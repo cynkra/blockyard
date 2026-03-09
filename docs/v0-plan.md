@@ -200,7 +200,6 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[derive(Debug, Deserialize)]
 pub struct DatabaseConfig {
     pub path: PathBuf,                  // e.g. /data/db/blockr.db
 }
