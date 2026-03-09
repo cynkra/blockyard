@@ -2,7 +2,7 @@
 
 This document is the build plan for v0 — the first working technical milestone.
 It covers project scaffolding, crate layout, dependency graph, build phases,
-key type definitions, and test strategy. The roadmap (`docs/roadmap.md`) is
+key type definitions, and test strategy. The roadmap (`../roadmap.md`) is
 the source of truth for *what* v0 includes; this document describes *how* to
 build it.
 

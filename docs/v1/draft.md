@@ -20,7 +20,7 @@ These are v0 design decisions that explicitly punt to v1:
 
 ## Roadmap v1 features
 
-From `docs/roadmap.md` items 17–30:
+From `../roadmap.md` items 17–30:
 
 1. **Multi-worker and session sharing** — enforce `max_workers_per_app` and
    `max_sessions_per_worker` when `> 1`; load balancing and auto-scaling

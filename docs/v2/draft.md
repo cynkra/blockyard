@@ -44,7 +44,7 @@ extract. If feature flags remain clean, keep the single crate.
 
 ## Roadmap v2 features
 
-From `docs/roadmap.md` items 31–39:
+From `../roadmap.md` items 31–39:
 
 1. **Kubernetes backend** — Deployments for apps, Jobs for tasks; `kube-rs`
 2. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
