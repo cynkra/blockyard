@@ -13,6 +13,7 @@ compiles and passes tests but does not start a server or talk to Docker.
 5. SQLite schema + migrations (`db/sqlite.rs`)
 6. `AppState` struct that holds shared server state
 7. Structured logging setup (`tracing` + `tracing-subscriber`)
+8. GitHub Actions CI workflow
 
 ## Step-by-step
 
@@ -991,6 +992,60 @@ Things to keep in mind during implementation:
   churn. Expect unused-import warnings during this phase; they go away as
   later phases land.
 
+### Step 8: GitHub Actions CI
+
+`.github/workflows/ci.yml` — runs on every push and pull request. Two jobs:
+lint/test (always) and Docker integration tests (when the Docker backend
+matters, starting from phase 0-2).
+
+```yaml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --features test-support
+      - run: cargo test --features test-support
+
+  docker-tests:
+    runs-on: ubuntu-latest
+    if: false  # enabled in phase 0-2 when Docker backend is implemented
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features docker-tests
+```
+
+**Notes:**
+
+- **`Swatinem/rust-cache`** — caches `target/` and the cargo registry between
+  runs. Cuts CI time significantly after the first run.
+- **`RUSTFLAGS: -D warnings`** — treats all warnings as errors in CI. Keeps
+  the codebase clean. This is set globally rather than per-command so clippy
+  and test builds share the same flag.
+- **`--all-targets`** on clippy — also lints tests and benchmarks, not just
+  `src/`.
+- **`docker-tests` job** — disabled (`if: false`) until phase 0-2. Flip to
+  `if: true` or remove the condition when the Docker backend lands.
+- **No caching of SQLite** — test DBs are in-memory (`:memory:`), nothing
+  to cache.
+
 ## Exit criteria
 
 Phase 0-1 is done when:
@@ -999,7 +1054,9 @@ Phase 0-1 is done when:
 - `cargo build --no-default-features --features test-support` succeeds
 - `cargo test --features test-support` passes:
   - Config parsing + env var overlay + validation tests
+  - Env var coverage + uniqueness tests
   - Mock backend spawn/stop/health_check tests
   - SQLite create/get/list/delete app tests
 - `src/main.rs` loads config and initializes logging (does not start a server)
 - The example `blockr.toml` is valid and parseable
+- CI passes on GitHub Actions (lint + test)
