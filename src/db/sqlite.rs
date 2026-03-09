@@ -1,0 +1,217 @@
+use sqlx::SqlitePool;
+use uuid::Uuid;
+
+/// App record as stored in SQLite.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct AppRow {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub active_bundle: Option<String>,
+    pub max_workers_per_app: Option<i64>,
+    pub max_sessions_per_worker: i64,
+    pub memory_limit: Option<String>,
+    pub cpu_limit: Option<f64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Bundle record as stored in SQLite.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct BundleRow {
+    pub id: String,
+    pub app_id: String,
+    pub status: String,
+    pub path: String,
+    pub uploaded_at: String,
+}
+
+pub async fn create_app(pool: &SqlitePool, name: &str) -> Result<AppRow, sqlx::Error> {
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query_as::<_, AppRow>(
+        "INSERT INTO apps (id, name, status, max_sessions_per_worker, created_at, updated_at)
+         VALUES (?, ?, 'stopped', 1, ?, ?)
+         RETURNING *",
+    )
+    .bind(&id)
+    .bind(name)
+    .bind(&now)
+    .bind(&now)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn get_app(pool: &SqlitePool, id: &str) -> Result<Option<AppRow>, sqlx::Error> {
+    sqlx::query_as::<_, AppRow>("SELECT * FROM apps WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn get_app_by_name(pool: &SqlitePool, name: &str) -> Result<Option<AppRow>, sqlx::Error> {
+    sqlx::query_as::<_, AppRow>("SELECT * FROM apps WHERE name = ?")
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn list_apps(pool: &SqlitePool) -> Result<Vec<AppRow>, sqlx::Error> {
+    sqlx::query_as::<_, AppRow>("SELECT * FROM apps ORDER BY created_at DESC")
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn delete_app(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM apps WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn create_bundle(
+    pool: &SqlitePool,
+    app_id: &str,
+    path: &str,
+) -> Result<BundleRow, sqlx::Error> {
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query_as::<_, BundleRow>(
+        "INSERT INTO bundles (id, app_id, status, path, uploaded_at)
+         VALUES (?, ?, 'pending', ?, ?)
+         RETURNING *",
+    )
+    .bind(&id)
+    .bind(app_id)
+    .bind(path)
+    .bind(&now)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_bundles_by_app(
+    pool: &SqlitePool,
+    app_id: &str,
+) -> Result<Vec<BundleRow>, sqlx::Error> {
+    sqlx::query_as::<_, BundleRow>(
+        "SELECT * FROM bundles WHERE app_id = ? ORDER BY uploaded_at DESC",
+    )
+    .bind(app_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn update_bundle_status(
+    pool: &SqlitePool,
+    id: &str,
+    status: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("UPDATE bundles SET status = ? WHERE id = ?")
+        .bind(status)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn create_and_get_app() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        assert_eq!(app.name, "my-app");
+        assert_eq!(app.status, "stopped");
+
+        let fetched = get_app(&pool, &app.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, app.id);
+    }
+
+    #[tokio::test]
+    async fn get_app_by_name_works() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+
+        let fetched = get_app_by_name(&pool, "my-app").await.unwrap().unwrap();
+        assert_eq!(fetched.id, app.id);
+
+        assert!(
+            get_app_by_name(&pool, "nonexistent")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_name_fails() {
+        let pool = test_pool().await;
+        create_app(&pool, "my-app").await.unwrap();
+        assert!(create_app(&pool, "my-app").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_apps_returns_all() {
+        let pool = test_pool().await;
+        create_app(&pool, "app-1").await.unwrap();
+        create_app(&pool, "app-2").await.unwrap();
+
+        let apps = list_apps(&pool).await.unwrap();
+        assert_eq!(apps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_app_removes_row() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        assert!(delete_app(&pool, &app.id).await.unwrap());
+        assert!(get_app(&pool, &app.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_returns_false() {
+        let pool = test_pool().await;
+        assert!(!delete_app(&pool, "nonexistent").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_and_list_bundles() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        let bundle = create_bundle(&pool, &app.id, "/tmp/bundle.tar.gz")
+            .await
+            .unwrap();
+        assert_eq!(bundle.app_id, app.id);
+        assert_eq!(bundle.status, "pending");
+
+        let bundles = list_bundles_by_app(&pool, &app.id).await.unwrap();
+        assert_eq!(bundles.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_bundle_status_works() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        let bundle = create_bundle(&pool, &app.id, "/tmp/bundle.tar.gz")
+            .await
+            .unwrap();
+
+        assert!(
+            update_bundle_status(&pool, &bundle.id, "ready")
+                .await
+                .unwrap()
+        );
+
+        let bundles = list_bundles_by_app(&pool, &app.id).await.unwrap();
+        assert_eq!(bundles[0].status, "ready");
+    }
+}

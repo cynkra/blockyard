@@ -1,0 +1,23 @@
+[server]
+bind             = "0.0.0.0:8080"
+token            = "change-me-in-production"
+shutdown_timeout = "30s"
+
+[docker]
+socket     = "/var/run/docker.sock"
+image      = "ghcr.io/rocker-org/r-ver:latest"
+shiny_port = 3838
+
+[storage]
+bundle_server_path = "/data/bundles"
+bundle_worker_path = "/app"
+bundle_retention   = 50
+
+[database]
+path = "/data/db/blockyard.db"
+
+[proxy]
+ws_cache_ttl         = "60s"
+health_interval      = "10s"
+worker_start_timeout = "60s"
+max_workers          = 100
