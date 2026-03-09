@@ -220,9 +220,17 @@ Each feature is described below with a priority annotation:
   for this app are at capacity"; in `per-session` mode it is "the host is at
   resource limits and cannot spawn another container right now." Once capacity
   is available, dequeue and forward. Only return 503 when the queue itself is
-  full. Shiny Server's immediate-503-at-capacity behaviour is a known pain
-  point we should fix from the start.
+  full (`queue_depth`, default 128). Shiny Server's immediate-503-at-capacity
+  behaviour is a known pain point we should fix from the start.
   **Priority: v0.** Immediate 503 under load is poor UX.
+
+- **Rate limiting.** No rate limiting is built into blockr.cloud. The
+  `queue_depth` cap is the safety valve for the proxy. Operators are
+  responsible for rate limiting at the network edge (Caddy, nginx, Cloudflare,
+  etc.) — this is the correct place for it in a deployment that already
+  delegates TLS termination upstream. In v1, when apps become user-facing with
+  OIDC, a per-user connection rate limit on the proxy is worth revisiting.
+  **Priority: out of scope for v0; revisit for v1.**
 
 - **Cold-start UX (`per-session` mode).** In `per-session` mode every new
   session spawns a fresh container. The proxy holds the initial HTTP request
