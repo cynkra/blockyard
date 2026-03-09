@@ -184,7 +184,33 @@ humantime-serde = "1"
 
 **Loading and env var overlay:**
 
+The env var overlay is data-driven: a single function returns the list of
+all supported env var names. Both `apply_env_overrides` and the completeness
+test use this list. Adding a config field without adding its env var entry
+causes a test failure.
+
 ```rust
+/// Returns the set of env var names that apply_env_overrides handles.
+/// Used by the completeness test to verify no field is missing.
+pub fn supported_env_vars() -> &'static [&'static str] {
+    &[
+        "BLOCKR_SERVER_BIND",
+        "BLOCKR_SERVER_TOKEN",
+        "BLOCKR_SERVER_SHUTDOWN_TIMEOUT",
+        "BLOCKR_DOCKER_SOCKET",
+        "BLOCKR_DOCKER_IMAGE",
+        "BLOCKR_DOCKER_SHINY_PORT",
+        "BLOCKR_STORAGE_BUNDLE_SERVER_PATH",
+        "BLOCKR_STORAGE_BUNDLE_WORKER_PATH",
+        "BLOCKR_STORAGE_BUNDLE_RETENTION",
+        "BLOCKR_DATABASE_PATH",
+        "BLOCKR_PROXY_WS_CACHE_TTL",
+        "BLOCKR_PROXY_HEALTH_INTERVAL",
+        "BLOCKR_PROXY_WORKER_START_TIMEOUT",
+        "BLOCKR_PROXY_MAX_WORKERS",
+    ]
+}
+
 impl Config {
     /// Load config from file + env var overrides.
     /// File path: --config CLI arg, or ./blockr.toml by default.
@@ -212,19 +238,42 @@ impl Config {
         if let Ok(v) = std::env::var("BLOCKR_SERVER_TOKEN") {
             self.server.token = v;
         }
+        if let Ok(v) = std::env::var("BLOCKR_SERVER_SHUTDOWN_TIMEOUT") {
+            if let Ok(d) = v.parse::<humantime::Duration>() { self.server.shutdown_timeout = d.into(); }
+        }
         if let Ok(v) = std::env::var("BLOCKR_DOCKER_SOCKET") {
-            self.docker.socket = v;
+            if let Some(docker) = &mut self.docker { docker.socket = v; }
         }
         if let Ok(v) = std::env::var("BLOCKR_DOCKER_IMAGE") {
-            self.docker.image = v;
+            if let Some(docker) = &mut self.docker { docker.image = v; }
+        }
+        if let Ok(v) = std::env::var("BLOCKR_DOCKER_SHINY_PORT") {
+            if let (Some(docker), Ok(p)) = (&mut self.docker, v.parse()) { docker.shiny_port = p; }
         }
         if let Ok(v) = std::env::var("BLOCKR_STORAGE_BUNDLE_SERVER_PATH") {
             self.storage.bundle_server_path = PathBuf::from(v);
         }
+        if let Ok(v) = std::env::var("BLOCKR_STORAGE_BUNDLE_WORKER_PATH") {
+            self.storage.bundle_worker_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("BLOCKR_STORAGE_BUNDLE_RETENTION") {
+            if let Ok(n) = v.parse() { self.storage.bundle_retention = n; }
+        }
         if let Ok(v) = std::env::var("BLOCKR_DATABASE_PATH") {
             self.database.path = PathBuf::from(v);
         }
-        // ... remaining fields follow the same pattern
+        if let Ok(v) = std::env::var("BLOCKR_PROXY_WS_CACHE_TTL") {
+            if let Ok(d) = v.parse::<humantime::Duration>() { self.proxy.ws_cache_ttl = d.into(); }
+        }
+        if let Ok(v) = std::env::var("BLOCKR_PROXY_HEALTH_INTERVAL") {
+            if let Ok(d) = v.parse::<humantime::Duration>() { self.proxy.health_interval = d.into(); }
+        }
+        if let Ok(v) = std::env::var("BLOCKR_PROXY_WORKER_START_TIMEOUT") {
+            if let Ok(d) = v.parse::<humantime::Duration>() { self.proxy.worker_start_timeout = d.into(); }
+        }
+        if let Ok(v) = std::env::var("BLOCKR_PROXY_MAX_WORKERS") {
+            if let Ok(n) = v.parse() { self.proxy.max_workers = n; }
+        }
     }
 
     /// Validate config after all overrides are applied.
@@ -260,13 +309,19 @@ pub enum ConfigError {
 }
 ```
 
+Add `humantime` (for parsing in overlay) alongside `humantime-serde` (for
+serde deserialization):
+
+```toml
+humantime = "2"
+```
+
 **Tests (in `config.rs`):**
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn minimal_toml() -> &'static str {
         r#"
@@ -291,7 +346,6 @@ mod tests {
         let config: Config = toml::from_str(minimal_toml()).unwrap();
         assert_eq!(config.server.bind, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.server.token, "test-token");
-        assert_eq!(config.docker.shiny_port, 3838);
         assert_eq!(config.proxy.max_workers, 100);
     }
 
@@ -309,6 +363,64 @@ mod tests {
         let mut config: Config = toml::from_str(minimal_toml()).unwrap();
         config.server.token = String::new();
         assert!(config.validate().is_err());
+    }
+
+    /// Verify every leaf field in Config has a corresponding BLOCKR_* env var.
+    ///
+    /// Serializes Config to a JSON value, recursively collects all leaf
+    /// field paths (e.g. "server.bind", "proxy.max_workers"), converts
+    /// each to the expected env var name (BLOCKR_SERVER_BIND, etc.), and
+    /// asserts it appears in supported_env_vars().
+    ///
+    /// If you add a config field but forget to add its env var override,
+    /// this test fails with a message telling you which env var is missing.
+    #[test]
+    fn env_var_coverage_complete() {
+        let config: Config = toml::from_str(minimal_toml()).unwrap();
+        let value = serde_json::to_value(&config).unwrap();
+
+        let mut field_paths = Vec::new();
+        collect_leaf_paths(&value, "", &mut field_paths);
+
+        let supported: std::collections::HashSet<&str> =
+            supported_env_vars().iter().copied().collect();
+
+        let mut missing = Vec::new();
+        for path in &field_paths {
+            let env_var = format!("BLOCKR_{}", path.to_uppercase().replace('.', "_"));
+            if !supported.contains(env_var.as_str()) {
+                missing.push(format!("{env_var} (for config field '{path}')"));
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "Config fields without env var support:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// Recursively collect dotted paths to all leaf (non-object) fields.
+    fn collect_leaf_paths(
+        value: &serde_json::Value,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    collect_leaf_paths(val, &path, out);
+                }
+            }
+            _ => {
+                out.push(prefix.to_string());
+            }
+        }
     }
 }
 ```
@@ -834,11 +946,6 @@ Things to keep in mind during implementation:
   is only set later when a bundle reaches `ready` status. No deferred
   constraints needed — the insert order (app first, bundle second, then
   update `active_bundle`) avoids the cycle naturally.
-
-- **Env var overlay completeness.** The `apply_env_overrides` method in the
-  plan shows a few fields explicitly. During implementation, enumerate all
-  fields — don't leave any out. Consider a small helper or macro to reduce
-  boilerplate and prevent misses.
 
 - **Unused dependencies in phase 0-1.** The Cargo.toml lists dependencies
   for later phases (axum, hyper, tower, etc.) that nothing in this phase
