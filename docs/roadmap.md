@@ -68,7 +68,7 @@ shutdown_timeout = "30s"   # drain window on SIGTERM
 
 [docker]
 socket     = "/var/run/docker.sock"  # or Podman socket path
-image      = "ghcr.io/blockr-org/blockr-r-base:latest"
+image      = "ghcr.io/rocker-org/r-ver:latest"
 shiny_port = 3838                    # internal port Shiny listens on
 
 [storage]
@@ -1150,7 +1150,7 @@ A minimal single-host setup with Caddy for TLS:
 ```yaml
 services:
   blockyard:
-    image: ghcr.io/blockr-org/blockyard:latest
+    image: ghcr.io/cynkra/blockyard:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - blockyard-bundles:/data/bundles

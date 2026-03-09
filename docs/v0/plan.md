@@ -185,7 +185,7 @@ pub struct ServerConfig {
 pub struct DockerConfig {
     #[serde(default = "default_socket")]
     pub socket: String,                 // default: /var/run/docker.sock
-    pub image: String,                  // e.g. ghcr.io/blockr-org/blockr-r-base:latest
+    pub image: String,                  // e.g. ghcr.io/rocker-org/r-ver:latest
     #[serde(default = "default_shiny_port")]
     pub shiny_port: u16,                // default: 3838
 }

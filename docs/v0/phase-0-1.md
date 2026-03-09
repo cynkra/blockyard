@@ -345,7 +345,7 @@ mod tests {
         token = "test-token"
 
         [docker]
-        image = "ghcr.io/blockr-org/blockr-r-base:latest"
+        image = "ghcr.io/rocker-org/r-ver:latest"
 
         [storage]
         bundle_server_path = "/tmp/bundles"
@@ -952,7 +952,7 @@ shutdown_timeout = "30s"
 
 [docker]
 socket     = "/var/run/docker.sock"
-image      = "ghcr.io/blockr-org/blockr-r-base:latest"
+image      = "ghcr.io/rocker-org/r-ver:latest"
 shiny_port = 3838
 
 [storage]
