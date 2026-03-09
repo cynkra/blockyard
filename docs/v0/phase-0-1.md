@@ -184,10 +184,25 @@ humantime-serde = "1"
 
 **Loading and env var overlay:**
 
-The env var overlay is data-driven: a single function returns the list of
-all supported env var names. Both `apply_env_overrides` and the completeness
-test use this list. Adding a config field without adding its env var entry
-causes a test failure.
+**Naming rule:** every config field maps to exactly one env var. The name is
+derived mechanically: `BLOCKR_` + section name + `_` + field name, all
+uppercased. Examples:
+
+| Config path | Env var |
+|---|---|
+| `server.bind` | `BLOCKR_SERVER_BIND` |
+| `storage.bundle_server_path` | `BLOCKR_STORAGE_BUNDLE_SERVER_PATH` |
+| `proxy.ws_cache_ttl` | `BLOCKR_PROXY_WS_CACHE_TTL` |
+
+The mapping is deterministic and one-to-one. Two tests enforce this at
+compile time:
+
+- **Coverage:** every leaf field in `Config` (discovered via serde
+  serialization) must have a corresponding entry in `supported_env_vars()`.
+  Adding a config field without its env var entry fails this test.
+- **Uniqueness:** no two entries in `supported_env_vars()` may be the same.
+  Catches the case where different field paths collapse to the same env var
+  name (e.g. a nested subsection whose path happens to match a flat field).
 
 ```rust
 /// Returns the set of env var names that apply_env_overrides handles.
@@ -397,6 +412,24 @@ mod tests {
             missing.is_empty(),
             "Config fields without env var support:\n  {}",
             missing.join("\n  ")
+        );
+    }
+
+    /// Verify no two config fields map to the same env var name.
+    #[test]
+    fn env_var_names_unique() {
+        let vars = supported_env_vars();
+        let mut seen = std::collections::HashSet::new();
+        let mut dupes = Vec::new();
+        for var in vars {
+            if !seen.insert(var) {
+                dupes.push(*var);
+            }
+        }
+        assert!(
+            dupes.is_empty(),
+            "Duplicate env var names:\n  {}",
+            dupes.join("\n  ")
         );
     }
 
