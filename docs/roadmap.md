@@ -601,6 +601,28 @@ or networks.
 
 No hot reload. Config changes require a restart.
 
+### State on Restart
+
+The server makes no attempt to recover or reconnect to containers after a
+restart — clean or otherwise.
+
+**Clean shutdown:** all containers and networks are stopped and removed before
+exit. Next startup begins with an empty slate.
+
+**Unclean shutdown** (crash, OOM kill, power loss): containers may still be
+running on the host. Orphan cleanup on startup removes them. End state is the
+same as a clean shutdown.
+
+In both cases all active user sessions are lost. This is intentional —
+simplicity over resilience. A crashed server is already broken from the user's
+perspective; attempting partial session recovery adds complexity with little
+real benefit.
+
+**`jti` revocation list:** this in-memory list is lost on restart. A token
+that was explicitly revoked (logout) remains valid until its natural expiry
+(5–15 minutes, configured on the IdP). Acceptable for the single-host
+deployment model.
+
 ## Proposed Architecture
 
 ### Backend Trait
