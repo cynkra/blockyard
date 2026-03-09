@@ -281,8 +281,8 @@ Each feature is described below with a priority annotation:
 - **Content registry.** A SQLite database with two tables:
 
   - `apps` — name, UUID, status (running/stopped/failed), isolation mode,
-    resource limits (`max_processes`, `memory_limit`, `cpu_limit`), active
-    bundle ID, and encrypted environment variables
+    resource limits (`max_processes`, `memory_limit`, `cpu_limit`), and active
+    bundle ID
   - `bundles` — per-app bundle history: tar.gz path, upload timestamp, which
     bundle is currently active
 
@@ -473,11 +473,11 @@ Each feature is described below with a priority annotation:
   something to work with.
   **Priority: v1 / MVP.** Without discovery, the platform is a black box.
 
-- **Environment variable management.** Store per-app environment variables
-  (database credentials, API keys, etc.) encrypted at rest, inject them into
-  the container/process at startup. Avoids putting secrets in code or config
-  files.
-  **Priority: v0.** Apps need secrets from day one.
+- **Per-app environment variables.** Out of scope. Apps execute arbitrary
+  user-supplied R code — any env var injected into the process is readable by
+  that code, so per-app secrets do not provide a meaningful security boundary.
+  Per-user credentials via OpenBao (v1) are the correct model: each user's
+  secrets are cryptographically scoped to their session only.
 
 - **App log capture.** Capture stdout/stderr from each container and make it
   available via the REST API (`GET /apps/{id}/logs`). With `per-session`
@@ -705,8 +705,7 @@ app plane. Control plane protected by a single static bearer token in config.
 10. **REST API** — deploy, list, start/stop, view logs
 11. **Static bearer token** — single token in server config for control plane
     access; no database storage
-12. **Environment variable management** — encrypted at rest, injected at startup
-13. **App log capture** — stream and persist container stdout/stderr; expose
+12. **App log capture** — stream and persist container stdout/stderr; expose
     via REST API
 14. **Orphan container cleanup** — remove unlabeled/untracked containers on
     startup
@@ -776,7 +775,6 @@ CREATE TABLE apps (
     max_processes  INTEGER,
     memory_limit   TEXT,              -- e.g. "512m"
     cpu_limit      REAL,              -- fractional vCPUs
-    env_vars       BLOB,              -- encrypted JSON
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
