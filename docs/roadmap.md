@@ -43,6 +43,62 @@ mock — no bare-metal process spawner is needed. Everything else — language
 dispatch, content-type routing tables, version matching — gets built when there
 is a second use case to validate the abstraction's shape.
 
+## Server Configuration
+
+The server is configured via a TOML file. Every value can be overridden by an
+environment variable, which takes precedence — this is the recommended approach
+for secrets in container deployments. The env var name is the config key path
+uppercased with `BLOCKR_` prefix and dots replaced by underscores (e.g.
+`[server].token` → `BLOCKR_SERVER_TOKEN`).
+
+**Config file location:** the server looks for `blockr.toml` in the current
+working directory by default. Override with `--config <path>`.
+
+**Startup validation:** the server validates the full config (including env var
+overrides) at startup and refuses to start on any error — missing required
+fields, unreachable Docker socket, unreadable storage path, etc. Config changes
+require a restart; there is no hot reload.
+
+```toml
+[server]
+bind  = "0.0.0.0:8080"
+token = "..."           # bearer token for control plane auth (v0)
+                        # use BLOCKR_SERVER_TOKEN env var in production
+
+[docker]
+socket = "/var/run/docker.sock"  # or Podman socket path
+image  = "ghcr.io/blockr-org/blockr-r-base:latest"
+
+[storage]
+# Named Docker volume (recommended when server runs in a container):
+bundle_volume = "blockr-bundles"
+# Or host bind mount (native binary or explicit config):
+# bundle_host_path      = "/opt/blockr/bundles"
+# bundle_container_path = "/bundles"
+
+[database]
+path = "/data/db/blockr.db"
+
+[proxy]
+ws_cache_ttl    = "60s"   # how long to hold backend WS on client disconnect
+health_interval = "10s"   # how often to poll worker health
+queue_depth     = 128     # max queued requests before returning 503
+```
+
+**v1 additions** (OIDC + OpenBao):
+
+```toml
+[oidc]
+issuer_url    = "https://auth.example.com/realms/myrealm"
+client_id     = "blockr-cloud"
+client_secret = "..."    # use BLOCKR_OIDC_CLIENT_SECRET env var
+groups_claim  = "groups" # optional, default: "groups"
+
+[openbao]
+address       = "https://bao.example.com"
+admin_token   = "..."    # use BLOCKR_OPENBAO_ADMIN_TOKEN env var
+```
+
 ## Feature Inventory
 
 Each feature is described below with a priority annotation:
