@@ -109,7 +109,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
-    pub docker: DockerConfig,
+    #[serde(default)]
+    pub docker: Option<DockerConfig>,   // required only when feature = "docker"
     pub storage: StorageConfig,
     pub database: DatabaseConfig,
     pub proxy: ProxyConfig,
@@ -233,10 +234,16 @@ impl Config {
                 "server.token must not be empty".into()
             ));
         }
-        if self.docker.image.is_empty() {
-            return Err(ConfigError::Validation(
-                "docker.image must not be empty".into()
-            ));
+        #[cfg(feature = "docker")]
+        {
+            let docker = self.docker.as_ref().ok_or_else(|| {
+                ConfigError::Validation("[docker] section required when docker feature is enabled".into())
+            })?;
+            if docker.image.is_empty() {
+                return Err(ConfigError::Validation(
+                    "docker.image must not be empty".into()
+                ));
+            }
         }
         Ok(())
     }
@@ -553,7 +560,9 @@ pub async fn create_pool(path: &std::path::Path) -> Result<SqlitePool, sqlx::Err
         std::fs::create_dir_all(parent).ok();
     }
     let url = format!("sqlite://{}?mode=rwc", path.display());
-    let pool = SqlitePool::connect(&url).await?;
+    let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url)?
+        .pragma("foreign_keys", "ON");
+    let pool = SqlitePool::connect_with(opts).await?;
     run_migrations(&pool).await?;
     Ok(pool)
 }
@@ -814,6 +823,28 @@ health_interval      = "10s"
 worker_start_timeout = "60s"
 max_workers          = 100
 ```
+
+## Implementation notes
+
+Things to keep in mind during implementation:
+
+- **Circular FK between `apps` and `bundles`.** `apps.active_bundle`
+  references `bundles.id`, and `bundles.app_id` references `apps.id`. This
+  works because apps are created with `active_bundle = NULL` and the field
+  is only set later when a bundle reaches `ready` status. No deferred
+  constraints needed — the insert order (app first, bundle second, then
+  update `active_bundle`) avoids the cycle naturally.
+
+- **Env var overlay completeness.** The `apply_env_overrides` method in the
+  plan shows a few fields explicitly. During implementation, enumerate all
+  fields — don't leave any out. Consider a small helper or macro to reduce
+  boilerplate and prevent misses.
+
+- **Unused dependencies in phase 0-1.** The Cargo.toml lists dependencies
+  for later phases (axum, hyper, tower, etc.) that nothing in this phase
+  uses. This is intentional — one stable Cargo.toml across all phases avoids
+  churn. Expect unused-import warnings during this phase; they go away as
+  later phases land.
 
 ## Exit criteria
 
