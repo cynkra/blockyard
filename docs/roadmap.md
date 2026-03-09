@@ -86,7 +86,8 @@ health_interval = "10s"   # how often to poll worker health
 queue_depth     = 128     # max queued requests before returning 503
 ```
 
-**v1 additions** (OIDC + OpenBao):
+**v1 additions** (OIDC + OpenBao arrive together — neither is meaningful
+without the other):
 
 ```toml
 [oidc]
@@ -96,8 +97,9 @@ client_secret = "..."    # use BLOCKR_OIDC_CLIENT_SECRET env var
 groups_claim  = "groups" # optional, default: "groups"
 
 [openbao]
-address       = "https://bao.example.com"
-admin_token   = "..."    # use BLOCKR_OPENBAO_ADMIN_TOKEN env var
+address     = "https://bao.example.com"
+admin_token = "..."      # use BLOCKR_OPENBAO_ADMIN_TOKEN env var
+                         # operator initializes and unseals OpenBao manually
 ```
 
 ## Feature Inventory
@@ -176,9 +178,10 @@ Each feature is described below with a priority annotation:
   the proxy routes connections to shared workers and applies load balancing.
   This affects both the proxy routing layer and the backend lifecycle logic.
 
-  OpenBao tokens are injected at worker spawn time in both modes; in
-  `per-session` mode each container gets its own scoped token, which is
-  automatically invalidated when the container is destroyed.
+  In v1, OpenBao tokens are injected at worker spawn time; in `per-session`
+  mode each container gets its own scoped token, automatically invalidated when
+  the container is destroyed. No token injection in v0 — OpenBao is not a v0
+  dependency.
   **Priority: v0.** Must be designed into the proxy and backend trait from the
   start — retrofitting session-scoped worker lifecycle later is expensive.
 
@@ -409,18 +412,26 @@ Each feature is described below with a priority annotation:
   these are made available to their Shiny sessions at runtime in a
   cryptographically bounded way.
 
+  **Requires:** IdP (OIDC) and OpenBao — both v1 dependencies. Not present in
+  v0.
+
   **Threat model:** Shiny apps run arbitrary R code. Any credential or token
   placed in the process space must be treated as potentially exfiltrable. The
   blast radius of a compromised session must be bounded to that user's secrets
   only — no path from the process to any other user's data or to the server's
   own DB credentials.
 
-  **Mechanism — Vault + IdP JWT auth:**
+  **Mechanism — OpenBao + IdP JWT auth:**
   [OpenBao](https://openbao.org) (the open source Vault fork) is used as the
-  secrets backend. The IdP and OpenBao are wired together via OpenBao's JWT
-  auth method: OpenBao is configured with the IdP's JWKS endpoint once, after
-  which any valid IdP JWT can be exchanged for a scoped OpenBao token. Per-user
-  policies restrict each token to `read` on `secret/users/{sub}/*` only.
+  secrets backend. OpenBao is bundled in the reference Docker Compose; operators
+  who already run Vault or OpenBao can point the server at their own instance.
+  OpenBao must be initialized and unsealed by the operator before the server
+  starts — no auto-unseal; this is documented as a one-time setup step.
+
+  The IdP and OpenBao are wired together via OpenBao's JWT auth method:
+  OpenBao is configured with the IdP's JWKS endpoint once, after which any
+  valid IdP JWT can be exchanged for a scoped OpenBao token. Per-user policies
+  restrict each token to `read` on `secret/users/{sub}/*` only.
 
   **Session flow:**
   1. User authenticates via IdP → server receives their OIDC JWT
@@ -435,18 +446,24 @@ Each feature is described below with a priority annotation:
   6. The server's OpenBao admin credentials (used for enrollment writes) never
      enter the process space
 
-  **Enrollment:** Two credential types — OAuth delegation (user authorises via
-  provider flow; server stores refresh token in OpenBao at
-  `secret/users/{sub}/oauth/{provider}`) and API key / secret (user enters key
-  via UI; server writes to `secret/users/{sub}/apikeys/{service}`). Enrollment
-  is handled by the server with its admin OpenBao token; the R process has no
-  write access.
+  **Enrollment progression:**
+  - **v1a (stopgap):** users write credentials directly via the OpenBao web UI
+    at the correct paths (`secret/users/{sub}/apikeys/{service}` etc.). Rough
+    but functional for early adopters; requires users to know their `sub`.
+  - **v1b:** `POST /users/me/credentials/{service}` on the blockr.cloud REST
+    API. Server validates identity via OIDC, writes to OpenBao on the user's
+    behalf. Two credential types: API key/secret and OAuth delegation (server
+    stores refresh token after provider OAuth flow).
+  - **v2:** blockr.cloud web UI wraps the v1b API. Point-and-click credential
+    management.
+
+  The server authenticates to OpenBao with a static admin token supplied via
+  env var (`BLOCKR_OPENBAO_ADMIN_TOKEN`). AppRole auth is deferred to later.
 
   **Token TTL and renewal:** OpenBao session tokens are issued with a short
   TTL. The R process renews its token before expiry using OpenBao's standard
-  token renewal API — idiomatic OpenBao usage. The companion R package handles
-  renewal transparently before each credential read, so app code never deals
-  with token lifecycle.
+  token renewal API. The companion R package handles renewal transparently
+  before each credential read, so app code never deals with token lifecycle.
 
   **R interface:** A companion R package (`blockr.cloud` or similar) wraps the
   OpenBao API behind a simple call: `blockr_secret("openai")` reads
@@ -791,12 +808,12 @@ CREATE TABLE bundles (
 
 | Concern | Where |
 |---|---|
-| Per-user credentials (OAuth tokens, API keys) | OpenBao |
-| User identity, groups, auth tokens | IdP |
-| Session state (sub, groups, access + refresh token) | Signed cookie |
+| Per-user credentials (OAuth tokens, API keys) | OpenBao (v1) |
+| User identity, groups, auth tokens | IdP (v1) |
+| Session state (sub, groups, access + refresh token) | Signed cookie (v1) |
 | Runtime worker state (container ID ↔ session) | In-memory |
 | App logs | Docker log stream + persisted files |
-| Revoked token list | In-memory (`jti` blocklist) |
+| Revoked token list | In-memory (`jti` blocklist, v1) |
 
 ### Not Built-In
 
