@@ -396,12 +396,10 @@ Each feature is described below with a priority annotation:
   and re-issues the cookie — the user never notices. The cookie carries
   everything; no database lookup is required.
 
-  Runtime state (which container belongs to which session) is kept in-memory
-  and reconstructed implicitly as sessions reconnect after a server restart.
-  Explicit logout is handled via an in-memory revocation list of `jti` claim
-  values; revocations are lost on restart, meaning a revoked token remains
-  valid until its natural expiry — acceptable for the single-host deployment
-  model.
+  Runtime state (which container belongs to which session) is kept in-memory.
+  Logout deletes the cookie client-side; the access token remains valid until
+  its natural expiry (5–15 minutes, configured on the IdP). No server-side
+  token revocation list is maintained — the short TTL makes it unnecessary.
   **Priority: v1 / MVP.** Prerequisite for everything user-aware.
 
 - **Identity injection.** On each proxied request, inject the authenticated
@@ -620,10 +618,8 @@ simplicity over resilience. A crashed server is already broken from the user's
 perspective; attempting partial session recovery adds complexity with little
 real benefit.
 
-**`jti` revocation list:** this in-memory list is lost on restart. A token
-that was explicitly revoked (logout) remains valid until its natural expiry
-(5–15 minutes, configured on the IdP). Acceptable for the single-host
-deployment model.
+**Token revocation:** not implemented. Logout deletes the cookie; the access
+token expires naturally within one TTL (5–15 minutes). No revocation list.
 
 ## Proposed Architecture
 
@@ -807,8 +803,8 @@ infrastructure.
     K8s (fields carried in `WorkerSpec` from v0)
 27. **CLI tool** — dedicated Rust binary for deployment and management
 28. **Web UI** — admin dashboard, content browser, log viewer
-29. **Execution environment images** — publish and maintain the Rocker-based
-    runtime image; update independently of the server release cycle
+29. **Multiple execution environment images** — per-app image selection;
+    operators or app developers specify which image to use per deployment
 30. **Scale-to-zero** — idle shutdown for `per-app` mode; pair with
     pre-warming
 31. **Seat-based pre-warming** — pre-started container pools; pair with
@@ -862,7 +858,6 @@ CREATE TABLE bundles (
 | Session state (sub, groups, access + refresh token) | Signed cookie (v1) |
 | Runtime worker state (container ID ↔ session) | In-memory |
 | App logs | Docker log stream + persisted files |
-| Revoked token list | In-memory (`jti` blocklist, v1) |
 
 ### Not Built-In
 
@@ -1017,17 +1012,12 @@ only the connection pool type switches.
 
 **In-memory state**
 
-Two in-memory stores exist today: the worker map (session → Pod address) and
-the `jti` revocation list. With a single server replica these are fine. For
-HA (multiple server replicas), both move to PostgreSQL:
-
-- Worker map → a `workers` table (session ID, pod IP, port, app ID, created at)
-  with the server holding a local read-through cache
-- `jti` blocklist → a `revoked_tokens` table with TTL-based cleanup via a
-  background task
-
-The in-memory implementations and the PostgreSQL-backed implementations share
-an interface defined from v0, so the swap is additive rather than a rewrite.
+The worker map (session → Pod address) is kept in-memory. With a single server
+replica this is fine. For HA (multiple server replicas), it moves to
+PostgreSQL: a `workers` table (session ID, pod IP, port, app ID, created at)
+with the server holding a local read-through cache. The in-memory and
+PostgreSQL-backed implementations share an interface defined from v0, so the
+swap is additive rather than a rewrite.
 
 **TLS and ingress**
 
