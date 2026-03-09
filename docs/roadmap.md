@@ -61,9 +61,10 @@ require a restart; there is no hot reload.
 
 ```toml
 [server]
-bind  = "0.0.0.0:8080"
-token = "..."           # bearer token for control plane auth (v0)
-                        # use BLOCKR_SERVER_TOKEN env var in production
+bind             = "0.0.0.0:8080"
+token            = "..."   # bearer token for control plane auth (v0)
+                            # use BLOCKR_SERVER_TOKEN env var in production
+shutdown_timeout = "30s"   # drain window on SIGTERM
 
 [docker]
 socket     = "/var/run/docker.sock"  # or Podman socket path
@@ -575,6 +576,30 @@ Each feature is described below with a priority annotation:
   code in the server itself.
   **Priority: external proxy, not built-in.** Delegate TLS to Caddy/nginx/
   Traefik. The server only speaks HTTP. No built-in TLS planned.
+
+## Graceful Shutdown
+
+On SIGTERM the server shuts down cleanly in this order:
+
+1. **Stop accepting new connections** — close the HTTP listener
+2. **Drain in-flight requests** — wait up to `shutdown_timeout` (default `30s`,
+   configurable via `[server] shutdown_timeout`) for in-flight HTTP and
+   WebSocket requests to finish; remaining connections are dropped
+3. **Stop all managed containers and networks** — stop and remove every
+   container and bridge network carrying `dev.blockr.cloud/managed=true`;
+   steps 3 and 4 run in parallel
+4. **Stop in-progress build containers** — stop any running dependency restore
+   containers and mark their bundles as `failed` in the DB; a re-deploy will
+   restart the restore from scratch
+5. **Flush and close** — flush structured logs and audit log, close the DB
+   connection
+
+All active user sessions are killed on shutdown. This is intentional — a
+server restart is a rare, disruptive operational event, not a rolling update.
+The clean shutdown means the next startup begins with no orphaned containers
+or networks.
+
+No hot reload. Config changes require a restart.
 
 ## Proposed Architecture
 
