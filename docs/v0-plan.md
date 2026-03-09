@@ -145,7 +145,7 @@ The dependency graph dictates build order. Each phase produces a testable
 artifact. Phases are sequential; items within a phase can be worked in
 parallel.
 
-### Phase 1: Foundation
+### Phase 0-1: Foundation
 
 Establish the project skeleton, core types, config parsing, and database
 schema. Everything else builds on this.
@@ -340,7 +340,7 @@ pub struct AppState<B: Backend> {
 }
 ```
 
-### Phase 2: Docker Backend + Network Isolation
+### Phase 0-2: Docker Backend + Network Isolation
 
 Implement the `Backend` trait for Docker using `bollard`. This is the only
 production backend for v0.
@@ -420,7 +420,7 @@ ID to join worker networks. Detection order:
    (not running in a container); skip network joining, workers are reachable
    on the bridge gateway IP
 
-### Phase 3: Content Management
+### Phase 0-3: Content Management
 
 Bundle upload, dependency restoration, content registry. These form the
 deployment pipeline — the path from "user has a tar.gz" to "app is ready to
@@ -529,7 +529,7 @@ In-memory implementation: a `DashMap<TaskId, TaskEntry>` where each entry
 holds a `Vec<String>` of buffered log lines and a
 `tokio::sync::broadcast::Sender<String>` for live subscribers.
 
-### Phase 4: REST API + Auth
+### Phase 0-4: REST API + Auth
 
 The control plane HTTP API. All endpoints under `/api/v1/`. Protected by
 static bearer token.
@@ -618,7 +618,7 @@ HTTP status codes: 400 (bad request / validation), 401 (missing/invalid token),
 404 (not found), 409 (conflict, e.g. duplicate app name), 503 (max workers
 reached).
 
-### Phase 5: Proxy Layer
+### Phase 0-5: Proxy Layer
 
 The HTTP/WebSocket reverse proxy that serves Shiny apps to end users. This is
 the data plane — separate from the control plane API but served by the same
@@ -716,7 +716,7 @@ The proxy handler extracts the app name from the path, validates the
 `/app/{name}/` prefix, and handles routing. Any request outside `/app/*/` that
 isn't an API or health route gets 404.
 
-### Phase 6: Health Polling + Orphan Cleanup + Log Capture
+### Phase 0-6: Health Polling + Orphan Cleanup + Log Capture
 
 Operational concerns that run alongside the main server.
 
@@ -825,38 +825,38 @@ Shutdown sequence (from roadmap):
 ## Build Order and Dependency Graph
 
 ```
-Phase 1: Foundation
+Phase 0-1: Foundation
   ├── Config parsing
   ├── Backend trait + mock
   ├── SQLite schema
   └── AppState
 
-Phase 2: Docker Backend
+Phase 0-2: Docker Backend
   └── depends on: Backend trait, Config
 
-Phase 3: Content Management
+Phase 0-3: Content Management
   ├── Bundle upload + storage
   ├── TaskStore + restore pipeline
   └── depends on: Backend (build), SQLite (content registry)
 
-Phase 4: REST API + Auth
+Phase 0-4: REST API + Auth
   └── depends on: Content Management, AppState
 
-Phase 5: Proxy Layer
+Phase 0-5: Proxy Layer
   ├── Session routing
   ├── Cold-start + WS caching
   └── depends on: Backend (spawn/stop/addr), Session/Worker stores
 
-Phase 6: Operations
+Phase 0-6: Operations
   ├── Health polling
   ├── Orphan cleanup
   ├── Log capture
   └── depends on: Backend, Worker tracking
 ```
 
-Phases 3 and 5 are independent of each other — they can be developed in
-parallel. Both depend on Phase 2 only for integration testing; their unit
-tests use the mock backend from Phase 1.
+Phases 0-3 and 0-5 are independent of each other — they can be developed in
+parallel. Both depend on phase 0-2 only for integration testing; their unit
+tests use the mock backend from phase 0-1.
 
 ## Test Strategy
 
