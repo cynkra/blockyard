@@ -1,4 +1,4 @@
-# blockr.cloud v1 / MVP — Draft Notes
+# blockyard v1 / MVP — Draft Notes
 
 This document collects v1 items from the roadmap and design decisions deferred
 from v0 planning. It is a staging area, not a plan — the v1 implementation

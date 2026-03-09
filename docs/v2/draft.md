@@ -1,4 +1,4 @@
-# blockr.cloud v2 — Draft Notes
+# blockyard v2 — Draft Notes
 
 This document collects v2 items from the roadmap and architectural decisions
 deferred from v0/v1 planning.
@@ -20,10 +20,10 @@ backends but may become unwieldy when Kubernetes arrives. At that point,
 consider extracting a trait crate:
 
 ```
-blockr-cloud/               # binary + app logic
-blockr-cloud-core/          # traits: Backend, WorkerHandle, SessionStore, etc.
-blockr-backend-docker/      # depends on core + bollard
-blockr-backend-k8s/         # depends on core + kube-rs
+blockyard/               # binary + app logic
+blockyard-core/          # traits: Backend, WorkerHandle, SessionStore, etc.
+blockyard-backend-docker/      # depends on core + bollard
+blockyard-backend-k8s/         # depends on core + kube-rs
 ```
 
 **What triggers the refactor:** if adding the k8s backend to the single crate
@@ -36,9 +36,9 @@ extract. If feature flags remain clean, keep the single crate.
 - Extract all traits (`Backend`, `WorkerHandle`, `SessionStore`,
   `WorkerRegistry`, `TaskStore`) and their associated types (`WorkerSpec`,
   `BuildSpec`, `BuildResult`, `ManagedResource`, `LogStream`) into
-  `blockr-cloud-core`
-- Each backend crate depends on `blockr-cloud-core` for the trait definitions
-- The main crate depends on `blockr-cloud-core` and on each backend crate
+  `blockyard-core`
+- Each backend crate depends on `blockyard-core` for the trait definitions
+- The main crate depends on `blockyard-core` and on each backend crate
   (optionally, via features)
 - The mock backend stays in the main crate (test-only code, no heavy deps)
 

@@ -1,4 +1,4 @@
-# blockr.cloud v0 Implementation Plan
+# blockyard v0 Implementation Plan
 
 This document is the build plan for v0 — the first working technical milestone.
 It covers project scaffolding, crate layout, dependency graph, build phases,
@@ -12,7 +12,7 @@ A single crate with `src/lib.rs` (domain logic) and `src/main.rs` (entry
 point). Feature flags control which backends are compiled in.
 
 ```
-blockr-cloud/
+blockyard/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
@@ -48,7 +48,7 @@ blockr-cloud/
 │   ├── api_test.rs
 │   ├── proxy_test.rs
 │   └── bundle_test.rs
-├── blockr.toml             # example config
+├── blockyard.toml             # example config
 ├── docs/
 │   ├── roadmap.md
 │   └── v0-plan.md          # this file
@@ -75,7 +75,7 @@ test-support = []               # mock backend for tests
 
 ```toml
 [dev-dependencies]
-blockr-cloud = { path = ".", features = ["test-support"] }
+blockyard = { path = ".", features = ["test-support"] }
 ```
 
 **Why a single crate:**
@@ -117,7 +117,7 @@ dashmap     = "6"                 # concurrent maps for session/worker stores
 tempfile    = "3"                 # atomic bundle writes
 
 [dev-dependencies]
-blockr-cloud = { path = ".", features = ["test-support"] }
+blockyard = { path = ".", features = ["test-support"] }
 reqwest     = { version = "0.12", features = ["json", "cookies"] }
 tokio-tungstenite = "0.26"        # WS client for proxy tests
 assert_matches = "1"
@@ -201,7 +201,7 @@ pub struct StorageConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct DatabaseConfig {
-    pub path: PathBuf,                  // e.g. /data/db/blockr.db
+    pub path: PathBuf,                  // e.g. /data/db/blockyard.db
 }
 
 pub struct ProxyConfig {
@@ -217,10 +217,10 @@ pub struct ProxyConfig {
 ```
 
 **Env var overlay:** each config field can be overridden by an env var. The
-convention is `BLOCKR_` + section + `_` + field, uppercased:
+convention is `BLOCKYARD_` + section + `_` + field, uppercased:
 
 ```
-BLOCKR_SERVER_BIND, BLOCKR_SERVER_TOKEN, BLOCKR_DOCKER_IMAGE, etc.
+BLOCKYARD_SERVER_BIND, BLOCKYARD_SERVER_TOKEN, BLOCKYARD_DOCKER_IMAGE, etc.
 ```
 
 Implementation: deserialize TOML first, then walk the struct and override any
@@ -351,14 +351,14 @@ production backend for v0.
 3. Server joins each worker's network (multi-homing)
 4. Container hardening (cap-drop, read-only fs, no-new-privileges)
 5. Image pulling (at startup and before each build/spawn)
-6. Label management (`dev.blockr.cloud/*`)
+6. Label management (`dev.blockyard/*`)
 
 **Docker backend — key operations:**
 
 `spawn()` flow:
 ```
-1. Create a user-defined bridge network: blockr-{session-id}
-   Labels: dev.blockr.cloud/managed=true, app-id, worker-id
+1. Create a user-defined bridge network: blockyard-{session-id}
+   Labels: dev.blockyard/managed=true, app-id, worker-id
 2. Create container:
    - Image: spec.image
    - Network: the bridge just created
@@ -367,7 +367,7 @@ production backend for v0.
    - CapDrop: ALL
    - SecurityOpt: no-new-privileges
    - ReadonlyRootfs: true
-   - Labels: dev.blockr.cloud/managed=true, app-id, worker-id
+   - Labels: dev.blockyard/managed=true, app-id, worker-id
    - No published ports
 3. Connect the server's own container to the new bridge network
    (bollard: network_connect with the server's container ID)
@@ -379,7 +379,7 @@ production backend for v0.
 ```
 1. Inspect the container
 2. Extract the IP address on the worker's named network
-   (not just any IP — specifically the IP on blockr-{session-id})
+   (not just any IP — specifically the IP on blockyard-{session-id})
 3. Return SocketAddr(ip, spec.shiny_port)
 ```
 
@@ -401,7 +401,7 @@ production backend for v0.
      - bundle → /app (ro)
      - library output dir → /app/lib (rw) — this is the only writable mount
    - Same hardening as workers, except library mount is rw
-   - Labels: dev.blockr.cloud/managed=true, app-id, bundle-id
+   - Labels: dev.blockyard/managed=true, app-id, bundle-id
    - AutoRemove: true
 2. Start container
 3. Attach to container stdout/stderr, stream logs to TaskStore
@@ -414,7 +414,7 @@ ID to join worker networks. Detection order:
 
 1. Read `/proc/self/cgroup` — Docker writes the container ID in cgroup paths
 2. Read hostname — Docker sets it to the short container ID by default
-3. `BLOCKR_CONTAINER_ID` env var — explicit override for non-standard setups
+3. `BLOCKYARD_CONTAINER_ID` env var — explicit override for non-standard setups
 4. If all fail and Docker socket is reachable: assume native binary mode
    (not running in a container); skip network joining, workers are reachable
    on the bridge gateway IP
@@ -771,7 +771,7 @@ async fn cleanup_orphans<B: Backend>(backend: &B) -> Result<()> {
 ```
 
 `list_managed()` in the Docker backend queries for containers and networks
-with `dev.blockr.cloud/managed=true` label. All are removed unconditionally —
+with `dev.blockyard/managed=true` label. All are removed unconditionally —
 the server starts with a clean slate.
 
 **App log capture:**

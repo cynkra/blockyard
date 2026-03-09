@@ -1,0 +1,10 @@
+# repo-specific
+/target
+
+# devcontainer user overrides
+.env
+.bashrc
+.gitconfig.local
+.gitignore.local
+.ssh/
+.claude/

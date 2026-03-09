@@ -19,13 +19,13 @@ compiles and passes tests but does not start a server or talk to Docker.
 
 ### Step 1: Crate skeleton
 
-Create the project with `cargo init --name blockr-cloud`. Set up `Cargo.toml`
+Create the project with `cargo init --name blockyard`. Set up `Cargo.toml`
 with feature flags and dependencies. The crate has both `src/lib.rs` (public
 API) and `src/main.rs` (entry point stub).
 
 ```toml
 [package]
-name = "blockr-cloud"
+name = "blockyard"
 version = "0.1.0"
 edition = "2024"
 
@@ -56,7 +56,7 @@ dashmap     = "6"
 tempfile    = "3"
 
 [dev-dependencies]
-blockr-cloud = { path = ".", features = ["test-support"] }
+blockyard = { path = ".", features = ["test-support"] }
 reqwest      = { version = "0.12", features = ["json", "cookies"] }
 tokio-tungstenite = "0.26"
 assert_matches = "1"
@@ -74,7 +74,7 @@ pub mod app;
 `src/main.rs` — placeholder:
 
 ```rust
-use blockr_cloud::config::Config;
+use blockyard::config::Config;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -186,14 +186,14 @@ humantime-serde = "1"
 **Loading and env var overlay:**
 
 **Naming rule:** every config field maps to exactly one env var. The name is
-derived mechanically: `BLOCKR_` + section name + `_` + field name, all
+derived mechanically: `BLOCKYARD_` + section name + `_` + field name, all
 uppercased. Examples:
 
 | Config path | Env var |
 |---|---|
-| `server.bind` | `BLOCKR_SERVER_BIND` |
-| `storage.bundle_server_path` | `BLOCKR_STORAGE_BUNDLE_SERVER_PATH` |
-| `proxy.ws_cache_ttl` | `BLOCKR_PROXY_WS_CACHE_TTL` |
+| `server.bind` | `BLOCKYARD_SERVER_BIND` |
+| `storage.bundle_server_path` | `BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH` |
+| `proxy.ws_cache_ttl` | `BLOCKYARD_PROXY_WS_CACHE_TTL` |
 
 The mapping is deterministic and one-to-one. Two tests enforce this at
 compile time:
@@ -210,31 +210,31 @@ compile time:
 /// Used by the completeness test to verify no field is missing.
 pub fn supported_env_vars() -> &'static [&'static str] {
     &[
-        "BLOCKR_SERVER_BIND",
-        "BLOCKR_SERVER_TOKEN",
-        "BLOCKR_SERVER_SHUTDOWN_TIMEOUT",
-        "BLOCKR_DOCKER_SOCKET",
-        "BLOCKR_DOCKER_IMAGE",
-        "BLOCKR_DOCKER_SHINY_PORT",
-        "BLOCKR_STORAGE_BUNDLE_SERVER_PATH",
-        "BLOCKR_STORAGE_BUNDLE_WORKER_PATH",
-        "BLOCKR_STORAGE_BUNDLE_RETENTION",
-        "BLOCKR_DATABASE_PATH",
-        "BLOCKR_PROXY_WS_CACHE_TTL",
-        "BLOCKR_PROXY_HEALTH_INTERVAL",
-        "BLOCKR_PROXY_WORKER_START_TIMEOUT",
-        "BLOCKR_PROXY_MAX_WORKERS",
+        "BLOCKYARD_SERVER_BIND",
+        "BLOCKYARD_SERVER_TOKEN",
+        "BLOCKYARD_SERVER_SHUTDOWN_TIMEOUT",
+        "BLOCKYARD_DOCKER_SOCKET",
+        "BLOCKYARD_DOCKER_IMAGE",
+        "BLOCKYARD_DOCKER_SHINY_PORT",
+        "BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH",
+        "BLOCKYARD_STORAGE_BUNDLE_WORKER_PATH",
+        "BLOCKYARD_STORAGE_BUNDLE_RETENTION",
+        "BLOCKYARD_DATABASE_PATH",
+        "BLOCKYARD_PROXY_WS_CACHE_TTL",
+        "BLOCKYARD_PROXY_HEALTH_INTERVAL",
+        "BLOCKYARD_PROXY_WORKER_START_TIMEOUT",
+        "BLOCKYARD_PROXY_MAX_WORKERS",
     ]
 }
 
 impl Config {
     /// Load config from file + env var overrides.
-    /// File path: --config CLI arg, or ./blockr.toml by default.
+    /// File path: --config CLI arg, or ./blockyard.toml by default.
     pub fn load() -> Result<Self, ConfigError> {
         let path = std::env::args()
             .skip_while(|a| a != "--config")
             .nth(1)
-            .unwrap_or_else(|| "blockr.toml".into());
+            .unwrap_or_else(|| "blockyard.toml".into());
 
         let text = std::fs::read_to_string(&path)
             .map_err(|e| ConfigError::ReadFile(path.clone(), e))?;
@@ -246,48 +246,48 @@ impl Config {
         Ok(config)
     }
 
-    /// Override individual fields from BLOCKR_* env vars.
+    /// Override individual fields from BLOCKYARD_* env vars.
     fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("BLOCKR_SERVER_BIND") {
+        if let Ok(v) = std::env::var("BLOCKYARD_SERVER_BIND") {
             if let Ok(addr) = v.parse() { self.server.bind = addr; }
         }
-        if let Ok(v) = std::env::var("BLOCKR_SERVER_TOKEN") {
+        if let Ok(v) = std::env::var("BLOCKYARD_SERVER_TOKEN") {
             self.server.token = v;
         }
-        if let Ok(v) = std::env::var("BLOCKR_SERVER_SHUTDOWN_TIMEOUT") {
+        if let Ok(v) = std::env::var("BLOCKYARD_SERVER_SHUTDOWN_TIMEOUT") {
             if let Ok(d) = v.parse::<humantime::Duration>() { self.server.shutdown_timeout = d.into(); }
         }
-        if let Ok(v) = std::env::var("BLOCKR_DOCKER_SOCKET") {
+        if let Ok(v) = std::env::var("BLOCKYARD_DOCKER_SOCKET") {
             if let Some(docker) = &mut self.docker { docker.socket = v; }
         }
-        if let Ok(v) = std::env::var("BLOCKR_DOCKER_IMAGE") {
+        if let Ok(v) = std::env::var("BLOCKYARD_DOCKER_IMAGE") {
             if let Some(docker) = &mut self.docker { docker.image = v; }
         }
-        if let Ok(v) = std::env::var("BLOCKR_DOCKER_SHINY_PORT") {
+        if let Ok(v) = std::env::var("BLOCKYARD_DOCKER_SHINY_PORT") {
             if let (Some(docker), Ok(p)) = (&mut self.docker, v.parse()) { docker.shiny_port = p; }
         }
-        if let Ok(v) = std::env::var("BLOCKR_STORAGE_BUNDLE_SERVER_PATH") {
+        if let Ok(v) = std::env::var("BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH") {
             self.storage.bundle_server_path = PathBuf::from(v);
         }
-        if let Ok(v) = std::env::var("BLOCKR_STORAGE_BUNDLE_WORKER_PATH") {
+        if let Ok(v) = std::env::var("BLOCKYARD_STORAGE_BUNDLE_WORKER_PATH") {
             self.storage.bundle_worker_path = PathBuf::from(v);
         }
-        if let Ok(v) = std::env::var("BLOCKR_STORAGE_BUNDLE_RETENTION") {
+        if let Ok(v) = std::env::var("BLOCKYARD_STORAGE_BUNDLE_RETENTION") {
             if let Ok(n) = v.parse() { self.storage.bundle_retention = n; }
         }
-        if let Ok(v) = std::env::var("BLOCKR_DATABASE_PATH") {
+        if let Ok(v) = std::env::var("BLOCKYARD_DATABASE_PATH") {
             self.database.path = PathBuf::from(v);
         }
-        if let Ok(v) = std::env::var("BLOCKR_PROXY_WS_CACHE_TTL") {
+        if let Ok(v) = std::env::var("BLOCKYARD_PROXY_WS_CACHE_TTL") {
             if let Ok(d) = v.parse::<humantime::Duration>() { self.proxy.ws_cache_ttl = d.into(); }
         }
-        if let Ok(v) = std::env::var("BLOCKR_PROXY_HEALTH_INTERVAL") {
+        if let Ok(v) = std::env::var("BLOCKYARD_PROXY_HEALTH_INTERVAL") {
             if let Ok(d) = v.parse::<humantime::Duration>() { self.proxy.health_interval = d.into(); }
         }
-        if let Ok(v) = std::env::var("BLOCKR_PROXY_WORKER_START_TIMEOUT") {
+        if let Ok(v) = std::env::var("BLOCKYARD_PROXY_WORKER_START_TIMEOUT") {
             if let Ok(d) = v.parse::<humantime::Duration>() { self.proxy.worker_start_timeout = d.into(); }
         }
-        if let Ok(v) = std::env::var("BLOCKR_PROXY_MAX_WORKERS") {
+        if let Ok(v) = std::env::var("BLOCKYARD_PROXY_MAX_WORKERS") {
             if let Ok(n) = v.parse() { self.proxy.max_workers = n; }
         }
     }
@@ -351,7 +351,7 @@ mod tests {
         bundle_server_path = "/tmp/bundles"
 
         [database]
-        path = "/tmp/blockr.db"
+        path = "/tmp/blockyard.db"
 
         [proxy]
         "#
@@ -368,9 +368,9 @@ mod tests {
     #[test]
     fn env_var_overrides_token() {
         let mut config: Config = toml::from_str(minimal_toml()).unwrap();
-        std::env::set_var("BLOCKR_SERVER_TOKEN", "override-token");
+        std::env::set_var("BLOCKYARD_SERVER_TOKEN", "override-token");
         config.apply_env_overrides();
-        std::env::remove_var("BLOCKR_SERVER_TOKEN");
+        std::env::remove_var("BLOCKYARD_SERVER_TOKEN");
         assert_eq!(config.server.token, "override-token");
     }
 
@@ -381,11 +381,11 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
-    /// Verify every leaf field in Config has a corresponding BLOCKR_* env var.
+    /// Verify every leaf field in Config has a corresponding BLOCKYARD_* env var.
     ///
     /// Serializes Config to a JSON value, recursively collects all leaf
     /// field paths (e.g. "server.bind", "proxy.max_workers"), converts
-    /// each to the expected env var name (BLOCKR_SERVER_BIND, etc.), and
+    /// each to the expected env var name (BLOCKYARD_SERVER_BIND, etc.), and
     /// asserts it appears in supported_env_vars().
     ///
     /// If you add a config field but forget to add its env var override,
@@ -403,7 +403,7 @@ mod tests {
 
         let mut missing = Vec::new();
         for path in &field_paths {
-            let env_var = format!("BLOCKR_{}", path.to_uppercase().replace('.', "_"));
+            let env_var = format!("BLOCKYARD_{}", path.to_uppercase().replace('.', "_"));
             if !supported.contains(env_var.as_str()) {
                 missing.push(format!("{env_var} (for config field '{path}')"));
             }
@@ -927,20 +927,20 @@ In `main.rs`, already shown in step 1. The setup is:
 tracing_subscriber::fmt()
     .with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "blockr_cloud=info".parse().unwrap())
+            .unwrap_or_else(|_| "blockyard=info".parse().unwrap())
     )
     .json()
     .init();
 ```
 
-- **Default level:** `info` for `blockr_cloud`, `warn` for everything else
-- **Override:** set `RUST_LOG=blockr_cloud=debug` for debug output
+- **Default level:** `info` for `blockyard`, `warn` for everything else
+- **Override:** set `RUST_LOG=blockyard=debug` for debug output
 - **Format:** JSON lines (structured, parseable by log aggregators)
 
 No additional work beyond what's in `main.rs`. The `tracing` crate is used
 throughout the codebase via `tracing::info!`, `tracing::warn!`, etc.
 
-## Example blockr.toml
+## Example blockyard.toml
 
 Ship this as the example config at the crate root:
 
@@ -961,7 +961,7 @@ bundle_worker_path = "/app"
 bundle_retention   = 50
 
 [database]
-path = "/data/db/blockr.db"
+path = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl         = "60s"
@@ -1058,5 +1058,5 @@ Phase 0-1 is done when:
   - Mock backend spawn/stop/health_check tests
   - SQLite create/get/list/delete app tests
 - `src/main.rs` loads config and initializes logging (does not start a server)
-- The example `blockr.toml` is valid and parseable
+- The example `blockyard.toml` is valid and parseable
 - CI passes on GitHub Actions (lint + test)

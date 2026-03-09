@@ -1,8 +1,8 @@
-# blockr.cloud Roadmap
+# blockyard Roadmap
 
 ## Scope
 
-`blockr.cloud` is focused on hosting **blockr Shiny applications**. This
+`blockyard` is focused on hosting **blockr Shiny applications**. This
 deliberately narrows the scope relative to general-purpose platforms like Posit
 Connect:
 
@@ -48,10 +48,10 @@ is a second use case to validate the abstraction's shape.
 The server is configured via a TOML file. Every value can be overridden by an
 environment variable, which takes precedence — this is the recommended approach
 for secrets in container deployments. The env var name is the config key path
-uppercased with `BLOCKR_` prefix and dots replaced by underscores (e.g.
-`[server].token` → `BLOCKR_SERVER_TOKEN`).
+uppercased with `BLOCKYARD_` prefix and dots replaced by underscores (e.g.
+`[server].token` → `BLOCKYARD_SERVER_TOKEN`).
 
-**Config file location:** the server looks for `blockr.toml` in the current
+**Config file location:** the server looks for `blockyard.toml` in the current
 working directory by default. Override with `--config <path>`.
 
 **Startup validation:** the server validates the full config (including env var
@@ -63,7 +63,7 @@ require a restart; there is no hot reload.
 [server]
 bind             = "0.0.0.0:8080"
 token            = "..."   # bearer token for control plane auth (v0)
-                            # use BLOCKR_SERVER_TOKEN env var in production
+                            # use BLOCKYARD_SERVER_TOKEN env var in production
 shutdown_timeout = "30s"   # drain window on SIGTERM
 
 [docker]
@@ -77,7 +77,7 @@ bundle_worker_path = "/app"            # where each worker sees its bundle (read
 bundle_retention   = 50                # max bundles retained per app; oldest non-active deleted first
 
 [database]
-path = "/data/db/blockr.db"
+path = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl            = "60s"   # how long to hold backend WS on client disconnect
@@ -92,13 +92,13 @@ without the other):
 ```toml
 [oidc]
 issuer_url    = "https://auth.example.com/realms/myrealm"
-client_id     = "blockr-cloud"
-client_secret = "..."    # use BLOCKR_OIDC_CLIENT_SECRET env var
+client_id     = "blockyard"
+client_secret = "..."    # use BLOCKYARD_OIDC_CLIENT_SECRET env var
 groups_claim  = "groups" # optional, default: "groups"
 
 [openbao]
 address     = "https://bao.example.com"
-admin_token = "..."      # use BLOCKR_OPENBAO_ADMIN_TOKEN env var
+admin_token = "..."      # use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
                          # operator initializes and unseals OpenBao manually
 ```
 
@@ -132,8 +132,8 @@ Each feature is described below with a priority annotation:
 
   **Networking:** each spawned container gets its own freshly-created
   user-defined bridge network. When `max_sessions_per_worker = 1` the network
-  is named `blockr-{session-id}`; when sessions share a worker it is named
-  `blockr-{worker-id}`. The server joins that network to proxy traffic;
+  is named `blockyard-{session-id}`; when sessions share a worker it is named
+  `blockyard-{worker-id}`. The server joins that network to proxy traffic;
   no host port mapping is needed. `backend.addr(handle)` returns the
   container's bridge IP and the Shiny port (configured as `[docker] shiny_port`,
   default `3838`). The address is resolved by inspecting the container's IP on
@@ -157,18 +157,18 @@ Each feature is described below with a priority annotation:
   Docker handles thousands of networks, Linux multi-homing is well-supported,
   and label-based cleanup is a single API filter call.
 
-  **Labels:** all containers and networks spawned by blockr.cloud carry
+  **Labels:** all containers and networks spawned by blockyard carry
   identifying labels:
 
   ```
-  dev.blockr.cloud/managed    = "true"
-  dev.blockr.cloud/app-id     = "{app-id}"
-  dev.blockr.cloud/worker-id  = "{worker-id}"
+  dev.blockyard/managed    = "true"
+  dev.blockyard/app-id     = "{app-id}"
+  dev.blockyard/worker-id  = "{worker-id}"
   ```
 
   These labels are used for orphan cleanup, log streaming, health polling, and
   lifecycle management. On startup, the server queries Docker for both
-  containers and networks carrying `dev.blockr.cloud/managed=true` and removes
+  containers and networks carrying `dev.blockyard/managed=true` and removes
   any it has no active record for.
   **Priority: v0.** Required — there is no other production backend.
 
@@ -232,7 +232,7 @@ Each feature is described below with a priority annotation:
   to resolve correctly.
   **Priority: v0.** Can't serve apps without it.
 
-- **Rate limiting.** No rate limiting is built into blockr.cloud. When
+- **Rate limiting.** No rate limiting is built into blockyard. When
   `max_workers` is reached the server returns 503 immediately — queuing
   requests only delays the inevitable for users who are better served by a
   fast error. Operators are responsible for rate limiting at the network edge
@@ -502,7 +502,7 @@ Each feature is described below with a priority annotation:
   ```toml
   [oidc]
   issuer_url    = "https://auth.example.com/realms/myrealm"
-  client_id     = "blockr-cloud"
+  client_id     = "blockyard"
   client_secret = "..."
   groups_claim  = "groups"  # optional, default: "groups"
   ```
@@ -580,15 +580,15 @@ Each feature is described below with a priority annotation:
   - **v1a (stopgap):** users write credentials directly via the OpenBao web UI
     at the correct paths (`secret/users/{sub}/apikeys/{service}` etc.). Rough
     but functional for early adopters; requires users to know their `sub`.
-  - **v1b:** `POST /users/me/credentials/{service}` on the blockr.cloud REST
+  - **v1b:** `POST /users/me/credentials/{service}` on the blockyard REST
     API. Server validates identity via OIDC, writes to OpenBao on the user's
     behalf. Two credential types: API key/secret and OAuth delegation (server
     stores refresh token after provider OAuth flow).
-  - **v2:** blockr.cloud web UI wraps the v1b API. Point-and-click credential
+  - **v2:** blockyard web UI wraps the v1b API. Point-and-click credential
     management.
 
   The server authenticates to OpenBao with a static admin token supplied via
-  env var (`BLOCKR_OPENBAO_ADMIN_TOKEN`). AppRole auth is deferred to later.
+  env var (`BLOCKYARD_OPENBAO_ADMIN_TOKEN`). AppRole auth is deferred to later.
 
   **Token TTL and renewal:** OpenBao session tokens are issued with a short
   TTL. The R process renews its token before expiry using OpenBao's standard
@@ -597,13 +597,13 @@ Each feature is described below with a priority annotation:
   **R interface:** no companion R package. App developers query OpenBao
   directly using `httr2` (or similar). The server injects two env vars into
   every session container:
-  - `BLOCKR_VAULT_TOKEN` — the scoped OpenBao token for this session
-  - `BLOCKR_VAULT_ADDR` — the OpenBao address reachable from inside the
+  - `BLOCKYARD_VAULT_TOKEN` — the scoped OpenBao token for this session
+  - `BLOCKYARD_VAULT_ADDR` — the OpenBao address reachable from inside the
     container
 
   Reading a secret is a standard OpenBao KV v2 GET request to
-  `{BLOCKR_VAULT_ADDR}/v1/secret/data/users/{sub}/apikeys/{service}` with
-  `Authorization: Bearer {BLOCKR_VAULT_TOKEN}`. This is documented as a
+  `{BLOCKYARD_VAULT_ADDR}/v1/secret/data/users/{sub}/apikeys/{service}` with
+  `Authorization: Bearer {BLOCKYARD_VAULT_TOKEN}`. This is documented as a
   how-to; no package abstraction is needed.
 
   **Priority: v1 / MVP.** Without this, blockr apps cannot securely integrate
@@ -635,8 +635,8 @@ Each feature is described below with a priority annotation:
   available via the REST API (`GET /api/v1/apps/{id}/logs`). Logs must be persisted
   for a configurable period after a container exits so crashes can be diagnosed
   after the fact. Captured via
-  Docker's log streaming API using the container's `dev.blockr.cloud/app-id`
-  and `dev.blockr.cloud/worker-id` labels.
+  Docker's log streaming API using the container's `dev.blockyard/app-id`
+  and `dev.blockyard/worker-id` labels.
   **Priority: v0.** Required to debug anything during development and
   operation.
 
@@ -647,7 +647,7 @@ Each feature is described below with a priority annotation:
   becomes important once real users are deploying and accessing apps.
 
 - **Orphan cleanup.** On startup, query Docker for containers and networks
-  labeled `dev.blockr.cloud/managed=true` and remove any the server has no
+  labeled `dev.blockyard/managed=true` and remove any the server has no
   active record for. Prevents resource leaks accumulating across server
   restarts. Orphaned containers are simply removed — there is no session
   state to resume.
@@ -720,7 +720,7 @@ On SIGTERM the server shuts down cleanly in this order:
    configurable via `[server] shutdown_timeout`) for in-flight HTTP and
    WebSocket requests to finish; remaining connections are dropped
 3. **Stop all managed containers and networks** — stop and remove every
-   container and bridge network carrying `dev.blockr.cloud/managed=true`;
+   container and bridge network carrying `dev.blockyard/managed=true`;
    steps 3 and 4 run in parallel
 4. **Stop in-progress build containers** — stop any running dependency restore
    containers and mark their bundles as `failed` in the DB; a re-deploy will
@@ -916,7 +916,7 @@ returns the instance's cloud credentials (IAM tokens, service account keys) to
 anyone who asks. Docker bridge containers can reach it via the host network
 stack. Without this rule, arbitrary user code could retrieve the host VM's
 cloud credentials and use them against the cloud provider's API. The rule is a
-one-time host configuration step; `blockr.cloud` verifies it is in place at
+one-time host configuration step; `blockyard` verifies it is in place at
 startup and refuses to start if it is missing on a cloud-detected host.
 
 **Container hardening applied to every app container via `WorkerSpec`:**
@@ -1149,16 +1149,16 @@ A minimal single-host setup with Caddy for TLS:
 
 ```yaml
 services:
-  blockr:
-    image: ghcr.io/blockr-org/blockr.cloud:latest
+  blockyard:
+    image: ghcr.io/blockr-org/blockyard:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - blockr-bundles:/data/bundles
-      - blockr-db:/data/db
+      - blockyard-bundles:/data/bundles
+      - blockyard-db:/data/db
     environment:
-      BLOCKR_SERVER_TOKEN: "${BLOCKR_SERVER_TOKEN}"
+      BLOCKYARD_SERVER_TOKEN: "${BLOCKYARD_SERVER_TOKEN}"
     networks:
-      - blockr-net
+      - blockyard-net
 
   caddy:
     image: caddy:latest
@@ -1169,21 +1169,21 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy-data:/data
     networks:
-      - blockr-net
+      - blockyard-net
 
 volumes:
-  blockr-bundles:
-  blockr-db:
+  blockyard-bundles:
+  blockyard-db:
   caddy-data:
 
 networks:
-  blockr-net:
+  blockyard-net:
 ```
 
 ```
 # Caddyfile
-blockr.example.com {
-    reverse_proxy blockr:8080
+blockyard.example.com {
+    reverse_proxy blockyard:8080
 }
 ```
 

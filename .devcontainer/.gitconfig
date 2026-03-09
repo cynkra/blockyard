@@ -1,0 +1,8 @@
+[core]
+	excludesFile = /workspace/.devcontainer/.gitignore.local
+
+[include]
+	path = /workspace/.devcontainer/.gitconfig.local
+
+[credential]
+	helper = cache

@@ -1,9 +1,9 @@
-# blockr.cloud Prior Art
+# blockyard Prior Art
 
 ## Overview
 
 This document surveys six existing R/Shiny deployment platforms and records
-the build-vs-fork decision for `blockr.cloud`. It is the research base for the
+the build-vs-fork decision for `blockyard`. It is the research base for the
 design choices documented in `roadmap.md`.
 
 Projects surveyed:
