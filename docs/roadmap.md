@@ -186,12 +186,19 @@ Each feature is described below with a priority annotation:
   mode containers already die with their session.
   **Priority: v2.** Depends on `per-app` mode; pair with pre-warming.
 
-- **Bundle upload and deployment.** Accept a tar.gz archive (app code +
-  manifest file like `_blockr.toml`) via a REST endpoint, unpack it to a content
-  directory, trigger dependency installation, and register it in the content
-  database. This is how apps get onto the server — users push code, the server
-  handles containerization. Each upload creates a new versioned bundle; previous
-  bundles are retained up to a configurable limit, enabling rollback.
+- **Bundle upload and deployment.** Accept a tar.gz archive of app code via a
+  REST endpoint, unpack it to a content directory, trigger dependency
+  installation, and register it in the content database. App name and all
+  configuration are supplied via the API — there is no in-bundle manifest file.
+  The conventional entrypoint is `app.R`; a `rv.lock` at the bundle root is
+  required for dependency restoration. Each upload creates a new versioned
+  bundle; previous bundles are retained up to a configurable limit, enabling
+  rollback. Typical deploy flow:
+
+  ```
+  POST /apps                       { "name": "my-app" }  →  { "id": "a3f2c1...", ... }
+  POST /apps/{id}/bundles          <tar.gz body>          →  activates immediately
+  ```
   **Priority: v0.** Core deployment mechanism.
 
 - **Bundle rollback.** Activate a previous bundle for a content item. Drain
@@ -201,19 +208,18 @@ Each feature is described below with a priority annotation:
   previous code, which goes through the same path as a fresh deploy.
 
 - **Dependency restoration.** After uploading a bundle, restore R package
-  dependencies from a lockfile. Restore runs inside a build container with a
-  shared cache volume so packages aren't re-downloaded on every deploy.
-  Exploring alternatives to renv (e.g. `rv`) for the package management tool. The R
-  version is configured server-wide — no per-deployment version selection or
-  version matching logic.
+  dependencies from `rv.lock` using [`rv`](https://github.com/A2-ai/rv).
+  Restore runs inside a build container with a shared cache volume so packages
+  aren't re-downloaded on every deploy. The R version is configured
+  server-wide — no per-deployment version selection or version matching logic.
   **Priority: v0.** Tightly coupled with bundle upload — can't deploy without
   restoring deps.
 
 - **Content registry.** A SQLite database with two tables:
 
-  - `apps` — name, status (running/stopped/failed), isolation mode, resource
-    limits (`max_processes`, `memory_limit`, `cpu_limit`), active bundle ID,
-    and encrypted environment variables
+  - `apps` — name, UUID, status (running/stopped/failed), isolation mode,
+    resource limits (`max_processes`, `memory_limit`, `cpu_limit`), active
+    bundle ID, and encrypted environment variables
   - `bundles` — per-app bundle history: tar.gz path, upload timestamp, which
     bundle is currently active
 
@@ -240,14 +246,10 @@ Each feature is described below with a priority annotation:
 - **Static site serving.** Serve rendered Rmd/Quarto output as static HTML.
   **Priority: out of scope.** Not a Shiny use case.
 
-- **Git-backed deployment.** Register a content item as backed by a git
-  repository: store the repo URL, branch, and path to `_blockr.toml`. The
-  server polls for changes (configurable interval, default 15 minutes) and
-  re-deploys when the manifest or files change. Enables CD workflows without
-  requiring a CI pipeline. The manifest format should be designed with this in
-  mind from day one. Posit Connect's git-backed publishing is the reference.
-  **Priority: v2.** Push-based deployment is sufficient initially; git-backed
-  is a convenience for CD workflows.
+- **Git-backed deployment.** Out of scope. CI/CD via the REST API is more
+  explicit and more flexible — set up a GitHub Actions workflow that calls
+  `POST /apps/{id}/bundles` on push. The server has no need to poll
+  repositories.
 
 - **Per-content resource limits.** Enforce CPU and memory limits per content
   item (`max_processes`, `memory_limit`, `cpu_limit`). In the Docker backend,
@@ -629,10 +631,9 @@ app plane. Control plane protected by a single static bearer token in config.
    immediate 503
 6. **Active health polling** — periodic health checks on running workers; detect
    and replace hung processes
-7. **Bundle upload** — accept tar.gz + manifest (`_blockr.toml`), unpack,
-   register; version every upload
-8. **Dependency restoration** — restore R packages from lockfile (exploring `rv`
-   as alternative to renv)
+7. **Bundle upload** — accept tar.gz via REST, unpack, register; name supplied
+   via API; version every upload
+8. **Dependency restoration** — restore R packages from `rv.lock` using `rv`
 9. **Content registry** — SQLite database tracking deployed apps, bundle
    history, resource limits, isolation mode, and state
 10. **REST API** — deploy, list, start/stop, view logs
@@ -671,8 +672,7 @@ infrastructure.
 
 23. **Kubernetes backend** — Deployments for apps, Jobs for tasks
 24. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
-25. **Git-backed deployment** — polling-based CD from a git manifest
-26. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
+25. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
     K8s (fields carried in `WorkerSpec` from v0)
 27. **CLI tool** — dedicated Rust binary for deployment and management
 28. **Web UI** — admin dashboard, content browser, log viewer
@@ -702,8 +702,8 @@ PostgreSQL with the same query syntax.
 
 ```sql
 CREATE TABLE apps (
-    id             TEXT PRIMARY KEY,  -- UUID
-    name           TEXT NOT NULL UNIQUE,
+    id             TEXT PRIMARY KEY,  -- UUID, system-generated
+    name           TEXT NOT NULL UNIQUE,  -- user-supplied slug
     status         TEXT NOT NULL,     -- running | stopped | failed
     isolation_mode TEXT NOT NULL,     -- per-session | per-app
     active_bundle  TEXT REFERENCES bundles(id),
