@@ -713,12 +713,12 @@ pub async fn create_pool(path: &std::path::Path) -> Result<SqlitePool, sqlx::Err
 }
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::migrate!("src/db/migrations").run(pool).await?;
+    sqlx::migrate!().run(pool).await?;  // looks for ./migrations/ at crate root
     Ok(())
 }
 ```
 
-`src/db/migrations/001_initial.sql`:
+`migrations/001_initial.sql` (at crate root — `sqlx` convention):
 
 ```sql
 CREATE TABLE IF NOT EXISTS apps (
@@ -979,6 +979,11 @@ Things to keep in mind during implementation:
   is only set later when a bundle reaches `ready` status. No deferred
   constraints needed — the insert order (app first, bundle second, then
   update `active_bundle`) avoids the cycle naturally.
+
+- **`create_pool` needs `use std::str::FromStr`** for
+  `SqliteConnectOptions::from_str`. The code snippets in this doc are
+  illustrative, not copy-paste complete — missing imports, error type
+  conversions, etc. will be resolved during implementation.
 
 - **Unused dependencies in phase 0-1.** The Cargo.toml lists dependencies
   for later phases (axum, hyper, tower, etc.) that nothing in this phase
