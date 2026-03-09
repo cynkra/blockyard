@@ -142,4 +142,4 @@ Blockyard is in early development. The current phase (0-1) establishes the found
 
 ## License
 
-See the project repository for license information.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
