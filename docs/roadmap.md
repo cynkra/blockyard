@@ -72,6 +72,7 @@ image      = "ghcr.io/blockr-org/blockr-r-base:latest"
 shiny_port = 3838                    # internal port Shiny listens on
 
 [storage]
+bundle_retention = 50    # max bundles retained per app; oldest non-active deleted first
 # Named Docker volume (recommended when server runs in a container):
 bundle_volume = "blockr-bundles"
 # Or host bind mount (native binary or explicit config):
@@ -296,9 +297,27 @@ Each feature is described below with a priority annotation:
   rollback. Typical deploy flow:
 
   ```
-  POST /apps                       { "name": "my-app" }  →  { "id": "a3f2c1...", ... }
-  POST /apps/{id}/bundles          <tar.gz body>          →  activates immediately
+  POST /api/v1/apps                       { "name": "my-app" }  →  { "id": "a3f2c1...", ... }
+  POST /api/v1/apps/{id}/bundles          <tar.gz body>          →  activates immediately
   ```
+
+  **Storage layout:**
+  ```
+  /bundles/
+    {app-id}/
+      {bundle-id}.tar.gz    # uploaded archive
+      {bundle-id}/          # unpacked app code (bind-mounted into container)
+        app.R
+        rv.lock
+        ...
+  ```
+
+  Archives are written to a temp path first and moved atomically into place on
+  success — no partial state on failed uploads. Unpacking happens eagerly at
+  upload time. When the number of bundles for an app exceeds
+  `bundle_retention` (default 50), the oldest non-active bundles are deleted
+  (archive + unpacked dir). The active bundle is never deleted automatically.
+
   **Priority: v0.** Core deployment mechanism.
 
 - **Bundle rollback.** Activate a previous bundle for a content item. Drain
