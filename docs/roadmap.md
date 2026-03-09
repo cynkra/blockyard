@@ -331,12 +331,14 @@ Each feature is described below with a priority annotation:
   user-supplied parameters, named variants, and per-variant schedules.
   **Priority: out of scope.** Not a Shiny use case.
 
-- **Execution environment images.** Pre-built Docker images with R + system
-  libraries installed, used as the base for running apps and tasks. Defines
-  what's available at runtime (R version, system deps like GDAL, GEOS, etc.).
-  ricochet maintains `r-ubuntu`, `r-alpine`, `r-alma` variants.
-  **Priority: v2.** Start with user-provided images, offer maintained base
-  images eventually.
+- **Execution environment images.** A single server-wide Docker image
+  configured in `[docker] image`. We maintain a Rocker-based image with R +
+  required system libraries. The image is pulled on server startup and on every
+  bundle deploy — never at container spawn time (which would add latency to
+  every session start). Image selection and pinning are an operational concern
+  managed centrally, not by the server or app developers.
+  **Priority: v0.** The server ships with a reference image; maintaining and
+  publishing it is a separate but parallel concern.
 
 - **Control plane authentication.** Two mechanisms, by milestone:
 
@@ -805,8 +807,8 @@ infrastructure.
     K8s (fields carried in `WorkerSpec` from v0)
 27. **CLI tool** — dedicated Rust binary for deployment and management
 28. **Web UI** — admin dashboard, content browser, log viewer
-29. **Execution environment images** — maintained base images with R + system
-    libs
+29. **Execution environment images** — publish and maintain the Rocker-based
+    runtime image; update independently of the server release cycle
 30. **Scale-to-zero** — idle shutdown for `per-app` mode; pair with
     pre-warming
 31. **Seat-based pre-warming** — pre-started container pools; pair with
