@@ -82,9 +82,10 @@ bundle_volume = "blockr-bundles"
 path = "/data/db/blockr.db"
 
 [proxy]
-ws_cache_ttl    = "60s"   # how long to hold backend WS on client disconnect
-health_interval = "10s"   # how often to poll worker health
-queue_depth     = 128     # max queued requests before returning 503
+ws_cache_ttl           = "60s"   # how long to hold backend WS on client disconnect
+health_interval        = "10s"   # how often to poll worker health
+queue_depth            = 128     # max queued requests before returning 503
+container_start_timeout = "60s"  # how long to hold a request while a container starts
 ```
 
 **v1 additions** (OIDC + OpenBao arrive together — neither is meaningful
@@ -209,6 +210,17 @@ Each feature is described below with a priority annotation:
   full. Shiny Server's immediate-503-at-capacity behaviour is a known pain
   point we should fix from the start.
   **Priority: v0.** Immediate 503 under load is poor UX.
+
+- **Cold-start UX (`per-session` mode).** In `per-session` mode every new
+  session spawns a fresh container. The proxy holds the initial HTTP request
+  open until the container passes its health check, then forwards it — the
+  user sees the browser's native loading indicator while R starts. No custom
+  loading page is served; the browser handles the wait. If the container does
+  not become healthy within `container_start_timeout` (default `60s`), the
+  held request is released with a 503. A custom loading page is a v2 polish
+  item.
+  **Priority: v0.** Behaviour must be defined from the start; the alternative
+  (timing out immediately) is unacceptable for per-session apps.
 
 - **Active health polling.** After a worker starts, periodically poll its
   endpoint (TCP connect or lightweight HTTP probe) to detect hung processes.
