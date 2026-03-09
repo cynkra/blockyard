@@ -66,8 +66,9 @@ token = "..."           # bearer token for control plane auth (v0)
                         # use BLOCKR_SERVER_TOKEN env var in production
 
 [docker]
-socket = "/var/run/docker.sock"  # or Podman socket path
-image  = "ghcr.io/blockr-org/blockr-r-base:latest"
+socket     = "/var/run/docker.sock"  # or Podman socket path
+image      = "ghcr.io/blockr-org/blockr-r-base:latest"
+shiny_port = 3838                    # internal port Shiny listens on
 
 [storage]
 # Named Docker volume (recommended when server runs in a container):
@@ -123,13 +124,19 @@ Each feature is described below with a priority annotation:
 
 - **Docker / Podman backend.** Implement the `Backend` trait using the `bollard`
   crate to create and manage containers. Covers image pulling, container
-  creation with port mapping, health checking, log streaming, and cleanup.
-  Users provide their own Docker images initially; we may offer maintained base
-  images later. The only production backend for single-host deployments and the
-  reference implementation for the trait.
+  creation, health checking, log streaming, and cleanup. The only production
+  backend for single-host deployments and the reference implementation for the
+  trait.
 
-  All containers spawned by blockr.cloud are labeled so they can be identified
-  unambiguously on a host that may be running other containers:
+  **Networking:** each spawned container gets its own freshly-created
+  user-defined bridge network named `blockr-{session-id}` (per-session) or
+  `blockr-{app-id}` (per-app). The server joins that network to proxy traffic;
+  no host port mapping is needed. `backend.addr(handle)` returns the
+  container's bridge IP and the Shiny port (configured as `[docker] shiny_port`,
+  default `3838`).
+
+  **Labels:** all containers and networks spawned by blockr.cloud carry
+  identifying labels:
 
   ```
   dev.blockr.cloud/managed    = "true"
@@ -137,10 +144,10 @@ Each feature is described below with a priority annotation:
   dev.blockr.cloud/session-id = "{session-id}"  # per-session mode only
   ```
 
-  On startup, the server queries Docker for containers with
-  `dev.blockr.cloud/managed=true` and removes any it has no active record for
-  (orphan cleanup). These labels are also used for log streaming, health
-  polling, and any future per-app lifecycle management.
+  These labels are used for orphan cleanup, log streaming, health polling, and
+  lifecycle management. On startup, the server queries Docker for both
+  containers and networks carrying `dev.blockr.cloud/managed=true` and removes
+  any it has no active record for.
   **Priority: v0.** Required — there is no other production backend.
 
 - **Isolation mode.** Controls the granularity at which containers are spawned
@@ -487,26 +494,29 @@ Each feature is described below with a priority annotation:
   **Priority: v1 / MVP.** Standard server logs suffice for v0; audit trail
   becomes important once real users are deploying and accessing apps.
 
-- **Orphan container cleanup.** On startup, query Docker for containers labeled
-  `dev.blockr.cloud/managed=true` and remove any the server has no active
-  record for. Prevents resource leaks accumulating across server restarts.
-  With `per-session` containers there is nothing to resume — orphans are
-  simply removed.
-  **Priority: v0.** Without this, restarts leak containers.
+- **Orphan cleanup.** On startup, query Docker for containers and networks
+  labeled `dev.blockr.cloud/managed=true` and remove any the server has no
+  active record for. Prevents resource leaks accumulating across server
+  restarts. With `per-session` containers there is nothing to resume — orphans
+  are simply removed.
+  **Priority: v0.** Without this, restarts leak containers and networks.
 
 - **Network isolation.** Each app container runs in its own isolated Docker
-  bridge network. Containers on different networks cannot reach each other.
-  The server joins each container's network solely to proxy traffic; its
-  management API binds only on a separate host/management interface and is not
-  reachable from within app containers. At startup the server verifies that the
-  host has an iptables rule blocking app container traffic to `169.254.169.254`
-  (the cloud instance metadata endpoint) and refuses to start if it is missing
-  on a cloud-detected host. Every spawned container has all Linux capabilities
-  dropped (`--cap-drop=ALL`), privilege escalation disabled
-  (`--security-opt=no-new-privileges`), and a read-only filesystem with a
-  tmpfs at `/tmp`. The Docker socket is never mounted into app containers.
-  In Kubernetes, a `NetworkPolicy` per Pod enforces the equivalent rules;
-  a CNI plugin that supports NetworkPolicy (Calico or Cilium) is required.
+  bridge network (see Docker backend entry for naming and labeling). Containers
+  on different bridge networks cannot reach each other — Docker's bridge
+  isolation enforces this without additional iptables rules. The server joins
+  each container's network solely to proxy traffic; no host port mapping is
+  used. The server's management API binds only on a separate host/management
+  interface and is not reachable from within app containers. At startup the
+  server verifies that the host has an iptables rule blocking app container
+  traffic to `169.254.169.254` (the cloud instance metadata endpoint) and
+  refuses to start if it is missing on a cloud-detected host. Every spawned
+  container has all Linux capabilities dropped (`--cap-drop=ALL`), privilege
+  escalation disabled (`--security-opt=no-new-privileges`), and a read-only
+  filesystem with a tmpfs at `/tmp`. The Docker socket is never mounted into
+  app containers. In Kubernetes, a `NetworkPolicy` per Pod enforces the
+  equivalent rules; a CNI plugin that supports NetworkPolicy (Calico or Cilium)
+  is required.
   **Priority: v0.** Arbitrary user code runs in these containers — isolation
   must be correct from the first deployment.
 
