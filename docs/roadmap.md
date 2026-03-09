@@ -199,6 +199,19 @@ Each feature is described below with a priority annotation:
   routing. Must handle connection upgrades (HTTP → WS), set `X-Forwarded-*`
   headers, and support multiple apps on different URL prefixes. faucet's
   `pool.rs` and `websockets.rs` are direct references.
+
+  **URL scheme:**
+
+  ```
+  /api/...         → control plane REST API
+  /app/{name}/     → proxied Shiny app (name-based, v0)
+  /{vanity}/       → vanity URL alias resolving to an app (v1)
+  ```
+
+  Apps are routed by name. The proxy redirects `/app/{name}` (no trailing
+  slash) to `/app/{name}/` and strips the prefix before forwarding to the
+  container — Shiny requires a trailing-slash prefix for relative asset URLs
+  to resolve correctly.
   **Priority: v0.** Can't serve apps without it.
 
 - **Request queuing.** Hold incoming requests in a bounded queue rather than
@@ -488,10 +501,10 @@ Each feature is described below with a priority annotation:
   with external services on a per-user basis.
 
 - **Vanity URLs.** Allow publishers to assign a custom URL path (e.g.
-  `/sales-dashboard`) to a content item, in addition to its system-assigned
-  ID-based URL. The router resolves vanity paths before falling back to
-  ID-based routing. Requires collision detection and a reserved-prefix blocklist
-  (e.g. `/__`, `/api`, `/login`).
+  `/sales-dashboard`) to a content item, in addition to its base `/app/{name}/`
+  URL. The router resolves vanity paths before falling back to name-based
+  routing. Requires collision detection and a reserved-prefix blocklist
+  (e.g. `/api`, `/app`, `/login`).
   **Priority: v1 / MVP.** Low implementation cost, high discoverability
   value.
 
