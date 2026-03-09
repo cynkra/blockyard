@@ -372,6 +372,20 @@ Each feature is described below with a priority annotation:
   ```
   **Priority: v0.** Primary server interface.
 
+- **Health endpoints.** Unauthenticated endpoints for process monitoring:
+
+  - **`GET /healthz` (liveness, v0):** returns `200 OK` whenever the server
+    process is running. No dependency checks. Used for Docker health checks
+    and simple uptime monitoring.
+  - **`GET /readyz` (readiness, v1):** returns `200 OK` only when all runtime
+    dependencies are reachable — DB, Docker socket, IdP, OpenBao. Returns
+    `503` with a JSON body listing which checks failed. Useful for Kubernetes
+    readiness probes and signalling that the server is not yet ready to serve
+    traffic after startup.
+
+  Both endpoints are excluded from bearer token authentication.
+  **Priority: v0** (`/healthz`) **/ v1** (`/readyz`).
+
 - **Task execution (run-to-completion).** Spawn an R script that runs once and
   exits. Capture stdout/stderr and exit code, store results. Used for ETL jobs,
   report rendering, data processing.
