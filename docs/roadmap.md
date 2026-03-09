@@ -342,9 +342,10 @@ Each feature is described below with a priority annotation:
   - `bundles` — per-app bundle history: tar.gz path, upload timestamp, which
     bundle is currently active
 
-  Credentials are in OpenBao, user identity is in the IdP, runtime worker
-  state (container ID → session mapping) is in-memory, and session state lives
-  in signed cookies. SQLite stores only what must survive a server restart.
+  Runtime worker state (container ID → session mapping) is in-memory. SQLite
+  stores only what must survive a server restart. Credentials (v1), user
+  identity (v1), and session state (v1) live outside the DB — see the "What
+  lives elsewhere" table in the Database Schema section.
   **Priority: v0.** Need to track what's deployed and its state.
 
 - **REST API.** HTTP endpoints for all server operations: deploy apps, list
@@ -400,17 +401,17 @@ Each feature is described below with a priority annotation:
 
 - **Git-backed deployment.** Out of scope. CI/CD via the REST API is more
   explicit and more flexible — set up a GitHub Actions workflow that calls
-  `POST /apps/{id}/bundles` on push. The server has no need to poll
+  `POST /api/v1/apps/{id}/bundles` on push. The server has no need to poll
   repositories.
 
 - **Per-content resource limits.** Enforce CPU and memory limits per content
   item (`max_processes`, `memory_limit`, `cpu_limit`). In the Docker backend,
   these map to container resource constraints. In the Kubernetes backend, they
   map to pod resource requests/limits. Resource limits are stored in the content
-  registry and passed through `WorkerSpec` from the start, even if enforcement
-  is backend-specific.
-  **Priority: design now, enforce later.** `WorkerSpec` carries the fields from
-  v1; actual enforcement added when Docker/K8s backends land.
+  registry and carried in `WorkerSpec` from v0 so the schema does not change
+  when enforcement is added; actual enforcement is backend-specific and added
+  when Docker/K8s backends are stable.
+  **Priority: design now, enforce later.**
 
 - **Parameterized reports.** Support Quarto and R Markdown documents with
   user-supplied parameters, named variants, and per-variant schedules.
@@ -765,9 +766,9 @@ trait WorkerHandle: Send + Sync {
 - **Docker Swarm / Mesos** — effectively deprecated; not planned.
 
 `WorkerSpec` carries everything a backend needs to launch a worker: the app
-directory, the startup command, environment variables (decrypted at spawn
-time), resource limits (`max_memory`, `max_cpu`), and isolation mode
-(`per-session` or `per-app`). There is no language or runtime version field —
+directory, the startup command, resource limits (`max_memory`, `max_cpu`), and
+isolation mode (`per-session` or `per-app`). In v1, scoped OpenBao tokens are
+also carried for injection into the container at spawn time. There is no language or runtime version field —
 the server runs a single configured R version. Resource limit enforcement is
 backend-specific (Docker container constraints, K8s pod limits), but the
 fields are present from v0 so the schema does not need to change when
@@ -841,63 +842,69 @@ app plane. Control plane protected by a single static bearer token in config.
    `WorkerSpec` includes isolation mode from the start
 2. **Isolation mode** — `per-session` (default) and `per-app`; proxy and
    backend lifecycle wired accordingly
-3. **HTTP/WS reverse proxy** — route requests to the correct worker, handle WS
-   upgrades
-4. **WebSocket session caching** — hold backend WS connections on client
-   disconnect
-5. **Request queuing** — queue requests at capacity rather than returning
+3. **Network isolation** — per-container bridge networks; container hardening
+   (`--cap-drop=ALL`, read-only fs, no socket mount); metadata endpoint block
+4. **HTTP/WS reverse proxy** — route by app name (`/app/{name}/`); handle WS
+   upgrades; trailing-slash redirect
+5. **Cold-start UX** — hold initial request until container healthy; 503 after
+   `container_start_timeout`
+6. **WebSocket session caching** — hold backend WS connections on client
+   disconnect for `ws_cache_ttl`
+7. **Request queuing** — queue requests at capacity rather than returning
    immediate 503
-6. **Active health polling** — periodic health checks on running workers; detect
-   and replace hung processes
-7. **Bundle upload** — accept tar.gz via REST, unpack, register; name supplied
-   via API; version every upload
-8. **Dependency restoration** — restore R packages from `rv.lock` using `rv`
-9. **Content registry** — SQLite database tracking deployed apps, bundle
-   history, resource limits, isolation mode, and state
-10. **REST API** — deploy, list, start/stop, view logs
-11. **Static bearer token** — single token in server config for control plane
-    access; no database storage
-12. **App log capture** — stream and persist container stdout/stderr; expose
+8. **Active health polling** — periodic health checks on running workers;
+   detect and replace hung processes
+9. **Bundle upload** — accept tar.gz via REST, unpack eagerly, register; name
+   supplied via API; version every upload; atomic write
+10. **Dependency restoration** — restore R packages from `rv.lock` using `rv`
+    in a build container with shared cache
+11. **Content registry** — SQLite database tracking deployed apps, bundle
+    history, resource limits, and isolation mode
+12. **REST API** — `/api/v1/` prefix; deploy, list, start/stop, view logs
+13. **Static bearer token** — single token in server config; env var override
+14. **App log capture** — stream and persist container stdout/stderr; expose
     via REST API
-14. **Orphan container cleanup** — remove unlabeled/untracked containers on
-    startup
+15. **Orphan cleanup** — remove untracked containers and networks on startup
+16. **`/healthz` endpoint** — unauthenticated liveness check
 
 ### v1 / MVP: User-Facing Completeness
 
 Adds everything needed to host a real blockr app for real users. Builds on v0
 infrastructure.
 
-12. **OIDC authentication** — enterprise SSO; establishes user identity
-13. **IdP client credentials** — replaces static token; machine auth via
+17. **OIDC authentication** — enterprise SSO; establishes user identity
+18. **IdP client credentials** — replaces static token; machine auth via
     OAuth 2.0 client credentials flow; same JWT validation path as human auth
-14. **User sessions** — server-side session tracking for authenticated users
-15. **RBAC + per-content ACL** — roles and per-app access control
-16. **Identity injection** — user identity and groups injected as HTTP headers
+19. **User sessions** — cookie-based; transparent access token refresh
+20. **RBAC + per-content ACL** — roles and per-app access control
+21. **Identity injection** — user identity and groups injected as HTTP headers
     into each Shiny session
-17. **Integration system** — OpenBao as secrets backend; IdP JWT → scoped
+22. **Integration system** — OpenBao as secrets backend; IdP JWT → scoped
     OpenBao token at session start; token injected into R process; R process
     reads secrets directly from OpenBao via `httr2`; no companion package
-18. **Audit logging** — append-only JSON Lines of all state-changing operations
-19. **Vanity URLs** — per-content custom URL paths
-20. **Content discovery** — catalog API, tag system, search/filter
-21. **Load balancing** — cookie-hash sticky sessions for Shiny
-22. **Auto-scaling** — connection-based, paired with load balancing
-23. **Telemetry and observability** — Prometheus metrics endpoint,
+23. **Audit logging** — append-only JSON Lines of all state-changing operations
+24. **Vanity URLs** — per-content custom URL paths
+25. **Content discovery** — catalog API, tag system, search/filter
+26. **Load balancing** — cookie-hash sticky sessions for Shiny
+27. **Auto-scaling** — connection-based, paired with load balancing
+28. **Telemetry and observability** — Prometheus metrics endpoint,
     OpenTelemetry tracing
+29. **`/readyz` endpoint** — readiness check against all runtime dependencies
 
 ### v2
 
-23. **Kubernetes backend** — Deployments for apps, Jobs for tasks
-24. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
-25. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
+30. **Kubernetes backend** — Deployments for apps, Jobs for tasks
+31. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
+32. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
     K8s (fields carried in `WorkerSpec` from v0)
-27. **CLI tool** — dedicated Rust binary for deployment and management
-28. **Web UI** — admin dashboard, content browser, log viewer
-29. **Multiple execution environment images** — per-app image selection;
+33. **CLI tool** — dedicated Rust binary for deployment and management
+34. **Web UI** — admin dashboard, content browser, log viewer; credential
+    enrollment UI
+35. **Multiple execution environment images** — per-app image selection;
     operators or app developers specify which image to use per deployment
-30. **Scale-to-zero** — idle shutdown for `per-app` mode; pair with
+36. **Scale-to-zero** — idle shutdown for `per-app` mode; pair with
     pre-warming
-31. **Seat-based pre-warming** — pre-started container pools; pair with
+37. **Seat-based pre-warming** — pre-started container pools; pair with
     scale-to-zero
 
 ## Database Schema
@@ -994,8 +1001,8 @@ Two approaches, both supported:
 
 ```toml
 [storage]
-bundle_volume = "blockr-bundles"   # Docker named volume
-bundle_mount  = "/bundles"         # mount point inside app containers
+bundle_volume    = "blockr-bundles"  # Docker named volume
+bundle_container_path = "/bundles"   # mount point inside app containers
 ```
 
 The named volume is mounted into the server container at `/data/bundles` and
@@ -1032,7 +1039,7 @@ services:
       - blockr-bundles:/data/bundles
       - blockr-db:/data/db
     environment:
-      BLOCKR_CONTROL_TOKEN: "${BLOCKR_CONTROL_TOKEN}"
+      BLOCKR_SERVER_TOKEN: "${BLOCKR_SERVER_TOKEN}"
     networks:
       - blockr-net
 
