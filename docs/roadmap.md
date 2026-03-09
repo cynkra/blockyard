@@ -23,8 +23,8 @@ Connect:
 
 - **Isolation:** blockr apps execute arbitrary user-supplied R code. Container
   isolation is required — there is no bare-metal process backend. The default
-  isolation mode is **per-session** (one container per user session). See the
-  Isolation Mode feature entry for details.
+  is one container per session (`max_sessions_per_worker = 1`). See the Worker
+  Scaling feature entry for details.
 
 **Milestones:** v0 is the first working technical milestone — core
 infrastructure, no user auth on the app plane. v1 is the MVP: the minimum
@@ -77,16 +77,16 @@ bundle_retention = 50    # max bundles retained per app; oldest non-active delet
 bundle_volume = "blockr-bundles"
 # Or host bind mount (native binary or explicit config):
 # bundle_host_path      = "/opt/blockr/bundles"
-# bundle_container_path = "/bundles"
+# bundle_mount_path = "/bundles"
 
 [database]
 path = "/data/db/blockr.db"
 
 [proxy]
-ws_cache_ttl           = "60s"   # how long to hold backend WS on client disconnect
-health_interval        = "10s"   # how often to poll worker health
-queue_depth            = 128     # max queued requests before returning 503
-container_start_timeout = "60s"  # how long to hold a request while a container starts
+ws_cache_ttl            = "60s"   # how long to hold backend WS on client disconnect
+health_interval         = "10s"   # how often to poll worker health
+worker_start_timeout    = "60s"   # how long to hold a request while a worker starts
+max_workers             = 100     # hard ceiling on total running workers across all apps
 ```
 
 **v1 additions** (OIDC + OpenBao arrive together — neither is meaningful
@@ -134,8 +134,9 @@ Each feature is described below with a priority annotation:
   trait.
 
   **Networking:** each spawned container gets its own freshly-created
-  user-defined bridge network named `blockr-{session-id}` (per-session) or
-  `blockr-{app-id}` (per-app). The server joins that network to proxy traffic;
+  user-defined bridge network. When `max_sessions_per_worker = 1` the network
+  is named `blockr-{session-id}`; when sessions share a worker it is named
+  `blockr-{worker-id}`. The server joins that network to proxy traffic;
   no host port mapping is needed. `backend.addr(handle)` returns the
   container's bridge IP and the Shiny port (configured as `[docker] shiny_port`,
   default `3838`).
@@ -146,7 +147,7 @@ Each feature is described below with a priority annotation:
   ```
   dev.blockr.cloud/managed    = "true"
   dev.blockr.cloud/app-id     = "{app-id}"
-  dev.blockr.cloud/session-id = "{session-id}"  # per-session mode only
+  dev.blockr.cloud/worker-id  = "{worker-id}"
   ```
 
   These labels are used for orphan cleanup, log streaming, health polling, and
@@ -155,38 +156,32 @@ Each feature is described below with a priority annotation:
   any it has no active record for.
   **Priority: v0.** Required — there is no other production backend.
 
-- **Isolation mode.** Controls the granularity at which containers are spawned
-  per app. Two modes:
+- **Worker scaling.** Two per-app numeric parameters control how containers are
+  shared across sessions — the same model as Posit Connect's `Max Processes`
+  and `Max Connections Per Process`:
 
-  - **`per-session` (default):** A new container is spawned for each incoming
-    user session and torn down when the session ends. No cross-session
-    interference is possible — each user has their own process, filesystem, and
-    memory space. Required for public or untrusted users. Higher resource cost
-    and cold-start latency per session.
+  - **`max_workers_per_app` (default 1):** how many container replicas run in
+    parallel for this app. When `> 1`, the proxy load-balances incoming
+    sessions across workers.
+  - **`max_sessions_per_worker` (default 1):** how many sessions share one
+    container. When `1` (the default), every session gets its own container —
+    no cross-session interference is possible. When `> 1`, sessions share the
+    same R process, global environment, `system()` calls, and file I/O.
+    Session sharing is appropriate only for authenticated, mutually-trusting
+    users where lower resource cost and absence of per-session cold starts are
+    worthwhile.
 
-  - **`per-app`:** One container (or a pool) is shared across all sessions for
-    an app. Users within the app share the same R process — global environment,
-    `system()` calls, and file I/O are not isolated between sessions.
-    Appropriate only for authenticated, mutually-trusting users (e.g. an
-    internal team) where the lower resource cost and absence of per-session
-    cold starts are worthwhile.
+  The defaults (`max_workers_per_app = 1`, `max_sessions_per_worker = 1`) give
+  one container per session — the recommended configuration for any deployment
+  with external or untrusted users. Raising either value is opt-in per app.
 
-  blockr apps execute arbitrary user-supplied R code, so `per-session` is the
-  default and the recommended mode for any deployment with external or untrusted
-  users. `per-app` is opt-in per app.
-
-  Isolation mode is stored in the content registry and carried in `WorkerSpec`.
-  In `per-session` mode, the proxy spawns a worker on each new WebSocket
-  connection and routes that connection exclusively to it; in `per-app` mode,
-  the proxy routes connections to shared workers and applies load balancing.
-  This affects both the proxy routing layer and the backend lifecycle logic.
-
-  In v1, OpenBao tokens are injected at worker spawn time; in `per-session`
-  mode each container gets its own scoped token, automatically invalidated when
-  the container is destroyed. No token injection in v0 — OpenBao is not a v0
-  dependency.
-  **Priority: v0.** Must be designed into the proxy and backend trait from the
-  start — retrofitting session-scoped worker lifecycle later is expensive.
+  Both fields are present in the schema from v0. In v0, the server enforces
+  the defaults — multi-worker and session-sharing logic is deferred to v1.
+  In v1, OpenBao tokens are injected per worker at spawn time; with
+  `max_sessions_per_worker = 1` each container gets its own scoped token,
+  automatically invalidated when the container is destroyed.
+  **Priority: v0** (schema + default 1:1 behaviour) **/ v1** (multi-worker,
+  session sharing, load balancing, auto-scaling).
 
 - **Kubernetes backend.** Implement the `Backend` trait using `kube-rs` to
   create Deployments (long-lived apps) and Jobs (tasks). Involves pod specs,
@@ -215,34 +210,25 @@ Each feature is described below with a priority annotation:
   to resolve correctly.
   **Priority: v0.** Can't serve apps without it.
 
-- **Request queuing.** Hold incoming requests in a bounded queue rather than
-  immediately returning 503 when the server cannot serve them immediately.
-  The trigger differs by isolation mode: in `per-app` mode it is "all workers
-  for this app are at capacity"; in `per-session` mode it is "the host is at
-  resource limits and cannot spawn another container right now." Once capacity
-  is available, dequeue and forward. Only return 503 when the queue itself is
-  full (`queue_depth`, default 128). Shiny Server's immediate-503-at-capacity
-  behaviour is a known pain point we should fix from the start.
-  **Priority: v0.** Immediate 503 under load is poor UX.
-
-- **Rate limiting.** No rate limiting is built into blockr.cloud. The
-  `queue_depth` cap is the safety valve for the proxy. Operators are
-  responsible for rate limiting at the network edge (Caddy, nginx, Cloudflare,
-  etc.) — this is the correct place for it in a deployment that already
-  delegates TLS termination upstream. In v1, when apps become user-facing with
-  OIDC, a per-user connection rate limit on the proxy is worth revisiting.
+- **Rate limiting.** No rate limiting is built into blockr.cloud. When
+  `max_workers` is reached the server returns 503 immediately — queuing
+  requests only delays the inevitable for users who are better served by a
+  fast error. Operators are responsible for rate limiting at the network edge
+  (Caddy, nginx, Cloudflare, etc.) — this is the correct place for it in a
+  deployment that already delegates TLS termination upstream. In v1, when apps
+  become user-facing with OIDC, a per-user connection rate limit on the proxy
+  is worth revisiting.
   **Priority: out of scope for v0; revisit for v1.**
 
-- **Cold-start UX (`per-session` mode).** In `per-session` mode every new
-  session spawns a fresh container. The proxy holds the initial HTTP request
-  open until the container passes its health check, then forwards it — the
-  user sees the browser's native loading indicator while R starts. No custom
-  loading page is served; the browser handles the wait. If the container does
-  not become healthy within `container_start_timeout` (default `60s`), the
-  held request is released with a 503. A custom loading page is a v2 polish
-  item.
+- **Cold-start UX.** When a new session requires a new container (i.e. no
+  existing worker has capacity), the proxy holds the initial HTTP request open
+  until the container passes its health check, then forwards it — the user sees
+  the browser's native loading indicator while R starts. No custom loading page
+  is served; the browser handles the wait. If the container does not become
+  healthy within `worker_start_timeout` (default `60s`), the held request is
+  released with a 503. A custom loading page is a v2 polish item.
   **Priority: v0.** Behaviour must be defined from the start; the alternative
-  (timing out immediately) is unacceptable for per-session apps.
+  (timing out immediately) is unacceptable.
 
 - **Active health polling.** After a worker starts, periodically poll its
   endpoint (TCP connect or lightweight HTTP probe) to detect hung processes.
@@ -251,55 +237,70 @@ Each feature is described below with a priority annotation:
   and (if auto-scaling is enabled) spawn a replacement.
   **Priority: v0.** Without this, hung processes silently swallow traffic.
 
-- **Load balancing.** Distribute requests across multiple workers for the same
-  app. Only applicable to `per-app` mode — in `per-session` mode each session
-  already has a dedicated container and there is nothing to balance. Shiny
-  requires cookie-hash sticky sessions — sessions are stateful and tied to a
-  specific R process. faucet's `LoadBalancingStrategy` trait is a good model.
-  **Priority: v1 / MVP.** v0 runs single-worker-per-app. Load balancing
-  and auto-scaling are a package deal added together.
+- **Load balancing.** Distribute incoming sessions across multiple workers when
+  `max_workers_per_app > 1`. Shiny requires cookie-hash sticky sessions —
+  sessions are stateful and tied to a specific R process; once a session is
+  assigned to a worker it stays there. faucet's `LoadBalancingStrategy` trait
+  is a good model.
+  **Priority: v1 / MVP.** v0 runs with `max_workers_per_app = 1`. Load
+  balancing and auto-scaling are a package deal added together.
 
 - **WebSocket session caching.** When a browser briefly disconnects (page
   reload, network glitch), hold the backend WebSocket connection open for a
   grace period so the client can reconnect to the same session. faucet
   implements this with a 60s cache. Critical for Shiny apps where session state
-  lives in the R process. In `per-session` mode this also means keeping the
-  container alive during the grace period — `backend.stop()` is not called
-  until the grace period expires without a reconnect.
+  lives in the R process. When `max_sessions_per_worker = 1`, this also means
+  keeping the container alive during the grace period — `backend.stop()` is
+  not called until the grace period expires without a reconnect.
   **Priority: v0.** Session loss on reload is unacceptable for Shiny users.
 
 - **Auto-scaling.** Monitor active connections or request rate per app and
   dynamically call `backend.spawn()` / `backend.stop()` to add or remove
-  workers. Only applicable to `per-app` mode — in `per-session` mode the
-  worker count tracks the session count one-to-one and there is nothing to
-  scale independently. Configurable min/max instances per app. faucet's
+  workers within the `max_workers_per_app` bound. Only meaningful when
+  `max_workers_per_app > 1` — when each session has its own container the
+  worker count already tracks the session count one-to-one. faucet's
   RPS-based autoscaler and ShinyProxy's seat-based scaler are references.
   **Priority: v1 / MVP.** Comes alongside load balancing — they are a
   package deal.
 
-- **Scale-to-zero.** When a `per-app` mode app has no active connections for a
-  configurable idle period, stop its workers to free resources. On the next
-  incoming request, hold the connection and spin up a worker before forwarding.
-  Idle detection should use reference-counted connection tracking (HTTP
-  connections, WebSocket connections, and pending connections counted
-  separately) — inspired by Shiny Server's `httpConn` / `sockConn` /
-  `pendingConn` model. Only meaningful for `per-app` mode; in `per-session`
-  mode containers already die with their session.
-  **Priority: v2.** Depends on `per-app` mode; pair with pre-warming.
+- **Scale-to-zero.** When an app has no active connections for a configurable
+  idle period, stop its workers to free resources. On the next incoming
+  request, hold the connection and spin up a worker before forwarding. Idle
+  detection should use reference-counted connection tracking (HTTP connections,
+  WebSocket connections, and pending connections counted separately) — inspired
+  by Shiny Server's `httpConn` / `sockConn` / `pendingConn` model. Only
+  meaningful when `max_workers_per_app > 1`; when each session has its own
+  container, workers already die with their session.
+  **Priority: v2.** Pair with pre-warming.
 
 - **Bundle upload and deployment.** Accept a tar.gz archive of app code via a
   REST endpoint, unpack it to a content directory, trigger dependency
-  installation, and register it in the content database. App name and all
+  restoration, and register it in the content database. App name and all
   configuration are supplied via the API — there is no in-bundle manifest file.
-  The conventional entrypoint is `app.R`; a `rv.lock` at the bundle root is
+  The conventional entrypoint is `app.R`; an `rv.lock` at the bundle root is
   required for dependency restoration. Each upload creates a new versioned
   bundle; previous bundles are retained up to a configurable limit, enabling
   rollback. Typical deploy flow:
 
   ```
   POST /api/v1/apps                       { "name": "my-app" }  →  { "id": "a3f2c1...", ... }
-  POST /api/v1/apps/{id}/bundles          <tar.gz body>          →  activates immediately
+  POST /api/v1/apps/{id}/bundles          <tar.gz body>          →  202 { "bundle_id": "...", "task_id": "..." }
+  GET  /api/v1/tasks/{task_id}/logs                              →  chunked restore output
   ```
+
+  The upload endpoint returns immediately with `202 Accepted`. The bundle is
+  created with status `pending` and dependency restoration runs asynchronously
+  in a build container. On success the bundle transitions to `ready` and is
+  activated (set as `active_bundle` on the app). On failure the bundle
+  transitions to `failed` and the previous active bundle remains unchanged.
+  The `active_bundle` foreign key only ever points at a `ready` bundle;
+  this is enforced in application logic.
+
+  Callers stream restore output via `GET /api/v1/tasks/{task_id}/logs` —
+  chunked plain text, compatible with `curl -N`. The task is in-memory only;
+  it does not survive a server restart. If the server is restarted while a
+  restore is running, the bundle is marked `failed` during orphan cleanup and
+  the caller must re-deploy.
 
   **Storage layout:**
   ```
@@ -328,19 +329,27 @@ Each feature is described below with a priority annotation:
 
 - **Dependency restoration.** After uploading a bundle, restore R package
   dependencies from `rv.lock` using [`rv`](https://github.com/A2-ai/rv).
-  Restore runs inside a build container with a shared cache volume so packages
-  aren't re-downloaded on every deploy. The R version is configured
-  server-wide — no per-deployment version selection or version matching logic.
+  `rv` is a hard runtime requirement — operators must ensure it is available in
+  the build container image. Restore runs inside a build container with a
+  shared cache volume so packages aren't re-downloaded on every deploy. The R
+  version is configured server-wide — no per-deployment version selection or
+  version matching logic.
+
+  Restore output (stdout/stderr from `rv`) is streamed to the caller via the
+  task log endpoint. The task lifecycle is managed by a `TaskStore` — an
+  in-memory implementation for v0, with a PostgreSQL-backed implementation
+  available for HA k8s deployments (v2). Both implement the same `TaskStore`
+  trait so the task and API logic are unaffected by the swap.
   **Priority: v0.** Tightly coupled with bundle upload — can't deploy without
   restoring deps.
 
 - **Content registry.** A SQLite database with two tables:
 
-  - `apps` — name, UUID, status (running/stopped/failed), isolation mode,
-    resource limits (`max_processes`, `memory_limit`, `cpu_limit`), and active
-    bundle ID
-  - `bundles` — per-app bundle history: tar.gz path, upload timestamp, which
-    bundle is currently active
+  - `apps` — name, UUID, status (running/stopped/failed), resource limits
+    (`max_workers_per_app`, `max_sessions_per_worker`, `memory_limit`,
+    `cpu_limit`), and active bundle ID
+  - `bundles` — per-app bundle history: tar.gz path, upload timestamp, bundle
+    status (`pending | ready | failed`)
 
   Runtime worker state (container ID → session mapping) is in-memory. SQLite
   stores only what must survive a server restart. Credentials (v1), user
@@ -364,12 +373,13 @@ Each feature is described below with a priority annotation:
   GET    /api/v1/apps                    list apps
   GET    /api/v1/apps/{id}               get app details
   DELETE /api/v1/apps/{id}               delete an app
-  POST   /api/v1/apps/{id}/bundles       upload and deploy a bundle
+  POST   /api/v1/apps/{id}/bundles       upload a bundle (202; restore runs async)
   GET    /api/v1/apps/{id}/bundles       list bundles
   POST   /api/v1/apps/{id}/start         start an app
   POST   /api/v1/apps/{id}/stop          stop an app
   GET    /api/v1/apps/{id}/logs          stream or fetch logs
-  PATCH  /api/v1/apps/{id}              update app config (isolation mode, resource limits)
+  PATCH  /api/v1/apps/{id}              update app config (resource limits, worker scaling)
+  GET    /api/v1/tasks/{task_id}/logs    stream restore output (chunked plain text)
   ```
   **Priority: v0.** Primary server interface.
 
@@ -589,9 +599,9 @@ Each feature is described below with a priority annotation:
   secrets are cryptographically scoped to their session only.
 
 - **App log capture.** Capture stdout/stderr from each container and make it
-  available via the REST API (`GET /apps/{id}/logs`). With `per-session`
-  containers, logs must be persisted for a configurable period after the
-  container exits so crashes can be diagnosed after the fact. Captured via
+  available via the REST API (`GET /apps/{id}/logs`). Logs must be persisted
+  for a configurable period after a container exits so crashes can be diagnosed
+  after the fact. Captured via
   Docker's log streaming API using the container's `dev.blockr.cloud/app-id`
   and `dev.blockr.cloud/session-id` labels.
   **Priority: v0.** Required to debug anything during development and
@@ -606,8 +616,8 @@ Each feature is described below with a priority annotation:
 - **Orphan cleanup.** On startup, query Docker for containers and networks
   labeled `dev.blockr.cloud/managed=true` and remove any the server has no
   active record for. Prevents resource leaks accumulating across server
-  restarts. With `per-session` containers there is nothing to resume — orphans
-  are simply removed.
+  restarts. Orphaned containers are simply removed — there is no session
+  state to resume.
   **Priority: v0.** Without this, restarts leak containers and networks.
 
 - **Network isolation.** Each app container runs in its own isolated Docker
@@ -648,13 +658,14 @@ Each feature is described below with a priority annotation:
 - **Seat-based pre-warming.** Pre-start a pool of containers before users
   arrive, so the first request doesn't incur cold-start latency. ShinyProxy
   supports this with `minimum-seats-available`. Useful for apps with slow
-  startup times but adds resource cost. Only meaningful for `per-app` mode.
+  startup times but adds resource cost. Only meaningful when
+  `max_workers_per_app > 1`.
   **Priority: v2.** Pair with scale-to-zero.
 
 - **Telemetry and observability.** Structured logging, Prometheus-compatible
   metrics endpoint, and OpenTelemetry tracing. Metrics should cover active
   connections per app, request rates, worker lifecycle events (spawn, stop,
-  crash), queue depth, and health check results. Posit Connect ships Prometheus
+  crash), and health check results. Posit Connect ships Prometheus
   + OTel as first-class features (adding OTel in 2026); retrofitting
   observability onto a production system is painful. The `tracing` and
   `metrics` crates in the Rust ecosystem make this relatively cheap to add
@@ -766,21 +777,76 @@ trait WorkerHandle: Send + Sync {
 - **Docker Swarm / Mesos** — effectively deprecated; not planned.
 
 `WorkerSpec` carries everything a backend needs to launch a worker: the app
-directory, the startup command, resource limits (`max_memory`, `max_cpu`), and
-isolation mode (`per-session` or `per-app`). In v1, scoped OpenBao tokens are
-also carried for injection into the container at spawn time. There is no language or runtime version field —
-the server runs a single configured R version. Resource limit enforcement is
-backend-specific (Docker container constraints, K8s pod limits), but the
-fields are present from v0 so the schema does not need to change when
-enforcement is added.
+directory, the startup command, and resource limits (`max_memory`, `max_cpu`).
+In v1, scoped OpenBao tokens are also carried for injection into the container
+at spawn time. There is no language or runtime version field — the server runs
+a single configured R version. Resource limit enforcement is backend-specific
+(Docker container constraints, K8s pod limits), but the fields are present from
+v0 so the schema does not need to change when enforcement is added.
 
-The proxy layer uses the isolation mode from `WorkerSpec` to decide worker
-lifecycle: in `per-session` mode it calls `backend.spawn()` on each new
-WebSocket connection and `backend.stop()` on disconnect; in `per-app` mode it
-manages a shared pool and applies load balancing across workers.
+The proxy layer uses `max_sessions_per_worker` and `max_workers_per_app` from
+the app config to decide worker lifecycle: when `max_sessions_per_worker = 1`
+it calls `backend.spawn()` for each new session and `backend.stop()` on
+disconnect; when `> 1` it routes new sessions to workers with available
+capacity and manages a shared pool. In v0 the defaults are enforced and
+multi-worker/session-sharing logic is not active.
 
 The load-balancing and autoscaling layers operate on `SocketAddr` returned by
 `backend.addr(handle)` and are completely backend-agnostic.
+
+### HTTP Stack
+
+The control plane API is built with [`axum`](https://github.com/tokio-rs/axum)
+(routing, middleware, request/response handling). The proxy layer uses
+[`hyper`](https://github.com/hyperium/hyper) directly for connection upgrades,
+WebSocket forwarding, and streaming. They compose naturally — `axum` is built
+on `hyper` and `tower`.
+
+### Session and Worker Routing
+
+Session routing is split across two traits to keep concerns separate:
+
+```rust
+trait SessionStore: Send + Sync {
+    async fn get(&self, session_id: &str) -> Option<WorkerId>;
+    async fn insert(&self, session_id: &str, worker_id: WorkerId);
+    async fn remove(&self, session_id: &str);
+}
+
+trait WorkerRegistry: Send + Sync {
+    async fn addr(&self, worker_id: &WorkerId) -> Option<SocketAddr>;
+    async fn insert(&self, worker_id: WorkerId, addr: SocketAddr);
+    async fn remove(&self, worker_id: &WorkerId);
+}
+```
+
+`SessionStore` pins sessions to workers (1:1 when `max_sessions_per_worker = 1`;
+many:1 when `> 1`). `WorkerRegistry` resolves worker IDs to addresses. Load
+balancing sits on top — it picks a worker and calls `SessionStore::insert`;
+the stores just hold the mappings.
+
+Both traits have in-memory implementations for v0 (`HashMap` behind
+`Arc<RwLock<...>>`). A PostgreSQL-backed implementation is added for k8s HA
+deployments (v2) without touching the proxy or routing logic.
+
+On first request to `/app/{name}/`, the proxy sets a session cookie containing
+a generated session ID. Subsequent requests — including WebSocket reconnects
+during the `ws_cache_ttl` grace period — are routed via this cookie.
+
+### Task Store
+
+Restore tasks are managed via a `TaskStore` trait:
+
+```rust
+trait TaskStore: Send + Sync {
+    async fn create(&self, task_id: TaskId) -> TaskHandle;
+    async fn get(&self, task_id: &TaskId) -> Option<TaskState>;
+    async fn log_stream(&self, task_id: &TaskId) -> Option<LogStream>;
+}
+```
+
+In-memory for v0. PostgreSQL-backed implementation added for k8s HA (v2). Both
+implement the same trait — no task or API logic changes on swap.
 
 ### Network Isolation
 
@@ -835,76 +901,88 @@ Docker, a `NetworkPolicy` manifest for Kubernetes.
 
 ### v0: Core Infrastructure
 
-Single-worker-per-app, Docker backend, Shiny apps only. No user auth on the
-app plane. Control plane protected by a single static bearer token in config.
+Default worker scaling (`max_workers_per_app = 1`, `max_sessions_per_worker =
+1`), Docker backend, Shiny apps only. No user auth on the app plane. Control
+plane protected by a single static bearer token in config.
 
-1. **`Backend` trait** — Docker implementation; mock backend for tests;
-   `WorkerSpec` includes isolation mode from the start
-2. **Isolation mode** — `per-session` (default) and `per-app`; proxy and
-   backend lifecycle wired accordingly
-3. **Network isolation** — per-container bridge networks; container hardening
+1. **`Backend` trait** — Docker implementation; mock backend for tests
+2. **Worker scaling (defaults)** — proxy spawns one container per session and
+   tears it down on disconnect; `max_workers_per_app` and
+   `max_sessions_per_worker` fields present in schema with defaults of `1`;
+   multi-worker and session-sharing logic deferred to v1
+3. **Session and worker routing** — cookie-based session pinning; `SessionStore`
+   and `WorkerRegistry` traits with in-memory implementations; designed to
+   generalize to multi-worker and HA without interface changes
+4. **Network isolation** — per-container bridge networks; container hardening
    (`--cap-drop=ALL`, read-only fs, no socket mount); metadata endpoint block
-4. **HTTP/WS reverse proxy** — route by app name (`/app/{name}/`); handle WS
-   upgrades; trailing-slash redirect
-5. **Cold-start UX** — hold initial request until container healthy; 503 after
-   `container_start_timeout`
-6. **WebSocket session caching** — hold backend WS connections on client
+5. **HTTP/WS reverse proxy** — `axum` control plane + `hyper` proxy layer;
+   route by app name (`/app/{name}/`); handle WS upgrades; trailing-slash
+   redirect
+6. **Cold-start UX** — hold initial request until container healthy; 503 after
+   `worker_start_timeout`
+7. **WebSocket session caching** — hold backend WS connections on client
    disconnect for `ws_cache_ttl`
-7. **Request queuing** — queue requests at capacity rather than returning
-   immediate 503
 8. **Active health polling** — periodic health checks on running workers;
    detect and replace hung processes
-9. **Bundle upload** — accept tar.gz via REST, unpack eagerly, register; name
-   supplied via API; version every upload; atomic write
-10. **Dependency restoration** — restore R packages from `rv.lock` using `rv`
-    in a build container with shared cache
-11. **Content registry** — SQLite database tracking deployed apps, bundle
-    history, resource limits, and isolation mode
-12. **REST API** — `/api/v1/` prefix; deploy, list, start/stop, view logs
-13. **Static bearer token** — single token in server config; env var override
-14. **App log capture** — stream and persist container stdout/stderr; expose
+10. **Bundle upload** — accept tar.gz via REST; return 202 with `bundle_id` +
+    `task_id`; unpack eagerly; atomic write; bundle status `pending → ready |
+    failed`
+11. **Dependency restoration** — restore R packages from `rv.lock` using `rv`
+    in a build container with shared cache; stream output via task log endpoint;
+    `TaskStore` trait with in-memory implementation
+12. **Content registry** — SQLite database tracking deployed apps, bundle
+    history (`pending | ready | failed`), and resource limits
+13. **REST API** — `/api/v1/` prefix; deploy, list, start/stop, view logs,
+    stream task logs
+14. **Static bearer token** — single token in server config; env var override
+15. **App log capture** — stream and persist container stdout/stderr; expose
     via REST API
-15. **Orphan cleanup** — remove untracked containers and networks on startup
-16. **`/healthz` endpoint** — unauthenticated liveness check
+16. **Orphan cleanup** — remove untracked containers and networks on startup
+17. **`/healthz` endpoint** — unauthenticated liveness check
 
 ### v1 / MVP: User-Facing Completeness
 
 Adds everything needed to host a real blockr app for real users. Builds on v0
 infrastructure.
 
-17. **OIDC authentication** — enterprise SSO; establishes user identity
-18. **IdP client credentials** — replaces static token; machine auth via
+18. **Multi-worker and session sharing** — enforce `max_workers_per_app` and
+    `max_sessions_per_worker` when `> 1`; load balancing and auto-scaling
+    wired in
+19. **OIDC authentication** — enterprise SSO; establishes user identity
+20. **IdP client credentials** — replaces static token; machine auth via
     OAuth 2.0 client credentials flow; same JWT validation path as human auth
-19. **User sessions** — cookie-based; transparent access token refresh
-20. **RBAC + per-content ACL** — roles and per-app access control
-21. **Identity injection** — user identity and groups injected as HTTP headers
+21. **User sessions** — cookie-based; transparent access token refresh
+22. **RBAC + per-content ACL** — roles and per-app access control
+23. **Identity injection** — user identity and groups injected as HTTP headers
     into each Shiny session
-22. **Integration system** — OpenBao as secrets backend; IdP JWT → scoped
+24. **Integration system** — OpenBao as secrets backend; IdP JWT → scoped
     OpenBao token at session start; token injected into R process; R process
     reads secrets directly from OpenBao via `httr2`; no companion package
-23. **Audit logging** — append-only JSON Lines of all state-changing operations
-24. **Vanity URLs** — per-content custom URL paths
-25. **Content discovery** — catalog API, tag system, search/filter
-26. **Load balancing** — cookie-hash sticky sessions for Shiny
-27. **Auto-scaling** — connection-based, paired with load balancing
-28. **Telemetry and observability** — Prometheus metrics endpoint,
+25. **Audit logging** — append-only JSON Lines of all state-changing operations
+26. **Vanity URLs** — per-content custom URL paths
+27. **Content discovery** — catalog API, tag system, search/filter
+28. **Load balancing** — cookie-hash sticky sessions for Shiny; active when
+    `max_workers_per_app > 1`
+29. **Auto-scaling** — connection-based, paired with load balancing; active
+    when `max_workers_per_app > 1`
+30. **Telemetry and observability** — Prometheus metrics endpoint,
     OpenTelemetry tracing
-29. **`/readyz` endpoint** — readiness check against all runtime dependencies
+31. **`/readyz` endpoint** — readiness check against all runtime dependencies
 
 ### v2
 
-30. **Kubernetes backend** — Deployments for apps, Jobs for tasks
-31. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
-32. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
+32. **Kubernetes backend** — Deployments for apps, Jobs for tasks
+33. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
+34. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
     K8s (fields carried in `WorkerSpec` from v0)
-33. **CLI tool** — dedicated Rust binary for deployment and management
-34. **Web UI** — admin dashboard, content browser, log viewer; credential
+35. **CLI tool** — dedicated Rust binary for deployment and management
+36. **Web UI** — admin dashboard, content browser, log viewer; credential
     enrollment UI
-35. **Multiple execution environment images** — per-app image selection;
+37. **Multiple execution environment images** — per-app image selection;
     operators or app developers specify which image to use per deployment
-36. **Scale-to-zero** — idle shutdown for `per-app` mode; pair with
-    pre-warming
-37. **Seat-based pre-warming** — pre-started container pools; pair with
+38. **Scale-to-zero** — idle shutdown when `max_workers_per_app > 1`; pair
+    with pre-warming
+39. **Seat-based pre-warming** — pre-started container pools; pair with
     scale-to-zero
 
 ## Database Schema
@@ -926,25 +1004,32 @@ PostgreSQL with the same query syntax.
 
 ```sql
 CREATE TABLE apps (
-    id             TEXT PRIMARY KEY,  -- UUID, system-generated
-    name           TEXT NOT NULL UNIQUE,  -- user-supplied slug
-    status         TEXT NOT NULL,     -- running | stopped | failed
-    isolation_mode TEXT NOT NULL,     -- per-session | per-app
-    active_bundle  TEXT REFERENCES bundles(id),
-    max_processes  INTEGER,
-    memory_limit   TEXT,              -- e.g. "512m"
-    cpu_limit      REAL,              -- fractional vCPUs
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
+    id                      TEXT PRIMARY KEY,      -- UUID, system-generated
+    name                    TEXT NOT NULL UNIQUE,  -- user-supplied slug
+    status                  TEXT NOT NULL,         -- running | stopped | failed
+    active_bundle           TEXT REFERENCES bundles(id),
+    max_workers_per_app     INTEGER NOT NULL DEFAULT 1,   -- max container replicas
+    max_sessions_per_worker INTEGER NOT NULL DEFAULT 1,   -- max sessions per container
+    memory_limit            TEXT,                  -- e.g. "512m"
+    cpu_limit               REAL,                  -- fractional vCPUs
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
 );
 
 CREATE TABLE bundles (
     id          TEXT PRIMARY KEY,     -- UUID
     app_id      TEXT NOT NULL REFERENCES apps(id),
+    status      TEXT NOT NULL,        -- pending | ready | failed
     path        TEXT NOT NULL,        -- path to tar.gz on disk
     uploaded_at TEXT NOT NULL
 );
 ```
+
+`active_bundle` only ever references a `ready` bundle; enforced in application
+logic (SQLite cannot express this constraint natively). Both
+`max_workers_per_app` and `max_sessions_per_worker` default to `1` — the
+multi-worker and session-sharing logic that reads values `> 1` is not active
+until v1.
 
 **What lives elsewhere:**
 
@@ -1002,19 +1087,19 @@ Two approaches, both supported:
 ```toml
 [storage]
 bundle_volume    = "blockr-bundles"  # Docker named volume
-bundle_container_path = "/bundles"   # mount point inside app containers
+bundle_mount_path = "/bundles"   # mount point inside app containers
 ```
 
 The named volume is mounted into the server container at `/data/bundles` and
-into each app container at `/bundles`. Docker resolves the volume on both sides
-— no host path translation needed.
+into each worker at `bundle_mount_path`. Docker resolves the volume on both
+sides — no host path translation needed.
 
 **Host bind mount (native binary or explicitly configured)**
 
 ```toml
 [storage]
 bundle_host_path      = "/opt/blockr/bundles"  # path on the Docker host
-bundle_container_path = "/bundles"             # mount point inside app containers
+bundle_mount_path = "/bundles"             # mount point inside app containers
 ```
 
 When the server runs as a native binary, `bundle_host_path` is also its local
@@ -1022,9 +1107,9 @@ path to bundle files. When the server runs in a container, `bundle_host_path`
 is the host-side path of whatever is mounted into the server container — the
 operator must configure this explicitly to match their bind mount.
 
-`WorkerSpec` carries the resolved host-side path or volume name so that the
-backend can construct the correct bind mount spec for each app container
-regardless of how the server itself is deployed.
+`WorkerSpec` carries the resolved host-side path or volume name and the
+`bundle_mount_path` so that the backend can construct the correct bind mount
+spec for each worker regardless of how the server itself is deployed.
 
 ### Reference Docker Compose
 
