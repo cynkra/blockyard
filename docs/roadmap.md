@@ -1,0 +1,1187 @@
+# blockr.cloud Server Design
+
+## Overview
+
+This document explores what it would take to build an open-source R deployment
+server, drawing on research into 6 existing projects:
+
+- **[Shiny Server](https://github.com/rstudio/shiny-server)** — the original
+  OSS R/Shiny hosting server from Posit; the reference implementation for Shiny
+  process management
+- **[Posit Connect](https://docs.posit.co/connect/)** — the commercial
+  all-in-one publishing platform from Posit; the 900-pound gorilla and the
+  benchmark for full-featured R/Python deployment
+- **[Scaly](https://docs.scalyapps.io)** — a closed-source hosted platform for
+  R, Python, and Julia apps; notable for its Stack abstraction and User Pool
+  auth model
+- **[ricochet-rs](https://github.com/ricochet-rs)** — a closed-source
+  deployment platform written in Rust ("R & Julia belong in production")
+- **[faucet](https://github.com/ixpantia/faucet)** — an OSS Rust reverse
+  proxy and process manager for R/Python apps
+- **[ShinyProxy](https://github.com/openanalytics/shinyproxy)** — an OSS
+  Java/Spring Boot container-orchestration platform for Shiny apps
+
+## Scope
+
+`blockr.cloud` is focused on hosting **blockr Shiny applications**. This
+deliberately narrows the scope relative to general-purpose platforms like Posit
+Connect:
+
+- **Content type:** Shiny apps only. Plumber APIs, static sites, rendered
+  documents, scheduled tasks, and parameterized reports are out of scope for
+  now. The code should be factored into clear modules so adding a new content
+  type later means adding a new module, not refactoring existing ones.
+
+- **Runtime:** A single R version, configured server-wide. Per-deployment
+  version selection, multi-version side-by-side installations, and version
+  matching strategies add meaningful complexity for a use case we don't yet
+  have. Add when there is a concrete need.
+
+- **Language:** R only. Python, Julia, and multi-language dependency restore
+  pipelines are out of scope. The `Backend` trait is agnostic to what runs
+  inside a container, so adding a new language later is a matter of adding a
+  new deployment pipeline, not changing the core architecture.
+
+- **Isolation:** blockr apps execute arbitrary user-supplied R code. Container
+  isolation is required — there is no bare-metal process backend. The default
+  isolation mode is **per-session** (one container per user session). See the
+  Isolation Mode feature entry for details.
+
+**Milestones:** v0 is the first working technical milestone — core
+infrastructure, no user auth on the app plane. v1 is the MVP: the minimum
+needed to host a real blockr app for real users. v1 adds user auth (OIDC),
+identity injection, per-user credential management (the integration system),
+and load balancing. Nothing in "later" or beyond is required to call the
+product useful.
+
+**The one deliberate exception to "no premature abstraction"** is the `Backend`
+trait (Docker vs. Kubernetes). This abstraction is worth its complexity
+because: (a) it affects every other layer of the architecture and retrofitting
+it later is expensive, (b) its shape is well-validated across multiple prior
+projects, and (c) we know we will need Kubernetes before the project reaches
+scale. The `Backend` trait is validated in tests using a lightweight in-process
+mock — no bare-metal process spawner is needed. Everything else — language
+dispatch, content-type routing tables, version matching — gets built when there
+is a second use case to validate the abstraction's shape.
+
+## Existing Projects
+
+### Shiny Server
+
+The original OSS Shiny hosting server from Posit, written in **Node.js**. The
+server acts as a reverse proxy in front of R processes — it does zero R work
+itself.
+
+**Process model:** One R process per app URL, shared across all users. Sessions
+are multiplexed inside that one process. The `SchedulerRegistry` maintains one
+`SimpleScheduler` per unique app key; each scheduler holds at most one R
+process in the OSS version. Shiny Server Pro (closed-source) adds per-user and
+pooled schedulers.
+
+**WebSocket / session handling:**
+- Uses **SockJS** (WebSocket with XHR-polling/EventSource fallback) for broad
+  browser compatibility
+- **RobustSockJS** implements session resumption: on disconnect, the backend WS
+  connection is buffered for 15 seconds; if the client reconnects within that
+  window, a sequence-numbered message exchange replays any missed messages
+- **MultiplexSocket** allows multiple logical Shiny sessions to share one
+  physical SockJS connection
+
+**Security patterns worth adopting:**
+- **Stdin config injection:** R processes receive their configuration (port,
+  appDir, shared secret, etc.) over stdin as JSON — not as command-line
+  arguments — so app paths and secrets are invisible in `ps` output
+- **Shared secret header:** R validates a `shiny-shared-secret` HTTP header on
+  every proxied request; only the Node proxy can talk to it
+
+**Connection lifecycle:** Reference-counted per-worker tracking of three
+counters — `httpConn`, `sockConn`, `pendingConn`. The idle timer only fires
+when all three reach zero. The `pendingConn` "reservation" is pre-incremented
+when the HTML page is served (before the WebSocket is opened), preventing
+premature idle detection during the HTTP → WS transition.
+
+**Known limitations:**
+- Single process per app (no pooling in OSS version); R is single-threaded so
+  all users compete for one event loop
+- No process pre-warming; every first request pays full cold-start cost
+- No request queuing — at `maxRequests` capacity, users immediately get 503
+- No active health polling after startup; a hung R process holds its slot until
+  all sessions disconnect and the idle timer fires
+- No REST API; deployment is file-copy + `restart.txt` touch + SIGHUP
+
+### Posit Connect
+
+The commercial publishing platform from Posit. Closed-source, but thoroughly
+documented. The benchmark for what a full-featured R/Python deployment platform
+looks like.
+
+**Content types:** 20+ types unified under one platform — Shiny for R/Python,
+Streamlit, Dash, Bokeh, Gradio, Plumber, FastAPI, Flask, Vetiver (ML model
+serving), Quarto, R Markdown, Jupyter Notebooks, parameterized reports, static
+sites, Pins (versioned data), scheduled scripts, MCP servers.
+
+**Deployment:** Push from RStudio/VS Code IDE, `rsconnect`/`rsconnect-python`
+CLI, REST API, or **git-backed CD** (Connect polls a `manifest.json` in a git
+repo every 15 minutes and re-deploys on change).
+
+**Runtime management:**
+- Multiple R and Python versions installed side-by-side; version locked per
+  content item at publish time; matching strategies: `Nearest`, `Major-Minor`,
+  `Exact`
+- Per-content isolated Python virtual environments (using `uv` by default)
+- Per-content resource limits: `MaxProcesses`, `MaxConnsPerProcess`,
+  `MemoryLimit`, `CPULimit`, GPU limits (Kubernetes mode)
+- Linux namespace sandboxing for local execution; full container isolation on
+  Kubernetes via Posit Launcher
+
+**Access control:** Four user roles (Anonymous, Viewer, Publisher,
+Administrator). Per-content ACLs grant Viewer or Collaborator access to
+specific users or groups. Content visibility: public, all-authenticated, or
+specific ACL. `MostPermissiveAccessType` allows admins to cap maximum
+visibility server-wide.
+
+**Content discovery:**
+- Hierarchical tag system (Category → Tag → Subtag) for organizing content
+- Content catalog with search and filter (`type:`, `owner:`, `tag:`,
+  `is:scheduled`, `is:r`, etc.)
+- **Vanity URLs** — per-content custom URL paths (e.g. `/sales-dashboard`)
+- `connectwidgets` R package for building curated content portals
+
+**Bundle management:** Each deployment stored as a versioned bundle; previous
+bundles retained up to a configurable limit; rollback by activating a previous
+bundle (apps/APIs drain existing sessions gracefully before switching).
+
+**Key features not in open-source alternatives:** parameterized report
+variants with per-variant schedules, git-backed CD, OAuth credential delegation
+(viewer's own identity flows into content session), content locking, vanity
+URLs, Prometheus + OpenTelemetry export, usage analytics per content item, and
+a comprehensive tamper-proof audit trail.
+
+### Scaly
+
+A **closed-source hosted platform** for deploying R, Python, and Julia
+applications without web development expertise. Documentation is sparse but
+the product gives a useful picture of what a simplified, opinionated deployment
+UX looks like.
+
+**Supported frameworks:** R Shiny, Python Shiny, Streamlit, Bokeh, Jupyter
+Notebooks, Reflex, Flask, Bottle, Genie.jl (Julia). App type is auto-detected
+from file structure — no explicit declaration required.
+
+**Infrastructure model (Stacks):** The core unit is a "Stack" — a container
+setup that hosts one or more apps. Stacks come in fixed T-shirt sizes (Eco:
+0.25 vCPU / 0.5 GB RAM → Performance_L: 8 vCPU / 16 GB RAM). Apps and stacks
+are independent objects; an app can be moved between stacks or removed from
+hosting without deletion. This is a cleaner separation than bundling resource
+sizing into the app itself.
+
+**Deployment:** ZIP file upload or GitHub-integrated CD. When GitHub is
+selected at app creation, Scaly generates workflow files to add to the repo —
+a nice onboarding touch. Separate QA and production stacks/apps are the
+recommended workflow.
+
+**Dependency management:** R Shiny apps require `renv.lock`; Python apps
+require `requirements.txt`. No mention of multi-version R/Python management.
+
+**Scaling and idle management:** Configurable minimum idle processes per stack
+(`min_idle`). Setting `min_idle ≥ 1` keeps a warm process running to avoid
+cold starts. Autoscaling is listed as "coming soon."
+
+**Authentication (User Pools):** A User Pool is a shared user directory that
+multiple apps can attach to as an addon. User identity and group membership
+are injected into the app via HTTP headers (`HTTP_SCALY_USER_ID`, etc.) — no
+SDK required, works the same way for R and Python. Supports MFA via
+authenticator apps, configurable password policies, per-user
+enable/disable/reset. Groups allow differentiated in-app experiences.
+
+**Addons model:** Databases and storage buckets (S3-compatible) are first-class
+platform resources that apps attach to via the Addon tab. Attaching an addon
+triggers a redeployment. This is a notably broader scope than the other
+projects — Scaly positions itself as a full application platform, not just a
+process host.
+
+**Notable for our design:** The Stack abstraction (a named, sized hosting
+environment that apps are assigned to, independent of the apps themselves) is
+worth considering. It maps naturally to our Backend concept but surfaces as a
+user-facing object rather than an internal implementation detail. The HTTP
+header injection pattern for user identity (simpler than OAuth flows for
+in-app auth) is also worth noting.
+
+### ricochet-rs
+
+A deployment platform for data scientists. The server is written in Rust but is
+**closed-source** — only the CLI, container images, Helm charts, Ansible roles,
+and documentation are publicly available.
+
+**R runtime management by deployment mode:**
+
+- **Host/VM (systemd):** R must be pre-installed (they recommend
+  [rig](https://github.com/r-lib/rig)). Ricochet uses whatever R is on the
+  system PATH.
+- **Containers (Docker/Podman):** Pre-built execution environment images
+  (`ricochetrs/r-ubuntu`, `r-alpine`, `r-alma`) with R + system dev libraries
+  baked in. Rebuilt weekly for amd64/arm64.
+- **Kubernetes:** Helm chart deploys the server, which spawns Deployments for
+  long-lived apps and Jobs for tasks. A shared PVC caches renv packages.
+
+**Rust-R interface:** Process-level orchestration, not FFI. The Rust server
+spawns and manages R processes — it does not embed R.
+
+**Key features:** Bundle upload via REST API, renv-based dependency management,
+auto-scaling with scale-to-zero, task scheduling (cron), static site serving,
+OIDC auth, encrypted env vars, multi-language (R/Python/Julia).
+
+### faucet
+
+A **single-binary Rust reverse proxy + process manager**. Directly spawns
+R/Python processes, assigns random ports, health-checks via TCP polling, and
+proxies HTTP/WebSocket traffic.
+
+- Auto-detection of app type (Shiny, Plumber, Quarto, FastAPI) by scanning for
+  known files
+- 4 load-balancing strategies: round-robin, IP hash, cookie hash (sticky
+  sessions for Shiny), RPS-based autoscaling
+- WebSocket session caching: preserves backend WS connections for 60s on client
+  disconnect
+- Multi-app router via TOML config
+- Optional telemetry to PostgreSQL
+- No auth, no deployment/bundling, no package management — purely a runtime
+  proxy
+
+### ShinyProxy
+
+A **container-orchestration platform** for Shiny apps. Written in Java (Spring
+Boot). Every app must be packaged as a Docker image — ShinyProxy never touches R
+directly.
+
+- 4 container backends: Docker Engine, Docker Swarm, Kubernetes, AWS ECS (clean
+  `IContainerBackend` abstraction)
+- 7 auth backends: Simple, LDAP, OIDC, SAML, WebService, CustomHeader, None
+- Seat-based pre-warming: pool containers with multiple seats to reduce cold
+  starts
+- Per-user container isolation by default (one container per user per app)
+- App recovery: scans backend for existing containers on restart
+- Heartbeat-based session management: kills inactive containers after timeout
+- No CLI-driven deployment, no task/scheduling support, no scale-to-zero
+
+## Feature Inventory
+
+Each feature is described below with a priority annotation:
+
+- **v0** — must-have for the first working version (core infrastructure)
+- **v1 / MVP** — required to host a real blockr app for real users
+- **v2** — important but not near-term
+- **out of scope** — not planned; add if a concrete use case arises
+
+---
+
+- **Backend trait abstraction.** A pluggable interface (`Backend` trait) that
+  lets the server manage workers without knowing whether they are Docker
+  containers or Kubernetes pods. This is the architectural foundation — every
+  other feature depends on it. Includes the trait definition, `WorkerSpec`
+  (what to run), and `WorkerHandle` (opaque reference to a running worker). The
+  trait is agnostic to what runs inside the worker — it deals only with *where*
+  and *how* containers are launched, not *what* they run. Validated in tests
+  using a lightweight in-process mock backend; no bare-metal process spawner is
+  needed.
+  **Priority: v0.** Foundational — build first.
+
+- **Docker / Podman backend.** Implement the `Backend` trait using the `bollard`
+  crate to create and manage containers. Covers image pulling, container
+  creation with port mapping, health checking, log streaming, and cleanup.
+  Users provide their own Docker images initially; we may offer maintained base
+  images later. The only production backend for single-host deployments and the
+  reference implementation for the trait.
+
+  All containers spawned by blockr.cloud are labeled so they can be identified
+  unambiguously on a host that may be running other containers:
+
+  ```
+  dev.blockr.cloud/managed    = "true"
+  dev.blockr.cloud/app-id     = "{app-id}"
+  dev.blockr.cloud/session-id = "{session-id}"  # per-session mode only
+  ```
+
+  On startup, the server queries Docker for containers with
+  `dev.blockr.cloud/managed=true` and removes any it has no active record for
+  (orphan cleanup). These labels are also used for log streaming, health
+  polling, and any future per-app lifecycle management.
+  **Priority: v0.** Required — there is no other production backend.
+
+- **Isolation mode.** Controls the granularity at which containers are spawned
+  per app. Two modes:
+
+  - **`per-session` (default):** A new container is spawned for each incoming
+    user session and torn down when the session ends. No cross-session
+    interference is possible — each user has their own process, filesystem, and
+    memory space. Required for public or untrusted users. Higher resource cost
+    and cold-start latency per session.
+
+  - **`per-app`:** One container (or a pool) is shared across all sessions for
+    an app. Users within the app share the same R process — global environment,
+    `system()` calls, and file I/O are not isolated between sessions.
+    Appropriate only for authenticated, mutually-trusting users (e.g. an
+    internal team) where the lower resource cost and absence of per-session
+    cold starts are worthwhile.
+
+  blockr apps execute arbitrary user-supplied R code, so `per-session` is the
+  default and the recommended mode for any deployment with external or untrusted
+  users. `per-app` is opt-in per app.
+
+  Isolation mode is stored in the content registry and carried in `WorkerSpec`.
+  In `per-session` mode, the proxy spawns a worker on each new WebSocket
+  connection and routes that connection exclusively to it; in `per-app` mode,
+  the proxy routes connections to shared workers and applies load balancing.
+  This affects both the proxy routing layer and the backend lifecycle logic.
+
+  OpenBao tokens are injected at worker spawn time in both modes; in
+  `per-session` mode each container gets its own scoped token, which is
+  automatically invalidated when the container is destroyed.
+  **Priority: v0.** Must be designed into the proxy and backend trait from the
+  start — retrofitting session-scoped worker lifecycle later is expensive.
+
+- **Kubernetes backend.** Implement the `Backend` trait using `kube-rs` to
+  create Deployments (long-lived apps) and Jobs (tasks). Involves pod specs,
+  service creation for routing, PVC management for shared caches, and pod
+  status polling. Production backend for multi-node deployments.
+  **Priority: v2.** Once Docker backend is stable, K8s is a separate
+  milestone.
+
+- **HTTP / WebSocket reverse proxy.** Accept incoming HTTP and WebSocket
+  connections and forward them to the correct backend worker based on URL
+  routing. Must handle connection upgrades (HTTP → WS), set `X-Forwarded-*`
+  headers, and support multiple apps on different URL prefixes. faucet's
+  `pool.rs` and `websockets.rs` are direct references.
+  **Priority: v0.** Can't serve apps without it.
+
+- **Request queuing.** Hold incoming requests in a bounded queue rather than
+  immediately returning 503 when the server cannot serve them immediately.
+  The trigger differs by isolation mode: in `per-app` mode it is "all workers
+  for this app are at capacity"; in `per-session` mode it is "the host is at
+  resource limits and cannot spawn another container right now." Once capacity
+  is available, dequeue and forward. Only return 503 when the queue itself is
+  full. Shiny Server's immediate-503-at-capacity behaviour is a known pain
+  point we should fix from the start.
+  **Priority: v0.** Immediate 503 under load is poor UX.
+
+- **Active health polling.** After a worker starts, periodically poll its
+  endpoint (TCP connect or lightweight HTTP probe) to detect hung processes.
+  Shiny Server only probes at startup; a hung R process can hold a worker slot
+  indefinitely. On failure, mark the worker unhealthy, stop it via the backend,
+  and (if auto-scaling is enabled) spawn a replacement.
+  **Priority: v0.** Without this, hung processes silently swallow traffic.
+
+- **Load balancing.** Distribute requests across multiple workers for the same
+  app. Only applicable to `per-app` mode — in `per-session` mode each session
+  already has a dedicated container and there is nothing to balance. Shiny
+  requires cookie-hash sticky sessions — sessions are stateful and tied to a
+  specific R process. faucet's `LoadBalancingStrategy` trait is a good model.
+  **Priority: v1 / MVP.** v0 runs single-worker-per-app. Load balancing
+  and auto-scaling are a package deal added together.
+
+- **WebSocket session caching.** When a browser briefly disconnects (page
+  reload, network glitch), hold the backend WebSocket connection open for a
+  grace period so the client can reconnect to the same session. faucet
+  implements this with a 60s cache. Critical for Shiny apps where session state
+  lives in the R process. In `per-session` mode this also means keeping the
+  container alive during the grace period — `backend.stop()` is not called
+  until the grace period expires without a reconnect.
+  **Priority: v0.** Session loss on reload is unacceptable for Shiny users.
+
+- **Auto-scaling.** Monitor active connections or request rate per app and
+  dynamically call `backend.spawn()` / `backend.stop()` to add or remove
+  workers. Only applicable to `per-app` mode — in `per-session` mode the
+  worker count tracks the session count one-to-one and there is nothing to
+  scale independently. Configurable min/max instances per app. faucet's
+  RPS-based autoscaler and ShinyProxy's seat-based scaler are references.
+  **Priority: v1 / MVP.** Comes alongside load balancing — they are a
+  package deal.
+
+- **Scale-to-zero.** When a `per-app` mode app has no active connections for a
+  configurable idle period, stop its workers to free resources. On the next
+  incoming request, hold the connection and spin up a worker before forwarding.
+  Idle detection should use reference-counted connection tracking (HTTP
+  connections, WebSocket connections, and pending connections counted
+  separately) — inspired by Shiny Server's `httpConn` / `sockConn` /
+  `pendingConn` model. Only meaningful for `per-app` mode; in `per-session`
+  mode containers already die with their session.
+  **Priority: v2.** Depends on `per-app` mode; pair with pre-warming.
+
+- **Bundle upload and deployment.** Accept a tar.gz archive (app code +
+  manifest file like `_blockr.toml`) via a REST endpoint, unpack it to a content
+  directory, trigger dependency installation, and register it in the content
+  database. This is how apps get onto the server — users push code, the server
+  handles containerization. Each upload creates a new versioned bundle; previous
+  bundles are retained up to a configurable limit, enabling rollback.
+  **Priority: v0.** Core deployment mechanism.
+
+- **Bundle rollback.** Activate a previous bundle for a content item. Drain
+  active sessions gracefully before switching — don't kill users mid-session.
+  Posit Connect's bundle activation model is the reference.
+  **Priority: v2.** In v0 a bad deploy can be fixed by redeploying the
+  previous code, which goes through the same path as a fresh deploy.
+
+- **Dependency restoration.** After uploading a bundle, restore R package
+  dependencies from a lockfile. Restore runs inside a build container with a
+  shared cache volume so packages aren't re-downloaded on every deploy.
+  Exploring alternatives to renv (e.g. `rv`) for the package management tool. The R
+  version is configured server-wide — no per-deployment version selection or
+  version matching logic.
+  **Priority: v0.** Tightly coupled with bundle upload — can't deploy without
+  restoring deps.
+
+- **Content registry.** A SQLite database with two tables:
+
+  - `apps` — name, status (running/stopped/failed), isolation mode, resource
+    limits (`max_processes`, `memory_limit`, `cpu_limit`), active bundle ID,
+    and encrypted environment variables
+  - `bundles` — per-app bundle history: tar.gz path, upload timestamp, which
+    bundle is currently active
+
+  Credentials are in OpenBao, user identity is in the IdP, runtime worker
+  state (container ID → session mapping) is in-memory, and session state lives
+  in signed cookies. SQLite stores only what must survive a server restart.
+  **Priority: v0.** Need to track what's deployed and its state.
+
+- **REST API.** HTTP endpoints for all server operations: deploy apps, list
+  apps, start/stop apps, manage settings, view logs. This is the primary
+  interface — the CLI and (eventually) the web UI are clients of this API.
+  Think of it as the control plane.
+  **Priority: v0.** Primary server interface.
+
+- **Task execution (run-to-completion).** Spawn an R script that runs once and
+  exits. Capture stdout/stderr and exit code, store results. Used for ETL jobs,
+  report rendering, data processing.
+  **Priority: out of scope.** Shiny apps are the only content type for now.
+
+- **Cron scheduling.** Trigger task execution on a schedule.
+  **Priority: out of scope.** Depends on task execution, which is itself out of
+  scope.
+
+- **Static site serving.** Serve rendered Rmd/Quarto output as static HTML.
+  **Priority: out of scope.** Not a Shiny use case.
+
+- **Git-backed deployment.** Register a content item as backed by a git
+  repository: store the repo URL, branch, and path to `_blockr.toml`. The
+  server polls for changes (configurable interval, default 15 minutes) and
+  re-deploys when the manifest or files change. Enables CD workflows without
+  requiring a CI pipeline. The manifest format should be designed with this in
+  mind from day one. Posit Connect's git-backed publishing is the reference.
+  **Priority: v2.** Push-based deployment is sufficient initially; git-backed
+  is a convenience for CD workflows.
+
+- **Per-content resource limits.** Enforce CPU and memory limits per content
+  item (`max_processes`, `memory_limit`, `cpu_limit`). In the Docker backend,
+  these map to container resource constraints. In the Kubernetes backend, they
+  map to pod resource requests/limits. Resource limits are stored in the content
+  registry and passed through `WorkerSpec` from the start, even if enforcement
+  is backend-specific.
+  **Priority: design now, enforce later.** `WorkerSpec` carries the fields from
+  v1; actual enforcement added when Docker/K8s backends land.
+
+- **Parameterized reports.** Support Quarto and R Markdown documents with
+  user-supplied parameters, named variants, and per-variant schedules.
+  **Priority: out of scope.** Not a Shiny use case.
+
+- **Execution environment images.** Pre-built Docker images with R + system
+  libraries installed, used as the base for running apps and tasks. Defines
+  what's available at runtime (R version, system deps like GDAL, GEOS, etc.).
+  ricochet maintains `r-ubuntu`, `r-alpine`, `r-alma` variants.
+  **Priority: v2.** Start with user-provided images, offer maintained base
+  images eventually.
+
+- **Control plane authentication.** Two mechanisms, by milestone:
+
+  **v0 — static token:** A single bearer token configured in the server config
+  file. No database storage, no issuance logic. Sufficient for development and
+  single-operator deployments where network-level access control is acceptable.
+
+  **v1 / MVP — IdP client credentials:** Machine-to-machine auth via the OAuth
+  2.0 client credentials flow. A CI/CD pipeline or automation script
+  authenticates with a `client_id` + `client_secret` against the IdP's token
+  endpoint and receives a short-lived JWT. Tokens have a short TTL; clients
+  are responsible for re-authenticating before expiry — standard practice for
+  any OAuth2 client library. The JWT is presented as a Bearer token on the
+  REST API and validated against the IdP's JWKS endpoint — the same path used
+  for human OIDC sessions. No API key storage in the database; token
+  rotation, revocation, and expiry are handled by the IdP.
+  **Priority: v0** (static token) **/ v1 / MVP** (IdP client credentials).
+
+- **OIDC authentication.** Delegate user authentication to an external identity
+  provider via OpenID Connect. The interface is fully standardized — we
+  implement against OIDC Discovery (`{issuer}/.well-known/openid-configuration`
+  ), which auto-discovers all endpoints (authorization, token, userinfo, JWKS,
+  logout). The only configuration required is the issuer URL, client
+  credentials, and an optional groups claim name (the one thing that varies
+  across IdPs; default: `"groups"`). Any compliant IdP works without
+  IdP-specific code: Keycloak, Authentik, Auth0, Okta, Azure AD, Google
+  Workspace. OpenBao's JWT auth method is wired to the same JWKS URI from the
+  discovery document, so IdP swapping also requires no OpenBao reconfiguration
+  beyond the issuer URL.
+
+  Minimal configuration:
+  ```toml
+  [oidc]
+  issuer_url    = "https://auth.example.com/realms/myrealm"
+  client_id     = "blockr-cloud"
+  client_secret = "..."
+  groups_claim  = "groups"  # optional, default: "groups"
+  ```
+  **Priority: v1 / MVP.**
+
+- **Role-based access control (RBAC).** Define roles (e.g. admin, developer,
+  viewer) with different permissions. Optionally, per-content ACLs so specific
+  apps or tasks are visible only to certain users/groups. ShinyProxy does this
+  with `access-groups` and SpEL expressions. Posit Connect's four-level model
+  (Anonymous, Viewer, Publisher, Administrator) with per-content Viewer /
+  Collaborator grants is the reference.
+  **Priority: v1 / MVP.** Comes alongside OIDC — once there are multiple
+  authenticated users, you need roles and per-content access.
+
+- **User sessions.** After a successful OIDC callback, the server issues a
+  signed cookie containing the user's `sub`, groups, access token, and
+  encrypted refresh token. Access tokens have a short TTL (5–15 minutes,
+  configured on the IdP). On each request, if the access token is near expiry
+  the server transparently exchanges the refresh token for a new access token
+  and re-issues the cookie — the user never notices. The cookie carries
+  everything; no database lookup is required.
+
+  Runtime state (which container belongs to which session) is kept in-memory
+  and reconstructed implicitly as sessions reconnect after a server restart.
+  Explicit logout is handled via an in-memory revocation list of `jti` claim
+  values; revocations are lost on restart, meaning a revoked token remains
+  valid until its natural expiry — acceptable for the single-host deployment
+  model.
+  **Priority: v1 / MVP.** Prerequisite for everything user-aware.
+
+- **Identity injection.** On each proxied request, inject the authenticated
+  user's identity into the Shiny process via HTTP headers (`X-Shiny-User`,
+  `X-Shiny-Groups`). The Shiny app reads these headers to personalise content
+  without implementing its own auth. For public apps the headers are absent.
+  **Priority: v1 / MVP.** Required for user-aware blockr apps.
+
+- **Integration system (per-user credentials).** Allows each user to register
+  credentials for external services (AI providers, S3, databases, etc.) once;
+  these are made available to their Shiny sessions at runtime in a
+  cryptographically bounded way.
+
+  **Threat model:** Shiny apps run arbitrary R code. Any credential or token
+  placed in the process space must be treated as potentially exfiltrable. The
+  blast radius of a compromised session must be bounded to that user's secrets
+  only — no path from the process to any other user's data or to the server's
+  own DB credentials.
+
+  **Mechanism — Vault + IdP JWT auth:**
+  [OpenBao](https://openbao.org) (the open source Vault fork) is used as the
+  secrets backend. The IdP and OpenBao are wired together via OpenBao's JWT
+  auth method: OpenBao is configured with the IdP's JWKS endpoint once, after
+  which any valid IdP JWT can be exchanged for a scoped OpenBao token. Per-user
+  policies restrict each token to `read` on `secret/users/{sub}/*` only.
+
+  **Session flow:**
+  1. User authenticates via IdP → server receives their OIDC JWT
+  2. At session start, the **server** (not the R process) presents the JWT to
+     OpenBao's `/auth/jwt/login` endpoint
+  3. OpenBao validates the JWT, maps the `sub` claim to a policy, and returns
+     a short-lived token scoped to `secret/users/{sub}/*`
+  4. The scoped OpenBao token is injected into the Shiny process as an
+     environment variable
+  5. The R process calls OpenBao directly to read its credentials — it never
+     touches the server's DB or decryption keys
+  6. The server's OpenBao admin credentials (used for enrollment writes) never
+     enter the process space
+
+  **Enrollment:** Two credential types — OAuth delegation (user authorises via
+  provider flow; server stores refresh token in OpenBao at
+  `secret/users/{sub}/oauth/{provider}`) and API key / secret (user enters key
+  via UI; server writes to `secret/users/{sub}/apikeys/{service}`). Enrollment
+  is handled by the server with its admin OpenBao token; the R process has no
+  write access.
+
+  **Token TTL and renewal:** OpenBao session tokens are issued with a short
+  TTL. The R process renews its token before expiry using OpenBao's standard
+  token renewal API — idiomatic OpenBao usage. The companion R package handles
+  renewal transparently before each credential read, so app code never deals
+  with token lifecycle.
+
+  **R interface:** A companion R package (`blockr.cloud` or similar) wraps the
+  OpenBao API behind a simple call: `blockr_secret("openai")` reads
+  `secret/users/{sub}/apikeys/openai` using the injected token (renewing it if
+  needed) and returns the key. The package is the only integration point the
+  app developer needs to know about.
+
+  **Priority: v1 / MVP.** Without this, blockr apps cannot securely integrate
+  with external services on a per-user basis.
+
+- **Vanity URLs.** Allow publishers to assign a custom URL path (e.g.
+  `/sales-dashboard`) to a content item, in addition to its system-assigned
+  ID-based URL. The router resolves vanity paths before falling back to
+  ID-based routing. Requires collision detection and a reserved-prefix blocklist
+  (e.g. `/__`, `/api`, `/login`).
+  **Priority: v1 / MVP.** Low implementation cost, high discoverability
+  value.
+
+- **Content discovery.** A way for users to find and navigate to deployed
+  content: a content catalog endpoint in the REST API listing all accessible
+  items with metadata (title, type, owner, status, URL), a hierarchical tag
+  system for organizing content (admin-managed), and basic search/filter
+  support. Needed even before a web UI — the API consumer (CLI or UI) needs
+  something to work with.
+  **Priority: v1 / MVP.** Without discovery, the platform is a black box.
+
+- **Environment variable management.** Store per-app environment variables
+  (database credentials, API keys, etc.) encrypted at rest, inject them into
+  the container/process at startup. Avoids putting secrets in code or config
+  files.
+  **Priority: v0.** Apps need secrets from day one.
+
+- **App log capture.** Capture stdout/stderr from each container and make it
+  available via the REST API (`GET /apps/{id}/logs`). With `per-session`
+  containers, logs must be persisted for a configurable period after the
+  container exits so crashes can be diagnosed after the fact. Captured via
+  Docker's log streaming API using the container's `dev.blockr.cloud/app-id`
+  and `dev.blockr.cloud/session-id` labels.
+  **Priority: v0.** Required to debug anything during development and
+  operation.
+
+- **Audit logging.** Append-only log of all state-changing operations: who
+  deployed what, when an app was started/stopped, config changes. JSON Lines
+  format for easy ingestion into log aggregation tools.
+  **Priority: v1 / MVP.** Standard server logs suffice for v0; audit trail
+  becomes important once real users are deploying and accessing apps.
+
+- **Orphan container cleanup.** On startup, query Docker for containers labeled
+  `dev.blockr.cloud/managed=true` and remove any the server has no active
+  record for. Prevents resource leaks accumulating across server restarts.
+  With `per-session` containers there is nothing to resume — orphans are
+  simply removed.
+  **Priority: v0.** Without this, restarts leak containers.
+
+- **Network isolation.** Each app container runs in its own isolated Docker
+  bridge network. Containers on different networks cannot reach each other.
+  The server joins each container's network solely to proxy traffic; its
+  management API binds only on a separate host/management interface and is not
+  reachable from within app containers. At startup the server verifies that the
+  host has an iptables rule blocking app container traffic to `169.254.169.254`
+  (the cloud instance metadata endpoint) and refuses to start if it is missing
+  on a cloud-detected host. Every spawned container has all Linux capabilities
+  dropped (`--cap-drop=ALL`), privilege escalation disabled
+  (`--security-opt=no-new-privileges`), and a read-only filesystem with a
+  tmpfs at `/tmp`. The Docker socket is never mounted into app containers.
+  In Kubernetes, a `NetworkPolicy` per Pod enforces the equivalent rules;
+  a CNI plugin that supports NetworkPolicy (Calico or Cilium) is required.
+  **Priority: v0.** Arbitrary user code runs in these containers — isolation
+  must be correct from the first deployment.
+
+- **CLI tool.** A separate command-line binary (Rust) for interacting with the
+  server: deploy apps, list content, tail logs, invoke tasks, manage settings.
+  Communicates with the server via the REST API. ricochet's CLI is the closest
+  reference.
+  **Priority: v2.** curl/httpie against the REST API is sufficient initially.
+
+- **Web UI.** A browser-based interface for browsing deployed content, viewing
+  logs, managing settings, and (for admins) managing users. Lower priority than
+  the API/CLI but important for discoverability and non-developer users.
+  **Priority: v2.** Developers are the primary users initially.
+
+- **Multi-language support.** Python, Julia, or any runtime beyond R. The
+  `Backend` trait is already runtime-agnostic, so adding a new language means
+  adding a new deployment pipeline, not rearchitecting the core.
+  **Priority: out of scope.** Add if a concrete use case arises.
+
+- **Seat-based pre-warming.** Pre-start a pool of containers before users
+  arrive, so the first request doesn't incur cold-start latency. ShinyProxy
+  supports this with `minimum-seats-available`. Useful for apps with slow
+  startup times but adds resource cost. Only meaningful for `per-app` mode.
+  **Priority: v2.** Pair with scale-to-zero.
+
+- **Telemetry and observability.** Structured logging, Prometheus-compatible
+  metrics endpoint, and OpenTelemetry tracing. Metrics should cover active
+  connections per app, request rates, worker lifecycle events (spawn, stop,
+  crash), queue depth, and health check results. Posit Connect ships Prometheus
+  + OTel as first-class features (adding OTel in 2026); retrofitting
+  observability onto a production system is painful. The `tracing` and
+  `metrics` crates in the Rust ecosystem make this relatively cheap to add
+  early.
+  **Priority: v1 / MVP.** Cheap to instrument early, expensive to retrofit.
+
+- **TLS termination.** Serving HTTPS. Either built-in (via `rustls` + ACME) or
+  delegated to an external reverse proxy (Caddy, nginx, Traefik). The external
+  proxy model is standard in container deployments and avoids maintaining TLS
+  code in the server itself.
+  **Priority: external proxy, not built-in.** Delegate TLS to Caddy/nginx/
+  Traefik. The server only speaks HTTP. No built-in TLS planned.
+
+## Build vs. Fork Assessment
+
+We evaluated two approaches for leveraging faucet:
+
+- **Option A (fork):** Fork faucet, refactor the backend layer to support
+  containers alongside bare-metal processes.
+- **Option B (reference build):** Use faucet's proxy/LB architecture as a
+  blueprint, build fresh with a pluggable backend from day one.
+
+### What transfers cleanly from faucet
+
+The following layers are address-agnostic — they operate on `SocketAddr` or
+abstract `Client` objects and don't care whether the upstream is a Docker
+container or a Kubernetes pod:
+
+- **Reverse proxy / connection pool** (`Client`, `ConnectionManager` in
+  `pool.rs`)
+- **Load balancing strategies** (round-robin, IP hash, cookie hash, RPS
+  autoscale in `load_balancing/`)
+- **Service/middleware pipeline** (`onion.rs` — `Service` and `Layer` traits)
+- **WebSocket proxying & session caching** (`websockets.rs`)
+- **Health checking** — a pure `TcpStream::connect(addr)` function
+
+### What doesn't transfer
+
+The process management layer in `worker.rs` is deeply coupled to local OS
+processes:
+
+- **Port assignment** is hardcoded to `127.0.0.1` with local bind-testing
+- **Spawning** calls `tokio::process::Command` with Unix-specific `setpgid` and
+  `kill_on_drop`
+- **Lifecycle loop** uses `child.kill()`, `child.wait()`, `child.id()` — all OS
+  process primitives
+- **Logging** reads `Child` stdout/stderr streams directly
+- **No `Backend` trait** exists — `WorkerConfig` is simultaneously config
+  holder, spawner, lifecycle manager, and state container
+
+Roughly half of `worker.rs` is process-specific code that would be dead weight
+in a container-first project.
+
+### Decision: Option B (reference build)
+
+Since production workloads will be exclusively containerized, we build fresh
+with a pluggable `Backend` trait from day one. The local-process backend serves
+as a reference implementation and is useful for development, testing, and
+examples. Docker and Kubernetes backends are introduced early.
+
+The proxy, load-balancing, and middleware patterns from faucet are reused
+architecturally but reimplemented to avoid fork maintenance.
+
+## Proposed Architecture
+
+### Backend Trait
+
+The central abstraction. All container runtimes implement this trait:
+
+```rust
+#[async_trait]
+trait Backend: Send + Sync {
+    type Handle: WorkerHandle;
+
+    async fn spawn(&self, spec: &WorkerSpec) -> Result<Self::Handle>;
+    async fn stop(&self, handle: &Self::Handle) -> Result<()>;
+    async fn health_check(&self, handle: &Self::Handle) -> bool;
+    async fn logs(&self, handle: &Self::Handle) -> Result<LogStream>;
+    async fn addr(&self, handle: &Self::Handle) -> SocketAddr;
+}
+
+trait WorkerHandle: Send + Sync {
+    fn id(&self) -> &str;
+}
+```
+
+**Planned implementations:**
+
+| Backend             | Crate     | Handle type        | Priority | Purpose                |
+|---------------------|-----------|--------------------|----------|------------------------|
+| `Docker` / `Podman` | `bollard` | Container ID       | v0       | Single-host production |
+| `Kubernetes`        | `kube-rs` | Pod/Job name       | v2       | Multi-node production  |
+
+**Runtime and orchestrator notes:**
+
+- **Podman** — Podman exposes a Docker-compatible socket via `podman system
+  service`. `bollard` connects to it unchanged; the `DockerBackend`
+  implementation works without modification. Configure the socket path in
+  server config and Podman is supported. Rootless Podman (containers without a
+  root daemon) is a meaningful security improvement over Docker's default
+  daemon-as-root model and is the recommended mode for operators who choose it.
+  Considered supported alongside Docker, not a separate backend.
+
+- **containerd / CRI-O** — both are low-level runtimes used underneath Docker,
+  Podman, and k8s. Nobody uses them directly as a deployment runtime; they are
+  always mediated by one of the above. Invisible behind the trait.
+
+- **Nomad** — HashiCorp's workload scheduler. Simpler than k8s, clean REST
+  API, supports Docker task drivers. The `Backend` trait would accommodate a
+  `NomadBackend` without changes to the interface. Parked for two reasons:
+  (1) a third runtime to maintain with no confirmed user demand, (2)
+  HashiCorp's 2023 BSL relicense complicates its use in OSS projects. Revisit
+  if there is concrete demand.
+
+- **Docker Swarm / Mesos** — effectively deprecated; not planned.
+
+`WorkerSpec` carries everything a backend needs to launch a worker: the app
+directory, the startup command, environment variables (decrypted at spawn
+time), resource limits (`max_memory`, `max_cpu`), and isolation mode
+(`per-session` or `per-app`). There is no language or runtime version field —
+the server runs a single configured R version. Resource limit enforcement is
+backend-specific (Docker container constraints, K8s pod limits), but the
+fields are present from v0 so the schema does not need to change when
+enforcement is added.
+
+The proxy layer uses the isolation mode from `WorkerSpec` to decide worker
+lifecycle: in `per-session` mode it calls `backend.spawn()` on each new
+WebSocket connection and `backend.stop()` on disconnect; in `per-app` mode it
+manages a shared pool and applies load balancing across workers.
+
+The load-balancing and autoscaling layers operate on `SocketAddr` returned by
+`backend.addr(handle)` and are completely backend-agnostic.
+
+### Network Isolation
+
+App containers execute arbitrary user-supplied R code and must be isolated from
+each other, from the server's management API, and from host-level network
+services. Internet egress is permitted — R packages, external APIs, and user
+code all have legitimate reasons to make outbound requests.
+
+**Docker: per-container bridge network**
+
+Each spawned container gets its own freshly-created user-defined bridge
+network. The server joins that network (multi-homed) solely to proxy traffic
+to the container. Containers on different bridge networks cannot reach each
+other — Docker's bridge isolation enforces this without additional iptables
+rules. Internet egress works via NAT as normal.
+
+The server's management API binds only on the host/management interface, not
+on the per-container bridge networks, so app containers have no route to it.
+
+One host-level iptables rule is required at setup time to block app containers
+from reaching the cloud instance metadata endpoint at `169.254.169.254`. This
+address is provided by cloud platforms (AWS, GCP, Azure) on every VM and
+returns the instance's cloud credentials (IAM tokens, service account keys) to
+anyone who asks. Docker bridge containers can reach it via the host network
+stack. Without this rule, arbitrary user code could retrieve the host VM's
+cloud credentials and use them against the cloud provider's API. The rule is a
+one-time host configuration step; `blockr.cloud` verifies it is in place at
+startup and refuses to start if it is missing on a cloud-detected host.
+
+**Container hardening applied to every app container via `WorkerSpec`:**
+
+- `--cap-drop=ALL` — all Linux capabilities dropped; a Shiny process needs none
+- `--security-opt=no-new-privileges` — blocks privilege escalation via setuid
+  binaries
+- `--read-only` with a tmpfs at `/tmp` — container filesystem is immutable;
+  app code cannot modify it
+- No Docker socket mount
+- Default seccomp profile enforced (never disabled)
+
+**Kubernetes: NetworkPolicy**
+
+Each app Pod gets a `NetworkPolicy` that denies all ingress except from the
+server Pod, and restricts egress: internet-bound traffic is allowed, traffic
+to cluster-internal CIDRs and to `169.254.169.254` is denied. This requires a
+CNI plugin that enforces NetworkPolicy (Calico or Cilium; Flannel alone does
+not suffice). The Helm chart documents this requirement and optionally installs
+Calico as a sub-chart.
+
+**`WorkerSpec` carries network config** so that each backend constructs the
+appropriate isolation primitives at spawn time: a named bridge network for
+Docker, a `NetworkPolicy` manifest for Kubernetes.
+
+### v0: Core Infrastructure
+
+Single-worker-per-app, Docker backend, Shiny apps only. No user auth on the
+app plane. Control plane protected by a single static bearer token in config.
+
+1. **`Backend` trait** — Docker implementation; mock backend for tests;
+   `WorkerSpec` includes isolation mode from the start
+2. **Isolation mode** — `per-session` (default) and `per-app`; proxy and
+   backend lifecycle wired accordingly
+3. **HTTP/WS reverse proxy** — route requests to the correct worker, handle WS
+   upgrades
+4. **WebSocket session caching** — hold backend WS connections on client
+   disconnect
+5. **Request queuing** — queue requests at capacity rather than returning
+   immediate 503
+6. **Active health polling** — periodic health checks on running workers; detect
+   and replace hung processes
+7. **Bundle upload** — accept tar.gz + manifest (`_blockr.toml`), unpack,
+   register; version every upload
+8. **Dependency restoration** — restore R packages from lockfile (exploring `rv`
+   as alternative to renv)
+9. **Content registry** — SQLite database tracking deployed apps, bundle
+   history, resource limits, isolation mode, and state
+10. **REST API** — deploy, list, start/stop, view logs
+11. **Static bearer token** — single token in server config for control plane
+    access; no database storage
+12. **Environment variable management** — encrypted at rest, injected at startup
+13. **App log capture** — stream and persist container stdout/stderr; expose
+    via REST API
+14. **Orphan container cleanup** — remove unlabeled/untracked containers on
+    startup
+
+
+### v1 / MVP: User-Facing Completeness
+
+Adds everything needed to host a real blockr app for real users. Builds on v0
+infrastructure.
+
+12. **OIDC authentication** — enterprise SSO; establishes user identity
+13. **IdP client credentials** — replaces static token; machine auth via
+    OAuth 2.0 client credentials flow; same JWT validation path as human auth
+14. **User sessions** — server-side session tracking for authenticated users
+15. **RBAC + per-content ACL** — roles and per-app access control
+16. **Identity injection** — user identity and groups injected as HTTP headers
+    into each Shiny session
+17. **Integration system** — OpenBao as secrets backend; IdP JWT → scoped
+    OpenBao token at session start; token injected into R process; R process
+    reads secrets directly from OpenBao; companion R package (`blockr_secret()`)
+18. **Audit logging** — append-only JSON Lines of all state-changing operations
+19. **Vanity URLs** — per-content custom URL paths
+20. **Content discovery** — catalog API, tag system, search/filter
+21. **Load balancing** — cookie-hash sticky sessions for Shiny
+22. **Auto-scaling** — connection-based, paired with load balancing
+23. **Telemetry and observability** — Prometheus metrics endpoint,
+    OpenTelemetry tracing
+
+### v2
+
+23. **Kubernetes backend** — Deployments for apps, Jobs for tasks
+24. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
+25. **Git-backed deployment** — polling-based CD from a git manifest
+26. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
+    K8s (fields carried in `WorkerSpec` from v0)
+27. **CLI tool** — dedicated Rust binary for deployment and management
+28. **Web UI** — admin dashboard, content browser, log viewer
+29. **Execution environment images** — maintained base images with R + system
+    libs
+30. **Scale-to-zero** — idle shutdown for `per-app` mode; pair with
+    pre-warming
+31. **Seat-based pre-warming** — pre-started container pools; pair with
+    scale-to-zero
+
+## Database Schema
+
+Two tables — everything else lives in OpenBao, the IdP, Docker, or in-memory.
+
+**Storage backend:** SQLite for single-host Docker deployments — zero
+operational overhead and sufficient for the write load (deploys and config
+changes, not per-request writes). The Kubernetes backend (v2) will likely
+require PostgreSQL for HA multi-node deployments where SQLite's single-writer
+model breaks down.
+
+The database layer should be abstracted behind a trait from the start so that
+swapping SQLite for PostgreSQL is a matter of adding a new implementation
+rather than touching query code throughout the codebase. Use
+[`sqlx`](https://github.com/launchbakery/sqlx) with compile-time checked
+queries against a generic connection type — it supports both SQLite and
+PostgreSQL with the same query syntax.
+
+```sql
+CREATE TABLE apps (
+    id             TEXT PRIMARY KEY,  -- UUID
+    name           TEXT NOT NULL UNIQUE,
+    status         TEXT NOT NULL,     -- running | stopped | failed
+    isolation_mode TEXT NOT NULL,     -- per-session | per-app
+    active_bundle  TEXT REFERENCES bundles(id),
+    max_processes  INTEGER,
+    memory_limit   TEXT,              -- e.g. "512m"
+    cpu_limit      REAL,              -- fractional vCPUs
+    env_vars       BLOB,              -- encrypted JSON
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
+CREATE TABLE bundles (
+    id          TEXT PRIMARY KEY,     -- UUID
+    app_id      TEXT NOT NULL REFERENCES apps(id),
+    path        TEXT NOT NULL,        -- path to tar.gz on disk
+    uploaded_at TEXT NOT NULL
+);
+```
+
+**What lives elsewhere:**
+
+| Concern | Where |
+|---|---|
+| Per-user credentials (OAuth tokens, API keys) | OpenBao |
+| User identity, groups, auth tokens | IdP |
+| Session state (sub, groups, access + refresh token) | Signed cookie |
+| Runtime worker state (container ID ↔ session) | In-memory |
+| App logs | Docker log stream + persisted files |
+| Revoked token list | In-memory (`jti` blocklist) |
+
+### Not Built-In
+
+- **TLS termination** — delegate to Caddy/nginx/Traefik. The server speaks HTTP
+  only.
+
+## Deployment
+
+### Distribution
+
+Two artifacts are shipped:
+
+- **Native binary** — a single statically-linked Rust binary. Suitable for
+  operators who prefer to manage the process directly (systemd unit, etc.) or
+  for development. No runtime dependencies beyond Docker and the R image.
+- **Docker image** — the recommended production deployment. Uses the
+  Docker-out-of-Docker (DooD) pattern: the server container is given access to
+  the host Docker daemon via a mounted socket. Containers spawned for Shiny
+  apps are siblings on the host, not children of the server container.
+
+### Networking
+
+In both deployment modes, app containers must be reachable from the server
+over TCP. For Docker, all containers (server and app containers) are placed on
+a shared Docker network created at startup. The server resolves each container's
+address via `backend.addr(handle)` (container IP + Shiny port) and proxies
+traffic to it.
+
+The external TLS-terminating proxy (Caddy, nginx, Traefik) connects to our
+server over the host network or a shared Docker network. Our server only speaks
+plain HTTP.
+
+### Bundle Storage and Path Translation
+
+Bundle archives and unpacked app directories must be accessible to both the
+server (for reading) and to app containers (bind-mounted at startup). This
+creates a path constraint: the path given to Docker when spawning an app
+container must be the **host-side path**, not the path as seen from inside the
+server container.
+
+Two approaches, both supported:
+
+**Named Docker volume (recommended for containerized server)**
+
+```toml
+[storage]
+bundle_volume = "blockr-bundles"   # Docker named volume
+bundle_mount  = "/bundles"         # mount point inside app containers
+```
+
+The named volume is mounted into the server container at `/data/bundles` and
+into each app container at `/bundles`. Docker resolves the volume on both sides
+— no host path translation needed.
+
+**Host bind mount (native binary or explicitly configured)**
+
+```toml
+[storage]
+bundle_host_path      = "/opt/blockr/bundles"  # path on the Docker host
+bundle_container_path = "/bundles"             # mount point inside app containers
+```
+
+When the server runs as a native binary, `bundle_host_path` is also its local
+path to bundle files. When the server runs in a container, `bundle_host_path`
+is the host-side path of whatever is mounted into the server container — the
+operator must configure this explicitly to match their bind mount.
+
+`WorkerSpec` carries the resolved host-side path or volume name so that the
+backend can construct the correct bind mount spec for each app container
+regardless of how the server itself is deployed.
+
+### Reference Docker Compose
+
+A minimal single-host setup with Caddy for TLS:
+
+```yaml
+services:
+  blockr:
+    image: ghcr.io/blockr-org/blockr.cloud:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - blockr-bundles:/data/bundles
+      - blockr-db:/data/db
+    environment:
+      BLOCKR_CONTROL_TOKEN: "${BLOCKR_CONTROL_TOKEN}"
+    networks:
+      - blockr-net
+
+  caddy:
+    image: caddy:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+    networks:
+      - blockr-net
+
+volumes:
+  blockr-bundles:
+  blockr-db:
+  caddy-data:
+
+networks:
+  blockr-net:
+```
+
+```
+# Caddyfile
+blockr.example.com {
+    reverse_proxy blockr:8080
+}
+```
+
+### Kubernetes Deployment (v2)
+
+The k8s deployment is a v2 milestone. Several constraints differ meaningfully
+from the single-host Docker case.
+
+**Our server** runs as a k8s Deployment, talking to the cluster API via
+`kube-rs`. No Docker socket — the Kubernetes `Backend` trait implementation
+creates Pods and Services via the k8s API instead.
+
+**Bundle storage**
+
+The Docker named-volume approach does not translate to k8s. Options, in order
+of preference:
+
+- **ReadWriteMany PVC (default)** — a PersistentVolumeClaim with `ReadWriteMany`
+  access mode (NFS, AWS EFS, CephFS, etc.) mounted into both the server Pod and
+  each app Pod. Available on most managed clusters; adds a storage class
+  dependency.
+- **Object storage (alternative)** — bundles uploaded to S3/MinIO; app Pods
+  pull the bundle at startup via an init container. No RWX requirement, works
+  on any cluster. Adds a cold-start download penalty and an object store
+  dependency.
+- **Image-baking (out of scope)** — build a container image per bundle at
+  deploy time (Kaniko or similar); reference the image in the Pod spec. Zero
+  runtime bundle access, but requires a full container build pipeline.
+
+`WorkerSpec` carries a bundle reference that the backend interprets: a volume
+mount spec for PVC mode, a pre-signed URL for object storage mode. The server
+config declares which mode is active.
+
+**Database**
+
+SQLite's single-writer model is incompatible with multi-replica deployments.
+The k8s deployment uses PostgreSQL. The database trait introduced for SQLite/
+PostgreSQL portability (see Database Schema) means no query code changes —
+only the connection pool type switches.
+
+**In-memory state**
+
+Two in-memory stores exist today: the worker map (session → Pod address) and
+the `jti` revocation list. With a single server replica these are fine. For
+HA (multiple server replicas), both move to PostgreSQL:
+
+- Worker map → a `workers` table (session ID, pod IP, port, app ID, created at)
+  with the server holding a local read-through cache
+- `jti` blocklist → a `revoked_tokens` table with TTL-based cleanup via a
+  background task
+
+The in-memory implementations and the PostgreSQL-backed implementations share
+an interface defined from v0, so the swap is additive rather than a rewrite.
+
+**TLS and ingress**
+
+cert-manager handles certificate provisioning (Let's Encrypt or internal CA).
+An Ingress resource (or HTTPRoute via Gateway API) routes external traffic to
+our server's ClusterIP Service. Our server proxies onward to app Pod IPs
+resolved via the k8s API — no Ingress rule per app needed.
+
+**Distribution**
+
+A Helm chart is the primary distribution artifact for k8s. Kustomize bases
+are provided as an alternative. The chart covers: server Deployment, RBAC for
+k8s API access, PVC (or object storage Secret), PostgreSQL dependency
+(sub-chart or external), Ingress/cert-manager integration, and a
+`values.yaml` with sensible defaults.
