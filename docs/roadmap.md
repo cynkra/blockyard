@@ -136,7 +136,26 @@ Each feature is described below with a priority annotation:
   `blockr-{worker-id}`. The server joins that network to proxy traffic;
   no host port mapping is needed. `backend.addr(handle)` returns the
   container's bridge IP and the Shiny port (configured as `[docker] shiny_port`,
-  default `3838`).
+  default `3838`). The address is resolved by inspecting the container's IP on
+  its specific named network — not just any IP the container has.
+
+  **Why per-container bridges (design decision):** the requirements are that
+  workers can reach the internet and local network services (package
+  repositories, external APIs, OpenBao, IdP — which may themselves be
+  containerized on the same host), workers cannot reach each other, the server
+  can reach each worker to
+  proxy traffic, and workers cannot reach the server's management API. The
+  obvious alternative — a single shared bridge with `--icc=false`
+  (inter-container communication disabled) — blocks *all* container-to-container
+  traffic, including server-to-worker, since the server is itself a container in
+  the Docker Compose deployment. Workarounds (server in `network_mode: host`,
+  two-network topologies, published ports to localhost) each re-introduce the
+  isolation problem in a different form and require compensating iptables rules
+  or bind-address management. Per-container bridges give strong isolation by
+  default without additional firewall rules. The operational overhead — network
+  proliferation, server multi-homing, cleanup — is manageable in practice:
+  Docker handles thousands of networks, Linux multi-homing is well-supported,
+  and label-based cleanup is a single API filter call.
 
   **Labels:** all containers and networks spawned by blockr.cloud carry
   identifying labels:
