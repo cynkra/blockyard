@@ -515,14 +515,19 @@ Each feature is described below with a priority annotation:
 
   **Token TTL and renewal:** OpenBao session tokens are issued with a short
   TTL. The R process renews its token before expiry using OpenBao's standard
-  token renewal API. The companion R package handles renewal transparently
-  before each credential read, so app code never deals with token lifecycle.
+  token renewal API — a plain HTTP call app developers make directly.
 
-  **R interface:** A companion R package (`blockr.cloud` or similar) wraps the
-  OpenBao API behind a simple call: `blockr_secret("openai")` reads
-  `secret/users/{sub}/apikeys/openai` using the injected token (renewing it if
-  needed) and returns the key. The package is the only integration point the
-  app developer needs to know about.
+  **R interface:** no companion R package. App developers query OpenBao
+  directly using `httr2` (or similar). The server injects two env vars into
+  every session container:
+  - `BLOCKR_VAULT_TOKEN` — the scoped OpenBao token for this session
+  - `BLOCKR_VAULT_ADDR` — the OpenBao address reachable from inside the
+    container
+
+  Reading a secret is a standard OpenBao KV v2 GET request to
+  `{BLOCKR_VAULT_ADDR}/v1/secret/data/users/{sub}/apikeys/{service}` with
+  `Authorization: Bearer {BLOCKR_VAULT_TOKEN}`. This is documented as a
+  how-to; no package abstraction is needed.
 
   **Priority: v1 / MVP.** Without this, blockr apps cannot securely integrate
   with external services on a per-user basis.
@@ -838,7 +843,7 @@ infrastructure.
     into each Shiny session
 17. **Integration system** — OpenBao as secrets backend; IdP JWT → scoped
     OpenBao token at session start; token injected into R process; R process
-    reads secrets directly from OpenBao; companion R package (`blockr_secret()`)
+    reads secrets directly from OpenBao via `httr2`; no companion package
 18. **Audit logging** — append-only JSON Lines of all state-changing operations
 19. **Vanity URLs** — per-content custom URL paths
 20. **Content discovery** — catalog API, tag system, search/filter
