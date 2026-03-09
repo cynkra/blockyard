@@ -203,7 +203,7 @@ Each feature is described below with a priority annotation:
   **URL scheme:**
 
   ```
-  /api/...         → control plane REST API
+  /api/v1/...      → control plane REST API
   /app/{name}/     → proxied Shiny app (name-based, v0)
   /{vanity}/       → vanity URL alias resolving to an app (v1)
   ```
@@ -332,6 +332,25 @@ Each feature is described below with a priority annotation:
   apps, start/stop apps, manage settings, view logs. This is the primary
   interface — the CLI and (eventually) the web UI are clients of this API.
   Think of it as the control plane.
+
+  All endpoints are prefixed with `/api/v1/`. The version is the API contract
+  version, independent of the product milestone — it starts at `v1` from day
+  one and increments only on breaking changes. No version negotiation; the
+  version is in the path.
+
+  Core v0 endpoints:
+  ```
+  POST   /api/v1/apps                    create an app
+  GET    /api/v1/apps                    list apps
+  GET    /api/v1/apps/{id}               get app details
+  DELETE /api/v1/apps/{id}               delete an app
+  POST   /api/v1/apps/{id}/bundles       upload and deploy a bundle
+  GET    /api/v1/apps/{id}/bundles       list bundles
+  POST   /api/v1/apps/{id}/start         start an app
+  POST   /api/v1/apps/{id}/stop          stop an app
+  GET    /api/v1/apps/{id}/logs          stream or fetch logs
+  PATCH  /api/v1/apps/{id}              update app config (isolation mode, resource limits)
+  ```
   **Priority: v0.** Primary server interface.
 
 - **Task execution (run-to-completion).** Spawn an R script that runs once and
