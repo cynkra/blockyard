@@ -145,7 +145,7 @@ The dependency graph dictates build order. Each phase produces a testable
 artifact. Phases are sequential; items within a phase can be worked in
 parallel.
 
-### Phase 0-1: Foundation
+### Phase 0-1: Foundation ([detailed plan](phase-0-1.md))
 
 Establish the project skeleton, core types, config parsing, and database
 schema. Everything else builds on this.
