@@ -260,10 +260,8 @@ Each feature is described below with a priority annotation:
 
 - **Auto-scaling.** Monitor active connections or request rate per app and
   dynamically call `backend.spawn()` / `backend.stop()` to add or remove
-  workers within the `max_workers_per_app` bound. Only meaningful when
-  `max_workers_per_app > 1` — when each session has its own container the
-  worker count already tracks the session count one-to-one. faucet's
-  RPS-based autoscaler and ShinyProxy's seat-based scaler are references.
+  workers within the `max_workers_per_app` bound. faucet's RPS-based
+  autoscaler and ShinyProxy's seat-based scaler are references.
   **Priority: v1 / MVP.** Comes alongside load balancing — they are a
   package deal.
 
@@ -272,9 +270,7 @@ Each feature is described below with a priority annotation:
   request, hold the connection and spin up a worker before forwarding. Idle
   detection should use reference-counted connection tracking (HTTP connections,
   WebSocket connections, and pending connections counted separately) — inspired
-  by Shiny Server's `httpConn` / `sockConn` / `pendingConn` model. Only
-  meaningful when `max_workers_per_app > 1`; when each session has its own
-  container, workers already die with their session.
+  by Shiny Server's `httpConn` / `sockConn` / `pendingConn` model.
   **Priority: v2.** Pair with pre-warming.
 
 - **Bundle upload and deployment.** Accept a tar.gz archive of app code via a
@@ -325,9 +321,9 @@ Each feature is described below with a priority annotation:
   (archive + unpacked dir + library). The active bundle is never deleted
   automatically.
 
-  **Container mounts:** each app container receives two read-only bind mounts:
-  - The unpacked app directory → `/app` (read-only)
-  - The restored R package library → `/app/lib` (read-only)
+  **Container mounts:** each worker receives two read-only bind mounts:
+  - The unpacked app directory → `{bundle_worker_path}` (read-only)
+  - The restored R package library → `{bundle_worker_path}/lib` (read-only)
 
   Both are mounted read-only — app code cannot modify its own source or
   installed packages at runtime.
@@ -342,14 +338,16 @@ Each feature is described below with a priority annotation:
 
 - **Dependency restoration.** After uploading a bundle, restore R package
   dependencies from `rv.lock` using [`rv`](https://github.com/A2-ai/rv).
-  `rv` is a hard runtime requirement — operators must ensure it is available in
-  the build container image. Restore runs via `backend.build()` — a
-  run-to-completion container with a writable mount for the library output and
-  a shared cache volume so packages aren't re-downloaded on every deploy. The
-  restored library is written to `{bundle-id}_lib/` alongside the unpacked
-  bundle and mounted read-only into app workers at
-  `{bundle_worker_path}/lib`. The R version is configured server-wide — no
-  per-deployment version selection or version matching logic.
+  `rv` is a hard runtime requirement. Restore runs via `backend.build()` —
+  how the build step executes is backend-specific: a run-to-completion
+  container on Docker/Podman, an init container or Job on Kubernetes, a local
+  process when the server runs as a native binary. Each backend is responsible
+  for ensuring `rv` is available in its build environment. A shared cache
+  avoids re-downloading packages on every deploy. The restored library is
+  written to `{bundle-id}_lib/` alongside the unpacked bundle and mounted
+  read-only into app workers at `{bundle_worker_path}/lib`. The R version is
+  configured server-wide — no per-deployment version selection or version
+  matching logic.
 
   Restore output (stdout/stderr from `rv`) is streamed to the caller via the
   task log endpoint. The task lifecycle is managed by a `TaskStore` — an
@@ -431,7 +429,7 @@ Each feature is described below with a priority annotation:
   repositories.
 
 - **Per-content resource limits.** Enforce CPU and memory limits per content
-  item (`max_processes`, `memory_limit`, `cpu_limit`). In the Docker backend,
+  item (`max_workers_per_app`, `memory_limit`, `cpu_limit`). In the Docker backend,
   these map to container resource constraints. In the Kubernetes backend, they
   map to pod resource requests/limits. Resource limits are stored in the content
   registry and carried in `WorkerSpec` from v0 so the schema does not change
@@ -615,11 +613,11 @@ Each feature is described below with a priority annotation:
   secrets are cryptographically scoped to their session only.
 
 - **App log capture.** Capture stdout/stderr from each container and make it
-  available via the REST API (`GET /apps/{id}/logs`). Logs must be persisted
+  available via the REST API (`GET /api/v1/apps/{id}/logs`). Logs must be persisted
   for a configurable period after a container exits so crashes can be diagnosed
   after the fact. Captured via
   Docker's log streaming API using the container's `dev.blockr.cloud/app-id`
-  and `dev.blockr.cloud/session-id` labels.
+  and `dev.blockr.cloud/worker-id` labels.
   **Priority: v0.** Required to debug anything during development and
   operation.
 
@@ -674,8 +672,7 @@ Each feature is described below with a priority annotation:
 - **Seat-based pre-warming.** Pre-start a pool of containers before users
   arrive, so the first request doesn't incur cold-start latency. ShinyProxy
   supports this with `minimum-seats-available`. Useful for apps with slow
-  startup times but adds resource cost. Only meaningful when
-  `max_workers_per_app > 1`.
+  startup times but adds resource cost.
   **Priority: v2.** Pair with scale-to-zero.
 
 - **Telemetry and observability.** Structured logging, Prometheus-compatible
@@ -1009,8 +1006,7 @@ infrastructure.
     enrollment UI
 36. **Multiple execution environment images** — per-app image selection;
     operators or app developers specify which image to use per deployment
-37. **Scale-to-zero** — idle shutdown when `max_workers_per_app > 1`; pair
-    with pre-warming
+37. **Scale-to-zero** — idle shutdown; pair with pre-warming
 38. **Seat-based pre-warming** — pre-started container pools; pair with
     scale-to-zero
 39. **Runtime package installation** — allow apps to install R packages at
@@ -1094,15 +1090,14 @@ Two artifacts are shipped:
 
 ### Networking
 
-In both deployment modes, app containers must be reachable from the server
-over TCP. For Docker, all containers (server and app containers) are placed on
-a shared Docker network created at startup. The server resolves each container's
-address via `backend.addr(handle)` (container IP + Shiny port) and proxies
-traffic to it.
+In both deployment modes, workers must be reachable from the server over TCP.
+For Docker, each worker gets its own per-container bridge network (see Network
+Isolation). The server joins each network to proxy traffic, resolving the
+worker's address via `backend.addr(handle)` (container IP + Shiny port).
 
-The external TLS-terminating proxy (Caddy, nginx, Traefik) connects to our
-server over the host network or a shared Docker network. Our server only speaks
-plain HTTP.
+The external TLS-terminating proxy (Caddy, nginx, Traefik) connects to the
+server over the host network or a dedicated Docker network. The server only
+speaks plain HTTP.
 
 ### Bundle Storage
 
