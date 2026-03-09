@@ -8,50 +8,46 @@ build it.
 
 ## Crate Layout
 
-A Cargo workspace with two crates.
+A single crate with `src/lib.rs` (domain logic) and `src/main.rs` (entry
+point). Feature flags control which backends are compiled in.
 
 ```
-blockr.cloud/
-├── Cargo.toml              # workspace root
-├── blockr-server/          # binary crate — main entry point
-│   ├── Cargo.toml
-│   └── src/
-│       └── main.rs
-├── blockr-cloud/           # library crate — all domain logic
-│   ├── Cargo.toml
-│   ├── src/
-│   │   ├── lib.rs
-│   │   ├── config.rs       # TOML config + env var overlay
-│   │   ├── backend/
-│   │   │   ├── mod.rs      # Backend trait, WorkerSpec, BuildSpec, handles
-│   │   │   ├── docker.rs   # bollard-based Docker/Podman implementation
-│   │   │   └── mock.rs     # in-process mock for tests
-│   │   ├── db/
-│   │   │   ├── mod.rs      # database trait
-│   │   │   └── sqlite.rs   # SQLite implementation (sqlx)
-│   │   ├── bundle/
-│   │   │   ├── mod.rs      # bundle upload, storage layout, retention
-│   │   │   └── restore.rs  # dependency restoration via backend.build()
-│   │   ├── proxy/
-│   │   │   ├── mod.rs      # HTTP/WS reverse proxy
-│   │   │   ├── session.rs  # SessionStore trait + in-memory impl
-│   │   │   ├── worker.rs   # WorkerRegistry trait + in-memory impl
-│   │   │   ├── cold_start.rs   # hold-until-healthy logic
-│   │   │   └── ws_cache.rs     # WS connection caching on disconnect
-│   │   ├── api/
-│   │   │   ├── mod.rs      # axum router assembly
-│   │   │   ├── apps.rs     # CRUD + start/stop/logs endpoints
-│   │   │   ├── bundles.rs  # upload + list endpoints
-│   │   │   ├── tasks.rs    # task log streaming endpoint
-│   │   │   └── auth.rs     # bearer token middleware
-│   │   ├── health.rs       # /healthz handler + health polling loop
-│   │   ├── task.rs         # TaskStore trait + in-memory impl
-│   │   ├── cleanup.rs      # orphan cleanup on startup
-│   │   └── app.rs          # AppState — shared server state
-│   └── tests/              # integration tests
-│       ├── api_test.rs
-│       ├── proxy_test.rs
-│       └── bundle_test.rs
+blockr-cloud/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs
+│   ├── main.rs             # entry point — config, wiring, server start
+│   ├── config.rs           # TOML config + env var overlay
+│   ├── backend/
+│   │   ├── mod.rs          # Backend trait, WorkerSpec, BuildSpec, handles
+│   │   ├── docker.rs       # bollard-based Docker/Podman [feature = "docker"]
+│   │   └── mock.rs         # in-process mock [feature = "test-support"]
+│   ├── db/
+│   │   ├── mod.rs          # database trait
+│   │   └── sqlite.rs       # SQLite implementation (sqlx)
+│   ├── bundle/
+│   │   ├── mod.rs          # bundle upload, storage layout, retention
+│   │   └── restore.rs      # dependency restoration via backend.build()
+│   ├── proxy/
+│   │   ├── mod.rs          # HTTP/WS reverse proxy
+│   │   ├── session.rs      # SessionStore trait + in-memory impl
+│   │   ├── worker.rs       # WorkerRegistry trait + in-memory impl
+│   │   ├── cold_start.rs   # hold-until-healthy logic
+│   │   └── ws_cache.rs     # WS connection caching on disconnect
+│   ├── api/
+│   │   ├── mod.rs          # axum router assembly
+│   │   ├── apps.rs         # CRUD + start/stop/logs endpoints
+│   │   ├── bundles.rs      # upload + list endpoints
+│   │   ├── tasks.rs        # task log streaming endpoint
+│   │   └── auth.rs         # bearer token middleware
+│   ├── health.rs           # /healthz handler + health polling loop
+│   ├── task.rs             # TaskStore trait + in-memory impl
+│   ├── cleanup.rs          # orphan cleanup on startup
+│   └── app.rs              # AppState — shared server state
+├── tests/                  # integration tests
+│   ├── api_test.rs
+│   ├── proxy_test.rs
+│   └── bundle_test.rs
 ├── blockr.toml             # example config
 ├── docs/
 │   ├── roadmap.md
@@ -61,21 +57,44 @@ blockr.cloud/
         └── ci.yml
 ```
 
-**Why this split:**
+**Feature flags:**
 
-- **`blockr-cloud`** is a library crate. All traits, implementations, and
-  business logic live here. It can be tested with `cargo test` using the mock
-  backend — no Docker required. Integration tests live in `blockr-cloud/tests/`
-  — they start the full server with the mock backend and exercise the HTTP API
-  end to end.
-- **`blockr-server`** is a thin binary that wires `blockr-cloud` components
-  together, parses CLI args, loads config, and starts the server. Almost no
-  logic of its own.
+```toml
+[features]
+default = ["docker"]
+docker = ["dep:bollard"]        # Docker/Podman backend
+test-support = []               # mock backend for tests
+```
+
+- **`docker`** (default) — compiles `backend/docker.rs` and pulls in
+  `bollard`. Disable with `--no-default-features` for mock-only test builds
+  or future k8s-only deployments.
+- **`test-support`** — compiles `backend/mock.rs`. Enabled automatically for
+  integration tests via `dev-dependencies`. Never included in production
+  builds.
+
+```toml
+[dev-dependencies]
+blockr-cloud = { path = ".", features = ["test-support"] }
+```
+
+**Why a single crate:**
+
+- `main.rs` is ~50 lines of wiring — not enough logic to justify a separate
+  binary crate.
+- Integration tests in `tests/` import from `lib.rs` directly.
+- When the v2 CLI tool arrives, it becomes a second crate that depends on the
+  library. That's the point where a workspace split makes sense — not now.
 
 ## Dependencies
 
 ```toml
-# blockr-cloud/Cargo.toml
+# Cargo.toml
+[features]
+default = ["docker"]
+docker = ["dep:bollard"]
+test-support = []
+
 [dependencies]
 tokio       = { version = "1", features = ["full"] }
 axum        = { version = "0.8", features = ["ws"] }
@@ -83,7 +102,7 @@ hyper       = { version = "1", features = ["full"] }
 hyper-util  = "0.1"
 http-body-util = "0.1"
 tower       = { version = "0.5", features = ["util"] }
-bollard     = "0.18"              # Docker API
+bollard     = { version = "0.18", optional = true }
 sqlx        = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
@@ -98,6 +117,7 @@ dashmap     = "6"                 # concurrent maps for session/worker stores
 tempfile    = "3"                 # atomic bundle writes
 
 [dev-dependencies]
+blockr-cloud = { path = ".", features = ["test-support"] }
 reqwest     = { version = "0.12", features = ["json", "cookies"] }
 tokio-tungstenite = "0.26"        # WS client for proxy tests
 assert_matches = "1"
@@ -132,7 +152,7 @@ schema. Everything else builds on this.
 
 **Deliverables:**
 
-1. Cargo workspace with `blockr-server` and `blockr-cloud`
+1. Crate skeleton with `src/lib.rs` + `src/main.rs`, feature flags
 2. Config parsing (`config.rs`) — TOML + env var overlay
 3. `Backend` trait + `WorkerSpec` + `BuildSpec` + handle types
 4. Mock backend implementation (for tests)
@@ -852,7 +872,7 @@ Three levels:
 - **Task store tests:** create, write logs, stream, complete.
 - **Auth middleware tests:** valid token, missing token, wrong token.
 
-### Integration tests (`blockr-cloud/tests/` directory)
+### Integration tests (`tests/` directory)
 
 These start the full server with the mock backend and exercise HTTP endpoints:
 
