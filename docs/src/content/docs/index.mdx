@@ -1,0 +1,38 @@
+---
+title: Blockyard
+description: A containerized hosting platform for Shiny applications.
+template: splash
+hero:
+  tagline: Deploy and run Shiny applications in isolated containers with zero configuration.
+  actions:
+    - text: Get Started
+      link: /getting-started/overview/
+      icon: right-arrow
+    - text: API Reference
+      link: /reference/api/
+      icon: open-book
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why Blockyard?
+
+<CardGrid>
+	<Card title="Container Isolation" icon="random">
+		Each Shiny app runs in its own container with network isolation,
+		read-only filesystems, and dropped capabilities.
+	</Card>
+	<Card title="Automatic Dependencies" icon="puzzle">
+		Upload a bundle with an `rv.lock` file and Blockyard restores
+		R package dependencies automatically.
+	</Card>
+	<Card title="Cold Start" icon="rocket">
+		Workers are spawned on-demand when a user visits your app.
+		No idle containers wasting resources.
+	</Card>
+	<Card title="Simple API" icon="setting">
+		A straightforward REST API for deploying and managing apps.
+		One config file. One binary.
+	</Card>
+</CardGrid>
