@@ -237,6 +237,38 @@ impl Config {
                 ));
             }
         }
+
+        // Validate storage paths are accessible
+        Self::ensure_dir_writable(
+            &self.storage.bundle_server_path,
+            "storage.bundle_server_path",
+        )?;
+        let db_parent = self
+            .database
+            .path
+            .parent()
+            .unwrap_or(&self.database.path);
+        Self::ensure_dir_writable(db_parent, "database.path parent directory")?;
+
+        Ok(())
+    }
+
+    /// Verify a directory exists (or can be created) and is writable.
+    fn ensure_dir_writable(path: &std::path::Path, label: &str) -> Result<(), ConfigError> {
+        std::fs::create_dir_all(path).map_err(|e| {
+            ConfigError::Validation(format!(
+                "{label}: cannot create directory '{}': {e}",
+                path.display()
+            ))
+        })?;
+        let test_file = path.join(".blockyard-write-test");
+        std::fs::write(&test_file, b"").map_err(|e| {
+            ConfigError::Validation(format!(
+                "{label}: directory '{}' is not writable: {e}",
+                path.display()
+            ))
+        })?;
+        let _ = std::fs::remove_file(&test_file);
         Ok(())
     }
 }
