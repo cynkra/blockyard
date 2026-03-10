@@ -260,14 +260,18 @@ impl Backend for DockerBackend {
     }
 
     async fn stop(&self, handle: &DockerHandle) -> Result<(), BackendError> {
-        // 1. Stop the container (10s timeout)
-        self.client
+        // 1. Stop the container (10s timeout) — ignore 304 (already stopped) and 404 (already gone)
+        if let Err(e) = self
+            .client
             .stop_container(&handle.container_id, Some(StopContainerOptions { t: 10 }))
             .await
-            .map_err(|e| BackendError::Stop(format!("stop container: {e}")))?;
+            && !is_docker_status(&e, &[304, 404]) {
+                return Err(BackendError::Stop(format!("stop container: {e}")));
+            }
 
-        // 2. Remove the container
-        self.client
+        // 2. Remove the container — ignore 404 (already gone) and 409 (removal in progress)
+        if let Err(e) = self
+            .client
             .remove_container(
                 &handle.container_id,
                 Some(RemoveContainerOptions {
@@ -276,7 +280,9 @@ impl Backend for DockerBackend {
                 }),
             )
             .await
-            .map_err(|e| BackendError::Stop(format!("remove container: {e}")))?;
+            && !is_docker_status(&e, &[404, 409]) {
+                return Err(BackendError::Stop(format!("remove container: {e}")));
+            }
 
         // 3. Disconnect server from the worker's network
         if let Some(ref server_id) = self.server_id {
@@ -515,7 +521,8 @@ impl Backend for DockerBackend {
     async fn remove_resource(&self, resource: &ManagedResource) -> Result<(), BackendError> {
         match resource.kind {
             ResourceKind::Container => {
-                self.client
+                if let Err(e) = self
+                    .client
                     .remove_container(
                         &resource.id,
                         Some(RemoveContainerOptions {
@@ -524,13 +531,15 @@ impl Backend for DockerBackend {
                         }),
                     )
                     .await
-                    .map_err(|e| BackendError::Cleanup(format!("remove container: {e}")))?;
+                    && !is_docker_status(&e, &[404, 409]) {
+                        return Err(BackendError::Cleanup(format!("remove container: {e}")));
+                    }
             }
             ResourceKind::Network => {
-                self.client
-                    .remove_network(&resource.id)
-                    .await
-                    .map_err(|e| BackendError::Cleanup(format!("remove network: {e}")))?;
+                if let Err(e) = self.client.remove_network(&resource.id).await
+                    && !is_docker_status(&e, &[404]) {
+                        return Err(BackendError::Cleanup(format!("remove network: {e}")));
+                    }
             }
         }
         Ok(())
@@ -538,6 +547,12 @@ impl Backend for DockerBackend {
 }
 
 // --- Helper functions ---
+
+/// Check if a bollard error is a Docker API response with one of the given status codes.
+#[cfg(feature = "docker")]
+fn is_docker_status(err: &bollard::errors::Error, codes: &[u16]) -> bool {
+    matches!(err, bollard::errors::Error::DockerResponseServerError { status_code, .. } if codes.contains(status_code))
+}
 
 #[cfg(feature = "docker")]
 fn worker_labels(spec: &WorkerSpec) -> HashMap<String, String> {
