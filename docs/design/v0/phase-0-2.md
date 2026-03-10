@@ -272,11 +272,7 @@ async fn create_worker_container(
         network_mode: Some(network_name.to_string()),
         binds: Some(vec![
             format!("{}:{}:ro", spec.bundle_path.display(), spec.worker_mount.display()),
-            format!(
-                "{}:{}/lib:ro",
-                spec.library_path.display(),
-                spec.worker_mount.display()
-            ),
+            format!("{}:/blockyard-lib:ro", spec.library_path.display()),
         ]),
         tmpfs: Some(HashMap::from([("/tmp".to_string(), "".to_string())])),
         cap_drop: Some(vec!["ALL".to_string()]),
@@ -289,7 +285,10 @@ async fn create_worker_container(
 
     let config = Config {
         image: Some(spec.image.clone()),
-        env: Some(vec![format!("SHINY_PORT={}", spec.shiny_port)]),
+        env: Some(vec![
+            format!("SHINY_PORT={}", spec.shiny_port),
+            "R_LIBS=/blockyard-lib".to_string(),
+        ]),
         labels: Some(worker_labels(spec)),
         host_config: Some(host_config),
         ..Default::default()
@@ -927,6 +926,5 @@ Phase 0-2 is done when:
   1. That rv correctly creates and populates the namespaced subdirectory
      under the mount point.
   2. That the worker container's R process finds the library at runtime —
-     R needs `.libPaths()` to include the full namespaced path. This may
-     require setting `R_LIBS` or `R_LIBS_USER` in the worker container's
-     env, or relying on rv/the image entrypoint to handle it.
+     the worker container sets `R_LIBS=/blockyard-lib` so R includes the
+     restored library in `.libPaths()`.
