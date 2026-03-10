@@ -129,16 +129,8 @@ pub async fn shuttle_ws<B: Backend + Clone>(
             tokio::spawn(async move {
                 if let Some(worker_id) = state_for_expire.sessions.remove(&sid_for_expire)
                     && state_for_expire.sessions.count_for_worker(&worker_id) == 0
-                    && let Some((_, worker)) = state_for_expire.workers.remove(&worker_id)
                 {
-                    state_for_expire.registry.remove(&worker_id);
-                    if let Err(e) = state_for_expire.backend.stop(&worker.handle).await {
-                        tracing::warn!(
-                            worker_id = %worker_id,
-                            error = %e,
-                            "failed to stop worker on session expire"
-                        );
-                    }
+                    crate::ops::evict_worker(&state_for_expire, &worker_id).await;
                 }
             });
         });

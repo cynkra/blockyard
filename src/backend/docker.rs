@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 #[cfg(feature = "docker")]
 use std::net::SocketAddr;
+#[cfg(feature = "docker")]
+use std::sync::Arc;
 
 #[cfg(feature = "docker")]
 use bollard::Docker;
@@ -32,6 +34,16 @@ pub struct DockerBackend {
     client: Docker,
     server_id: Option<String>,
     config: DockerConfig,
+    metadata_block_mode: Arc<tokio::sync::OnceCell<MetadataBlockMode>>,
+}
+
+#[cfg(feature = "docker")]
+#[derive(Debug, Clone)]
+enum MetadataBlockMode {
+    /// Server inserts/removes per-network iptables rules
+    ServerManaged,
+    /// Operator-installed blanket rule detected; skip per-network rules
+    HostManaged,
 }
 
 #[cfg(feature = "docker")]
@@ -67,6 +79,7 @@ impl DockerBackend {
             client,
             server_id,
             config,
+            metadata_block_mode: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -235,6 +248,134 @@ impl DockerBackend {
 
         Ok(())
     }
+
+    /// Block metadata endpoint access for a specific bridge network.
+    async fn block_metadata_for_network(
+        &self,
+        network_name: &str,
+        worker_id: &str,
+    ) -> Result<(), BackendError> {
+        // Check cached mode first
+        if let Some(mode) = self.metadata_block_mode.get() {
+            match mode {
+                MetadataBlockMode::ServerManaged => {}
+                MetadataBlockMode::HostManaged => return Ok(()),
+            }
+        }
+
+        // Inspect network to get subnet CIDR
+        let network = self
+            .client
+            .inspect_network::<String>(network_name, None)
+            .await
+            .map_err(|e| BackendError::Spawn(format!("inspect network: {e}")))?;
+
+        let subnet = network
+            .ipam
+            .and_then(|ipam| ipam.config)
+            .and_then(|configs| configs.into_iter().next())
+            .and_then(|config| config.subnet)
+            .ok_or_else(|| {
+                BackendError::Spawn(format!("no subnet found for network {network_name}"))
+            })?;
+
+        // Try inserting iptables rule
+        let comment = format!("blockyard-{worker_id}");
+        let status = tokio::process::Command::new("iptables")
+            .args([
+                "-I",
+                "DOCKER-USER",
+                "-s",
+                &subnet,
+                "-d",
+                "169.254.169.254/32",
+                "-j",
+                "DROP",
+                "-m",
+                "comment",
+                "--comment",
+                &comment,
+            ])
+            .status()
+            .await;
+
+        match status {
+            Ok(s) if s.success() => {
+                tracing::debug!(worker_id, subnet, "metadata endpoint blocked");
+                let _ = self
+                    .metadata_block_mode
+                    .set(MetadataBlockMode::ServerManaged);
+                Ok(())
+            }
+            Ok(_) | Err(_) => {
+                // iptables failed — check if a host-level rule already exists
+                if self.host_blocks_metadata_endpoint().await {
+                    tracing::info!("metadata endpoint blocked by host-level rule");
+                    let _ = self.metadata_block_mode.set(MetadataBlockMode::HostManaged);
+                    Ok(())
+                } else {
+                    Err(BackendError::Spawn(
+                        "cannot block metadata endpoint: grant CAP_NET_ADMIN to the \
+                         server container, or add a host-level iptables rule: \
+                         iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP"
+                            .into(),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Check if the metadata endpoint is unreachable from this process.
+    async fn host_blocks_metadata_endpoint(&self) -> bool {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect("169.254.169.254:80"),
+        )
+        .await
+        .map(|r| r.is_err()) // connection refused/failed = blocked
+        .unwrap_or(true) // timeout = blocked
+    }
+
+    /// Remove the iptables rule for a worker.
+    async fn unblock_metadata_for_worker(&self, worker_id: &str) {
+        if let Some(MetadataBlockMode::HostManaged) = self.metadata_block_mode.get() {
+            return;
+        }
+        let comment = format!("blockyard-{worker_id}");
+        delete_iptables_rules_by_comment(&comment).await;
+    }
+}
+
+/// Delete all iptables rules in DOCKER-USER whose comment contains the
+/// given string.
+#[cfg(feature = "docker")]
+async fn delete_iptables_rules_by_comment(comment: &str) {
+    let output = tokio::process::Command::new("iptables")
+        .args(["-S", "DOCKER-USER"])
+        .output()
+        .await;
+
+    let Ok(output) = output else { return };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        if line.contains(comment)
+            && let Some(rule) = line.strip_prefix("-A DOCKER-USER ")
+        {
+            let mut args = vec!["-D", "DOCKER-USER"];
+            args.extend(rule.split_whitespace());
+            let _ = tokio::process::Command::new("iptables")
+                .args(&args)
+                .status()
+                .await;
+        }
+    }
+}
+
+/// Remove all orphaned blockyard iptables rules from previous runs.
+#[cfg(feature = "docker")]
+pub async fn cleanup_orphan_metadata_rules() {
+    delete_iptables_rules_by_comment("blockyard-").await;
 }
 
 #[cfg(feature = "docker")]
@@ -252,16 +393,26 @@ impl Backend for DockerBackend {
             .create_network(&network_name, &spec.app_id, &spec.worker_id)
             .await?;
 
-        // 2. Create container — clean up network on failure
+        // 2. Block metadata endpoint for this network
+        if let Err(e) = self
+            .block_metadata_for_network(&network_name, &spec.worker_id)
+            .await
+        {
+            let _ = self.client.remove_network(&network_name).await;
+            return Err(e);
+        }
+
+        // 3. Create container — clean up network on failure
         let container_id = match self.create_worker_container(spec, &network_name).await {
             Ok(id) => id,
             Err(e) => {
+                self.unblock_metadata_for_worker(&spec.worker_id).await;
                 let _ = self.client.remove_network(&network_name).await;
                 return Err(e);
             }
         };
 
-        // 3. Join server to worker network (if running in a container)
+        // 4. Join server to worker network (if running in a container)
         if let Some(ref server_id) = self.server_id
             && let Err(e) = self.join_network(server_id, &network_name).await
         {
@@ -270,7 +421,7 @@ impl Backend for DockerBackend {
             return Err(e);
         }
 
-        // 4. Start the container — clean up everything on failure
+        // 5. Start the container — clean up everything on failure
         if let Err(e) = self
             .client
             .start_container::<String>(&container_id, None)
@@ -325,7 +476,12 @@ impl Backend for DockerBackend {
                 .await;
         }
 
-        // 4. Remove the network
+        // 4. Remove iptables metadata block rule
+        if let Some(worker_id) = handle.network_name.strip_prefix("blockyard-") {
+            self.unblock_metadata_for_worker(worker_id).await;
+        }
+
+        // 5. Remove the network
         self.client
             .remove_network(&handle.network_name)
             .await

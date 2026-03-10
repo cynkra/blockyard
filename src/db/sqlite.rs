@@ -189,6 +189,13 @@ pub async fn clear_active_bundle(pool: &SqlitePool, app_id: &str) -> Result<bool
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn fail_stale_bundles(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("UPDATE bundles SET status = 'failed' WHERE status = 'building'")
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn update_bundle_status(
     pool: &SqlitePool,
     id: &str,

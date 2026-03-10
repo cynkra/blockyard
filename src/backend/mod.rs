@@ -94,7 +94,7 @@ pub struct BuildResult {
 }
 
 /// A managed resource discovered during orphan cleanup.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ManagedResource {
     pub id: String,
     pub kind: ResourceKind,
@@ -102,7 +102,7 @@ pub struct ManagedResource {
 
 /// Resource kinds ordered by removal priority: containers must be removed
 /// before networks (networks fail to remove while containers are connected).
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResourceKind {
     Container,
     Network,

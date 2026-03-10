@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use blockyard::app::AppState;
 use blockyard::backend::mock::MockBackend;
+use blockyard::backend::{Backend, ManagedResource, ResourceKind};
 use blockyard::config::{Config, DatabaseConfig, ProxyConfig, ServerConfig, StorageConfig};
 use blockyard::db;
+use blockyard::ops;
 use reqwest::StatusCode;
 
 async fn spawn_test_server() -> (SocketAddr, AppState<MockBackend>, tempfile::TempDir) {
@@ -53,6 +55,7 @@ fn test_config(bundle_path: PathBuf) -> Config {
             health_interval: Duration::from_secs(15),
             worker_start_timeout: Duration::from_secs(60),
             max_workers: 100,
+            log_retention: Duration::from_secs(3600),
         },
     }
 }
@@ -913,4 +916,307 @@ async fn proxy_websocket_echo() {
 
     assert_eq!(msg, Message::Text("hello".into()));
     ws.close(None).await.ok();
+}
+
+// --- Phase 0-6 tests: orphan cleanup, stale bundles, graceful shutdown, health poller, log capture ---
+
+#[tokio::test]
+async fn startup_cleanup_removes_orphans() {
+    let (_, state, _tmp) = spawn_test_server().await;
+
+    // Configure mock to report orphaned resources
+    state.backend.set_managed_resources(vec![
+        ManagedResource {
+            id: "orphan-container-1".into(),
+            kind: ResourceKind::Container,
+        },
+        ManagedResource {
+            id: "orphan-network-1".into(),
+            kind: ResourceKind::Network,
+        },
+    ]);
+
+    // Verify they are present
+    let managed = state.backend.list_managed().await.unwrap();
+    assert_eq!(managed.len(), 2);
+
+    // Run startup cleanup
+    ops::startup_cleanup(&state).await.unwrap();
+
+    // Verify all orphans removed
+    let remaining = state.backend.list_managed().await.unwrap();
+    assert!(remaining.is_empty());
+}
+
+#[tokio::test]
+async fn startup_cleanup_fails_stale_bundles() {
+    let (_, state, _tmp) = spawn_test_server().await;
+    let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
+
+    // Create a bundle stuck in "building"
+    let bundle = db::sqlite::create_bundle(&state.db, "stale-1", &app.id, "/tmp/test.tar.gz")
+        .await
+        .unwrap();
+    db::sqlite::update_bundle_status(&state.db, &bundle.id, "building")
+        .await
+        .unwrap();
+
+    // Run startup cleanup
+    ops::startup_cleanup(&state).await.unwrap();
+
+    // Verify bundle is now "failed"
+    let bundles = db::sqlite::list_bundles_by_app(&state.db, &app.id)
+        .await
+        .unwrap();
+    assert_eq!(bundles[0].status, "failed");
+}
+
+#[tokio::test]
+async fn graceful_shutdown_stops_all_workers() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+
+    // Create two apps with bundles and start them
+    let id1 = create_app_with_bundle(&addr).await;
+    // Need a second app — create_app_with_bundle uses "my-app" so we do the second inline
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "app-two" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id2 = created["id"].as_str().unwrap().to_string();
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id2}/bundles"))
+        .bearer_auth("test-token")
+        .body(make_test_bundle())
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Start both
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id1}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id2}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(state.workers.len(), 2);
+
+    // Run graceful shutdown
+    ops::graceful_shutdown(&state).await;
+
+    assert_eq!(state.workers.len(), 0);
+}
+
+#[tokio::test]
+async fn graceful_shutdown_fails_in_progress_builds() {
+    let (_, state, _tmp) = spawn_test_server().await;
+    let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
+
+    let bundle = db::sqlite::create_bundle(&state.db, "build-1", &app.id, "/tmp/test.tar.gz")
+        .await
+        .unwrap();
+    db::sqlite::update_bundle_status(&state.db, &bundle.id, "building")
+        .await
+        .unwrap();
+
+    ops::graceful_shutdown(&state).await;
+
+    let bundles = db::sqlite::list_bundles_by_app(&state.db, &app.id)
+        .await
+        .unwrap();
+    assert_eq!(bundles[0].status, "failed");
+}
+
+#[tokio::test]
+async fn health_poller_removes_unhealthy_workers() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    let id = create_app_with_bundle(&addr).await;
+
+    // Start the app
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(state.workers.len(), 1);
+
+    // Set health to fail
+    state.backend.set_health_response(false);
+
+    // Spawn health poller with short interval
+    let token = tokio_util::sync::CancellationToken::new();
+    let mut config = (*state.config).clone();
+    config.proxy.health_interval = Duration::from_millis(50);
+    let poller_state = AppState {
+        config: std::sync::Arc::new(config),
+        backend: state.backend.clone(),
+        db: state.db.clone(),
+        workers: state.workers.clone(),
+        task_store: state.task_store.clone(),
+        sessions: state.sessions.clone(),
+        registry: state.registry.clone(),
+        ws_cache: state.ws_cache.clone(),
+        log_store: state.log_store.clone(),
+    };
+    let handle = ops::spawn_health_poller(poller_state, token.clone());
+
+    // Wait for health check to fire
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Worker should be evicted
+    assert_eq!(state.workers.len(), 0);
+
+    token.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn health_poller_keeps_healthy_workers() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    let id = create_app_with_bundle(&addr).await;
+
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(state.workers.len(), 1);
+
+    // Health stays true (default)
+    let token = tokio_util::sync::CancellationToken::new();
+    let mut config = (*state.config).clone();
+    config.proxy.health_interval = Duration::from_millis(50);
+    let poller_state = AppState {
+        config: std::sync::Arc::new(config),
+        backend: state.backend.clone(),
+        db: state.db.clone(),
+        workers: state.workers.clone(),
+        task_store: state.task_store.clone(),
+        sessions: state.sessions.clone(),
+        registry: state.registry.clone(),
+        ws_cache: state.ws_cache.clone(),
+        log_store: state.log_store.clone(),
+    };
+    let handle = ops::spawn_health_poller(poller_state, token.clone());
+
+    // Wait for several poll cycles
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Worker should still be present
+    assert_eq!(state.workers.len(), 1);
+
+    token.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn log_capture_stores_worker_logs() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    let id = create_app_with_bundle(&addr).await;
+
+    // Configure mock to emit log lines
+    state
+        .backend
+        .set_log_lines(vec!["hello from shiny".into(), "listening on port 3838".into()]);
+
+    // Start app (which triggers log capture)
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for log capture to drain
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // GET logs should return captured lines
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps/{id}/logs"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("hello from shiny"), "body: {body}");
+    assert!(body.contains("listening on port 3838"), "body: {body}");
+}
+
+#[tokio::test]
+async fn logs_persist_after_worker_stops() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    let id = create_app_with_bundle(&addr).await;
+
+    state
+        .backend
+        .set_log_lines(vec!["startup log".into(), "running...".into()]);
+
+    // Start and wait for log capture
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Stop the app
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/stop"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(state.workers.len(), 0);
+
+    // Logs should still be available (previously would have returned 404)
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps/{id}/logs"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("startup log"), "body: {body}");
+}
+
+#[tokio::test]
+async fn logs_unavailable_returns_404() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    // Create app but never start it
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "no-logs-app" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps/{id}/logs"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

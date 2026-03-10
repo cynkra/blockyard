@@ -59,6 +59,8 @@ pub struct ProxyConfig {
     pub worker_start_timeout: Duration,
     #[serde(default = "default_max_workers")]
     pub max_workers: u32,
+    #[serde(default = "default_log_retention", with = "humantime_serde")]
+    pub log_retention: Duration,
 }
 
 // --- defaults ---
@@ -99,6 +101,9 @@ fn default_start_timeout() -> Duration {
 fn default_max_workers() -> u32 {
     100
 }
+fn default_log_retention() -> Duration {
+    Duration::from_secs(3600) // 1 hour
+}
 
 /// Returns the set of env var names that apply_env_overrides handles.
 /// Used by the completeness test to verify no field is missing.
@@ -120,6 +125,7 @@ pub fn supported_env_vars() -> &'static [&'static str] {
         "BLOCKYARD_PROXY_HEALTH_INTERVAL",
         "BLOCKYARD_PROXY_WORKER_START_TIMEOUT",
         "BLOCKYARD_PROXY_MAX_WORKERS",
+        "BLOCKYARD_PROXY_LOG_RETENTION",
     ]
 }
 
@@ -214,6 +220,11 @@ impl Config {
             && let Ok(n) = v.parse()
         {
             self.proxy.max_workers = n;
+        }
+        if let Ok(v) = std::env::var("BLOCKYARD_PROXY_LOG_RETENTION")
+            && let Ok(d) = v.parse::<humantime::Duration>()
+        {
+            self.proxy.log_retention = d.into();
         }
     }
 

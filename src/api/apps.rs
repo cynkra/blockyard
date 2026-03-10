@@ -8,6 +8,7 @@ use crate::app::AppState;
 use crate::backend::Backend;
 use crate::db;
 use crate::db::sqlite::AppRow;
+use crate::ops;
 
 #[derive(serde::Serialize)]
 pub struct AppResponse {
@@ -122,12 +123,12 @@ pub async fn update_app<B: Backend>(
     Json(body): Json<UpdateAppRequest>,
 ) -> Result<Json<AppResponse>, ApiError> {
     // v0: max_sessions_per_worker is locked to 1; session-sharing is deferred to v1
-    if let Some(v) = body.max_sessions_per_worker {
-        if v != 1 {
-            return Err(bad_request(
-                "max_sessions_per_worker must be 1 in this version".to_string(),
-            ));
-        }
+    if let Some(v) = body.max_sessions_per_worker
+        && v != 1
+    {
+        return Err(bad_request(
+            "max_sessions_per_worker must be 1 in this version".to_string(),
+        ));
     }
 
     // Verify app exists and resolve name → ID
@@ -280,6 +281,14 @@ pub async fn start_app<B: Backend>(
         .await
         .map_err(|e| server_error(format!("spawn worker: {e}")))?;
 
+    // Start log capture
+    ops::spawn_log_capture(
+        &state,
+        worker_id.clone(),
+        app.id.clone(),
+        handle.clone(),
+    );
+
     // Track worker — no session yet, assigned by proxy in phase 0-5
     state.workers.insert(
         worker_id.clone(),
@@ -324,22 +333,12 @@ async fn stop_app_workers<B: Backend>(state: &AppState<B>, app_id: &str) -> usiz
         .map(|entry| entry.key().clone())
         .collect();
 
-    let mut stopped = 0;
+    let count = worker_ids.len();
     for worker_id in &worker_ids {
-        if let Some((_, worker)) = state.workers.remove(worker_id) {
-            if let Err(e) = state.backend.stop(&worker.handle).await {
-                tracing::warn!(
-                    worker_id,
-                    app_id,
-                    error = %e,
-                    "failed to stop worker"
-                );
-            }
-            stopped += 1;
-        }
+        ops::evict_worker(state, worker_id).await;
     }
 
-    stopped
+    count
 }
 
 // --- Logs ---
@@ -359,38 +358,59 @@ pub async fn app_logs<B: Backend>(
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {id} not found")))?;
 
-    // Find the worker
-    let (_worker_id, worker) = if let Some(ref wid) = query.worker_id {
-        let w = state
-            .workers
-            .get(wid)
-            .ok_or_else(|| not_found(format!("worker {wid} not found")))?;
-        if w.value().app_id != app.id {
+    // Subscribe from log store
+    let sub = if let Some(ref wid) = query.worker_id {
+        // Verify the worker belongs to this app if it's still tracked
+        if let Some(w) = state.workers.get(wid)
+            && w.value().app_id != app.id
+        {
             return Err(not_found(format!(
                 "worker {wid} does not belong to app {id}"
             )));
         }
-        (wid.clone(), w.value().clone())
+        state
+            .log_store
+            .subscribe(wid)
+            .await
+            .ok_or_else(|| not_found(format!("no logs for worker {wid}")))?
     } else {
         state
-            .workers
-            .iter()
-            .find(|entry| entry.value().app_id == app.id)
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .ok_or_else(|| not_found("no running workers for this app".into()))?
+            .log_store
+            .subscribe_by_app(&app.id)
+            .await
+            .map(|(_, sub)| sub)
+            .ok_or_else(|| not_found("no logs available for this app".into()))?
     };
 
-    // Get log stream from backend
-    let rx = state
-        .backend
-        .logs(&worker.handle)
-        .await
-        .map_err(|e| server_error(format!("log stream: {e}")))?;
+    if sub.ended {
+        // Worker has exited — return buffered lines as a complete response
+        let body = sub.lines.join("\n");
+        let body = if body.is_empty() { body } else { body + "\n" };
+        let response = axum::response::Response::builder()
+            .header("content-type", "text/plain")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        return Ok(response);
+    }
 
-    // Convert to streaming response
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-        .map(|line| Ok::<_, std::io::Error>(format!("{line}\n")));
+    // Stream buffered lines + live broadcast
+    let skip = sub.lines.len();
+    let buffered = futures_util::stream::iter(
+        sub.lines
+            .into_iter()
+            .map(|line| Ok::<_, std::io::Error>(format!("{line}\n"))),
+    );
 
+    let live = tokio_stream::wrappers::BroadcastStream::new(sub.rx)
+        .skip(skip)
+        .filter_map(|result| async move {
+            match result {
+                Ok(line) => Some(Ok(format!("{line}\n"))),
+                Err(_) => None, // lagged or closed
+            }
+        });
+
+    let stream = buffered.chain(live);
     let body = axum::body::Body::from_stream(stream);
     let response = axum::response::Response::builder()
         .header("content-type", "text/plain")

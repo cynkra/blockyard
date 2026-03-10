@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 
 use crate::backend::Backend;
 use crate::config::Config;
+use crate::ops::LogStore;
 use crate::proxy::registry::WorkerRegistry;
 use crate::proxy::session::SessionStore;
 use crate::proxy::ws_cache::WsCache;
@@ -23,6 +24,7 @@ pub struct AppState<B: Backend> {
     pub sessions: Arc<SessionStore>,
     pub registry: Arc<WorkerRegistry>,
     pub ws_cache: Arc<WsCache>,
+    pub log_store: Arc<LogStore>,
 }
 
 /// A running worker tracked by the server.
@@ -45,6 +47,7 @@ impl<B: Backend> AppState<B> {
             sessions: Arc::new(SessionStore::new()),
             registry: Arc::new(WorkerRegistry::new()),
             ws_cache: Arc::new(WsCache::new(ws_cache_ttl)),
+            log_store: Arc::new(LogStore::new()),
         }
     }
 }

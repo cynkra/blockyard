@@ -12,6 +12,8 @@ struct MockInner {
     workers: DashMap<String, MockWorker>,
     health_response: AtomicBool,
     build_success: AtomicBool,
+    managed_resources: std::sync::Mutex<Vec<ManagedResource>>,
+    log_lines: std::sync::Mutex<Option<Vec<String>>>,
 }
 
 #[derive(Clone)]
@@ -43,6 +45,8 @@ impl MockBackend {
                 workers: DashMap::new(),
                 health_response: AtomicBool::new(true),
                 build_success: AtomicBool::new(true),
+                managed_resources: std::sync::Mutex::new(Vec::new()),
+                log_lines: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -61,6 +65,18 @@ impl MockBackend {
 
     pub fn set_build_success(&self, success: bool) {
         self.inner.build_success.store(success, Ordering::SeqCst);
+    }
+
+    /// Configure what `list_managed()` returns. Resources persist across calls.
+    /// `remove_resource()` removes individual entries from the list.
+    pub fn set_managed_resources(&self, resources: Vec<ManagedResource>) {
+        *self.inner.managed_resources.lock().unwrap() = resources;
+    }
+
+    /// Configure what `logs()` emits. Lines are sent and then the channel
+    /// is dropped (stream ends).
+    pub fn set_log_lines(&self, lines: Vec<String>) {
+        *self.inner.log_lines.lock().unwrap() = Some(lines);
     }
 }
 
@@ -119,7 +135,18 @@ impl Backend for MockBackend {
     }
 
     async fn logs(&self, _handle: &MockHandle) -> Result<LogStream, BackendError> {
-        let (_tx, rx) = tokio::sync::mpsc::channel(16);
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        if let Some(lines) = self.inner.log_lines.lock().unwrap().clone() {
+            tokio::spawn(async move {
+                for line in lines {
+                    if tx.send(line).await.is_err() {
+                        break;
+                    }
+                }
+                // tx drops here, ending the stream
+            });
+        }
+        // If no lines configured, tx drops immediately, stream ends
         Ok(rx)
     }
 
@@ -136,10 +163,15 @@ impl Backend for MockBackend {
     }
 
     async fn list_managed(&self) -> Result<Vec<ManagedResource>, BackendError> {
-        Ok(Vec::new())
+        Ok(self.inner.managed_resources.lock().unwrap().clone())
     }
 
-    async fn remove_resource(&self, _resource: &ManagedResource) -> Result<(), BackendError> {
+    async fn remove_resource(&self, resource: &ManagedResource) -> Result<(), BackendError> {
+        self.inner
+            .managed_resources
+            .lock()
+            .unwrap()
+            .retain(|r| r.id != resource.id);
         Ok(())
     }
 }

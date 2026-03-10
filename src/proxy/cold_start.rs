@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use crate::app::{ActiveWorker, AppState};
 use crate::backend::Backend;
 use crate::db::sqlite::AppRow;
+use crate::ops;
 
 /// Ensure a running, healthy worker exists for the given app.
 /// Returns the worker ID.
@@ -73,6 +74,9 @@ pub async fn ensure_worker<B: Backend>(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     state.registry.insert(worker_id.clone(), addr);
+
+    // Start log capture
+    ops::spawn_log_capture(state, worker_id.clone(), app.id.clone(), handle.clone());
 
     // Track the worker
     state.workers.insert(
