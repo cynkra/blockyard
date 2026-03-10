@@ -13,14 +13,21 @@ export BLOCKYARD=http://localhost:8080
 export TOKEN=your-secret-token
 ```
 
-## 1. Create an app record
+## 1. Create an app
 
-Before uploading a bundle, the app must exist in the database. Currently,
-apps are created directly in SQLite:
+Before uploading a bundle, you need to register the app:
 
 ```bash
-sqlite3 /data/db/blockyard.db \
-  "INSERT INTO apps (id, name) VALUES ('hello-shiny', 'hello-shiny');"
+curl -X POST "$BLOCKYARD/api/v1/apps" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "hello-shiny"}'
+```
+
+The response includes a generated `id` — save it for subsequent API calls:
+
+```bash
+export APP_ID=<id from response>
 ```
 
 ## 2. Prepare your bundle
@@ -42,7 +49,7 @@ tar -czf bundle.tar.gz -C my-app .
 ## 3. Upload the bundle
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/hello-shiny/bundles" \
+curl -X POST "$BLOCKYARD/api/v1/apps/$APP_ID/bundles" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @bundle.tar.gz
@@ -70,7 +77,16 @@ curl "$BLOCKYARD/api/v1/tasks/t5678.../logs" \
 When the build completes, the bundle status changes to `ready` and becomes
 the active bundle for the app.
 
+## 5. Start the app
+
+Once the build completes, start a worker container:
+
+```bash
+curl -X POST "$BLOCKYARD/api/v1/apps/$APP_ID/start" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ## What's next
 
-App lifecycle management (starting/stopping workers, on-demand proxying)
+On-demand proxying (routing user traffic to workers via `/app/<name>/`)
 is not yet implemented. Check back for updates as new phases are released.

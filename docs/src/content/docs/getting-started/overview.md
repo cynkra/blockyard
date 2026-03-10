@@ -15,11 +15,11 @@ the right worker.
 2. **Blockyard restores dependencies** — it spins up a build container, runs
    [`rv sync`](https://github.com/a2-ai/rv) to install packages, and caches
    the resulting library.
-3. **Users visit the app** *(coming soon)* — when a request hits `/app/<name>/`,
-   Blockyard will spawn a worker container, wait for it to become healthy,
-   and proxy traffic to it.
+3. **You start the app** — Blockyard spawns worker containers that run your
+   Shiny app. On-demand proxying of user traffic to `/app/<name>/` is coming
+   soon.
 
-Workers will be isolated from each other via per-container bridge networks.
+Workers are isolated from each other via per-container bridge networks.
 Containers run with a read-only filesystem, all Linux capabilities dropped,
 and `no-new-privileges` set.
 

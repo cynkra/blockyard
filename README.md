@@ -59,15 +59,9 @@ Copy and edit the example configuration:
 cp blockyard.toml blockyard.toml.local
 ```
 
-All settings can be overridden with environment variables using the `BLOCKYARD_` prefix:
-
-| Config Field | Environment Variable |
-|---|---|
-| `server.bind` | `BLOCKYARD_SERVER_BIND` |
-| `server.token` | `BLOCKYARD_SERVER_TOKEN` |
-| `docker.socket` | `BLOCKYARD_DOCKER_SOCKET` |
-| `storage.bundle_server_path` | `BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH` |
-| `database.path` | `BLOCKYARD_DATABASE_PATH` |
+All settings can be overridden with environment variables using the
+`BLOCKYARD_<SECTION>_<FIELD>` pattern (uppercased). For example,
+`server.bind` becomes `BLOCKYARD_SERVER_BIND`.
 
 ### Build & Run
 
@@ -106,15 +100,27 @@ src/
 ├── lib.rs               # Public API
 ├── config.rs            # TOML + env var configuration
 ├── app.rs               # Shared application state
+├── task.rs              # In-memory task tracking & log streaming
+├── api/
+│   ├── mod.rs           # Router setup
+│   ├── auth.rs          # Bearer token middleware
+│   ├── apps.rs          # App CRUD & lifecycle endpoints
+│   ├── bundles.rs       # Bundle upload & list endpoints
+│   ├── tasks.rs         # Task log streaming endpoint
+│   └── error.rs         # Shared error response helpers
 ├── backend/
 │   ├── mod.rs           # Backend trait definition
 │   ├── docker.rs        # Docker/Podman implementation
 │   └── mock.rs          # In-memory mock for tests
+├── bundle/
+│   ├── mod.rs           # Archive storage, unpacking, retention
+│   └── restore.rs       # Dependency restoration pipeline
 └── db/
     ├── mod.rs           # Pool creation & migrations
     └── sqlite.rs        # App & bundle CRUD queries
 migrations/
-└── 001_initial.sql      # Database schema
+├── 001_initial.sql      # Initial schema
+└── 002_remove_app_status.sql  # Remove runtime status from apps table
 ```
 
 ## Configuration Reference
@@ -129,11 +135,13 @@ shutdown_timeout = "30s"
 socket     = "/var/run/docker.sock"
 image      = "ghcr.io/rocker-org/r-ver:latest"
 shiny_port = 3838
+rv_version = "latest"
 
 [storage]
 bundle_server_path = "/data/bundles"
 bundle_worker_path = "/app"
 bundle_retention   = 50
+max_bundle_size    = 104857600
 
 [database]
 path = "/data/db/blockyard.db"
