@@ -108,9 +108,7 @@ pub async fn ensure_worker<B: Backend>(
             app_id = %app.id,
             "worker did not become healthy within timeout"
         );
-        state.workers.remove(&worker_id);
-        state.registry.remove(&worker_id);
-        let _ = state.backend.stop(&handle).await;
+        ops::evict_worker(state, &worker_id).await;
         return Err(StatusCode::GATEWAY_TIMEOUT);
     }
 
