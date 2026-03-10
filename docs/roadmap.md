@@ -81,7 +81,7 @@ path = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl            = "60s"   # how long to hold backend WS on client disconnect
-health_interval         = "10s"   # how often to poll worker health
+health_interval         = "15s"   # how often to poll worker health
 worker_start_timeout    = "60s"   # how long to hold a request while a worker starts
 max_workers             = 100     # hard ceiling on total running workers across all apps
 ```

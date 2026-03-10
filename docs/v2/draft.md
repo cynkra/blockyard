@@ -58,3 +58,6 @@ From `../roadmap.md` items 31–39:
 8. **Seat-based pre-warming** — pre-started container pools
 9. **Runtime package installation** — writable library mount for user-driven
    package experimentation
+10. **Soft-delete for apps** — mark apps as deleted instead of immediate
+   removal; background cleanup routine purges deleted apps after a
+   retention period. Enables undo and audit trails.

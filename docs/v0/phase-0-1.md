@@ -170,7 +170,7 @@ fn default_shiny_port() -> u16 { 3838 }
 fn default_worker_path() -> PathBuf { PathBuf::from("/app") }
 fn default_retention() -> u32 { 50 }
 fn default_ws_cache_ttl() -> Duration { Duration::from_secs(60) }
-fn default_health_interval() -> Duration { Duration::from_secs(10) }
+fn default_health_interval() -> Duration { Duration::from_secs(15) }
 fn default_start_timeout() -> Duration { Duration::from_secs(60) }
 fn default_max_workers() -> u32 { 100 }
 ```
@@ -473,32 +473,42 @@ pub mod docker;  // #[cfg(feature = "docker")]
 pub mod mock;    // #[cfg(feature = "test-support")]
 
 /// Pluggable container runtime. Docker/Podman for v0, Kubernetes for v2.
+// RPITIT (return-position impl Trait in traits) — ensures returned futures
+// are Send, which is required for use across tokio::spawn boundaries.
 pub trait Backend: Send + Sync + 'static {
     type Handle: WorkerHandle;
 
     /// Spawn a long-lived worker (Shiny app container).
-    async fn spawn(&self, spec: &WorkerSpec) -> Result<Self::Handle, BackendError>;
+    fn spawn(&self, spec: &WorkerSpec)
+        -> impl std::future::Future<Output = Result<Self::Handle, BackendError>> + Send;
 
     /// Stop and remove a worker.
-    async fn stop(&self, handle: &Self::Handle) -> Result<(), BackendError>;
+    fn stop(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = Result<(), BackendError>> + Send;
 
     /// TCP or HTTP health check against the worker.
-    async fn health_check(&self, handle: &Self::Handle) -> bool;
+    fn health_check(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = bool> + Send;
 
     /// Stream stdout/stderr logs from the worker.
-    async fn logs(&self, handle: &Self::Handle) -> Result<LogStream, BackendError>;
+    fn logs(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = Result<LogStream, BackendError>> + Send;
 
     /// Resolve the worker's address (IP + Shiny port).
-    async fn addr(&self, handle: &Self::Handle) -> Result<SocketAddr, BackendError>;
+    fn addr(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = Result<SocketAddr, BackendError>> + Send;
 
     /// Run a build task to completion (dependency restore).
-    async fn build(&self, spec: &BuildSpec) -> Result<BuildResult, BackendError>;
+    fn build(&self, spec: &BuildSpec)
+        -> impl std::future::Future<Output = Result<BuildResult, BackendError>> + Send;
 
     /// List all managed resources (containers + networks) for orphan cleanup.
-    async fn list_managed(&self) -> Result<Vec<ManagedResource>, BackendError>;
+    fn list_managed(&self)
+        -> impl std::future::Future<Output = Result<Vec<ManagedResource>, BackendError>> + Send;
 
     /// Remove an orphaned resource.
-    async fn remove_resource(&self, resource: &ManagedResource) -> Result<(), BackendError>;
+    fn remove_resource(&self, resource: &ManagedResource)
+        -> impl std::future::Future<Output = Result<(), BackendError>> + Send;
 }
 
 pub trait WorkerHandle: Send + Sync + Clone + std::fmt::Debug {
@@ -965,7 +975,7 @@ path = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl         = "60s"
-health_interval      = "10s"
+health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 ```
@@ -973,6 +983,13 @@ max_workers          = 100
 ## Implementation notes
 
 Things to keep in mind during implementation:
+
+- **No `ON DELETE CASCADE` on `bundles.app_id`.** This is intentional.
+  Deleting an app requires a multi-step teardown (stop workers, remove
+  bundle files from disk, delete bundle rows, then delete the app row).
+  The FK constraint prevents the DB layer from silently deleting an app
+  while leaving orphaned bundle rows or files on disk. The API handler
+  (phase 0-4) orchestrates the full sequence; the FK enforces ordering.
 
 - **Circular FK between `apps` and `bundles`.** `apps.active_bundle`
   references `bundles.id`, and `bundles.app_id` references `apps.id`. This

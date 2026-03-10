@@ -251,7 +251,7 @@ async fn create_network(
     let response = self.client.create_network(options).await
         .map_err(|e| BackendError::Spawn(format!("create network: {e}")))?;
 
-    response.id.ok_or_else(|| BackendError::Spawn("network created but no ID returned".into()))
+    Ok(response.id)
 }
 ```
 
@@ -436,15 +436,19 @@ doesn't expose a health endpoint.
 ```rust
 async fn health_check(&self, handle: &DockerHandle) -> bool {
     match self.addr(handle).await {
-        Ok(addr) => {
-            tokio::net::TcpStream::connect(addr)
-                .await
-                .is_ok()
-        }
+        Ok(addr) => tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok()),
         Err(_) => false,
     }
 }
 ```
+
+The 10-second timeout ensures a hanging connection doesn't stall the
+health polling loop (which runs every 15s by default).
 
 ### Step 9: logs() — stream container stdout/stderr
 
@@ -641,6 +645,7 @@ async fn list_managed(&self) -> Result<Vec<ManagedResource>, BackendError> {
         }
     }
 
+    resources.sort_by(|a, b| a.kind.cmp(&b.kind));
     Ok(resources)
 }
 
@@ -901,10 +906,13 @@ Phase 0-2 is done when:
   `AutoRemove` because we need to inspect the exit code before the container
   disappears.
 
-- **Native mode (no server ID).** When the server runs outside
-  Docker, `addr()` still works — the worker's IP on the bridge network is
-  reachable from the host. The only difference is that `spawn()` and
-  `stop()` skip the network join/disconnect steps.
+- **Native mode (no server ID).** When the server runs outside Docker,
+  `spawn()` and `stop()` skip the network join/disconnect steps.
+  `addr()` returns the worker's IP on its bridge network, which must be
+  routable from the host for native mode to work. This is the case on
+  Linux and with some macOS Docker runtimes, but not all. If container
+  IPs are not routable from your host, run the server inside a container
+  (e.g. the devcontainer) instead.
 
 - **Image pulling is not handled in this phase.** The plan mentions image
   pulling at startup and before each build/spawn. This is deferred to the

@@ -86,7 +86,7 @@ fn default_ws_cache_ttl() -> Duration {
     Duration::from_secs(60)
 }
 fn default_health_interval() -> Duration {
-    Duration::from_secs(10)
+    Duration::from_secs(15)
 }
 fn default_start_timeout() -> Duration {
     Duration::from_secs(60)

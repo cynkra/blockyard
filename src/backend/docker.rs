@@ -253,7 +253,12 @@ impl Backend for DockerBackend {
 
     async fn health_check(&self, handle: &DockerHandle) -> bool {
         match self.addr(handle).await {
-            Ok(addr) => tokio::net::TcpStream::connect(addr).await.is_ok(),
+            Ok(addr) => tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::net::TcpStream::connect(addr),
+            )
+            .await
+            .is_ok_and(|r| r.is_ok()),
             Err(_) => false,
         }
     }
@@ -457,6 +462,7 @@ impl Backend for DockerBackend {
             }
         }
 
+        resources.sort_by(|a, b| a.kind.cmp(&b.kind));
         Ok(resources)
     }
 

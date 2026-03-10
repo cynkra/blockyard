@@ -100,7 +100,9 @@ pub struct ManagedResource {
     pub kind: ResourceKind,
 }
 
-#[derive(Debug)]
+/// Resource kinds ordered by removal priority: containers must be removed
+/// before networks (networks fail to remove while containers are connected).
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResourceKind {
     Container,
     Network,

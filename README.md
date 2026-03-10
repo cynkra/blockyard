@@ -89,6 +89,12 @@ code .
 # Then: Reopen in Container
 ```
 
+**Native mode** (`cargo run` directly) requires that Docker container
+IPs on bridge networks are routable from the host. This is the case on
+Linux and with some macOS Docker runtimes, but not all. If container IPs
+are not routable from your host, run the server inside a container
+(e.g. the devcontainer) instead.
+
 ## Project Structure
 
 ```
@@ -131,7 +137,7 @@ path = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl         = "60s"
-health_interval      = "10s"
+health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 ```

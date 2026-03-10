@@ -208,7 +208,7 @@ pub struct ProxyConfig {
     #[serde(default = "default_ws_cache_ttl")]
     pub ws_cache_ttl: Duration,         // default: 60s
     #[serde(default = "default_health_interval")]
-    pub health_interval: Duration,      // default: 10s
+    pub health_interval: Duration,      // default: 15s
     #[serde(default = "default_start_timeout")]
     pub worker_start_timeout: Duration, // default: 60s
     #[serde(default = "default_max_workers")]
@@ -232,34 +232,43 @@ function — not a config framework. The overlay is explicit and testable.
 ```rust
 use std::net::SocketAddr;
 
-// Native async traits (Rust 1.75+) — no #[async_trait] macro needed.
+// RPITIT (return-position impl Trait in traits) — ensures returned futures
+// are Send, which is required for use across tokio::spawn boundaries.
 pub trait Backend: Send + Sync + 'static {
     type Handle: WorkerHandle;
 
     /// Spawn a long-lived worker (Shiny app container).
-    async fn spawn(&self, spec: &WorkerSpec) -> Result<Self::Handle>;
+    fn spawn(&self, spec: &WorkerSpec)
+        -> impl std::future::Future<Output = Result<Self::Handle, BackendError>> + Send;
 
     /// Stop and remove a worker.
-    async fn stop(&self, handle: &Self::Handle) -> Result<()>;
+    fn stop(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = Result<(), BackendError>> + Send;
 
     /// TCP or HTTP health check against the worker.
-    async fn health_check(&self, handle: &Self::Handle) -> bool;
+    fn health_check(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = bool> + Send;
 
     /// Stream stdout/stderr logs from the worker.
-    async fn logs(&self, handle: &Self::Handle) -> Result<LogStream>;
+    fn logs(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = Result<LogStream, BackendError>> + Send;
 
     /// Resolve the worker's address (IP + Shiny port).
-    async fn addr(&self, handle: &Self::Handle) -> Result<SocketAddr>;
+    fn addr(&self, handle: &Self::Handle)
+        -> impl std::future::Future<Output = Result<SocketAddr, BackendError>> + Send;
 
     /// Run a build task to completion (dependency restore).
     /// Streams logs, returns success/failure, cleans up the build container.
-    async fn build(&self, spec: &BuildSpec) -> Result<BuildResult>;
+    fn build(&self, spec: &BuildSpec)
+        -> impl std::future::Future<Output = Result<BuildResult, BackendError>> + Send;
 
     /// List all managed resources (containers + networks) for orphan cleanup.
-    async fn list_managed(&self) -> Result<Vec<ManagedResource>>;
+    fn list_managed(&self)
+        -> impl std::future::Future<Output = Result<Vec<ManagedResource>, BackendError>> + Send;
 
-    /// Remove an orphaned resource by ID.
-    async fn remove_resource(&self, resource: &ManagedResource) -> Result<()>;
+    /// Remove an orphaned resource.
+    fn remove_resource(&self, resource: &ManagedResource)
+        -> impl std::future::Future<Output = Result<(), BackendError>> + Send;
 }
 
 pub trait WorkerHandle: Send + Sync + Clone + std::fmt::Debug {
@@ -412,12 +421,11 @@ production backend for v0.
 **Server container ID detection:** the server needs to know its own container
 ID to join worker networks. Detection order:
 
-1. Read `/proc/self/cgroup` — Docker writes the container ID in cgroup paths
-2. Read hostname — Docker sets it to the short container ID by default
-3. `BLOCKYARD_CONTAINER_ID` env var — explicit override for non-standard setups
-4. If all fail and Docker socket is reachable: assume native binary mode
-   (not running in a container); skip network joining, workers are reachable
-   on the bridge gateway IP
+1. `BLOCKYARD_SERVER_ID` env var — explicit override for non-standard setups
+2. Parse `/proc/self/cgroup` — Docker writes the container ID in cgroup paths
+3. Read hostname — Docker sets it to the short container ID by default
+4. If all fail: assume native binary mode (not running in a container);
+   skip network joining, workers are reachable on the bridge gateway IP
 
 ### Phase 0-3: Content Management
 
@@ -727,7 +735,7 @@ Operational concerns that run alongside the main server.
 
 **Health polling:**
 
-A `tokio::spawn`ed loop that runs every `health_interval` (default 10s):
+A `tokio::spawn`ed loop that runs every `health_interval` (default 15s):
 
 ```rust
 async fn health_poll_loop<B: Backend>(state: AppState<B>) {
