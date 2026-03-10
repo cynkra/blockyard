@@ -1,7 +1,803 @@
 //! Docker/Podman backend implementation.
-//! Full implementation in phase 0-2.
+
+#[cfg(feature = "docker")]
+use std::collections::HashMap;
+#[cfg(feature = "docker")]
+use std::net::SocketAddr;
+
+#[cfg(feature = "docker")]
+use bollard::Docker;
+#[cfg(feature = "docker")]
+use bollard::container::{
+    Config, CreateContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
+    StopContainerOptions,
+};
+#[cfg(feature = "docker")]
+use bollard::models::{EndpointSettings, HostConfig};
+#[cfg(feature = "docker")]
+use bollard::network::{
+    ConnectNetworkOptions, CreateNetworkOptions, DisconnectNetworkOptions, ListNetworksOptions,
+};
+#[cfg(feature = "docker")]
+use futures_util::StreamExt;
+
+#[cfg(feature = "docker")]
+use crate::backend::*;
+#[cfg(feature = "docker")]
+use crate::config::DockerConfig;
 
 #[cfg(feature = "docker")]
 pub struct DockerBackend {
-    // Fields added in phase 0-2
+    client: Docker,
+    server_id: Option<String>,
+    config: DockerConfig,
+}
+
+#[cfg(feature = "docker")]
+#[derive(Debug, Clone)]
+pub struct DockerHandle {
+    pub container_id: String,
+    pub network_id: String,
+    pub network_name: String,
+}
+
+#[cfg(feature = "docker")]
+impl WorkerHandle for DockerHandle {
+    fn id(&self) -> &str {
+        &self.container_id
+    }
+}
+
+#[cfg(feature = "docker")]
+impl DockerBackend {
+    pub async fn new(config: DockerConfig) -> Result<Self, BackendError> {
+        let client = Docker::connect_with_unix(&config.socket, 120, bollard::API_DEFAULT_VERSION)
+            .map_err(|e| BackendError::Spawn(format!("Docker connect failed: {e}")))?;
+
+        // Verify connectivity
+        client
+            .ping()
+            .await
+            .map_err(|e| BackendError::Spawn(format!("Docker ping failed: {e}")))?;
+
+        let server_id = detect_server_id().await;
+
+        Ok(Self {
+            client,
+            server_id,
+            config,
+        })
+    }
+
+    async fn create_network(
+        &self,
+        name: &str,
+        app_id: &str,
+        worker_id: &str,
+    ) -> Result<String, BackendError> {
+        let options = CreateNetworkOptions {
+            name: name.to_string(),
+            driver: "bridge".to_string(),
+            labels: network_labels(app_id, worker_id),
+            ..Default::default()
+        };
+
+        let response = self
+            .client
+            .create_network(options)
+            .await
+            .map_err(|e| BackendError::Spawn(format!("create network: {e}")))?;
+
+        Ok(response.id)
+    }
+
+    async fn create_worker_container(
+        &self,
+        spec: &WorkerSpec,
+        network_name: &str,
+    ) -> Result<String, BackendError> {
+        let container_name = format!("blockyard-worker-{}", spec.worker_id);
+
+        let host_config = HostConfig {
+            network_mode: Some(network_name.to_string()),
+            binds: Some(vec![
+                format!(
+                    "{}:{}:ro",
+                    spec.bundle_path.display(),
+                    spec.worker_mount.display()
+                ),
+                format!(
+                    "{}:{}/lib:ro",
+                    spec.library_path.display(),
+                    spec.worker_mount.display()
+                ),
+            ]),
+            tmpfs: Some(HashMap::from([("/tmp".to_string(), "".to_string())])),
+            cap_drop: Some(vec!["ALL".to_string()]),
+            security_opt: Some(vec!["no-new-privileges".to_string()]),
+            readonly_rootfs: Some(true),
+            memory: spec
+                .memory_limit
+                .as_ref()
+                .and_then(|m| parse_memory_limit(m)),
+            nano_cpus: spec.cpu_limit.map(|c| (c * 1e9) as i64),
+            ..Default::default()
+        };
+
+        let config = Config {
+            image: Some(spec.image.clone()),
+            env: Some(vec![format!("SHINY_PORT={}", spec.shiny_port)]),
+            labels: Some(worker_labels(spec)),
+            host_config: Some(host_config),
+            ..Default::default()
+        };
+
+        let options = CreateContainerOptions {
+            name: container_name.as_str(),
+            platform: None,
+        };
+
+        let response = self
+            .client
+            .create_container(Some(options), config)
+            .await
+            .map_err(|e| BackendError::Spawn(format!("create container: {e}")))?;
+
+        Ok(response.id)
+    }
+
+    async fn join_network(
+        &self,
+        container_id: &str,
+        network_name: &str,
+    ) -> Result<(), BackendError> {
+        let options = ConnectNetworkOptions {
+            container: container_id.to_string(),
+            endpoint_config: EndpointSettings::default(),
+        };
+
+        self.client
+            .connect_network(network_name, options)
+            .await
+            .map_err(|e| BackendError::Spawn(format!("join network: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn disconnect_network(
+        &self,
+        container_id: &str,
+        network_name: &str,
+    ) -> Result<(), BackendError> {
+        let options = DisconnectNetworkOptions {
+            container: container_id.to_string(),
+            force: true,
+        };
+
+        self.client
+            .disconnect_network(network_name, options)
+            .await
+            .map_err(|e| BackendError::Stop(format!("disconnect network: {e}")))?;
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "docker")]
+impl Backend for DockerBackend {
+    type Handle = DockerHandle;
+
+    async fn spawn(&self, spec: &WorkerSpec) -> Result<DockerHandle, BackendError> {
+        let network_name = format!("blockyard-{}", spec.worker_id);
+
+        // 1. Create per-worker bridge network
+        let network_id = self
+            .create_network(&network_name, &spec.app_id, &spec.worker_id)
+            .await?;
+
+        // 2. Create container
+        let container_id = self.create_worker_container(spec, &network_name).await?;
+
+        // 3. Join server to worker network (if running in a container)
+        if let Some(ref server_id) = self.server_id {
+            self.join_network(server_id, &network_name).await?;
+        }
+
+        // 4. Start the container
+        self.client
+            .start_container::<String>(&container_id, None)
+            .await
+            .map_err(|e| BackendError::Spawn(format!("start container: {e}")))?;
+
+        Ok(DockerHandle {
+            container_id,
+            network_id,
+            network_name,
+        })
+    }
+
+    async fn stop(&self, handle: &DockerHandle) -> Result<(), BackendError> {
+        // 1. Stop the container (10s timeout)
+        self.client
+            .stop_container(&handle.container_id, Some(StopContainerOptions { t: 10 }))
+            .await
+            .map_err(|e| BackendError::Stop(format!("stop container: {e}")))?;
+
+        // 2. Remove the container
+        self.client
+            .remove_container(
+                &handle.container_id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackendError::Stop(format!("remove container: {e}")))?;
+
+        // 3. Disconnect server from the worker's network
+        if let Some(ref server_id) = self.server_id {
+            let _ = self
+                .disconnect_network(server_id, &handle.network_name)
+                .await;
+        }
+
+        // 4. Remove the network
+        self.client
+            .remove_network(&handle.network_name)
+            .await
+            .map_err(|e| BackendError::Stop(format!("remove network: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn health_check(&self, handle: &DockerHandle) -> bool {
+        match self.addr(handle).await {
+            Ok(addr) => tokio::net::TcpStream::connect(addr).await.is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    async fn logs(&self, handle: &DockerHandle) -> Result<LogStream, BackendError> {
+        let options = LogsOptions::<String> {
+            follow: true,
+            stdout: true,
+            stderr: true,
+            ..Default::default()
+        };
+
+        let stream = self.client.logs(&handle.container_id, Some(options));
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+
+        tokio::spawn(async move {
+            let mut stream = std::pin::pin!(stream);
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(output) => {
+                        let line = output.to_string();
+                        if tx.send(line).await.is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
+    async fn addr(&self, handle: &DockerHandle) -> Result<SocketAddr, BackendError> {
+        let info = self
+            .client
+            .inspect_container(&handle.container_id, None)
+            .await
+            .map_err(|e| BackendError::Addr(format!("inspect container: {e}")))?;
+
+        let networks = info
+            .network_settings
+            .and_then(|ns| ns.networks)
+            .ok_or_else(|| BackendError::Addr("no networks on container".into()))?;
+
+        let endpoint = networks.get(&handle.network_name).ok_or_else(|| {
+            BackendError::Addr(format!("container not on network {}", handle.network_name))
+        })?;
+
+        let ip = endpoint
+            .ip_address
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BackendError::Addr("no IP on network".into()))?;
+
+        let addr: std::net::IpAddr = ip
+            .parse()
+            .map_err(|e| BackendError::Addr(format!("invalid IP '{ip}': {e}")))?;
+
+        Ok(SocketAddr::new(addr, self.config.shiny_port))
+    }
+
+    async fn build(&self, spec: &BuildSpec) -> Result<BuildResult, BackendError> {
+        let container_name = format!("blockyard-build-{}", spec.bundle_id);
+
+        let host_config = HostConfig {
+            binds: Some(vec![
+                format!("{}:/app:ro", spec.bundle_path.display()),
+                format!("{}:/app/rv/library:rw", spec.library_path.display()),
+            ]),
+            tmpfs: Some(HashMap::from([
+                ("/tmp".to_string(), "".to_string()),
+                ("/root/.cache/rv".to_string(), "".to_string()),
+            ])),
+            cap_drop: Some(vec!["ALL".to_string()]),
+            security_opt: Some(vec!["no-new-privileges".to_string()]),
+            // rootfs not read-only -- need to write rv binary to /usr/local/bin
+            ..Default::default()
+        };
+
+        // Download rv and run sync in one shot
+        let rv_url = format!(
+            "https://github.com/a2-ai/rv/releases/download/{}/rv-x86_64-unknown-linux-gnu",
+            self.config.rv_version,
+        );
+        let install_and_sync = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "curl -sSL {rv_url} -o /usr/local/bin/rv && chmod +x /usr/local/bin/rv && rv sync"
+            ),
+        ];
+
+        let config = Config {
+            image: Some(spec.image.clone()),
+            cmd: Some(install_and_sync),
+            working_dir: Some("/app".to_string()),
+            labels: Some(build_labels(spec)),
+            host_config: Some(host_config),
+            ..Default::default()
+        };
+
+        let options = CreateContainerOptions {
+            name: container_name.as_str(),
+            platform: None,
+        };
+
+        let response = self
+            .client
+            .create_container(Some(options), config)
+            .await
+            .map_err(|e| BackendError::Build(format!("create build container: {e}")))?;
+
+        let container_id = response.id;
+
+        // Start the build container
+        self.client
+            .start_container::<String>(&container_id, None)
+            .await
+            .map_err(|e| BackendError::Build(format!("start build container: {e}")))?;
+
+        // Wait for completion
+        let wait_result = self
+            .client
+            .wait_container::<String>(&container_id, None)
+            .next()
+            .await;
+
+        let exit_code = match wait_result {
+            Some(Ok(response)) => Some(response.status_code),
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "build container wait error");
+                None
+            }
+            None => None,
+        };
+
+        let success = exit_code == Some(0);
+
+        // Clean up the build container
+        let _ = self
+            .client
+            .remove_container(
+                &container_id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        Ok(BuildResult { success, exit_code })
+    }
+
+    async fn list_managed(&self) -> Result<Vec<ManagedResource>, BackendError> {
+        let mut resources = Vec::new();
+
+        // Find managed containers (including stopped)
+        let container_filters = HashMap::from([(
+            "label".to_string(),
+            vec!["dev.blockyard/managed=true".to_string()],
+        )]);
+        let containers = self
+            .client
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters: container_filters,
+                ..Default::default()
+            }))
+            .await
+            .map_err(|e| BackendError::Cleanup(format!("list containers: {e}")))?;
+
+        for c in containers {
+            if let Some(id) = c.id {
+                resources.push(ManagedResource {
+                    id,
+                    kind: ResourceKind::Container,
+                });
+            }
+        }
+
+        // Find managed networks
+        let network_filters = HashMap::from([(
+            "label".to_string(),
+            vec!["dev.blockyard/managed=true".to_string()],
+        )]);
+        let networks = self
+            .client
+            .list_networks(Some(ListNetworksOptions {
+                filters: network_filters,
+            }))
+            .await
+            .map_err(|e| BackendError::Cleanup(format!("list networks: {e}")))?;
+
+        for n in networks {
+            if let Some(id) = n.id {
+                resources.push(ManagedResource {
+                    id,
+                    kind: ResourceKind::Network,
+                });
+            }
+        }
+
+        Ok(resources)
+    }
+
+    async fn remove_resource(&self, resource: &ManagedResource) -> Result<(), BackendError> {
+        match resource.kind {
+            ResourceKind::Container => {
+                self.client
+                    .remove_container(
+                        &resource.id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .map_err(|e| BackendError::Cleanup(format!("remove container: {e}")))?;
+            }
+            ResourceKind::Network => {
+                self.client
+                    .remove_network(&resource.id)
+                    .await
+                    .map_err(|e| BackendError::Cleanup(format!("remove network: {e}")))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// --- Helper functions ---
+
+#[cfg(feature = "docker")]
+fn worker_labels(spec: &WorkerSpec) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    labels.insert("dev.blockyard/managed".into(), "true".into());
+    labels.insert("dev.blockyard/app-id".into(), spec.app_id.clone());
+    labels.insert("dev.blockyard/worker-id".into(), spec.worker_id.clone());
+    labels.insert("dev.blockyard/role".into(), "worker".into());
+    labels.extend(spec.labels.clone());
+    labels
+}
+
+#[cfg(feature = "docker")]
+fn build_labels(spec: &BuildSpec) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    labels.insert("dev.blockyard/managed".into(), "true".into());
+    labels.insert("dev.blockyard/app-id".into(), spec.app_id.clone());
+    labels.insert("dev.blockyard/bundle-id".into(), spec.bundle_id.clone());
+    labels.insert("dev.blockyard/role".into(), "build".into());
+    labels.extend(spec.labels.clone());
+    labels
+}
+
+#[cfg(feature = "docker")]
+fn network_labels(app_id: &str, worker_id: &str) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    labels.insert("dev.blockyard/managed".into(), "true".into());
+    labels.insert("dev.blockyard/app-id".into(), app_id.into());
+    labels.insert("dev.blockyard/worker-id".into(), worker_id.into());
+    labels
+}
+
+/// Parse human-readable memory limits like "512m", "1g", "256mb" to bytes.
+#[cfg(feature = "docker")]
+fn parse_memory_limit(s: &str) -> Option<i64> {
+    let s = s.trim().to_lowercase();
+    let (num_str, multiplier) = if s.ends_with("gb") || s.ends_with('g') {
+        (
+            s.trim_end_matches("gb").trim_end_matches('g'),
+            1024 * 1024 * 1024,
+        )
+    } else if s.ends_with("mb") || s.ends_with('m') {
+        (s.trim_end_matches("mb").trim_end_matches('m'), 1024 * 1024)
+    } else if s.ends_with("kb") || s.ends_with('k') {
+        (s.trim_end_matches("kb").trim_end_matches('k'), 1024)
+    } else {
+        (s.as_str(), 1) // assume bytes
+    };
+    num_str.trim().parse::<i64>().ok().map(|n| n * multiplier)
+}
+
+// --- Server ID detection ---
+
+#[cfg(feature = "docker")]
+async fn detect_server_id() -> Option<String> {
+    // 1. Explicit env var
+    if let Ok(id) = std::env::var("BLOCKYARD_SERVER_ID")
+        && !id.is_empty()
+    {
+        tracing::info!(container_id = %id, "server ID from env");
+        return Some(id);
+    }
+
+    // 2. Parse /proc/self/cgroup
+    if let Ok(cgroup) = tokio::fs::read_to_string("/proc/self/cgroup").await {
+        for line in cgroup.lines() {
+            if let Some(id) = extract_container_id_from_cgroup(line) {
+                tracing::info!(container_id = %id, "server ID from cgroup");
+                return Some(id);
+            }
+        }
+    }
+
+    // 3. Hostname (Docker sets this to the short container ID)
+    if let Ok(hostname) = tokio::fs::read_to_string("/etc/hostname").await {
+        let hostname = hostname.trim();
+        // Docker container IDs are 12+ hex chars
+        if hostname.len() >= 12 && hostname.chars().all(|c| c.is_ascii_hexdigit()) {
+            tracing::info!(container_id = %hostname, "server ID from hostname");
+            return Some(hostname.to_string());
+        }
+    }
+
+    tracing::info!("no server ID detected — running in native mode");
+    None
+}
+
+#[cfg(feature = "docker")]
+fn extract_container_id_from_cgroup(line: &str) -> Option<String> {
+    // Match patterns like:
+    //   0::/docker/<64-char-hex-id>
+    //   0::/system.slice/docker-<64-char-hex-id>.scope
+    let parts: Vec<&str> = line.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "docker" || part.starts_with("docker-") {
+            let candidate = if *part == "docker" {
+                parts.get(i + 1).map(|s| s.to_string())
+            } else {
+                // docker-<id>.scope
+                part.strip_prefix("docker-")
+                    .and_then(|s| s.strip_suffix(".scope"))
+                    .map(|s| s.to_string())
+            };
+            if let Some(id) = candidate
+                && id.len() >= 12
+                && id.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+// --- Tests ---
+
+#[cfg(all(test, feature = "docker"))]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn memory_limit_parsing() {
+        assert_eq!(parse_memory_limit("512m"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("1g"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("256mb"), Some(256 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("100kb"), Some(100 * 1024));
+        assert_eq!(parse_memory_limit("1024"), Some(1024));
+        assert_eq!(parse_memory_limit("  2g  "), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_limit("invalid"), None);
+    }
+
+    #[test]
+    fn cgroup_id_extraction() {
+        assert_eq!(
+            extract_container_id_from_cgroup(
+                "0::/docker/abc123def456abc123def456abc123def456abc123def456abc123def456abcd"
+            ),
+            Some("abc123def456abc123def456abc123def456abc123def456abc123def456abcd".to_string())
+        );
+
+        assert_eq!(
+            extract_container_id_from_cgroup(
+                "0::/system.slice/docker-abc123def456abc123def456abc123def456abc123def456abc123def456abcd.scope"
+            ),
+            Some("abc123def456abc123def456abc123def456abc123def456abc123def456abcd".to_string())
+        );
+
+        // Not a docker cgroup line
+        assert_eq!(
+            extract_container_id_from_cgroup("0::/user.slice/user-1000.slice"),
+            None
+        );
+
+        // Too short to be a container ID
+        assert_eq!(extract_container_id_from_cgroup("0::/docker/abc"), None);
+    }
+
+    #[test]
+    fn worker_labels_include_required_fields() {
+        let spec = WorkerSpec {
+            app_id: "app-1".into(),
+            worker_id: "worker-1".into(),
+            image: "test:latest".into(),
+            bundle_path: "/tmp".into(),
+            library_path: "/tmp".into(),
+            worker_mount: "/app".into(),
+            shiny_port: 3838,
+            memory_limit: None,
+            cpu_limit: None,
+            labels: Default::default(),
+        };
+
+        let labels = worker_labels(&spec);
+        assert_eq!(labels.get("dev.blockyard/managed"), Some(&"true".into()));
+        assert_eq!(labels.get("dev.blockyard/app-id"), Some(&"app-1".into()));
+        assert_eq!(
+            labels.get("dev.blockyard/worker-id"),
+            Some(&"worker-1".into())
+        );
+        assert_eq!(labels.get("dev.blockyard/role"), Some(&"worker".into()));
+    }
+
+    #[test]
+    fn build_labels_include_required_fields() {
+        let spec = BuildSpec {
+            app_id: "app-1".into(),
+            bundle_id: "bundle-1".into(),
+            image: "test:latest".into(),
+            bundle_path: "/tmp".into(),
+            library_path: "/tmp".into(),
+            labels: Default::default(),
+        };
+
+        let labels = build_labels(&spec);
+        assert_eq!(labels.get("dev.blockyard/managed"), Some(&"true".into()));
+        assert_eq!(labels.get("dev.blockyard/app-id"), Some(&"app-1".into()));
+        assert_eq!(
+            labels.get("dev.blockyard/bundle-id"),
+            Some(&"bundle-1".into())
+        );
+        assert_eq!(labels.get("dev.blockyard/role"), Some(&"build".into()));
+    }
+
+    #[test]
+    fn network_labels_include_required_fields() {
+        let labels = network_labels("app-1", "worker-1");
+        assert_eq!(labels.get("dev.blockyard/managed"), Some(&"true".into()));
+        assert_eq!(labels.get("dev.blockyard/app-id"), Some(&"app-1".into()));
+        assert_eq!(
+            labels.get("dev.blockyard/worker-id"),
+            Some(&"worker-1".into())
+        );
+    }
+}
+
+#[cfg(all(test, feature = "docker-tests"))]
+mod integration_tests {
+    use super::*;
+
+    fn test_config() -> DockerConfig {
+        DockerConfig {
+            socket: "/var/run/docker.sock".into(),
+            image: "ghcr.io/rocker-org/r-ver:latest".into(),
+            shiny_port: 3838,
+            rv_version: "latest".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_and_stop_container() {
+        let backend = DockerBackend::new(test_config()).await.unwrap();
+
+        let spec = WorkerSpec {
+            app_id: "test-app".into(),
+            worker_id: format!("test-{}", uuid::Uuid::new_v4()),
+            image: "ghcr.io/rocker-org/r-ver:latest".into(),
+            bundle_path: "/tmp".into(),
+            library_path: "/tmp".into(),
+            worker_mount: "/app".into(),
+            shiny_port: 3838,
+            memory_limit: Some("256m".into()),
+            cpu_limit: Some(0.5),
+            labels: Default::default(),
+        };
+
+        let handle = backend.spawn(&spec).await.unwrap();
+
+        // Container should be running — address should resolve
+        let addr = backend.addr(&handle).await.unwrap();
+        assert!(!addr.ip().is_unspecified());
+
+        // Stop and clean up
+        backend.stop(&handle).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_check_before_ready() {
+        let backend = DockerBackend::new(test_config()).await.unwrap();
+
+        let spec = WorkerSpec {
+            app_id: "test-app".into(),
+            worker_id: format!("test-{}", uuid::Uuid::new_v4()),
+            // Use alpine — exits quickly, won't listen on a port
+            image: "alpine:latest".into(),
+            bundle_path: "/tmp".into(),
+            library_path: "/tmp".into(),
+            worker_mount: "/app".into(),
+            shiny_port: 3838,
+            memory_limit: None,
+            cpu_limit: None,
+            labels: Default::default(),
+        };
+
+        let handle = backend.spawn(&spec).await.unwrap();
+
+        // Health check should fail — nothing listening on port
+        let healthy = backend.health_check(&handle).await;
+        assert!(!healthy);
+
+        // Clean up — ignore stop errors since alpine may have already exited
+        let _ = backend.stop(&handle).await;
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup() {
+        let backend = DockerBackend::new(test_config()).await.unwrap();
+
+        let spec = WorkerSpec {
+            app_id: "test-app".into(),
+            worker_id: format!("test-{}", uuid::Uuid::new_v4()),
+            image: "alpine:latest".into(),
+            bundle_path: "/tmp".into(),
+            library_path: "/tmp".into(),
+            worker_mount: "/app".into(),
+            shiny_port: 3838,
+            memory_limit: None,
+            cpu_limit: None,
+            labels: Default::default(),
+        };
+
+        let _handle = backend.spawn(&spec).await.unwrap();
+
+        // Simulate crash — don't call stop(), just list and clean up
+        let managed = backend.list_managed().await.unwrap();
+        assert!(!managed.is_empty());
+
+        for resource in &managed {
+            backend.remove_resource(resource).await.unwrap();
+        }
+
+        // Should be clean now
+        let remaining = backend.list_managed().await.unwrap();
+        assert!(remaining.is_empty());
+    }
 }

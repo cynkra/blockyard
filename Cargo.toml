@@ -7,6 +7,7 @@ license = "GPL-3.0-only"
 [features]
 default = ["docker"]
 docker = ["dep:bollard"]
+docker-tests = ["docker"]
 test-support = []
 
 [dependencies]
@@ -27,6 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror   = "2"
 tokio-util  = { version = "0.7", features = ["io"] }
 bytes       = "1"
+futures-util = "0.3"
 dashmap     = "6"
 tempfile    = "3"
 anyhow      = "1"

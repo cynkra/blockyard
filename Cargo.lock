@@ -156,6 +156,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "futures-util",
  "http-body-util",
  "humantime",
  "humantime-serde",
