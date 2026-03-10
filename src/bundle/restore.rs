@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures_util::FutureExt;
 use sqlx::SqlitePool;
 
 use crate::backend::{Backend, BuildSpec};
@@ -40,7 +42,7 @@ pub fn spawn_restore<B: Backend>(params: RestoreParams<B>) {
     } = params;
 
     tokio::spawn(async move {
-        let result = run_restore(
+        let result = AssertUnwindSafe(run_restore(
             &*backend,
             &pool,
             &task_sender,
@@ -48,11 +50,12 @@ pub fn spawn_restore<B: Backend>(params: RestoreParams<B>) {
             &bundle_id,
             &paths,
             &image,
-        )
+        ))
+        .catch_unwind()
         .await;
 
         match result {
-            Ok(()) => {
+            Ok(Ok(())) => {
                 task_sender.complete(&task_store, true).await;
                 // Enforce retention after successful deploy
                 crate::bundle::enforce_retention(
@@ -64,8 +67,16 @@ pub fn spawn_restore<B: Backend>(params: RestoreParams<B>) {
                 )
                 .await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 task_sender.send(format!("ERROR: {e}")).await;
+                task_sender.complete(&task_store, false).await;
+                let _ = db::sqlite::update_bundle_status(&pool, &bundle_id, "failed").await;
+            }
+            Err(_panic) => {
+                tracing::error!(app_id, bundle_id, "restore task panicked");
+                task_sender
+                    .send("FATAL: restore task panicked".into())
+                    .await;
                 task_sender.complete(&task_store, false).await;
                 let _ = db::sqlite::update_bundle_status(&pool, &bundle_id, "failed").await;
             }
