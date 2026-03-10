@@ -1,8 +1,12 @@
-name: Deploy docs
+name: Docs
 
 on:
   push:
     branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
     paths:
       - "docs/**"
       - ".github/workflows/docs.yml"
@@ -36,6 +40,7 @@ jobs:
           path: docs/dist
 
   deploy:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     environment:
