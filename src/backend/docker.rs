@@ -325,8 +325,22 @@ impl DockerBackend {
         }
     }
 
-    /// Check if the metadata endpoint is unreachable from this process.
+    /// Check if the metadata endpoint is already blocked for Docker containers.
+    ///
+    /// In native mode (server_id is None), a TCP connect from the host process
+    /// does NOT reflect whether Docker containers are blocked — it tests host
+    /// networking, not Docker-forwarded traffic. Instead, we check iptables
+    /// DOCKER-USER chain for an existing DROP rule targeting 169.254.169.254.
+    ///
+    /// In container mode (server_id is Some), we share Docker networking, so a
+    /// TCP connect is a valid proxy for container reachability.
     async fn host_blocks_metadata_endpoint(&self) -> bool {
+        if self.server_id.is_none() {
+            // Native mode: check iptables DOCKER-USER chain directly
+            return Self::docker_user_blocks_metadata().await;
+        }
+
+        // Container mode: TCP connect test
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio::net::TcpStream::connect("169.254.169.254:80"),
@@ -334,6 +348,35 @@ impl DockerBackend {
         .await
         .map(|r| r.is_err()) // connection refused/failed = blocked
         .unwrap_or(true) // timeout = blocked
+    }
+
+    /// Check if the DOCKER-USER iptables chain contains a DROP rule for 169.254.169.254.
+    /// Tries both direct `iptables` and `sudo iptables` since the process may
+    /// not have CAP_NET_ADMIN but may have passwordless sudo.
+    async fn docker_user_blocks_metadata() -> bool {
+        for cmd in ["iptables", "sudo"] {
+            let result = if cmd == "sudo" {
+                tokio::process::Command::new("sudo")
+                    .args(["iptables", "-S", "DOCKER-USER"])
+                    .output()
+                    .await
+            } else {
+                tokio::process::Command::new("iptables")
+                    .args(["-S", "DOCKER-USER"])
+                    .output()
+                    .await
+            };
+
+            if let Ok(output) = result
+                && output.status.success()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return stdout
+                    .lines()
+                    .any(|line| line.contains("169.254.169.254") && line.contains("DROP"));
+            }
+        }
+        false
     }
 
     /// Remove the iptables rule for a worker.
