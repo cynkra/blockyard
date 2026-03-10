@@ -12,7 +12,7 @@ pub struct BundlePaths {
 }
 
 impl BundlePaths {
-    pub fn new(base: &Path, app_id: &str, bundle_id: &str) -> Self {
+    pub fn for_bundle(base: &Path, app_id: &str, bundle_id: &str) -> Self {
         let app_dir = base.join(app_id);
         Self {
             archive: app_dir.join(format!("{bundle_id}.tar.gz")),
@@ -30,7 +30,7 @@ pub async fn write_archive(
     bundle_id: &str,
     data: bytes::Bytes,
 ) -> Result<BundlePaths, BundleError> {
-    let paths = BundlePaths::new(base, app_id, bundle_id);
+    let paths = BundlePaths::for_bundle(base, app_id, bundle_id);
     let app_dir = base.join(app_id);
     tokio::fs::create_dir_all(&app_dir)
         .await
@@ -140,7 +140,7 @@ pub async fn enforce_retention(
 
     let mut deleted_ids = Vec::new();
     for bundle in to_delete {
-        let paths = BundlePaths::new(base, app_id, &bundle.id);
+        let paths = BundlePaths::for_bundle(base, app_id, &bundle.id);
         delete_bundle_files(&paths).await;
         if let Err(e) = crate::db::sqlite::delete_bundle(pool, &bundle.id).await {
             tracing::warn!(bundle_id = bundle.id, error = %e, "failed to delete bundle row");

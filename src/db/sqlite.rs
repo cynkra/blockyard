@@ -6,7 +6,6 @@ use uuid::Uuid;
 pub struct AppRow {
     pub id: String,
     pub name: String,
-    pub status: String,
     pub active_bundle: Option<String>,
     pub max_workers_per_app: Option<i64>,
     pub max_sessions_per_worker: i64,
@@ -30,8 +29,8 @@ pub async fn create_app(pool: &SqlitePool, name: &str) -> Result<AppRow, sqlx::E
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query_as::<_, AppRow>(
-        "INSERT INTO apps (id, name, status, max_sessions_per_worker, created_at, updated_at)
-         VALUES (?, ?, 'stopped', 1, ?, ?)
+        "INSERT INTO apps (id, name, max_sessions_per_worker, created_at, updated_at)
+         VALUES (?, ?, 1, ?, ?)
          RETURNING *",
     )
     .bind(&id)
@@ -125,6 +124,60 @@ pub async fn set_active_bundle(
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn update_app(
+    pool: &SqlitePool,
+    id: &str,
+    max_workers_per_app: Option<Option<i64>>,
+    max_sessions_per_worker: Option<i64>,
+    memory_limit: Option<Option<String>>,
+    cpu_limit: Option<Option<f64>>,
+) -> Result<AppRow, sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut app = get_app(pool, id).await?.ok_or(sqlx::Error::RowNotFound)?;
+
+    if let Some(v) = max_workers_per_app {
+        app.max_workers_per_app = v;
+    }
+    if let Some(v) = max_sessions_per_worker {
+        app.max_sessions_per_worker = v;
+    }
+    if let Some(v) = memory_limit {
+        app.memory_limit = v;
+    }
+    if let Some(v) = cpu_limit {
+        app.cpu_limit = v;
+    }
+
+    sqlx::query_as::<_, AppRow>(
+        "UPDATE apps SET
+             max_workers_per_app = ?,
+             max_sessions_per_worker = ?,
+             memory_limit = ?,
+             cpu_limit = ?,
+             updated_at = ?
+         WHERE id = ?
+         RETURNING *",
+    )
+    .bind(app.max_workers_per_app)
+    .bind(app.max_sessions_per_worker)
+    .bind(&app.memory_limit)
+    .bind(app.cpu_limit)
+    .bind(&now)
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn clear_active_bundle(pool: &SqlitePool, app_id: &str) -> Result<bool, sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query("UPDATE apps SET active_bundle = NULL, updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(app_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn update_bundle_status(
     pool: &SqlitePool,
     id: &str,
@@ -153,7 +206,6 @@ mod tests {
         let pool = test_pool().await;
         let app = create_app(&pool, "my-app").await.unwrap();
         assert_eq!(app.name, "my-app");
-        assert_eq!(app.status, "stopped");
 
         let fetched = get_app(&pool, &app.id).await.unwrap().unwrap();
         assert_eq!(fetched.id, app.id);

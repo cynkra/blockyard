@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use bytes::Bytes;
 
+use super::error::{ApiError, bad_request, not_found, server_error};
 use crate::app::AppState;
 use crate::backend::Backend;
 use crate::bundle;
@@ -13,17 +14,11 @@ pub struct UploadResponse {
     pub task_id: String,
 }
 
-#[derive(serde::Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub message: String,
-}
-
 pub async fn upload_bundle<B: Backend>(
     State(state): State<AppState<B>>,
     Path(app_id): Path<String>,
     body: Bytes,
-) -> Result<(StatusCode, Json<UploadResponse>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
     // 1. Validate app exists
     let app = crate::db::sqlite::get_app(&state.db, &app_id)
         .await
@@ -105,39 +100,9 @@ pub async fn upload_bundle<B: Backend>(
 pub async fn list_bundles<B: Backend>(
     State(state): State<AppState<B>>,
     Path(app_id): Path<String>,
-) -> Result<Json<Vec<crate::db::sqlite::BundleRow>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<crate::db::sqlite::BundleRow>>, ApiError> {
     let bundles = crate::db::sqlite::list_bundles_by_app(&state.db, &app_id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?;
     Ok(Json(bundles))
-}
-
-fn bad_request(msg: String) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: "bad_request".into(),
-            message: msg,
-        }),
-    )
-}
-
-fn not_found(msg: String) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: "not_found".into(),
-            message: msg,
-        }),
-    )
-}
-
-fn server_error(msg: String) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: "internal_error".into(),
-            message: msg,
-        }),
-    )
 }

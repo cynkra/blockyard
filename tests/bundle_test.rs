@@ -79,15 +79,18 @@ fn make_test_bundle() -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
+fn client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+// --- Bundle tests (from phase 0-3) ---
+
 #[tokio::test]
 async fn upload_bundle_returns_202() {
     let (addr, state, _tmp) = spawn_test_server().await;
-
-    // Create an app first
     let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .header("authorization", "Bearer test-token")
         .body(make_test_bundle())
@@ -96,7 +99,6 @@ async fn upload_bundle_returns_202() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["bundle_id"].is_string());
     assert!(body["task_id"].is_string());
@@ -107,8 +109,7 @@ async fn upload_without_auth_returns_401() {
     let (addr, state, _tmp) = spawn_test_server().await;
     let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .body(make_test_bundle())
         .send()
@@ -122,8 +123,7 @@ async fn upload_without_auth_returns_401() {
 async fn upload_to_nonexistent_app_returns_404() {
     let (addr, _state, _tmp) = spawn_test_server().await;
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(format!("http://{addr}/api/v1/apps/nonexistent/bundles"))
         .header("authorization", "Bearer test-token")
         .body(make_test_bundle())
@@ -138,8 +138,7 @@ async fn upload_to_nonexistent_app_returns_404() {
 async fn healthz_returns_200_without_auth() {
     let (addr, _state, _tmp) = spawn_test_server().await;
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .get(format!("http://{addr}/healthz"))
         .send()
         .await
@@ -154,8 +153,7 @@ async fn task_logs_streams_output() {
     let (addr, state, _tmp) = spawn_test_server().await;
     let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .header("authorization", "Bearer test-token")
         .body(make_test_bundle())
@@ -166,11 +164,9 @@ async fn task_logs_streams_output() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let task_id = body["task_id"].as_str().unwrap();
 
-    // Give the background task a moment to run
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Fetch task logs
-    let resp = client
+    let resp = client()
         .get(format!("http://{addr}/api/v1/tasks/{task_id}/logs"))
         .header("authorization", "Bearer test-token")
         .send()
@@ -189,8 +185,7 @@ async fn task_logs_streams_output() {
 async fn task_logs_nonexistent_returns_404() {
     let (addr, _state, _tmp) = spawn_test_server().await;
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .get(format!("http://{addr}/api/v1/tasks/nonexistent/logs"))
         .header("authorization", "Bearer test-token")
         .send()
@@ -205,8 +200,7 @@ async fn upload_empty_body_returns_400() {
     let (addr, state, _tmp) = spawn_test_server().await;
     let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .header("authorization", "Bearer test-token")
         .body(Vec::<u8>::new())
@@ -222,10 +216,7 @@ async fn list_bundles_returns_uploaded() {
     let (addr, state, _tmp) = spawn_test_server().await;
     let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
 
-    let client = reqwest::Client::new();
-
-    // Upload a bundle
-    client
+    client()
         .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .header("authorization", "Bearer test-token")
         .body(make_test_bundle())
@@ -233,8 +224,7 @@ async fn list_bundles_returns_uploaded() {
         .await
         .unwrap();
 
-    // List bundles
-    let resp = client
+    let resp = client()
         .get(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .header("authorization", "Bearer test-token")
         .send()
@@ -254,11 +244,10 @@ async fn upload_oversized_bundle_returns_413() {
     .await;
     let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .header("authorization", "Bearer test-token")
-        .body(make_test_bundle()) // larger than 64 bytes
+        .body(make_test_bundle())
         .send()
         .await
         .unwrap();
@@ -271,8 +260,7 @@ async fn bundle_restore_activates_bundle() {
     let (addr, state, _tmp) = spawn_test_server().await;
     let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
         .header("authorization", "Bearer test-token")
         .body(make_test_bundle())
@@ -283,10 +271,8 @@ async fn bundle_restore_activates_bundle() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let bundle_id = body["bundle_id"].as_str().unwrap().to_string();
 
-    // Wait for the async restore to complete
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Check that the bundle is now "ready" and is the active bundle
     let app_row = db::sqlite::get_app(&state.db, &app.id)
         .await
         .unwrap()
@@ -297,4 +283,376 @@ async fn bundle_restore_activates_bundle() {
         .await
         .unwrap();
     assert_eq!(bundles[0].status, "ready");
+}
+
+// --- App CRUD tests (phase 0-4) ---
+
+#[tokio::test]
+async fn create_app_returns_201() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["name"], "my-app");
+    assert_eq!(body["status"], "stopped");
+    assert!(body["id"].is_string());
+}
+
+#[tokio::test]
+async fn create_app_rejects_invalid_name() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    // Uppercase
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "My-App" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Leading hyphen
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "-app" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Trailing hyphen
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "app-" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn create_duplicate_name_returns_409() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 409);
+}
+
+#[tokio::test]
+async fn list_apps_returns_all() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    for name in ["app-a", "app-b"] {
+        client()
+            .post(format!("http://{addr}/api/v1/apps"))
+            .bearer_auth("test-token")
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(body.len(), 2);
+}
+
+#[tokio::test]
+async fn get_app_returns_details() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps/{id}"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["name"], "my-app");
+    assert_eq!(body["status"], "stopped");
+}
+
+#[tokio::test]
+async fn get_nonexistent_app_returns_404() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps/nonexistent"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn update_app_modifies_fields() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client()
+        .patch(format!("http://{addr}/api/v1/apps/{id}"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "memory_limit": "512m" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["memory_limit"], "512m");
+}
+
+#[tokio::test]
+async fn delete_app_returns_204() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client()
+        .delete(format!("http://{addr}/api/v1/apps/{id}"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps/{id}"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// --- App lifecycle tests (phase 0-4) ---
+
+#[tokio::test]
+async fn start_app_without_bundle_returns_400() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+/// Helper: create app via API, upload bundle, wait for restore.
+async fn create_app_with_bundle(addr: &SocketAddr) -> String {
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/bundles"))
+        .bearer_auth("test-token")
+        .body(make_test_bundle())
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    id
+}
+
+#[tokio::test]
+async fn start_and_stop_app() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    let id = create_app_with_bundle(&addr).await;
+
+    // Start
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "running");
+    assert!(!body["worker_id"].as_str().unwrap().is_empty());
+
+    assert_eq!(state.workers.len(), 1);
+
+    // Start again — should be no-op
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(state.workers.len(), 1);
+
+    // Get app — should show "running"
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/apps/{id}"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "running");
+
+    // Stop
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/stop"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "stopped");
+    assert_eq!(body["workers_stopped"], 1);
+
+    assert_eq!(state.workers.len(), 0);
+}
+
+#[tokio::test]
+async fn start_at_max_workers_returns_503() {
+    let (addr, _state, _tmp) = spawn_test_server_with_config(|cfg| {
+        cfg.proxy.max_workers = 0; // no workers allowed
+    })
+    .await;
+    let id = create_app_with_bundle(&addr).await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn delete_app_stops_workers_first() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    let id = create_app_with_bundle(&addr).await;
+
+    // Start
+    client()
+        .post(format!("http://{addr}/api/v1/apps/{id}/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(state.workers.len(), 1);
+
+    // Delete — should stop workers and clean up
+    let resp = client()
+        .delete(format!("http://{addr}/api/v1/apps/{id}"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(state.workers.len(), 0);
+}
+
+#[tokio::test]
+async fn start_nonexistent_app_returns_404() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/nonexistent/start"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn stop_nonexistent_app_returns_404() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/nonexistent/stop"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }

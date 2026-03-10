@@ -24,7 +24,7 @@ pub struct AppState<B: Backend> {
 pub struct ActiveWorker<H: Clone> {
     pub app_id: String,
     pub handle: H,
-    pub session_id: String,
+    pub session_id: Option<String>,
 }
 
 impl<B: Backend> AppState<B> {
