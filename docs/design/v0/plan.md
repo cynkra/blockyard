@@ -608,7 +608,7 @@ async fn bearer_auth<B: Backend>(
 | `/api/v1/apps/{id}/bundles` | GET | List bundles for app. Returns array of bundle objects. |
 | `/api/v1/apps/{id}/start` | POST | Start app. No-op if already running. Creates initial worker if not already spawned (workers are also started on-demand by the proxy). |
 | `/api/v1/apps/{id}/stop` | POST | Stop app. Stops all workers, cleans up networks. |
-| `/api/v1/apps/{id}/logs` | GET | Stream app logs. Query params: `worker_id` (optional), `follow` (bool). Uses chunked transfer encoding. |
+| `/api/v1/apps/{id}/logs` | GET | Stream app logs. Query params: `worker_id` (optional). Returns buffered lines for ended workers, streams live output for running workers. |
 | `/api/v1/tasks/{task_id}/logs` | GET | Stream task logs. Chunked plain text. |
 | `/healthz` | GET | Returns 200 OK. No auth. No dependency checks. |
 
