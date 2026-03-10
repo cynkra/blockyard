@@ -53,6 +53,25 @@ curl "$BLOCKYARD/api/v1/tasks/<task-id>/logs" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+## Accessing the app
+
+Once the build completes, the app is accessible at:
+
+```
+http://<blockyard-host>/app/<app-name>/
+```
+
+Blockyard spawns a worker container on the first request (cold start) and
+proxies HTTP and WebSocket traffic to it. A session cookie pins the user to
+the same worker for subsequent requests.
+
+You can also pre-start a worker via the API:
+
+```bash
+curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/start" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ## Updating an app
 
 To deploy a new version, upload another bundle to the same app. Once it

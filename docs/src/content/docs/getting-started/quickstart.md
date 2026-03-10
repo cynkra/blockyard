@@ -71,16 +71,18 @@ curl "$BLOCKYARD/api/v1/tasks/t5678.../logs" \
 When the build completes, the bundle status changes to `ready` and becomes
 the active bundle for the app.
 
-## 5. Start the app
+## 5. Open the app
 
-Once the build completes, start a worker container:
+Once the build completes, visit the app in your browser:
+
+```
+http://localhost:8080/app/hello-shiny/
+```
+
+Blockyard spawns a worker container on demand when the first request arrives.
+You can also pre-start a worker via the API:
 
 ```bash
 curl -X POST "$BLOCKYARD/api/v1/apps/hello-shiny/start" \
   -H "Authorization: Bearer $TOKEN"
 ```
-
-## What's next
-
-On-demand proxying (routing user traffic to workers via `/app/<name>/`)
-is not yet implemented. Check back for updates as new phases are released.

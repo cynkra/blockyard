@@ -20,7 +20,7 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v blockyard-data:/data \
   -e BLOCKYARD_SERVER_TOKEN=your-secret-token \
-  ghcr.io/a2-ai/blockyard:latest
+  ghcr.io/cynkra/blockyard:latest
 ```
 
 This gives Blockyard access to Docker for spawning worker containers, and
@@ -29,7 +29,7 @@ persists application data (bundles, database) in a named volume.
 ## Running from source
 
 ```bash
-git clone https://github.com/a2-ai/blockyard.git
+git clone https://github.com/cynkra/blockyard.git
 cd blockyard
 cargo build --release
 ```

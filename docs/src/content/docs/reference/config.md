@@ -99,6 +99,7 @@ ws_cache_ttl         = "60s"
 health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
+log_retention        = "1h"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -107,3 +108,4 @@ max_workers          = 100
 | `health_interval` | `duration` | `15s` | No | How often workers are health-checked |
 | `worker_start_timeout` | `duration` | `60s` | No | Max time to wait for a new worker to become healthy |
 | `max_workers` | `integer` | `100` | No | Global cap on concurrent worker containers |
+| `log_retention` | `duration` | `1h` | No | How long to keep worker log entries before cleanup |

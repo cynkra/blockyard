@@ -115,6 +115,14 @@ src/
 ├── bundle/
 │   ├── mod.rs           # Archive storage, unpacking, retention
 │   └── restore.rs       # Dependency restoration pipeline
+├── proxy/
+│   ├── mod.rs           # Reverse proxy router (/app/{name}/)
+│   ├── forward.rs       # HTTP and WebSocket forwarding
+│   ├── cold_start.rs    # On-demand worker startup
+│   ├── registry.rs      # Worker address caching
+│   ├── session.rs       # Session-to-worker mapping
+│   └── ws_cache.rs      # WebSocket connection caching
+├── ops.rs               # Health polling, log capture, orphan cleanup
 └── db/
     ├── mod.rs           # Pool creation & migrations
     └── sqlite.rs        # App & bundle CRUD queries
@@ -151,6 +159,7 @@ ws_cache_ttl         = "60s"
 health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
+log_retention        = "1h"
 ```
 
 ## Status

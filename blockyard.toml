@@ -23,3 +23,4 @@ ws_cache_ttl         = "60s"
 health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
+log_retention        = "1h"

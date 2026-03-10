@@ -66,13 +66,15 @@ Update app configuration. Only resource-limit fields are mutable:
 ```json
 {
   "max_workers_per_app": 4,
-  "max_sessions_per_worker": 2,
   "memory_limit": "512m",
   "cpu_limit": 0.5
 }
 ```
 
 All fields are optional — only provided fields are updated.
+
+`max_sessions_per_worker` is accepted but must be `1` in the current version
+(session sharing is not yet supported).
 
 **Response:** `200 OK` — updated app object.
 
@@ -167,6 +169,27 @@ If the task is still running, the response streams buffered output followed
 by live lines. If the task is complete, the full log is returned.
 
 **Response:** `200 OK` — chunked `text/plain`.
+
+---
+
+## Proxy (Data Plane)
+
+These routes do **not** require authentication. Session affinity is managed
+via cookies.
+
+### `GET /app/{name}/`
+
+Reverse-proxy to the Shiny app. On the first request, Blockyard spawns a
+worker container (cold start), waits for it to become healthy, and forwards
+the request. A `blockyard_session` cookie is set to pin subsequent requests
+to the same worker.
+
+WebSocket upgrade requests are also supported at any path under
+`/app/{name}/`.
+
+### `GET /app/{name}/{path}`
+
+Same as above, for any sub-path within the app.
 
 ---
 

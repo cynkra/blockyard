@@ -61,6 +61,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `health_interval` | `15s` | Interval between worker health checks |
 | `worker_start_timeout` | `60s` | Max time to wait for a worker to become healthy |
 | `max_workers` | `100` | Maximum number of concurrent worker containers |
+| `log_retention` | `1h` | How long to keep worker log entries before cleanup |
 
 ## Example
 
@@ -90,4 +91,5 @@ ws_cache_ttl         = "60s"
 health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
+log_retention        = "1h"
 ```
