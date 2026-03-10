@@ -339,10 +339,20 @@ leftovers. Both paths converge to the same clean state.
 
 ### Step 8: Log capture
 
-When `POST /apps/{id}/start` spawns a worker (in `api/apps.rs`), also call
-`ops::spawn_log_capture_for_app(state, worker_id, app_id, handle)`.
+Every codepath that spawns a worker must also start log capture by calling
+`ops::spawn_log_capture_for_app(state, worker_id, app_id, handle)`. There
+are two spawn sites:
 
-This spawns a background tokio task that:
+- `api/apps.rs` — `POST /apps/{id}/start` (explicit start)
+- `proxy/forward.rs` — on-demand cold-start spawn when a session arrives
+  and no worker exists
+
+Both must call `spawn_log_capture_for_app` after a successful spawn.
+Without this, on-demand workers (the common case in v0, since users
+typically visit `/app/{name}/` rather than calling the start endpoint)
+would have no log capture.
+
+`spawn_log_capture_for_app` spawns a background tokio task that:
 
 1. Creates a log store entry via `log_store.create(worker_id, app_id)`.
 2. Calls `backend.logs(&handle)` to get a `LogStream`.
@@ -525,7 +535,7 @@ Existing fields consumed:
 | `src/db/sqlite.rs`                | Add `fail_stale_bundles()` query                          |
 | `src/main.rs`                     | CancellationToken, startup_cleanup, spawn background tasks, cancel + await, graceful_shutdown |
 | `src/api/apps.rs`                 | `start_app`: spawn log capture; `stop_app_workers`: use `evict_worker`; `app_logs`: serve from log store |
-| `src/proxy/forward.rs`            | Session expiry: use `evict_worker` instead of inline cleanup |
+| `src/proxy/forward.rs`            | Cold-start spawn: add log capture; session expiry: use `evict_worker` instead of inline cleanup |
 | `src/proxy/session.rs`            | Add `remove_by_worker(worker_id)` method                  |
 | `src/backend/mock.rs`             | Add `set_managed_resources()`, `set_log_lines()`, persistent resource list |
 | `tests/bundle_test.rs`            | 9 new mock integration tests                              |
