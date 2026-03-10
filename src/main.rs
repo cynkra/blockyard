@@ -36,11 +36,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn background tasks
     let health_handle = ops::spawn_health_poller(state.clone(), token.clone());
-    let cleaner_handle = ops::spawn_log_retention_cleaner(
-        state.clone(),
-        config.proxy.log_retention,
-        token.clone(),
-    );
+    let cleaner_handle =
+        ops::spawn_log_retention_cleaner(state.clone(), config.proxy.log_retention, token.clone());
 
     let app = blockyard::proxy::full_router(state.clone());
 

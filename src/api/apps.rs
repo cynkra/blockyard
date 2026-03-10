@@ -282,12 +282,7 @@ pub async fn start_app<B: Backend>(
         .map_err(|e| server_error(format!("spawn worker: {e}")))?;
 
     // Start log capture
-    ops::spawn_log_capture(
-        &state,
-        worker_id.clone(),
-        app.id.clone(),
-        handle.clone(),
-    );
+    ops::spawn_log_capture(&state, worker_id.clone(), app.id.clone(), handle.clone());
 
     // Track worker — no session yet, assigned by proxy in phase 0-5
     state.workers.insert(

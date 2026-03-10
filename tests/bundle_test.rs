@@ -1127,9 +1127,10 @@ async fn log_capture_stores_worker_logs() {
     let id = create_app_with_bundle(&addr).await;
 
     // Configure mock to emit log lines
-    state
-        .backend
-        .set_log_lines(vec!["hello from shiny".into(), "listening on port 3838".into()]);
+    state.backend.set_log_lines(vec![
+        "hello from shiny".into(),
+        "listening on port 3838".into(),
+    ]);
 
     // Start app (which triggers log capture)
     client()

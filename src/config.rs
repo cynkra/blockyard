@@ -254,11 +254,7 @@ impl Config {
             &self.storage.bundle_server_path,
             "storage.bundle_server_path",
         )?;
-        let db_parent = self
-            .database
-            .path
-            .parent()
-            .unwrap_or(&self.database.path);
+        let db_parent = self.database.path.parent().unwrap_or(&self.database.path);
         Self::ensure_dir_writable(db_parent, "database.path parent directory")?;
 
         Ok(())
