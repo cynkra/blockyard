@@ -27,7 +27,7 @@ metadata endpoint to steal host credentials.
     (stop backend, remove from workers/registry/sessions, mark log ended)
 14. `CancellationToken` — cooperative shutdown for background tasks
 15. Metadata endpoint protection — per-network iptables rules blocking
-    `169.254.169.254`, with fallback to host-level rule verification
+    `169.254.169.254`, with fallback to live reachability check
 16. Integration tests — orphan cleanup, stale bundle recovery, graceful
     shutdown, health poller behavior, log capture and persistence
 17. Docker integration tests — gated behind `docker-integration-tests`
@@ -94,9 +94,8 @@ pub struct LogSubscription {
 }
 
 pub struct LogSender {
-    worker_id: String,
     tx: broadcast::Sender<String>,
-    buffer: Arc<Mutex<Vec<String>>>,
+    buffer: Arc<Mutex<VecDeque<String>>>,
 }
 ```
 
@@ -111,7 +110,9 @@ pub struct LogSender {
   a worker for the app; prefer a live (not ended) worker over an ended one.
   Assumes single-worker-per-app in v0. When multi-worker lands, make
   `worker_id` a required parameter on the logs endpoint instead.
-- `mark_ended(worker_id)` — set `ended_at = Some(Instant::now())`
+- `mark_ended(worker_id)` — set `ended_at` if not already set
+  (`get_or_insert(Instant::now())`). Idempotent — safe to call from both
+  `evict_worker` and the log capture task when the stream ends.
 - `cleanup_expired(retention: Duration)` — remove entries whose `ended_at`
   is older than `retention`
 - `has_active(worker_id) -> bool` — true if entry exists and not ended
@@ -179,8 +180,12 @@ pub async fn startup_cleanup<B: Backend>(state: &AppState<B>) -> Result<(), Back
         }
     }
 
-    // 2. Fail stale bundles
-    db::sqlite::fail_stale_bundles(&state.db).await;
+    // 2. Fail stale bundles (DB is known reachable — panic if this fails)
+    let count = db::sqlite::fail_stale_bundles(&state.db).await
+        .expect("fail_stale_bundles: db reachable at startup");
+    if count > 0 {
+        tracing::info!(count, "marked stale bundles as failed");
+    }
 
     Ok(())
 }
@@ -276,7 +281,7 @@ async fn block_metadata_for_network(
         }
         Ok(_) | Err(_) => {
             // iptables failed — check if a host-level rule already exists
-            if self.host_has_metadata_block().await {
+            if self.host_blocks_metadata_endpoint().await {
                 tracing::info!("metadata endpoint blocked by host-level rule");
                 Ok(())
             } else {
@@ -291,22 +296,17 @@ async fn block_metadata_for_network(
     }
 }
 
-/// Check if the DOCKER-USER chain already has a DROP rule for 169.254.169.254.
-async fn host_has_metadata_block(&self) -> bool {
-    let output = tokio::process::Command::new("iptables")
-        .args(["-L", "DOCKER-USER", "-n"])
-        .output()
-        .await;
-
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().any(|line| {
-                line.contains("169.254.169.254") && line.contains("DROP")
-            })
-        }
-        Err(_) => false,
-    }
+/// Check if the metadata endpoint is unreachable from this process.
+/// Catches any protection mechanism: iptables rules, firewalls,
+/// security groups, etc. — not just iptables.
+async fn host_blocks_metadata_endpoint(&self) -> bool {
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect("169.254.169.254:80"),
+    )
+    .await
+    .map(|r| r.is_err()) // connection refused/failed = blocked
+    .unwrap_or(true)      // timeout = blocked
 }
 ```
 
@@ -325,21 +325,14 @@ self.block_metadata_for_network(&network_name, &spec.worker_id).await?;
 
 **Cleanup in `stop()`:**
 
-Remove the iptables rule by comment tag when the worker is stopped:
+Remove the iptables rule by comment tag when the worker is stopped.
+Uses `iptables -S` to get machine-parseable rule specs, matches by
+comment, and replays with `-D` instead of `-A`:
 
 ```rust
 async fn unblock_metadata_for_worker(&self, worker_id: &str) {
     let comment = format!("blockyard-{worker_id}");
-    // List rules in DOCKER-USER with line numbers, find ours, delete by number.
-    // Alternative: use iptables -D with the full rule spec.
-    let _ = tokio::process::Command::new("iptables")
-        .args([
-            "-D", "DOCKER-USER",
-            "-m", "comment", "--comment", &comment,
-            "-j", "DROP",
-        ])
-        .status()
-        .await;
+    delete_iptables_rules_by_comment(&comment).await;
 }
 ```
 
@@ -353,33 +346,37 @@ iptables rules from a previous run. Scan the DOCKER-USER chain for
 rules with `blockyard-` prefixed comments and delete them:
 
 ```rust
-async fn cleanup_orphan_metadata_rules() {
+/// Delete all iptables rules in DOCKER-USER whose comment contains the
+/// given string. Uses `iptables -S` for machine-parseable output, then
+/// replays each matching rule with `-D` instead of `-A`.
+async fn delete_iptables_rules_by_comment(comment: &str) {
     let output = tokio::process::Command::new("iptables")
-        .args(["-L", "DOCKER-USER", "-n", "--line-numbers", "-v"])
+        .args(["-S", "DOCKER-USER"])
         .output()
         .await;
 
     let Ok(output) = output else { return };
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Collect matching line numbers in reverse order (delete from bottom
-    // up to avoid renumbering issues)
-    let mut line_numbers: Vec<u32> = Vec::new();
+    // iptables -S outputs lines like:
+    // -A DOCKER-USER -s 172.18.0.0/16 -d 169.254.169.254/32 -m comment --comment blockyard-abc -j DROP
     for line in stdout.lines() {
-        if line.contains("blockyard-") && line.contains("DROP") {
-            if let Some(num) = line.split_whitespace().next().and_then(|s| s.parse().ok()) {
-                line_numbers.push(num);
+        if line.contains(comment) {
+            // Replace -A with -D to build the delete command
+            if let Some(rule) = line.strip_prefix("-A DOCKER-USER ") {
+                let mut args = vec!["-D", "DOCKER-USER"];
+                args.extend(rule.split_whitespace());
+                let _ = tokio::process::Command::new("iptables")
+                    .args(&args)
+                    .status()
+                    .await;
             }
         }
     }
-    line_numbers.sort_unstable_by(|a, b| b.cmp(a)); // reverse order
+}
 
-    for num in line_numbers {
-        let _ = tokio::process::Command::new("iptables")
-            .args(["-D", "DOCKER-USER", &num.to_string()])
-            .status()
-            .await;
-    }
+async fn cleanup_orphan_metadata_rules() {
+    delete_iptables_rules_by_comment("blockyard-").await;
 }
 ```
 
@@ -451,10 +448,28 @@ tokio task that runs at `config.proxy.health_interval`. Takes a
 
 Each cycle:
 
-1. Snapshot worker IDs from `state.workers` (avoids holding the DashMap
-   during async health checks).
-2. For each worker, call `backend.health_check(&handle)`.
-3. On failure: call `evict_worker(state, worker_id)`.
+1. Snapshot worker IDs + handles from `state.workers` (avoids holding the
+   DashMap during async health checks).
+2. Spawn all health checks concurrently via `JoinSet`:
+
+```rust
+let mut checks = tokio::task::JoinSet::new();
+for (worker_id, handle) in snapshot {
+    let backend = state.backend.clone();
+    checks.spawn(async move {
+        let healthy = backend.health_check(&handle).await;
+        (worker_id, healthy)
+    });
+}
+while let Some(Ok((worker_id, healthy))) = checks.join_next().await {
+    if !healthy {
+        evict_worker(state, &worker_id).await;
+    }
+}
+```
+
+This ensures a poll cycle takes ~10s worst case (one TCP timeout)
+regardless of worker count, rather than 10s × N sequentially.
 
 The first tick of the `tokio::time::interval` is consumed before
 entering the loop (the standard pattern: `interval.tick().await` once
@@ -483,15 +498,23 @@ background tasks have been cancelled.
 
 ```rust
 pub async fn graceful_shutdown<B: Backend>(state: &AppState<B>) {
-    // 1. Evict all tracked workers
+    // 1. Evict all tracked workers (concurrently, each with its own timeout)
     let worker_ids: Vec<String> = state.workers
         .iter()
         .map(|e| e.key().clone())
         .collect();
 
-    for worker_id in &worker_ids {
-        evict_worker(state, &worker_id).await;
+    let mut shutdowns = tokio::task::JoinSet::new();
+    for worker_id in worker_ids {
+        let state = state.clone();
+        shutdowns.spawn(async move {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                evict_worker(&state, &worker_id),
+            ).await.ok();
+        });
     }
+    while shutdowns.join_next().await.is_some() {}
 
     // 2. Remove any remaining managed resources (build containers, networks)
     //    that weren't tracked in state.workers
@@ -525,11 +548,10 @@ let _ = tokio::join!(health_handle, cleaner_handle);
 ops::graceful_shutdown(&state).await;
 ```
 
-`shutdown_timeout` (default 30s) applies to the axum drain period. The
-subsequent container cleanup is not time-bounded — it runs to completion.
-In practice, stopping a Docker container takes at most 10s (the stop
-timeout in `DockerBackend::stop`), so the total shutdown time is bounded
-by `shutdown_timeout + 10s × worker_count`.
+`shutdown_timeout` (default 30s) applies to the axum drain period. Worker
+evictions run concurrently, each with a 15s timeout, so the cleanup phase
+takes at most ~15s regardless of worker count. Total shutdown time is
+bounded by `shutdown_timeout + ~15s`.
 
 After a clean shutdown, the next `startup_cleanup` finds nothing to remove.
 After an unclean shutdown (OOM, SIGKILL), `startup_cleanup` handles the
@@ -542,8 +564,8 @@ Every codepath that spawns a worker must also start log capture by calling
 are two spawn sites:
 
 - `api/apps.rs` — `POST /apps/{id}/start` (explicit start)
-- `proxy/forward.rs` — on-demand cold-start spawn when a session arrives
-  and no worker exists
+- `proxy/cold_start.rs` — on-demand spawn in `ensure_worker()` when a
+  session arrives and no worker exists
 
 Both must call `spawn_log_capture_for_app` after a successful spawn.
 Without this, on-demand workers (the common case in v0, since users
@@ -737,9 +759,10 @@ Existing fields consumed:
 | `src/db/sqlite.rs`                | Add `fail_stale_bundles()` query                          |
 | `src/main.rs`                     | CancellationToken, startup_cleanup, spawn background tasks, cancel + await, graceful_shutdown |
 | `src/api/apps.rs`                 | `start_app`: spawn log capture; `stop_app_workers`: use `evict_worker`; `app_logs`: serve from log store |
-| `src/proxy/forward.rs`            | Cold-start spawn: add log capture; session expiry: use `evict_worker` instead of inline cleanup |
+| `src/proxy/cold_start.rs`         | `ensure_worker`: spawn log capture after successful worker spawn     |
+| `src/proxy/forward.rs`            | Session expiry: use `evict_worker` instead of inline cleanup         |
 | `src/proxy/session.rs`            | Add `remove_by_worker(worker_id)` method                  |
-| `src/backend/docker.rs`           | Add `block_metadata_for_network()`, `unblock_metadata_for_worker()`, `host_has_metadata_block()`, `MetadataBlockMode` cache; wire into `spawn()` and `stop()` |
+| `src/backend/docker.rs`           | Add `block_metadata_for_network()`, `unblock_metadata_for_worker()`, `host_blocks_metadata_endpoint()`, `MetadataBlockMode` cache; wire into `spawn()` and `stop()` |
 | `src/backend/mock.rs`             | Add `set_managed_resources()`, `set_log_lines()`, persistent resource list |
 | `tests/bundle_test.rs`            | 9 new mock integration tests                              |
 | `tests/docker_integration_test.rs`| New: Docker integration tests (feature-gated)             |
@@ -781,7 +804,7 @@ Phase 0-6 is done when:
 - Expired log entries are cleaned up after `log_retention`
 - Metadata endpoint (`169.254.169.254`) is blocked for worker containers
   via per-network iptables rules (when CAP_NET_ADMIN available) or verified
-  via host-level rule (fallback); spawn aborts if neither is in place
+  unreachable via live check (fallback); spawn aborts if neither is in place
 - Orphan iptables rules from previous runs are cleaned up at startup
 - Network isolation verified: two workers cannot reach each other
 - Native mode E2E verified: proxy works with server outside Docker
