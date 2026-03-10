@@ -11,8 +11,15 @@ use blockyard::db;
 use reqwest::StatusCode;
 
 async fn spawn_test_server() -> (SocketAddr, AppState<MockBackend>, tempfile::TempDir) {
+    spawn_test_server_with_config(|_| {}).await
+}
+
+async fn spawn_test_server_with_config(
+    customize: impl FnOnce(&mut Config),
+) -> (SocketAddr, AppState<MockBackend>, tempfile::TempDir) {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config = test_config(tmp.path().to_path_buf());
+    let mut config = test_config(tmp.path().to_path_buf());
+    customize(&mut config);
     let backend = MockBackend::new();
     let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
     db::run_migrations(&pool).await.unwrap();
@@ -237,6 +244,26 @@ async fn list_bundles_returns_uploaded() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bundles: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(bundles.len(), 1);
+}
+
+#[tokio::test]
+async fn upload_oversized_bundle_returns_413() {
+    let (addr, state, _tmp) = spawn_test_server_with_config(|cfg| {
+        cfg.storage.max_bundle_size = 64; // 64 bytes
+    })
+    .await;
+    let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
+        .header("authorization", "Bearer test-token")
+        .body(make_test_bundle()) // larger than 64 bytes
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]

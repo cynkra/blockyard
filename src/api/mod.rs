@@ -8,6 +8,8 @@ pub mod bundles;
 pub mod tasks;
 
 pub fn api_router<B: Backend + Clone>(state: AppState<B>) -> Router<AppState<B>> {
+    let max_body = state.config.storage.max_bundle_size;
+
     let authed = Router::new()
         .route(
             "/apps/{id}/bundles",
@@ -17,6 +19,7 @@ pub fn api_router<B: Backend + Clone>(state: AppState<B>) -> Router<AppState<B>>
             "/tasks/{task_id}/logs",
             axum::routing::get(tasks::task_logs::<B>),
         )
+        .layer(axum::extract::DefaultBodyLimit::max(max_body))
         .layer(middleware::from_fn_with_state(
             state,
             auth::bearer_auth::<B>,
