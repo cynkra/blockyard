@@ -3,7 +3,7 @@
 This document collects v2 items from the roadmap and architectural decisions
 deferred from v0/v1 planning.
 
-## Deferred from v0
+## Deferred from v0/v1
 
 ### Backend crate extraction
 
@@ -41,6 +41,43 @@ extract. If feature flags remain clean, keep the single crate.
 - The main crate depends on `blockyard-core` and on each backend crate
   (optionally, via features)
 - The mock backend stays in the main crate (test-only code, no heavy deps)
+
+### Trait extraction for SessionStore, WorkerRegistry, TaskStore
+
+v0 implemented `SessionStore`, `WorkerRegistry`, and `TaskStore` as concrete
+`DashMap`-backed structs with synchronous methods. The roadmap describes them
+as traits with swappable implementations (in-memory for single-node,
+PostgreSQL-backed for k8s HA). v1 continues with concrete structs since it
+runs a single server.
+
+For v2 multi-node deployments, these need to become traits:
+
+- `SessionStore` → async methods, Redis or PostgreSQL-backed implementation
+  for shared session state across nodes
+- `WorkerRegistry` → async methods, shared registry so any node can route
+  to any worker
+- `TaskStore` → async methods, PostgreSQL-backed for HA
+
+The current method signatures were designed to map cleanly onto async trait
+methods — the switch is mechanical: extract a trait, make methods async, and
+parameterize `AppState` over the trait (same pattern as `Backend`).
+
+**Trigger:** when the Kubernetes backend is implemented and multi-replica
+server deployments are needed.
+
+### Build image consolidation
+
+v0 introduced a `build_image` config field (separate from `image`) as a
+shortcut to avoid downloading `rv` on every build. For v2's bring-your-own-
+image support (roadmap item #36), this split creates a version-matching
+problem: rv's library path is namespaced by R version/arch/codename, so the
+build image's R version must match the worker image.
+
+Preferred path: collapse back to a single image and mount the `rv` binary
+from the server container into build containers (bind mount to
+`/usr/local/bin/rv`). This avoids the download cost without the version-
+matching problem. Only works with shared filesystem (Docker DooD); for
+Kubernetes, use an init container or shared volume.
 
 ## Roadmap v2 features
 

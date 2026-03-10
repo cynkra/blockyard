@@ -134,9 +134,20 @@ pub struct OidcConfig {
     pub client_secret: String,       // client secret (use env var)
     #[serde(default = "default_groups_claim")]
     pub groups_claim: String,        // default: "groups"
-    #[serde(default = "default_session_ttl")]
-    pub session_ttl: Duration,       // cookie max-age; default: 24h
+    #[serde(default = "default_cookie_max_age")]
+    pub cookie_max_age: Duration,    // cookie max-age; default: 24h
 }
+```
+
+**Note on cookie lifetime vs. session lifetime:** `cookie_max_age` controls how
+long the browser retains the session cookie. The *effective* session duration is
+`min(cookie_max_age, refresh_token_lifetime)` — if the IdP's refresh token
+expires before the cookie, the session ends at refresh token expiry regardless
+of the cookie's max-age. Conversely, a long-lived refresh token is bounded by
+the cookie max-age. Operators should align both values.
+
+```rust
+// (continued from above — not a separate block)
 ```
 
 **Signed session cookie:**
@@ -254,6 +265,21 @@ CREATE TABLE app_access (
 Access evaluation order: admin overrides all → owner has full access →
 explicit ACL grants → deny.
 
+**ACL conflict resolution:** a principal may have multiple grants for the same
+app (e.g., a direct `viewer` grant and a `collaborator` grant via group
+membership). The effective role is the highest-privilege grant across all
+matching entries. `Role` implements `Ord` in Rust (`collaborator > viewer`),
+and the access check collects all grants for the user's `sub` (kind=user)
+plus all their group names (kind=group), then takes the max.
+
+**ACL enforcement on active sessions:** ACL checks run on HTTP requests only,
+not on individual WebSocket frames. When a user's access is revoked, it takes
+effect on their next HTTP request or WebSocket reconnect — active WS
+connections continue until the next reconnect. This avoids per-frame database
+or cache lookups on the hot path. If per-request ACL checks become a
+performance concern, an in-memory ACL cache with short TTL (30–60s) can be
+added as an optimization.
+
 **JWT validation for control plane:**
 
 ```rust
@@ -285,8 +311,11 @@ async fn api_auth_middleware<B: Backend>(
 **Schema additions:**
 
 ```sql
--- Add owner to apps table
-ALTER TABLE apps ADD COLUMN owner TEXT;  -- user sub; NULL for pre-v1 apps
+-- Add owner to apps table (NOT NULL — no ownerless apps)
+-- Uses table-rebuild pattern since SQLite doesn't support ADD COLUMN NOT NULL
+-- without a default. Pre-release migration consolidation (see below) means
+-- no existing rows need migration.
+ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL;
 
 -- Per-content access grants
 CREATE TABLE app_access (
@@ -319,10 +348,11 @@ at runtime.
 2. OpenBao client — HTTP client for OpenBao's KV v2 and auth APIs
 3. OpenBao JWT auth setup — on server startup, configure OpenBao's JWT auth
    method with the IdP's JWKS URI
-4. Session-scoped token issuance — at worker spawn, exchange user's JWT for
-   a scoped OpenBao token restricted to `secret/users/{sub}/*`
-5. Token injection into worker containers — `BLOCKYARD_VAULT_TOKEN` and
-   `BLOCKYARD_VAULT_ADDR` env vars
+4. Per-request credential injection — exchange user's JWT for a scoped
+   OpenBao token, inject as `X-Blockyard-Vault-Token` and
+   `X-Blockyard-Vault-Addr` headers on every proxied request
+5. Token cache — in-memory cache keyed by user `sub` to avoid per-request
+   OpenBao calls
 6. Credential enrollment API — `POST /api/v1/users/me/credentials/{service}`
 7. Config additions: `[openbao]` section
 8. OpenBao health check for `/readyz` (wired in phase 1-6)
@@ -347,33 +377,60 @@ Headers are injected by the proxy, never by the client. The proxy strips
 any client-supplied `X-Shiny-User` or `X-Shiny-Groups` headers before
 forwarding.
 
-**OpenBao session flow:**
+**Per-request credential injection via HTTP headers:**
+
+OpenBao credentials are injected per-request as HTTP headers, not per-container
+as env vars. This is the same model Posit Connect uses for OAuth Integrations
+— per-user credentials are part of the Shiny session context, not the process
+environment. This design supports `max_sessions_per_worker > 1` safely: each
+user's request carries their own scoped token, even on shared workers.
 
 ```
-Worker spawn (cold-start path):
-1. Proxy receives request with valid session cookie
-2. Extract user's access_token from SessionPayload
-3. POST {openbao_addr}/v1/auth/jwt/login
-   Body: { "role": "blockyard-user", "jwt": "{access_token}" }
-4. OpenBao validates JWT against IdP JWKS, returns scoped token
-   Token policy: read-only on secret/users/{sub}/*
-5. Pass token + OpenBao address to backend.spawn() via WorkerSpec
-6. Backend injects as env vars: BLOCKYARD_VAULT_TOKEN, BLOCKYARD_VAULT_ADDR
+Per-request flow (on every proxied HTTP request):
+1. Auth middleware extracts SessionPayload from session cookie
+2. Look up cached OpenBao token for this user's `sub`
+   - Cache hit (token not expired): use cached token
+   - Cache miss: POST {openbao_addr}/v1/auth/jwt/login
+     Body: { "role": "blockyard-user", "jwt": "{access_token}" }
+     OpenBao validates JWT against IdP JWKS, returns scoped token
+     Cache the token (keyed by sub, TTL = token_ttl)
+3. Inject headers:
+   - X-Blockyard-Vault-Token: {scoped_token}
+   - X-Blockyard-Vault-Addr: {openbao_address}
+4. R app reads via session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN
 ```
 
-**WorkerSpec additions:**
+**Token cache:**
 
 ```rust
-pub struct WorkerSpec {
-    // ... existing fields ...
+/// In-memory cache of OpenBao tokens keyed by user sub.
+/// Avoids calling OpenBao's JWT login endpoint on every request.
+pub struct VaultTokenCache {
+    tokens: DashMap<String, CachedToken>,
+}
 
-    /// OpenBao token scoped to this user's secrets. None when OpenBao
-    /// is not configured.
-    pub vault_token: Option<String>,
-    /// OpenBao address reachable from inside the container.
-    pub vault_addr: Option<String>,
+struct CachedToken {
+    token: String,
+    expires_at: Instant,
 }
 ```
+
+The cache TTL matches `[openbao] token_ttl` (default 1h). On cache miss, the
+proxy exchanges the user's access token for a scoped OpenBao token and caches
+the result. No `WorkerSpec` changes are needed — credentials never enter the
+container environment.
+
+**Note:** `WorkerSpec` does not carry `vault_token` or `vault_addr`. These are
+injected per-request via headers, not per-container via env vars.
+
+> **Open research item:** Investigate how Posit Connect and ShinyProxy handle
+> per-user credentials on long-lived WebSocket connections. Headers are only
+> present on the initial WS upgrade request. For Shiny, the R code reads
+> `session$request` at session init time, which captures the upgrade headers.
+> This is likely sufficient (the token is available when the session starts),
+> but needs verification against real Shiny app patterns. If mid-session token
+> refresh is needed, the R code can call OpenBao's renewal API directly using
+> the token from `session$request`.
 
 **Config additions:**
 
@@ -529,16 +586,6 @@ async fn stop_app_graceful<B: Backend>(state: &AppState<B>, app_id: &str) {
     }
 }
 ```
-
-**OpenBao token scoping with session sharing:**
-
-When `max_sessions_per_worker > 1`, multiple users may share a worker. The
-OpenBao token injected at spawn time is scoped to the *first* user's
-secrets. This is acceptable only when session sharing is between
-mutually-trusting users (the documented constraint). The token scoping
-model does not change — each worker still gets one token at spawn time. If
-per-session token isolation is needed, that requires v2's per-request token
-injection.
 
 ### Phase 1-5: Vanity URLs + Content Discovery
 
@@ -827,7 +874,7 @@ issuer_url    = "https://auth.example.com/realms/myrealm"
 client_id     = "blockyard"
 client_secret = "..."                  # use BLOCKYARD_OIDC_CLIENT_SECRET env var
 groups_claim  = "groups"
-session_ttl   = "24h"
+cookie_max_age = "24h"
 
 [openbao]
 address     = "https://bao.example.com"
@@ -847,17 +894,72 @@ are optional. When omitted, the server runs in v0-compatible mode: static
 bearer token, no user auth on the app plane, no credential management, no
 metrics export, no audit log.
 
+**Environment variable mappings for v1 config fields:**
+
+The v0 env var overlay pattern (`BLOCKYARD_SECTION_FIELD`) extends to all
+new sections. Each field must be added to `supported_env_vars()` and
+`apply_env_overrides()` — the existing `env_var_coverage_complete` test
+enforces this.
+
+```
+BLOCKYARD_SERVER_SESSION_SECRET
+BLOCKYARD_OIDC_ISSUER_URL
+BLOCKYARD_OIDC_CLIENT_ID
+BLOCKYARD_OIDC_CLIENT_SECRET
+BLOCKYARD_OIDC_GROUPS_CLAIM
+BLOCKYARD_OIDC_COOKIE_MAX_AGE
+BLOCKYARD_OPENBAO_ADDRESS
+BLOCKYARD_OPENBAO_ADMIN_TOKEN
+BLOCKYARD_OPENBAO_TOKEN_TTL
+BLOCKYARD_OPENBAO_JWT_AUTH_PATH
+BLOCKYARD_TELEMETRY_METRICS_ENABLED
+BLOCKYARD_TELEMETRY_OTLP_ENDPOINT
+BLOCKYARD_AUDIT_PATH
+```
+
+**Auto-construction of optional sections from env vars:** the v1 config
+sections are `Option<T>` (absent when not in the TOML file). Setting an env
+var like `BLOCKYARD_OIDC_CLIENT_ID` when no `[oidc]` section exists in the
+TOML would silently do nothing under the v0 overlay pattern (the
+`if let Some(oidc) = &mut self.oidc` guard fails). To support env-var-only
+configuration (common in Docker Compose deployments where secrets come
+entirely from env vars), `apply_env_overrides()` should auto-construct a
+default struct when any env var in the section's prefix is set:
+
+```rust
+// Before applying individual overrides:
+if self.oidc.is_none() && env_prefix_exists("BLOCKYARD_OIDC_") {
+    self.oidc = Some(OidcConfig::default());
+}
+// Repeat for openbao, telemetry, audit
+```
+
+Required fields without meaningful defaults (e.g. `issuer_url`,
+`client_secret`) start as empty strings and are caught by
+`config.validate()` — same error path as a TOML section with missing
+fields.
+
 ## Schema Migrations
 
-v1 adds three migrations on top of v0's two:
+**Pre-release consolidation:** before v0.1.0, the existing v0 migrations
+(`001_initial.sql` and `002_remove_app_status.sql`) should be collapsed into a
+single `001_initial.sql`. Since no external consumers have run these migrations,
+there is no upgrade path to maintain. After v0.1.0, migrations are append-only
+and immutable. Migration numbers below are relative to the v0.1.0 baseline and
+will be assigned final numbers at implementation time.
+
+v1 adds three migrations:
 
 ```sql
--- 003_add_owner_and_vanity.sql
-ALTER TABLE apps ADD COLUMN owner TEXT;
+-- 002_add_owner_and_vanity.sql
+-- owner is NOT NULL — table rebuild required for SQLite compatibility.
+-- Since v0 migrations are consolidated pre-release, no existing rows
+-- need migration.
+ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL;
 ALTER TABLE apps ADD COLUMN vanity_url TEXT UNIQUE;
 ALTER TABLE apps ADD COLUMN title TEXT;
 
--- 004_access_control.sql
+-- 003_access_control.sql
 CREATE TABLE app_access (
     app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
     principal   TEXT NOT NULL,
@@ -874,7 +976,7 @@ CREATE TABLE role_mappings (
     PRIMARY KEY (group_name)
 );
 
--- 005_tags.sql
+-- 004_tags.sql
 CREATE TABLE tags (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
@@ -916,7 +1018,7 @@ Phase 1-4: Session Sharing + Load Balancing + Auto-scaling
   ├── Least-loaded worker assignment
   ├── Connection-based auto-scaling
   ├── Graceful drain
-  └── depends on: Phase 1-3 (OpenBao token model understood)
+  └── depends on: Phase 1-2 (RBAC for per-app worker limits)
 
 Phase 1-5: Vanity URLs + Content Discovery
   ├── Vanity URL routing
@@ -1044,3 +1146,31 @@ Extended with:
    table.** Each app can have at most one vanity URL. This is simpler than
    a many-to-many routing table and sufficient for v1. If multiple aliases
    per app are needed later, extract to a separate table.
+
+8. **Per-request credential injection, not per-container env vars.** OpenBao
+   tokens are injected as HTTP headers (`X-Blockyard-Vault-Token`) on each
+   proxied request, not as env vars at container spawn time. This supports
+   `max_sessions_per_worker > 1` safely — each user's session gets their
+   own scoped token. The R app reads the token via `session$request`, the
+   standard Shiny mechanism for proxy-injected headers. This matches how
+   Posit Connect handles OAuth Integrations.
+
+9. **Metadata endpoint protection unchanged from v0.** v0's per-network
+   iptables rules (or host-level rule fallback) blocking `169.254.169.254`
+   remain sufficient for v1. No changes needed — the protection applies to
+   all worker containers regardless of authentication or credential
+   injection model.
+
+10. **Catalog `status` field is derived from local in-memory state.** The
+    catalog API's `status` field is computed from the workers DashMap, which
+    is node-local. This is accurate for v1 (single server). For v2
+    multi-node deployments, `status` will need to come from shared state
+    (PostgreSQL-backed worker registry) or be documented as approximate.
+
+11. **`SessionStore`, `WorkerRegistry`, and `TaskStore` remain concrete
+    structs, not traits.** The roadmap describes these as traits with
+    swappable implementations, but v0 implemented them as concrete
+    `DashMap`-backed structs (a deliberate simplification documented in
+    phase 0-5). v1 does not require distributed state, so trait extraction
+    is deferred to v2 when PostgreSQL-backed implementations are needed for
+    multi-node deployments. See `docs/design/v2/draft.md`.
