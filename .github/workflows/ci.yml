@@ -38,6 +38,8 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - run: docker pull ghcr.io/rocker-org/r-ver:latest
       - run: docker pull alpine:latest
+      - name: Block metadata endpoint for Docker containers
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
       - run: cargo llvm-cov --features docker-tests --lcov --output-path lcov-integration.info
       - uses: actions/upload-artifact@v4
         with:
