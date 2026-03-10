@@ -787,21 +787,14 @@ async fn health_poll_loop<B: Backend>(state: AppState<B>) {
     let mut interval = tokio::time::interval(state.config.proxy.health_interval);
     loop {
         interval.tick().await;
-        let workers: Vec<_> = state.workers.iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+        let snapshot: Vec<_> = state.workers.iter()
+            .map(|e| (e.key().clone(), e.value().handle.clone()))
             .collect();
 
-        for (worker_id, active) in workers {
-            let healthy = state.backend.health_check(&active.handle).await;
-            if !healthy {
-                tracing::warn!(worker_id, app_id = active.app_id, "worker unhealthy");
-                // Stop the unhealthy worker
-                let _ = state.backend.stop(&active.handle).await;
-                state.workers.remove(&worker_id);
-                state.worker_registry.remove(&WorkerId(worker_id)).await;
-                // Session cleanup happens on next request — the proxy will
-                // spawn a new worker when the session cookie hits a missing
-                // worker.
+        for (worker_id, handle) in snapshot {
+            if !state.backend.health_check(&handle).await {
+                tracing::warn!(worker_id, "worker unhealthy — evicting");
+                evict_worker(&state, &worker_id).await;
             }
         }
     }
