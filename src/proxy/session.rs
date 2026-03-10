@@ -147,7 +147,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             COOKIE,
-            "other=val; blockyard_session=abc123; another=x".parse().unwrap(),
+            "other=val; blockyard_session=abc123; another=x"
+                .parse()
+                .unwrap(),
         );
         assert_eq!(extract_session_id(&headers), Some("abc123".into()));
     }
@@ -155,10 +157,7 @@ mod tests {
     #[test]
     fn extract_with_spaces_around_value() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            COOKIE,
-            "blockyard_session = abc123".parse().unwrap(),
-        );
+        headers.insert(COOKIE, "blockyard_session = abc123".parse().unwrap());
         assert_eq!(extract_session_id(&headers), Some("abc123".into()));
     }
 

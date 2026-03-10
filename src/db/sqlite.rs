@@ -347,7 +347,11 @@ mod tests {
     #[tokio::test]
     async fn set_active_bundle_nonexistent_app_returns_false() {
         let pool = test_pool().await;
-        assert!(!set_active_bundle(&pool, "no-such-app", "b-1").await.unwrap());
+        assert!(
+            !set_active_bundle(&pool, "no-such-app", "b-1")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -358,10 +362,10 @@ mod tests {
         let updated = update_app(
             &pool,
             &app.id,
-            Some(Some(4)),      // max_workers_per_app = 4
-            Some(10),           // max_sessions_per_worker = 10
+            Some(Some(4)),                  // max_workers_per_app = 4
+            Some(10),                       // max_sessions_per_worker = 10
             Some(Some("512m".to_string())), // memory_limit
-            Some(Some(1.5)),    // cpu_limit
+            Some(Some(1.5)),                // cpu_limit
         )
         .await
         .unwrap();
@@ -399,11 +403,17 @@ mod tests {
     async fn fail_stale_bundles_marks_building_as_failed() {
         let pool = test_pool().await;
         let app = create_app(&pool, "my-app").await.unwrap();
-        create_bundle(&pool, "b-1", &app.id, "/tmp/b1.tar.gz").await.unwrap();
-        create_bundle(&pool, "b-2", &app.id, "/tmp/b2.tar.gz").await.unwrap();
+        create_bundle(&pool, "b-1", &app.id, "/tmp/b1.tar.gz")
+            .await
+            .unwrap();
+        create_bundle(&pool, "b-2", &app.id, "/tmp/b2.tar.gz")
+            .await
+            .unwrap();
 
         // Set one to building, leave the other as pending
-        update_bundle_status(&pool, "b-1", "building").await.unwrap();
+        update_bundle_status(&pool, "b-1", "building")
+            .await
+            .unwrap();
 
         let count = fail_stale_bundles(&pool).await.unwrap();
         assert_eq!(count, 1);
@@ -419,7 +429,9 @@ mod tests {
     async fn fail_stale_bundles_noop_when_none_building() {
         let pool = test_pool().await;
         let app = create_app(&pool, "my-app").await.unwrap();
-        create_bundle(&pool, "b-1", &app.id, "/tmp/b1.tar.gz").await.unwrap();
+        create_bundle(&pool, "b-1", &app.id, "/tmp/b1.tar.gz")
+            .await
+            .unwrap();
 
         let count = fail_stale_bundles(&pool).await.unwrap();
         assert_eq!(count, 0);
@@ -429,7 +441,9 @@ mod tests {
     async fn delete_bundle_removes_row() {
         let pool = test_pool().await;
         let app = create_app(&pool, "my-app").await.unwrap();
-        create_bundle(&pool, "b-1", &app.id, "/tmp/b.tar.gz").await.unwrap();
+        create_bundle(&pool, "b-1", &app.id, "/tmp/b.tar.gz")
+            .await
+            .unwrap();
 
         assert!(delete_bundle(&pool, "b-1").await.unwrap());
         let bundles = list_bundles_by_app(&pool, &app.id).await.unwrap();

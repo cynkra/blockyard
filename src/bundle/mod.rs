@@ -282,9 +282,11 @@ mod tests {
         }
 
         // Retain 2, but b-1 (oldest) is the active bundle — it must survive
-        let deleted =
-            enforce_retention(&pool, tmp.path(), &app.id, Some("b-1"), 2).await;
-        assert!(!deleted.contains(&"b-1".to_string()), "active bundle must not be deleted");
+        let deleted = enforce_retention(&pool, tmp.path(), &app.id, Some("b-1"), 2).await;
+        assert!(
+            !deleted.contains(&"b-1".to_string()),
+            "active bundle must not be deleted"
+        );
 
         let remaining = crate::db::sqlite::list_bundles_by_app(&pool, &app.id)
             .await
