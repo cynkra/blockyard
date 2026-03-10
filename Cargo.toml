@@ -35,6 +35,9 @@ anyhow      = "1"
 humantime-serde = "1"
 humantime   = "2"
 chrono      = { version = "0.4", features = ["serde"] }
+flate2      = "1"
+tar         = "0.4"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 blockyard = { path = ".", features = ["test-support"] }

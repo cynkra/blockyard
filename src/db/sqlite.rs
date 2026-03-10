@@ -72,17 +72,17 @@ pub async fn delete_app(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error
 
 pub async fn create_bundle(
     pool: &SqlitePool,
+    id: &str,
     app_id: &str,
     path: &str,
 ) -> Result<BundleRow, sqlx::Error> {
-    let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query_as::<_, BundleRow>(
         "INSERT INTO bundles (id, app_id, status, path, uploaded_at)
          VALUES (?, ?, 'pending', ?, ?)
          RETURNING *",
     )
-    .bind(&id)
+    .bind(id)
     .bind(app_id)
     .bind(path)
     .bind(&now)
@@ -100,6 +100,29 @@ pub async fn list_bundles_by_app(
     .bind(app_id)
     .fetch_all(pool)
     .await
+}
+
+pub async fn delete_bundle(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM bundles WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn set_active_bundle(
+    pool: &SqlitePool,
+    app_id: &str,
+    bundle_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query("UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?")
+        .bind(bundle_id)
+        .bind(&now)
+        .bind(app_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn update_bundle_status(
@@ -187,7 +210,7 @@ mod tests {
     async fn create_and_list_bundles() {
         let pool = test_pool().await;
         let app = create_app(&pool, "my-app").await.unwrap();
-        let bundle = create_bundle(&pool, &app.id, "/tmp/bundle.tar.gz")
+        let bundle = create_bundle(&pool, "bundle-1", &app.id, "/tmp/bundle.tar.gz")
             .await
             .unwrap();
         assert_eq!(bundle.app_id, app.id);
@@ -201,7 +224,7 @@ mod tests {
     async fn update_bundle_status_works() {
         let pool = test_pool().await;
         let app = create_app(&pool, "my-app").await.unwrap();
-        let bundle = create_bundle(&pool, &app.id, "/tmp/bundle.tar.gz")
+        let bundle = create_bundle(&pool, "bundle-1", &app.id, "/tmp/bundle.tar.gz")
             .await
             .unwrap();
 

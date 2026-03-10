@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 
 use crate::backend::Backend;
 use crate::config::Config;
+use crate::task::InMemoryTaskStore;
 
 /// Shared server state. Cloneable (all fields behind Arc).
 /// Generic over the backend so tests can use MockBackend.
@@ -15,6 +16,7 @@ pub struct AppState<B: Backend> {
     pub db: SqlitePool,
     /// Currently running workers, keyed by worker_id.
     pub workers: Arc<DashMap<String, ActiveWorker<B::Handle>>>,
+    pub task_store: Arc<InMemoryTaskStore>,
 }
 
 /// A running worker tracked by the server.
@@ -32,6 +34,7 @@ impl<B: Backend> AppState<B> {
             backend: Arc::new(backend),
             db,
             workers: Arc::new(DashMap::new()),
+            task_store: Arc::new(InMemoryTaskStore::new()),
         }
     }
 }

@@ -1,16 +1,22 @@
 #![cfg(feature = "test-support")]
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dashmap::DashMap;
 
 use crate::backend::*;
 
-pub struct MockBackend {
+struct MockInner {
     workers: DashMap<String, MockWorker>,
-    pub health_response: AtomicBool,
-    pub build_success: AtomicBool,
+    health_response: AtomicBool,
+    build_success: AtomicBool,
+}
+
+#[derive(Clone)]
+pub struct MockBackend {
+    inner: Arc<MockInner>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,18 +39,28 @@ struct MockWorker {
 impl MockBackend {
     pub fn new() -> Self {
         Self {
-            workers: DashMap::new(),
-            health_response: AtomicBool::new(true),
-            build_success: AtomicBool::new(true),
+            inner: Arc::new(MockInner {
+                workers: DashMap::new(),
+                health_response: AtomicBool::new(true),
+                build_success: AtomicBool::new(true),
+            }),
         }
     }
 
     pub fn worker_count(&self) -> usize {
-        self.workers.len()
+        self.inner.workers.len()
     }
 
     pub fn has_worker(&self, id: &str) -> bool {
-        self.workers.contains_key(id)
+        self.inner.workers.contains_key(id)
+    }
+
+    pub fn set_health_response(&self, healthy: bool) {
+        self.inner.health_response.store(healthy, Ordering::SeqCst);
+    }
+
+    pub fn set_build_success(&self, success: bool) {
+        self.inner.build_success.store(success, Ordering::SeqCst);
     }
 }
 
@@ -71,7 +87,7 @@ impl Backend for MockBackend {
             addr: actual_addr,
         };
 
-        self.workers.insert(
+        self.inner.workers.insert(
             spec.worker_id.clone(),
             MockWorker {
                 _handle: handle.clone(),
@@ -83,14 +99,15 @@ impl Backend for MockBackend {
     }
 
     async fn stop(&self, handle: &MockHandle) -> Result<(), BackendError> {
-        self.workers
+        self.inner
+            .workers
             .remove(handle.id())
             .ok_or_else(|| BackendError::Stop(format!("worker {} not found", handle.id())))?;
         Ok(())
     }
 
     async fn health_check(&self, _handle: &MockHandle) -> bool {
-        self.health_response.load(Ordering::SeqCst)
+        self.inner.health_response.load(Ordering::SeqCst)
     }
 
     async fn logs(&self, _handle: &MockHandle) -> Result<LogStream, BackendError> {
@@ -103,7 +120,7 @@ impl Backend for MockBackend {
     }
 
     async fn build(&self, _spec: &BuildSpec) -> Result<BuildResult, BackendError> {
-        let success = self.build_success.load(Ordering::SeqCst);
+        let success = self.inner.build_success.load(Ordering::SeqCst);
         Ok(BuildResult {
             success,
             exit_code: if success { Some(0) } else { Some(1) },
@@ -143,7 +160,7 @@ mod tests {
 
         assert!(backend.health_check(&handle).await);
 
-        backend.health_response.store(false, Ordering::SeqCst);
+        backend.set_health_response(false);
         assert!(!backend.health_check(&handle).await);
     }
 
@@ -162,7 +179,7 @@ mod tests {
         let result = backend.build(&spec).await.unwrap();
         assert!(result.success);
 
-        backend.build_success.store(false, Ordering::SeqCst);
+        backend.set_build_success(false);
         let result = backend.build(&spec).await.unwrap();
         assert!(!result.success);
     }

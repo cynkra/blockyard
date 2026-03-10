@@ -13,6 +13,7 @@ rv_version = "latest"   # rv release tag, e.g. "v0.18.0"
 bundle_server_path = "/data/bundles"
 bundle_worker_path = "/app"
 bundle_retention   = 50
+max_bundle_size    = 104857600   # 100MB in bytes
 
 [database]
 path = "/data/db/blockyard.db"

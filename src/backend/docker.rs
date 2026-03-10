@@ -27,6 +27,7 @@ use crate::backend::*;
 use crate::config::DockerConfig;
 
 #[cfg(feature = "docker")]
+#[derive(Clone)]
 pub struct DockerBackend {
     client: Docker,
     server_id: Option<String>,
@@ -163,6 +164,46 @@ impl DockerBackend {
         Ok(())
     }
 
+    /// Pull the image if it's not already present locally.
+    pub async fn ensure_image(&self, image: &str) -> Result<(), BackendError> {
+        use bollard::image::CreateImageOptions;
+
+        // Check if image exists locally
+        match self.client.inspect_image(image).await {
+            Ok(_) => {
+                tracing::debug!(image, "image already present");
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::info!(image, "pulling image");
+            }
+        }
+
+        let options = CreateImageOptions {
+            from_image: image,
+            ..Default::default()
+        };
+
+        let mut stream = self.client.create_image(Some(options), None, None);
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(info) => {
+                    if let Some(status) = info.status {
+                        tracing::debug!(image, status, "pull progress");
+                    }
+                }
+                Err(e) => {
+                    return Err(BackendError::Build(format!(
+                        "image pull failed for '{image}': {e}"
+                    )));
+                }
+            }
+        }
+
+        tracing::info!(image, "image pulled successfully");
+        Ok(())
+    }
+
     async fn disconnect_network(
         &self,
         container_id: &str,
@@ -187,6 +228,9 @@ impl Backend for DockerBackend {
     type Handle = DockerHandle;
 
     async fn spawn(&self, spec: &WorkerSpec) -> Result<DockerHandle, BackendError> {
+        // Ensure image is available before spawning
+        self.ensure_image(&spec.image).await?;
+
         let network_name = format!("blockyard-{}", spec.worker_id);
 
         // 1. Create per-worker bridge network
@@ -321,6 +365,9 @@ impl Backend for DockerBackend {
     }
 
     async fn build(&self, spec: &BuildSpec) -> Result<BuildResult, BackendError> {
+        // Ensure image is available before building
+        self.ensure_image(&spec.image).await?;
+
         let container_name = format!("blockyard-build-{}", spec.bundle_id);
 
         let host_config = HostConfig {

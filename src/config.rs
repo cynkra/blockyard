@@ -40,6 +40,8 @@ pub struct StorageConfig {
     pub bundle_worker_path: PathBuf,
     #[serde(default = "default_retention")]
     pub bundle_retention: u32,
+    #[serde(default = "default_max_bundle_size")]
+    pub max_bundle_size: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -82,6 +84,9 @@ fn default_worker_path() -> PathBuf {
 fn default_retention() -> u32 {
     50
 }
+fn default_max_bundle_size() -> usize {
+    100 * 1024 * 1024
+}
 fn default_ws_cache_ttl() -> Duration {
     Duration::from_secs(60)
 }
@@ -109,6 +114,7 @@ pub fn supported_env_vars() -> &'static [&'static str] {
         "BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH",
         "BLOCKYARD_STORAGE_BUNDLE_WORKER_PATH",
         "BLOCKYARD_STORAGE_BUNDLE_RETENTION",
+        "BLOCKYARD_STORAGE_MAX_BUNDLE_SIZE",
         "BLOCKYARD_DATABASE_PATH",
         "BLOCKYARD_PROXY_WS_CACHE_TTL",
         "BLOCKYARD_PROXY_HEALTH_INTERVAL",
@@ -180,6 +186,11 @@ impl Config {
             && let Ok(n) = v.parse()
         {
             self.storage.bundle_retention = n;
+        }
+        if let Ok(v) = std::env::var("BLOCKYARD_STORAGE_MAX_BUNDLE_SIZE")
+            && let Ok(n) = v.parse()
+        {
+            self.storage.max_bundle_size = n;
         }
         if let Ok(v) = std::env::var("BLOCKYARD_DATABASE_PATH") {
             self.database.path = PathBuf::from(v);
