@@ -671,7 +671,7 @@ HTTP listener.
 6. Call backend.spawn(WorkerSpec { ... })
 7. Register worker in WorkerRegistry
 8. Pin session in SessionStore: session_id → worker_id
-9. Poll backend.health_check(handle) every 500ms
+9. Poll backend.health_check(handle) with exponential backoff (100ms initial, doubling, capped at 2s)
    - If healthy within worker_start_timeout → continue
    - If timeout → stop worker, return 503
 10. Get worker address via backend.addr(handle)
