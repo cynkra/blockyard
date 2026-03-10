@@ -504,25 +504,42 @@ buffered output (stored in the `TaskStore`) followed by live streaming.
 
 **TaskStore:**
 
+v0 uses a concrete `InMemoryTaskStore` — same rationale as
+`SessionStore`/`WorkerRegistry` (see Phase 0-5). Trait extraction
+follows the same path when persistence or distribution is needed.
+
 ```rust
-pub trait TaskStore: Send + Sync + 'static {
+pub struct InMemoryTaskStore {
+    tasks: DashMap<TaskId, TaskEntry>,
+}
+
+impl InMemoryTaskStore {
     /// Create a new task. Returns a sender for writing log output.
-    fn create(&self, task_id: TaskId) -> TaskSender;
+    pub fn create(&self, task_id: TaskId) -> TaskSender;
 
     /// Get the current state of a task.
-    async fn get(&self, task_id: &TaskId) -> Option<TaskState>;
+    pub fn get(&self, task_id: &str) -> Option<TaskState>;
 
-    /// Get a stream of log output (buffered + live).
-    async fn log_stream(&self, task_id: &TaskId) -> Option<LogStream>;
+    /// Subscribe to log output. Returns buffered lines and a broadcast
+    /// receiver for live lines. Callers should skip buffer.len() items
+    /// from the receiver to deduplicate.
+    pub async fn subscribe(&self, task_id: &str)
+        -> Option<(Vec<String>, broadcast::Receiver<String>)>;
+}
 
-    /// Mark a task as completed (success or failure).
-    async fn complete(&self, task_id: &TaskId, success: bool);
+/// Sender handle returned from create(). The background task uses this
+/// to write log lines and mark completion.
+pub struct TaskSender { ... }
+
+impl TaskSender {
+    pub async fn send(&self, line: String);
+    pub async fn complete(self, store: &InMemoryTaskStore, success: bool);
 }
 
 pub struct TaskState {
     pub id: TaskId,
     pub status: TaskStatus,     // running | completed | failed
-    pub created_at: DateTime,
+    pub created_at: String,
 }
 
 pub enum TaskStatus {
@@ -532,9 +549,10 @@ pub enum TaskStatus {
 }
 ```
 
-In-memory implementation: a `DashMap<TaskId, TaskEntry>` where each entry
-holds a `Vec<String>` of buffered log lines and a
+Each `TaskEntry` holds a `Vec<String>` of buffered log lines and a
 `tokio::sync::broadcast::Sender<String>` for live subscribers.
+Completion is driven by the `TaskSender`, not by calling a method on
+the store directly.
 
 ### Phase 0-4: REST API + Auth
 
