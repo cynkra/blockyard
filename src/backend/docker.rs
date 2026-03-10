@@ -265,9 +265,10 @@ impl Backend for DockerBackend {
             .client
             .stop_container(&handle.container_id, Some(StopContainerOptions { t: 10 }))
             .await
-            && !is_docker_status(&e, &[304, 404]) {
-                return Err(BackendError::Stop(format!("stop container: {e}")));
-            }
+            && !is_docker_status(&e, &[304, 404])
+        {
+            return Err(BackendError::Stop(format!("stop container: {e}")));
+        }
 
         // 2. Remove the container — ignore 404 (already gone) and 409 (removal in progress)
         if let Err(e) = self
@@ -280,9 +281,10 @@ impl Backend for DockerBackend {
                 }),
             )
             .await
-            && !is_docker_status(&e, &[404, 409]) {
-                return Err(BackendError::Stop(format!("remove container: {e}")));
-            }
+            && !is_docker_status(&e, &[404, 409])
+        {
+            return Err(BackendError::Stop(format!("remove container: {e}")));
+        }
 
         // 3. Disconnect server from the worker's network
         if let Some(ref server_id) = self.server_id {
@@ -531,15 +533,17 @@ impl Backend for DockerBackend {
                         }),
                     )
                     .await
-                    && !is_docker_status(&e, &[404, 409]) {
-                        return Err(BackendError::Cleanup(format!("remove container: {e}")));
-                    }
+                    && !is_docker_status(&e, &[404, 409])
+                {
+                    return Err(BackendError::Cleanup(format!("remove container: {e}")));
+                }
             }
             ResourceKind::Network => {
                 if let Err(e) = self.client.remove_network(&resource.id).await
-                    && !is_docker_status(&e, &[404]) {
-                        return Err(BackendError::Cleanup(format!("remove network: {e}")));
-                    }
+                    && !is_docker_status(&e, &[404])
+                {
+                    return Err(BackendError::Cleanup(format!("remove network: {e}")));
+                }
             }
         }
         Ok(())
