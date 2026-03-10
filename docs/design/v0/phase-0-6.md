@@ -1,9 +1,10 @@
-# Phase 0-6: Health Polling + Orphan Cleanup + Log Capture
+# Phase 0-6: Health Polling + Orphan Cleanup + Log Capture + Metadata Endpoint Protection
 
 Background operational subsystems that keep the server healthy at runtime
 and make debugging possible. Without these, hung processes silently swallow
-traffic, server restarts leak containers, and there is no way to see what
-a Shiny app printed to stdout.
+traffic, server restarts leak containers, there is no way to see what
+a Shiny app printed to stdout, and containers can reach the cloud instance
+metadata endpoint to steal host credentials.
 
 ## Deliverables
 
@@ -25,10 +26,12 @@ a Shiny app printed to stdout.
 13. `evict_worker()` — shared helper that fully decommissions a worker
     (stop backend, remove from workers/registry/sessions, mark log ended)
 14. `CancellationToken` — cooperative shutdown for background tasks
-15. Integration tests — orphan cleanup, stale bundle recovery, graceful
+15. Metadata endpoint protection — per-network iptables rules blocking
+    `169.254.169.254`, with fallback to host-level rule verification
+16. Integration tests — orphan cleanup, stale bundle recovery, graceful
     shutdown, health poller behavior, log capture and persistence
-16. Docker integration tests — gated behind `docker-integration-tests`
-    feature flag; network isolation, native mode E2E
+17. Docker integration tests — gated behind `docker-integration-tests`
+    feature flag; network isolation, native mode E2E, metadata block
 
 ## What's already done
 
@@ -214,7 +217,202 @@ pub async fn fail_stale_bundles(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
 Log the count if any were failed. This is idempotent — safe to run on
 every startup regardless of whether the previous shutdown was clean.
 
-### Step 5: `evict_worker` helper
+### Step 5: Metadata endpoint protection
+
+Cloud providers expose instance metadata at `169.254.169.254` — a
+link-local address reachable from any Docker container via the host
+network stack. Without protection, arbitrary R code in a Shiny container
+can retrieve the host VM's IAM credentials (AWS, GCP, Azure all use
+this address). This is a security boundary that must be enforced from
+the first deployment.
+
+**Approach: per-network iptables rules with comment-tagged cleanup.**
+
+When `DockerBackend::spawn()` creates a per-worker bridge network, it
+also inserts an iptables rule scoped to that network's subnet, blocking
+traffic to the metadata endpoint. Rules are tagged with a comment for
+discovery and cleanup.
+
+**New method on `DockerBackend`:**
+
+```rust
+/// Block metadata endpoint access for a specific bridge network.
+/// Inspects the network to find its subnet, then inserts a DROP rule
+/// in the DOCKER-USER chain scoped to that subnet.
+async fn block_metadata_for_network(
+    &self,
+    network_name: &str,
+    worker_id: &str,
+) -> Result<(), BackendError> {
+    // 1. Inspect network to get subnet CIDR
+    let network = self.client.inspect_network::<String>(network_name, None).await
+        .map_err(|e| BackendError::Spawn(format!("inspect network: {e}")))?;
+
+    let subnet = network.ipam
+        .and_then(|ipam| ipam.config)
+        .and_then(|configs| configs.into_iter().next())
+        .and_then(|config| config.subnet)
+        .ok_or_else(|| BackendError::Spawn(
+            format!("no subnet found for network {network_name}")
+        ))?;
+
+    // 2. Insert iptables rule with comment tag
+    let comment = format!("blockyard-{worker_id}");
+    let status = tokio::process::Command::new("iptables")
+        .args([
+            "-I", "DOCKER-USER",
+            "-s", &subnet,
+            "-d", "169.254.169.254/32",
+            "-j", "DROP",
+            "-m", "comment", "--comment", &comment,
+        ])
+        .status()
+        .await;
+
+    match status {
+        Ok(s) if s.success() => {
+            tracing::debug!(worker_id, subnet, "metadata endpoint blocked");
+            Ok(())
+        }
+        Ok(_) | Err(_) => {
+            // iptables failed — check if a host-level rule already exists
+            if self.host_has_metadata_block().await {
+                tracing::info!("metadata endpoint blocked by host-level rule");
+                Ok(())
+            } else {
+                Err(BackendError::Spawn(
+                    "cannot block metadata endpoint: grant CAP_NET_ADMIN to the \
+                     server container, or add a host-level iptables rule: \
+                     iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP"
+                        .into(),
+                ))
+            }
+        }
+    }
+}
+
+/// Check if the DOCKER-USER chain already has a DROP rule for 169.254.169.254.
+async fn host_has_metadata_block(&self) -> bool {
+    let output = tokio::process::Command::new("iptables")
+        .args(["-L", "DOCKER-USER", "-n"])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().any(|line| {
+                line.contains("169.254.169.254") && line.contains("DROP")
+            })
+        }
+        Err(_) => false,
+    }
+}
+```
+
+**Wiring into `spawn()`:**
+
+After creating the bridge network and before starting the container,
+call `block_metadata_for_network(network_name, worker_id)`. On failure,
+the spawn aborts — the worker is not started without metadata protection.
+
+```rust
+// In DockerBackend::spawn():
+// ... after create_network ...
+self.block_metadata_for_network(&network_name, &spec.worker_id).await?;
+// ... create container, join network, start ...
+```
+
+**Cleanup in `stop()`:**
+
+Remove the iptables rule by comment tag when the worker is stopped:
+
+```rust
+async fn unblock_metadata_for_worker(&self, worker_id: &str) {
+    let comment = format!("blockyard-{worker_id}");
+    // List rules in DOCKER-USER with line numbers, find ours, delete by number.
+    // Alternative: use iptables -D with the full rule spec.
+    let _ = tokio::process::Command::new("iptables")
+        .args([
+            "-D", "DOCKER-USER",
+            "-m", "comment", "--comment", &comment,
+            "-j", "DROP",
+        ])
+        .status()
+        .await;
+}
+```
+
+Errors removing the rule are logged but do not fail `stop()` — the rule
+is harmless without a network and will be cleaned up on next startup.
+
+**Orphan cleanup at startup:**
+
+Before removing orphaned containers and networks, remove all orphaned
+iptables rules from a previous run. Scan the DOCKER-USER chain for
+rules with `blockyard-` prefixed comments and delete them:
+
+```rust
+async fn cleanup_orphan_metadata_rules() {
+    let output = tokio::process::Command::new("iptables")
+        .args(["-L", "DOCKER-USER", "-n", "--line-numbers", "-v"])
+        .output()
+        .await;
+
+    let Ok(output) = output else { return };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Collect matching line numbers in reverse order (delete from bottom
+    // up to avoid renumbering issues)
+    let mut line_numbers: Vec<u32> = Vec::new();
+    for line in stdout.lines() {
+        if line.contains("blockyard-") && line.contains("DROP") {
+            if let Some(num) = line.split_whitespace().next().and_then(|s| s.parse().ok()) {
+                line_numbers.push(num);
+            }
+        }
+    }
+    line_numbers.sort_unstable_by(|a, b| b.cmp(a)); // reverse order
+
+    for num in line_numbers {
+        let _ = tokio::process::Command::new("iptables")
+            .args(["-D", "DOCKER-USER", &num.to_string()])
+            .status()
+            .await;
+    }
+}
+```
+
+Called at the start of `startup_cleanup()`, before orphan container/network
+removal. If iptables is unavailable (native mode without CAP_NET_ADMIN),
+the cleanup silently skips — no rules to clean.
+
+**Mode caching:**
+
+The first `spawn()` call determines whether the server can manage iptables
+rules (`ServerManaged`) or relies on a host-level rule (`HostManaged`).
+This result is cached in `DockerBackend` to avoid repeating the probe on
+every spawn:
+
+```rust
+pub struct DockerBackend {
+    client: Docker,
+    server_id: Option<String>,
+    config: DockerConfig,
+    metadata_block_mode: OnceCell<MetadataBlockMode>,
+}
+
+enum MetadataBlockMode {
+    ServerManaged,  // server inserts/removes per-network rules
+    HostManaged,    // operator-installed blanket rule detected
+}
+```
+
+When `HostManaged`, `spawn()` skips rule insertion and `stop()` skips
+rule removal. `startup_cleanup()` always attempts orphan rule cleanup
+regardless of mode (in case the mode changed between runs).
+
+### Step 6: `evict_worker` helper
 
 Extract a shared helper that fully decommissions a worker. Every
 codepath that removes a worker (health poller, `stop_app_workers`,
@@ -240,12 +438,12 @@ lookup). If this is too expensive (scan all sessions), add a reverse
 index `worker_id -> session_id` to `SessionStore`.
 
 Callers:
-- Health poller (step 6)
+- Health poller (step 7)
 - `stop_app_workers` in `api/apps.rs`
 - Session expiry in `proxy/forward.rs`
-- `graceful_shutdown` (step 7)
+- `graceful_shutdown` (step 8)
 
-### Step 6: Health polling
+### Step 7: Health polling
 
 `ops::spawn_health_poller(state, token) -> JoinHandle<()>` — spawns a
 tokio task that runs at `config.proxy.health_interval`. Takes a
@@ -272,7 +470,7 @@ No replacement spawning in v0. The roadmap mentions "(if auto-scaling is
 enabled) spawn a replacement" — that's a v1 concern tied to multi-worker
 load balancing.
 
-### Step 7: Graceful shutdown
+### Step 8: Graceful shutdown
 
 The current `main.rs` calls `shutdown_signal()` (waits for `ctrl_c`) but
 does not stop any containers. The roadmap specifies that on SIGTERM the
@@ -337,7 +535,7 @@ After a clean shutdown, the next `startup_cleanup` finds nothing to remove.
 After an unclean shutdown (OOM, SIGKILL), `startup_cleanup` handles the
 leftovers. Both paths converge to the same clean state.
 
-### Step 8: Log capture
+### Step 9: Log capture
 
 Every codepath that spawns a worker must also start log capture by calling
 `ops::spawn_log_capture_for_app(state, worker_id, app_id, handle)`. There
@@ -367,14 +565,14 @@ as ended.
 When `stop_app_workers()` stops a worker, it also calls
 `log_store.mark_ended(worker_id)`.
 
-### Step 9: Log retention cleanup
+### Step 10: Log retention cleanup
 
 `ops::spawn_log_retention_cleaner(state, retention, token) -> JoinHandle<()>`
 — takes a `CancellationToken`, runs periodically at `min(retention, 60s)`,
 selects on `token.cancelled()`, and calls
 `log_store.cleanup_expired(retention)`.
 
-### Step 10: Updated logs endpoint
+### Step 11: Updated logs endpoint
 
 `GET /api/v1/apps/{id}/logs?worker_id=<optional>` changes from streaming
 directly from the backend to serving from the log store.
@@ -397,7 +595,7 @@ directly from the backend to serving from the log store.
 This is the key behavioral change: logs are now available after a worker
 exits. Previously, `GET .../logs` returned 404 once the worker was gone.
 
-### Step 11: main.rs wiring
+### Step 12: main.rs wiring
 
 ```rust
 // After building state, before binding listener:
@@ -434,7 +632,7 @@ run in the background with cooperative cancellation. Graceful shutdown
 runs after background tasks have stopped and the HTTP server has
 finished draining.
 
-### Step 12: Mock backend updates
+### Step 13: Mock backend updates
 
 Add test helpers to `MockBackend`:
 
@@ -447,7 +645,7 @@ Add test helpers to `MockBackend`:
   worker. Lines are sent and then the channel is dropped (stream ends).
   For testing log capture.
 
-### Step 13: Integration tests (mock)
+### Step 14: Integration tests (mock)
 
 Added to `tests/bundle_test.rs`:
 
@@ -486,7 +684,7 @@ Added to `tests/bundle_test.rs`:
 - `logs_unavailable_returns_404` — create app but never start it, `GET
   .../logs` returns 404.
 
-### Step 14: Docker integration tests
+### Step 15: Docker integration tests
 
 Gated behind `--features docker-integration-tests`. These tests require
 a running Docker daemon and exercise real container lifecycle. They live
@@ -505,6 +703,10 @@ in a separate test file (`tests/docker_integration_test.rs`).
 - `native_mode_e2e` — run with the server outside Docker (no cgroup
   container ID detection), spawn a worker, verify proxy routing works
   without network joining.
+- `metadata_endpoint_blocked` — spawn a worker, exec `curl -s -o /dev/null
+  -w '%{http_code}' http://169.254.169.254/` inside the container (or
+  `wget --spider`), verify the request is dropped (timeout/unreachable,
+  not a successful response).
 
 These tests are slower and not run in the default `cargo test` pass.
 CI runs them on a Docker-capable runner with
@@ -528,7 +730,7 @@ Existing fields consumed:
 
 | File                              | Change                                                    |
 |-----------------------------------|-----------------------------------------------------------|
-| `src/ops.rs`                      | New module: LogStore, evict_worker, startup_cleanup, graceful_shutdown, health poller, log capture, retention cleaner |
+| `src/ops.rs`                      | New module: LogStore, evict_worker, startup_cleanup, graceful_shutdown, health poller, log capture, retention cleaner, cleanup_orphan_metadata_rules |
 | `src/lib.rs`                      | Add `pub mod ops`                                         |
 | `src/app.rs`                      | Add `log_store: Arc<LogStore>` to `AppState`              |
 | `src/config.rs`                   | Add `log_retention` to `ProxyConfig` + env var + default  |
@@ -537,6 +739,7 @@ Existing fields consumed:
 | `src/api/apps.rs`                 | `start_app`: spawn log capture; `stop_app_workers`: use `evict_worker`; `app_logs`: serve from log store |
 | `src/proxy/forward.rs`            | Cold-start spawn: add log capture; session expiry: use `evict_worker` instead of inline cleanup |
 | `src/proxy/session.rs`            | Add `remove_by_worker(worker_id)` method                  |
+| `src/backend/docker.rs`           | Add `block_metadata_for_network()`, `unblock_metadata_for_worker()`, `host_has_metadata_block()`, `MetadataBlockMode` cache; wire into `spawn()` and `stop()` |
 | `src/backend/mock.rs`             | Add `set_managed_resources()`, `set_log_lines()`, persistent resource list |
 | `tests/bundle_test.rs`            | 9 new mock integration tests                              |
 | `tests/docker_integration_test.rs`| New: Docker integration tests (feature-gated)             |
@@ -544,13 +747,17 @@ Existing fields consumed:
 
 ## Reminders
 
-- **Network isolation test:** Addressed in step 14 — Docker integration
+- **Network isolation test:** Addressed in step 15 — Docker integration
   test `network_isolation` spawns two workers and verifies they cannot
   reach each other.
 
-- **Native mode E2E test:** Addressed in step 14 — Docker integration
+- **Native mode E2E test:** Addressed in step 15 — Docker integration
   test `native_mode_e2e` runs the server outside Docker and verifies
   proxy routing works without network joining.
+
+- **Metadata endpoint test:** Addressed in step 15 — Docker integration
+  test `metadata_endpoint_blocked` verifies containers cannot reach
+  `169.254.169.254`.
 
 ## Exit criteria
 
@@ -572,5 +779,9 @@ Phase 0-6 is done when:
 - `GET .../logs` returns captured logs for both running and recently-exited
   workers
 - Expired log entries are cleaned up after `log_retention`
+- Metadata endpoint (`169.254.169.254`) is blocked for worker containers
+  via per-network iptables rules (when CAP_NET_ADMIN available) or verified
+  via host-level rule (fallback); spawn aborts if neither is in place
+- Orphan iptables rules from previous runs are cleaned up at startup
 - Network isolation verified: two workers cannot reach each other
 - Native mode E2E verified: proxy works with server outside Docker
