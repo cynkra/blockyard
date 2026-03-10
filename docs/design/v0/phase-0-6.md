@@ -22,8 +22,13 @@ a Shiny app printed to stdout.
 11. `main.rs` wiring — startup cleanup, graceful shutdown, background tasks
 12. Mock backend additions — `set_managed_resources()`, `set_log_lines()`
     for testing
-13. Integration tests — orphan cleanup, stale bundle recovery, graceful
+13. `evict_worker()` — shared helper that fully decommissions a worker
+    (stop backend, remove from workers/registry/sessions, mark log ended)
+14. `CancellationToken` — cooperative shutdown for background tasks
+15. Integration tests — orphan cleanup, stale bundle recovery, graceful
     shutdown, health poller behavior, log capture and persistence
+16. Docker integration tests — gated behind `docker-integration-tests`
+    feature flag; network isolation, native mode E2E
 
 ## What's already done
 
@@ -59,10 +64,18 @@ Config already has:
 Pattern mirrors `InMemoryTaskStore` from phase 0-3 (broadcast channel +
 buffered snapshot for subscribe-then-snapshot deduplication).
 
+The buffer is capped at `MAX_LOG_LINES` (50,000) per worker. When the
+buffer exceeds this limit, the oldest lines are dropped. At ~200 bytes
+per line this is ~10MB per worker — well within reason even with several
+dead workers in the retention window. Uses `VecDeque` for efficient
+front removal.
+
 ```rust
+const MAX_LOG_LINES: usize = 50_000;
+
 struct LogEntry {
     app_id: String,
-    buffer: Arc<Mutex<Vec<String>>>,
+    buffer: Arc<Mutex<VecDeque<String>>>,
     tx: broadcast::Sender<String>,
     ended_at: Option<Instant>,
 }
@@ -92,7 +105,9 @@ pub struct LogSender {
   are missed. Caller skips `buffer.len()` items from the receiver to
   deduplicate (same pattern as `InMemoryTaskStore::subscribe`)
 - `subscribe_by_app(app_id) -> Option<(worker_id, LogSubscription)>` — find
-  a worker for the app; prefer a live (not ended) worker over an ended one
+  a worker for the app; prefer a live (not ended) worker over an ended one.
+  Assumes single-worker-per-app in v0. When multi-worker lands, make
+  `worker_id` a required parameter on the logs endpoint instead.
 - `mark_ended(worker_id)` — set `ended_at = Some(Instant::now())`
 - `cleanup_expired(retention: Duration)` — remove entries whose `ended_at`
   is older than `retention`
@@ -100,7 +115,8 @@ pub struct LogSender {
 
 **LogSender:**
 
-- `send(line: String)` — append to buffer + broadcast
+- `send(line: String)` — append to buffer + broadcast. If buffer
+  exceeds `MAX_LOG_LINES`, drop oldest line (`pop_front`).
 
 **Tests:**
 
@@ -146,15 +162,24 @@ Since the server just started, `state.workers` is empty. Every managed
 resource is an orphan from a crashed or unclean previous run.
 
 ```rust
-pub async fn startup_cleanup<B: Backend>(state: &AppState<B>) {
+pub async fn startup_cleanup<B: Backend>(state: &AppState<B>) -> Result<(), BackendError> {
     // 1. Remove orphaned containers and networks
-    let resources = state.backend.list_managed().await;
+    //    Fail hard if we can't talk to the backend — if Docker is
+    //    unreachable at boot, the server shouldn't start.
+    let resources = state.backend.list_managed().await?;
     // Log count, iterate, remove each. Containers before networks
-    // (already sorted by list_managed). Log individual failures but
-    // don't abort — partial cleanup is better than none.
+    // (already sorted by list_managed). Log individual removal
+    // failures but don't abort — partial cleanup is better than none.
+    for resource in &resources {
+        if let Err(e) = state.backend.remove_resource(resource).await {
+            tracing::warn!(id = %resource.id, error = %e, "failed to remove orphan");
+        }
+    }
 
     // 2. Fail stale bundles
     db::sqlite::fail_stale_bundles(&state.db).await;
+
+    Ok(())
 }
 ```
 
@@ -162,8 +187,9 @@ pub async fn startup_cleanup<B: Backend>(state: &AppState<B>) {
 first, networks second). This is important because networks cannot be
 removed while containers are still connected to them.
 
-Errors removing individual resources are logged but do not prevent the
-server from starting.
+`list_managed()` errors are propagated — if the backend is unreachable
+at startup, the server should not start. Errors removing individual
+resources are logged but do not prevent startup.
 
 **4b. Fail stale bundles.**
 
@@ -188,29 +214,65 @@ pub async fn fail_stale_bundles(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
 Log the count if any were failed. This is idempotent — safe to run on
 every startup regardless of whether the previous shutdown was clean.
 
-### Step 5: Health polling
+### Step 5: `evict_worker` helper
 
-`ops::spawn_health_poller(state) -> JoinHandle<()>` — spawns a tokio task
-that runs at `config.proxy.health_interval`.
+Extract a shared helper that fully decommissions a worker. Every
+codepath that removes a worker (health poller, `stop_app_workers`,
+session expiry, graceful shutdown) calls this instead of doing partial
+inline cleanup.
+
+```rust
+pub async fn evict_worker<B: Backend>(state: &AppState<B>, worker_id: &str) {
+    if let Some((_, worker)) = state.workers.remove(worker_id) {
+        if let Err(e) = state.backend.stop(&worker.handle).await {
+            tracing::warn!(worker_id, error = %e, "failed to stop worker");
+        }
+    }
+    state.registry.remove(worker_id);
+    // Remove any session that maps to this worker
+    state.sessions.remove_by_worker(worker_id);
+    state.log_store.mark_ended(worker_id);
+}
+```
+
+`SessionStore` needs a `remove_by_worker(worker_id)` method (reverse
+lookup). If this is too expensive (scan all sessions), add a reverse
+index `worker_id -> session_id` to `SessionStore`.
+
+Callers:
+- Health poller (step 6)
+- `stop_app_workers` in `api/apps.rs`
+- Session expiry in `proxy/forward.rs`
+- `graceful_shutdown` (step 7)
+
+### Step 6: Health polling
+
+`ops::spawn_health_poller(state, token) -> JoinHandle<()>` — spawns a
+tokio task that runs at `config.proxy.health_interval`. Takes a
+`CancellationToken` for cooperative shutdown.
 
 Each cycle:
 
 1. Snapshot worker IDs from `state.workers` (avoids holding the DashMap
    during async health checks).
 2. For each worker, call `backend.health_check(&handle)`.
-3. On failure: remove from `state.workers`, call `backend.stop(&handle)`,
-   mark log capture as ended via `log_store.mark_ended(worker_id)`.
+3. On failure: call `evict_worker(state, worker_id)`.
 
-The first tick is skipped so workers have time to start before being
+The first tick of the `tokio::time::interval` is consumed before
+entering the loop (the standard pattern: `interval.tick().await` once
+before the loop). This gives workers time to start before being
 health-checked. Phase 0-5's cold-start hold already polls health before
 releasing the initial request — the health poller catches hung processes
 *after* the initial startup succeeds.
+
+The loop selects on `token.cancelled()` to exit cooperatively on
+shutdown.
 
 No replacement spawning in v0. The roadmap mentions "(if auto-scaling is
 enabled) spawn a replacement" — that's a v1 concern tied to multi-worker
 load balancing.
 
-### Step 6: Graceful shutdown
+### Step 7: Graceful shutdown
 
 The current `main.rs` calls `shutdown_signal()` (waits for `ctrl_c`) but
 does not stop any containers. The roadmap specifies that on SIGTERM the
@@ -218,22 +280,19 @@ server should stop all managed containers and networks, and mark in-progress
 builds as `failed`.
 
 `ops::graceful_shutdown(state)` — called after `axum::serve` returns
-(i.e., after the HTTP server has drained in-flight requests).
+(i.e., after the HTTP server has drained in-flight requests) and after
+background tasks have been cancelled.
 
 ```rust
 pub async fn graceful_shutdown<B: Backend>(state: &AppState<B>) {
-    // 1. Stop all tracked workers
+    // 1. Evict all tracked workers
     let worker_ids: Vec<String> = state.workers
         .iter()
         .map(|e| e.key().clone())
         .collect();
 
     for worker_id in &worker_ids {
-        if let Some((_, worker)) = state.workers.remove(worker_id) {
-            if let Err(e) = state.backend.stop(&worker.handle).await {
-                tracing::warn!(worker_id, error = %e, "shutdown: failed to stop worker");
-            }
-        }
+        evict_worker(state, &worker_id).await;
     }
 
     // 2. Remove any remaining managed resources (build containers, networks)
@@ -260,7 +319,11 @@ axum::serve(listener, app)
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-// HTTP server has stopped — clean up containers
+// Cancel background tasks and wait for them to finish their current cycle
+token.cancel();
+let _ = tokio::join!(health_handle, cleaner_handle);
+
+// Background tasks are done — clean up containers
 ops::graceful_shutdown(&state).await;
 ```
 
@@ -274,7 +337,7 @@ After a clean shutdown, the next `startup_cleanup` finds nothing to remove.
 After an unclean shutdown (OOM, SIGKILL), `startup_cleanup` handles the
 leftovers. Both paths converge to the same clean state.
 
-### Step 7: Log capture
+### Step 8: Log capture
 
 When `POST /apps/{id}/start` spawns a worker (in `api/apps.rs`), also call
 `ops::spawn_log_capture_for_app(state, worker_id, app_id, handle)`.
@@ -294,13 +357,14 @@ as ended.
 When `stop_app_workers()` stops a worker, it also calls
 `log_store.mark_ended(worker_id)`.
 
-### Step 8: Log retention cleanup
+### Step 9: Log retention cleanup
 
-`ops::spawn_log_retention_cleaner(state, retention) -> JoinHandle<()>` —
-runs periodically at `min(retention, 60s)` and calls
+`ops::spawn_log_retention_cleaner(state, retention, token) -> JoinHandle<()>`
+— takes a `CancellationToken`, runs periodically at `min(retention, 60s)`,
+selects on `token.cancelled()`, and calls
 `log_store.cleanup_expired(retention)`.
 
-### Step 9: Updated logs endpoint
+### Step 10: Updated logs endpoint
 
 `GET /api/v1/apps/{id}/logs?worker_id=<optional>` changes from streaming
 directly from the backend to serving from the log store.
@@ -323,17 +387,21 @@ directly from the backend to serving from the log store.
 This is the key behavioral change: logs are now available after a worker
 exits. Previously, `GET .../logs` returned 404 once the worker was gone.
 
-### Step 10: main.rs wiring
+### Step 11: main.rs wiring
 
 ```rust
 // After building state, before binding listener:
-ops::startup_cleanup(&state).await;
+ops::startup_cleanup(&state).await?;
+
+// CancellationToken for cooperative background task shutdown:
+let token = CancellationToken::new();
 
 // Spawn background tasks:
-let _health_poller = ops::spawn_health_poller(state.clone());
-let _log_cleaner = ops::spawn_log_retention_cleaner(
+let health_handle = ops::spawn_health_poller(state.clone(), token.clone());
+let cleaner_handle = ops::spawn_log_retention_cleaner(
     state.clone(),
     config.proxy.log_retention,
+    token.clone(),
 );
 
 // ...
@@ -342,28 +410,34 @@ axum::serve(listener, app)
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-// HTTP server has stopped — clean up containers
+// Cancel background tasks and wait for them to finish
+token.cancel();
+let _ = tokio::join!(health_handle, cleaner_handle);
+
+// Background tasks are done — clean up containers
 ops::graceful_shutdown(&state).await;
 ```
 
-Orphan cleanup blocks startup. Health polling and log retention run in the
-background. Graceful shutdown runs after the HTTP server finishes draining.
+Orphan cleanup blocks startup (and propagates errors — if Docker is
+unreachable, the server won't start). Health polling and log retention
+run in the background with cooperative cancellation. Graceful shutdown
+runs after background tasks have stopped and the HTTP server has
+finished draining.
 
-### Step 11: Mock backend updates
+### Step 12: Mock backend updates
 
 Add test helpers to `MockBackend`:
 
 - `set_managed_resources(Vec<ManagedResource>)` — configures what
-  `list_managed()` returns (consumed on call, subsequent calls return
-  empty). For testing orphan cleanup.
+  `list_managed()` returns. Resources persist across calls (not drained).
+  `remove_resource()` removes individual entries from the list.
+  This mirrors real Docker behavior: `list_managed()` → `remove_resource()`
+  → `list_managed()` returns empty after cleanup.
 - `set_log_lines(Vec<String>)` — configures what `logs()` emits for any
   worker. Lines are sent and then the channel is dropped (stream ends).
   For testing log capture.
 
-Update `list_managed()` to drain from the configured resources and
-`logs()` to emit configured lines instead of returning an empty channel.
-
-### Step 12: Integration tests
+### Step 13: Integration tests (mock)
 
 Added to `tests/bundle_test.rs`:
 
@@ -402,6 +476,30 @@ Added to `tests/bundle_test.rs`:
 - `logs_unavailable_returns_404` — create app but never start it, `GET
   .../logs` returns 404.
 
+### Step 14: Docker integration tests
+
+Gated behind `--features docker-integration-tests`. These tests require
+a running Docker daemon and exercise real container lifecycle. They live
+in a separate test file (`tests/docker_integration_test.rs`).
+
+**Tests:**
+
+- `orphan_cleanup_removes_real_containers` — spawn a container with
+  managed labels via `DockerBackend`, run `startup_cleanup()`, verify
+  the container is gone.
+- `graceful_shutdown_stops_real_containers` — start an app via the full
+  API, run `graceful_shutdown()`, verify containers are removed.
+- `network_isolation` — spawn two workers for different apps, verify
+  they cannot reach each other's ports (TCP connect from one container
+  to the other's address should fail).
+- `native_mode_e2e` — run with the server outside Docker (no cgroup
+  container ID detection), spawn a worker, verify proxy routing works
+  without network joining.
+
+These tests are slower and not run in the default `cargo test` pass.
+CI runs them on a Docker-capable runner with
+`cargo test --features docker-integration-tests`.
+
 ## Config summary
 
 New field:
@@ -418,42 +516,51 @@ Existing fields consumed:
 
 ## Files changed
 
-| File                      | Change                                                    |
-|---------------------------|-----------------------------------------------------------|
-| `src/ops.rs`              | New module: LogStore, startup_cleanup, graceful_shutdown, health poller, log capture, retention cleaner |
-| `src/lib.rs`              | Add `pub mod ops`                                         |
-| `src/app.rs`              | Add `log_store: Arc<LogStore>` to `AppState`              |
-| `src/config.rs`           | Add `log_retention` to `ProxyConfig` + env var + default  |
-| `src/db/sqlite.rs`        | Add `fail_stale_bundles()` query                          |
-| `src/main.rs`             | Call `startup_cleanup`, spawn background tasks, call `graceful_shutdown` after serve |
-| `src/api/apps.rs`         | `start_app`: spawn log capture; `stop_app_workers`: mark ended; `app_logs`: serve from log store |
-| `src/backend/mock.rs`     | Add `set_managed_resources()`, `set_log_lines()`          |
-| `tests/bundle_test.rs`    | 9 new integration tests                                   |
+| File                              | Change                                                    |
+|-----------------------------------|-----------------------------------------------------------|
+| `src/ops.rs`                      | New module: LogStore, evict_worker, startup_cleanup, graceful_shutdown, health poller, log capture, retention cleaner |
+| `src/lib.rs`                      | Add `pub mod ops`                                         |
+| `src/app.rs`                      | Add `log_store: Arc<LogStore>` to `AppState`              |
+| `src/config.rs`                   | Add `log_retention` to `ProxyConfig` + env var + default  |
+| `src/db/sqlite.rs`                | Add `fail_stale_bundles()` query                          |
+| `src/main.rs`                     | CancellationToken, startup_cleanup, spawn background tasks, cancel + await, graceful_shutdown |
+| `src/api/apps.rs`                 | `start_app`: spawn log capture; `stop_app_workers`: use `evict_worker`; `app_logs`: serve from log store |
+| `src/proxy/forward.rs`            | Session expiry: use `evict_worker` instead of inline cleanup |
+| `src/proxy/session.rs`            | Add `remove_by_worker(worker_id)` method                  |
+| `src/backend/mock.rs`             | Add `set_managed_resources()`, `set_log_lines()`, persistent resource list |
+| `tests/bundle_test.rs`            | 9 new mock integration tests                              |
+| `tests/docker_integration_test.rs`| New: Docker integration tests (feature-gated)             |
+| `Cargo.toml`                      | Add `docker-integration-tests` feature, `tokio-util` dep (CancellationToken) |
 
 ## Reminders
 
-- **Network isolation test:** Spawn two workers, verify they cannot reach
-  each other. Deferred from phase 0-2 — this is the natural place since
-  multi-worker scenarios are already exercised here.
+- **Network isolation test:** Addressed in step 14 — Docker integration
+  test `network_isolation` spawns two workers and verifies they cannot
+  reach each other.
 
-- **Native mode E2E test:** Phase 0-2 unit-tests the cgroup/hostname
-  parsing for server container ID detection, but there is no E2E test for
-  the native-mode path (server running outside Docker, no network joining).
-  Add an integration test here or document as a manual verification step.
+- **Native mode E2E test:** Addressed in step 14 — Docker integration
+  test `native_mode_e2e` runs the server outside Docker and verifies
+  proxy routing works without network joining.
 
 ## Exit criteria
 
 Phase 0-6 is done when:
 
 - `cargo test --features test-support` passes all existing + new tests
+- `cargo test --features docker-integration-tests` passes on a
+  Docker-capable runner
 - `cargo clippy --features test-support` is warning-free
-- Orphan cleanup runs on startup and removes stale managed resources
+- Orphan cleanup runs on startup and removes stale managed resources;
+  startup fails if the backend is unreachable
 - Stale `building` bundles are marked `failed` on startup
-- Graceful shutdown stops all workers and removes managed resources
+- Graceful shutdown cancels background tasks, stops all workers, and
+  removes managed resources
 - Health poller detects and evicts unhealthy workers within one poll cycle
-- Log capture stores stdout/stderr lines in memory per worker
+  (including registry/session cleanup via `evict_worker`)
+- Log capture stores stdout/stderr lines in memory per worker (capped
+  at 50k lines)
 - `GET .../logs` returns captured logs for both running and recently-exited
   workers
 - Expired log entries are cleaned up after `log_retention`
-- The design doc reminders (network isolation test, native mode E2E) are
-  addressed or explicitly deferred with justification
+- Network isolation verified: two workers cannot reach each other
+- Native mode E2E verified: proxy works with server outside Docker
