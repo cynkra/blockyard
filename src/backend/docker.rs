@@ -262,12 +262,12 @@ impl Backend for DockerBackend {
         };
 
         // 3. Join server to worker network (if running in a container)
-        if let Some(ref server_id) = self.server_id {
-            if let Err(e) = self.join_network(server_id, &network_name).await {
-                self.force_remove_container(&container_id).await;
-                let _ = self.client.remove_network(&network_name).await;
-                return Err(e);
-            }
+        if let Some(ref server_id) = self.server_id
+            && let Err(e) = self.join_network(server_id, &network_name).await
+        {
+            self.force_remove_container(&container_id).await;
+            let _ = self.client.remove_network(&network_name).await;
+            return Err(e);
         }
 
         // 4. Start the container — clean up everything on failure
