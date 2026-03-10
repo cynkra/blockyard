@@ -1,10 +1,10 @@
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::api::error::not_found;
 use crate::app::AppState;
 use crate::backend::Backend;
 use crate::task::TaskStatus;
@@ -12,17 +12,17 @@ use crate::task::TaskStatus;
 pub async fn task_logs<B: Backend>(
     State(state): State<AppState<B>>,
     Path(task_id): Path<String>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
     let task_state = state
         .task_store
         .get(&task_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| not_found(format!("No task with ID {task_id}")).into_response())?;
 
     let (buffer, rx) = state
         .task_store
         .subscribe(&task_id)
         .await
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| not_found(format!("No task with ID {task_id}")).into_response())?;
 
     let is_done = task_state.status != TaskStatus::Running;
     let buffer_len = buffer.len();
