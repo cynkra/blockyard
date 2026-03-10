@@ -72,3 +72,132 @@ pub fn extract_session_id(headers: &axum::http::HeaderMap) -> Option<String> {
 pub fn session_cookie(session_id: &str, app_name: &str) -> String {
     format!("{SESSION_COOKIE_NAME}={session_id}; Path=/app/{app_name}/; HttpOnly; SameSite=Lax")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+    use axum::http::header::COOKIE;
+
+    // ---- SessionStore tests ----
+
+    #[test]
+    fn store_insert_and_get() {
+        let store = SessionStore::new();
+        store.insert("s1".into(), "w1".into());
+        assert_eq!(store.get("s1"), Some("w1".into()));
+    }
+
+    #[test]
+    fn store_get_missing_returns_none() {
+        let store = SessionStore::new();
+        assert_eq!(store.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn store_remove_returns_worker() {
+        let store = SessionStore::new();
+        store.insert("s1".into(), "w1".into());
+        assert_eq!(store.remove("s1"), Some("w1".into()));
+        assert_eq!(store.get("s1"), None);
+    }
+
+    #[test]
+    fn store_remove_missing_returns_none() {
+        let store = SessionStore::new();
+        assert_eq!(store.remove("nonexistent"), None);
+    }
+
+    #[test]
+    fn store_remove_by_worker() {
+        let store = SessionStore::new();
+        store.insert("s1".into(), "w1".into());
+        store.insert("s2".into(), "w1".into());
+        store.insert("s3".into(), "w2".into());
+
+        store.remove_by_worker("w1");
+        assert_eq!(store.get("s1"), None);
+        assert_eq!(store.get("s2"), None);
+        assert_eq!(store.get("s3"), Some("w2".into()));
+    }
+
+    #[test]
+    fn store_count_for_worker() {
+        let store = SessionStore::new();
+        store.insert("s1".into(), "w1".into());
+        store.insert("s2".into(), "w1".into());
+        store.insert("s3".into(), "w2".into());
+
+        assert_eq!(store.count_for_worker("w1"), 2);
+        assert_eq!(store.count_for_worker("w2"), 1);
+        assert_eq!(store.count_for_worker("w3"), 0);
+    }
+
+    // ---- extract_session_id tests ----
+
+    #[test]
+    fn extract_from_single_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, "blockyard_session=abc123".parse().unwrap());
+        assert_eq!(extract_session_id(&headers), Some("abc123".into()));
+    }
+
+    #[test]
+    fn extract_from_multiple_cookies_in_one_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            "other=val; blockyard_session=abc123; another=x".parse().unwrap(),
+        );
+        assert_eq!(extract_session_id(&headers), Some("abc123".into()));
+    }
+
+    #[test]
+    fn extract_with_spaces_around_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            "blockyard_session = abc123".parse().unwrap(),
+        );
+        assert_eq!(extract_session_id(&headers), Some("abc123".into()));
+    }
+
+    #[test]
+    fn extract_missing_cookie_returns_none() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, "other=val; something=else".parse().unwrap());
+        assert_eq!(extract_session_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_no_cookie_header_returns_none() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_session_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_malformed_cookie_no_equals() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, "blockyard_session".parse().unwrap());
+        assert_eq!(extract_session_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_from_multiple_cookie_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(COOKIE, "other=val".parse().unwrap());
+        headers.append(COOKIE, "blockyard_session=abc123".parse().unwrap());
+        assert_eq!(extract_session_id(&headers), Some("abc123".into()));
+    }
+
+    // ---- session_cookie tests ----
+
+    #[test]
+    fn session_cookie_format() {
+        let cookie = session_cookie("sess-1", "my-app");
+        assert_eq!(
+            cookie,
+            "blockyard_session=sess-1; Path=/app/my-app/; HttpOnly; SameSite=Lax"
+        );
+    }
+}

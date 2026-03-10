@@ -235,4 +235,75 @@ mod tests {
         assert!(!paths.unpacked.exists());
         assert!(!paths.library.exists());
     }
+
+    async fn retention_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn enforce_retention_deletes_oldest_bundles() {
+        let pool = retention_pool().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = crate::db::sqlite::create_app(&pool, "app-1").await.unwrap();
+
+        // Create 4 bundles (listed newest-first by the query)
+        for i in 1..=4 {
+            let id = format!("b-{i}");
+            crate::db::sqlite::create_bundle(&pool, &id, &app.id, &format!("/tmp/{id}.tar.gz"))
+                .await
+                .unwrap();
+        }
+
+        // Retain 2 — should delete b-1 and b-2 (the oldest)
+        let deleted = enforce_retention(&pool, tmp.path(), &app.id, None, 2).await;
+        assert_eq!(deleted.len(), 2);
+        assert!(deleted.contains(&"b-1".to_string()));
+        assert!(deleted.contains(&"b-2".to_string()));
+
+        let remaining = crate::db::sqlite::list_bundles_by_app(&pool, &app.id)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn enforce_retention_preserves_active_bundle() {
+        let pool = retention_pool().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = crate::db::sqlite::create_app(&pool, "app-1").await.unwrap();
+
+        for i in 1..=4 {
+            let id = format!("b-{i}");
+            crate::db::sqlite::create_bundle(&pool, &id, &app.id, &format!("/tmp/{id}.tar.gz"))
+                .await
+                .unwrap();
+        }
+
+        // Retain 2, but b-1 (oldest) is the active bundle — it must survive
+        let deleted =
+            enforce_retention(&pool, tmp.path(), &app.id, Some("b-1"), 2).await;
+        assert!(!deleted.contains(&"b-1".to_string()), "active bundle must not be deleted");
+
+        let remaining = crate::db::sqlite::list_bundles_by_app(&pool, &app.id)
+            .await
+            .unwrap();
+        assert!(remaining.iter().any(|b| b.id == "b-1"));
+    }
+
+    #[tokio::test]
+    async fn enforce_retention_noop_within_limit() {
+        let pool = retention_pool().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = crate::db::sqlite::create_app(&pool, "app-1").await.unwrap();
+
+        crate::db::sqlite::create_bundle(&pool, "b-1", &app.id, "/tmp/b-1.tar.gz")
+            .await
+            .unwrap();
+
+        // Retention = 5, only 1 bundle — nothing to delete
+        let deleted = enforce_retention(&pool, tmp.path(), &app.id, None, 5).await;
+        assert!(deleted.is_empty());
+    }
 }

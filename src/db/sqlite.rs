@@ -324,4 +324,121 @@ mod tests {
         let bundles = list_bundles_by_app(&pool, &app.id).await.unwrap();
         assert_eq!(bundles[0].status, "ready");
     }
+
+    #[tokio::test]
+    async fn set_and_clear_active_bundle() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        let bundle = create_bundle(&pool, "b-1", &app.id, "/tmp/b.tar.gz")
+            .await
+            .unwrap();
+
+        // Set active bundle
+        assert!(set_active_bundle(&pool, &app.id, &bundle.id).await.unwrap());
+        let fetched = get_app(&pool, &app.id).await.unwrap().unwrap();
+        assert_eq!(fetched.active_bundle.as_deref(), Some(bundle.id.as_str()));
+
+        // Clear active bundle
+        assert!(clear_active_bundle(&pool, &app.id).await.unwrap());
+        let fetched = get_app(&pool, &app.id).await.unwrap().unwrap();
+        assert_eq!(fetched.active_bundle, None);
+    }
+
+    #[tokio::test]
+    async fn set_active_bundle_nonexistent_app_returns_false() {
+        let pool = test_pool().await;
+        assert!(!set_active_bundle(&pool, "no-such-app", "b-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn update_app_modifies_fields() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+
+        let updated = update_app(
+            &pool,
+            &app.id,
+            Some(Some(4)),      // max_workers_per_app = 4
+            Some(10),           // max_sessions_per_worker = 10
+            Some(Some("512m".to_string())), // memory_limit
+            Some(Some(1.5)),    // cpu_limit
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.max_workers_per_app, Some(4));
+        assert_eq!(updated.max_sessions_per_worker, 10);
+        assert_eq!(updated.memory_limit.as_deref(), Some("512m"));
+        assert_eq!(updated.cpu_limit, Some(1.5));
+    }
+
+    #[tokio::test]
+    async fn update_app_partial_leaves_other_fields() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+
+        // Only update max_sessions_per_worker, leave others as None (no change)
+        let updated = update_app(&pool, &app.id, None, Some(5), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.max_sessions_per_worker, 5);
+        assert_eq!(updated.max_workers_per_app, app.max_workers_per_app);
+        assert_eq!(updated.memory_limit, app.memory_limit);
+        assert_eq!(updated.cpu_limit, app.cpu_limit);
+    }
+
+    #[tokio::test]
+    async fn update_app_nonexistent_returns_error() {
+        let pool = test_pool().await;
+        let result = update_app(&pool, "no-such-id", None, None, None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn fail_stale_bundles_marks_building_as_failed() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        create_bundle(&pool, "b-1", &app.id, "/tmp/b1.tar.gz").await.unwrap();
+        create_bundle(&pool, "b-2", &app.id, "/tmp/b2.tar.gz").await.unwrap();
+
+        // Set one to building, leave the other as pending
+        update_bundle_status(&pool, "b-1", "building").await.unwrap();
+
+        let count = fail_stale_bundles(&pool).await.unwrap();
+        assert_eq!(count, 1);
+
+        let bundles = list_bundles_by_app(&pool, &app.id).await.unwrap();
+        let b1 = bundles.iter().find(|b| b.id == "b-1").unwrap();
+        let b2 = bundles.iter().find(|b| b.id == "b-2").unwrap();
+        assert_eq!(b1.status, "failed");
+        assert_eq!(b2.status, "pending"); // unchanged
+    }
+
+    #[tokio::test]
+    async fn fail_stale_bundles_noop_when_none_building() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        create_bundle(&pool, "b-1", &app.id, "/tmp/b1.tar.gz").await.unwrap();
+
+        let count = fail_stale_bundles(&pool).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_bundle_removes_row() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+        create_bundle(&pool, "b-1", &app.id, "/tmp/b.tar.gz").await.unwrap();
+
+        assert!(delete_bundle(&pool, "b-1").await.unwrap());
+        let bundles = list_bundles_by_app(&pool, &app.id).await.unwrap();
+        assert!(bundles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_bundle_nonexistent_returns_false() {
+        let pool = test_pool().await;
+        assert!(!delete_bundle(&pool, "no-such-bundle").await.unwrap());
+    }
 }
