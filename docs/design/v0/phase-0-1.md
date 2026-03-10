@@ -754,7 +754,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 CREATE TABLE IF NOT EXISTS apps (
     id                      TEXT PRIMARY KEY,
     name                    TEXT NOT NULL UNIQUE,
-    status                  TEXT NOT NULL DEFAULT 'stopped',
     active_bundle           TEXT REFERENCES bundles(id),
     max_workers_per_app     INTEGER,
     max_sessions_per_worker INTEGER NOT NULL DEFAULT 1,
@@ -877,7 +876,6 @@ mod tests {
         let pool = test_pool().await;
         let app = create_app(&pool, "my-app").await.unwrap();
         assert_eq!(app.name, "my-app");
-        assert_eq!(app.status, "stopped");
 
         let fetched = get_app(&pool, &app.id).await.unwrap().unwrap();
         assert_eq!(fetched.id, app.id);
