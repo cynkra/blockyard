@@ -24,12 +24,6 @@ curl -X POST "$BLOCKYARD/api/v1/apps" \
   -d '{"name": "hello-shiny"}'
 ```
 
-The response includes a generated `id` — save it for subsequent API calls:
-
-```bash
-export APP_ID=<id from response>
-```
-
 ## 2. Prepare your bundle
 
 Your app directory should look something like:
@@ -49,7 +43,7 @@ tar -czf bundle.tar.gz -C my-app .
 ## 3. Upload the bundle
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/$APP_ID/bundles" \
+curl -X POST "$BLOCKYARD/api/v1/apps/hello-shiny/bundles" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @bundle.tar.gz
@@ -82,7 +76,7 @@ the active bundle for the app.
 Once the build completes, start a worker container:
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/$APP_ID/start" \
+curl -X POST "$BLOCKYARD/api/v1/apps/hello-shiny/start" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

@@ -55,6 +55,14 @@ pub async fn get_app_by_name(pool: &SqlitePool, name: &str) -> Result<Option<App
         .await
 }
 
+/// Resolve an app by ID or name. Tries ID first, then falls back to name.
+pub async fn resolve_app(pool: &SqlitePool, id_or_name: &str) -> Result<Option<AppRow>, sqlx::Error> {
+    if let Some(app) = get_app(pool, id_or_name).await? {
+        return Ok(Some(app));
+    }
+    get_app_by_name(pool, id_or_name).await
+}
+
 pub async fn list_apps(pool: &SqlitePool) -> Result<Vec<AppRow>, sqlx::Error> {
     sqlx::query_as::<_, AppRow>("SELECT * FROM apps ORDER BY created_at DESC")
         .fetch_all(pool)
@@ -225,6 +233,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_app_by_id_and_name() {
+        let pool = test_pool().await;
+        let app = create_app(&pool, "my-app").await.unwrap();
+
+        // Resolve by ID
+        let by_id = resolve_app(&pool, &app.id).await.unwrap().unwrap();
+        assert_eq!(by_id.id, app.id);
+
+        // Resolve by name
+        let by_name = resolve_app(&pool, "my-app").await.unwrap().unwrap();
+        assert_eq!(by_name.id, app.id);
+
+        // Nonexistent returns None
+        assert!(resolve_app(&pool, "nonexistent").await.unwrap().is_none());
     }
 
     #[tokio::test]

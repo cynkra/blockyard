@@ -100,7 +100,7 @@ pub async fn get_app<B: Backend>(
     State(state): State<AppState<B>>,
     Path(id): Path<String>,
 ) -> Result<Json<AppResponse>, ApiError> {
-    let app = db::sqlite::get_app(&state.db, &id)
+    let app = db::sqlite::resolve_app(&state.db, &id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {id} not found")))?;
@@ -121,15 +121,15 @@ pub async fn update_app<B: Backend>(
     Path(id): Path<String>,
     Json(body): Json<UpdateAppRequest>,
 ) -> Result<Json<AppResponse>, ApiError> {
-    // Verify app exists
-    db::sqlite::get_app(&state.db, &id)
+    // Verify app exists and resolve name → ID
+    let existing = db::sqlite::resolve_app(&state.db, &id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {id} not found")))?;
 
     let app = db::sqlite::update_app(
         &state.db,
-        &id,
+        &existing.id,
         body.max_workers_per_app.map(Some),
         body.max_sessions_per_worker,
         body.memory_limit.map(Some),
@@ -146,7 +146,7 @@ pub async fn delete_app<B: Backend>(
     State(state): State<AppState<B>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let app = db::sqlite::get_app(&state.db, &id)
+    let app = db::sqlite::resolve_app(&state.db, &id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {id} not found")))?;
@@ -197,7 +197,7 @@ pub async fn start_app<B: Backend>(
     State(state): State<AppState<B>>,
     Path(id): Path<String>,
 ) -> Result<Json<StartResponse>, ApiError> {
-    let app = db::sqlite::get_app(&state.db, &id)
+    let app = db::sqlite::resolve_app(&state.db, &id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {id} not found")))?;
@@ -206,7 +206,7 @@ pub async fn start_app<B: Backend>(
     let existing_worker = state
         .workers
         .iter()
-        .find(|entry| entry.value().app_id == id)
+        .find(|entry| entry.value().app_id == app.id)
         .map(|entry| entry.key().clone());
     if let Some(worker_id) = existing_worker {
         return Ok(Json(StartResponse {
@@ -291,12 +291,12 @@ pub async fn stop_app<B: Backend>(
     State(state): State<AppState<B>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    db::sqlite::get_app(&state.db, &id)
+    let app = db::sqlite::resolve_app(&state.db, &id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {id} not found")))?;
 
-    let stopped = stop_app_workers(&state, &id).await;
+    let stopped = stop_app_workers(&state, &app.id).await;
 
     Ok(Json(serde_json::json!({
         "status": "stopped",
@@ -345,7 +345,7 @@ pub async fn app_logs<B: Backend>(
     Path(id): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<axum::response::Response, ApiError> {
-    db::sqlite::get_app(&state.db, &id)
+    let app = db::sqlite::resolve_app(&state.db, &id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {id} not found")))?;
@@ -356,7 +356,7 @@ pub async fn app_logs<B: Backend>(
             .workers
             .get(wid)
             .ok_or_else(|| not_found(format!("worker {wid} not found")))?;
-        if w.value().app_id != id {
+        if w.value().app_id != app.id {
             return Err(not_found(format!(
                 "worker {wid} does not belong to app {id}"
             )));
@@ -366,7 +366,7 @@ pub async fn app_logs<B: Backend>(
         state
             .workers
             .iter()
-            .find(|entry| entry.value().app_id == id)
+            .find(|entry| entry.value().app_id == app.id)
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .ok_or_else(|| not_found("no running workers for this app".into()))?
     };

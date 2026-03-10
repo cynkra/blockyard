@@ -20,7 +20,7 @@ pub async fn upload_bundle<B: Backend>(
     body: Bytes,
 ) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
     // 1. Validate app exists
-    let app = crate::db::sqlite::get_app(&state.db, &app_id)
+    let app = crate::db::sqlite::resolve_app(&state.db, &app_id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?
         .ok_or_else(|| not_found(format!("app {app_id} not found")))?;
@@ -46,24 +46,29 @@ pub async fn upload_bundle<B: Backend>(
         .map_err(|e| server_error(format!("write archive: {e}")))?;
 
     // 5. Unpack
-    bundle::unpack_archive(&paths)
-        .await
-        .map_err(|e| server_error(format!("unpack: {e}")))?;
+    if let Err(e) = bundle::unpack_archive(&paths).await {
+        bundle::delete_bundle_files(&paths).await;
+        return Err(server_error(format!("unpack: {e}")));
+    }
 
     // 6. Create library dir
-    bundle::create_library_dir(&paths)
-        .await
-        .map_err(|e| server_error(format!("create lib dir: {e}")))?;
+    if let Err(e) = bundle::create_library_dir(&paths).await {
+        bundle::delete_bundle_files(&paths).await;
+        return Err(server_error(format!("create lib dir: {e}")));
+    }
 
     // 7. Insert bundle row (status = pending)
-    crate::db::sqlite::create_bundle(
+    if let Err(e) = crate::db::sqlite::create_bundle(
         &state.db,
         &bundle_id,
         &app.id,
         paths.archive.to_str().unwrap(),
     )
     .await
-    .map_err(|e| server_error(format!("create bundle row: {e}")))?;
+    {
+        bundle::delete_bundle_files(&paths).await;
+        return Err(server_error(format!("create bundle row: {e}")));
+    }
 
     // 8. Create task in TaskStore
     let task_sender = state.task_store.create(task_id.clone());
@@ -101,7 +106,12 @@ pub async fn list_bundles<B: Backend>(
     State(state): State<AppState<B>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<crate::db::sqlite::BundleRow>>, ApiError> {
-    let bundles = crate::db::sqlite::list_bundles_by_app(&state.db, &app_id)
+    let app = crate::db::sqlite::resolve_app(&state.db, &app_id)
+        .await
+        .map_err(|e| server_error(format!("db error: {e}")))?
+        .ok_or_else(|| not_found(format!("app {app_id} not found")))?;
+
+    let bundles = crate::db::sqlite::list_bundles_by_app(&state.db, &app.id)
         .await
         .map_err(|e| server_error(format!("db error: {e}")))?;
     Ok(Json(bundles))

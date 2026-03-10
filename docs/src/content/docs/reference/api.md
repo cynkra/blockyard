@@ -20,6 +20,8 @@ Returns `200 OK` with body `ok`. No authentication required.
 
 ## Apps
 
+All `{id}` path parameters accept either the app's UUID or its name.
+
 ### `POST /api/v1/apps`
 
 Create a new app.
