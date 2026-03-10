@@ -723,7 +723,7 @@ The proxy handler extracts the app name from the path, validates the
 `/app/{name}/` prefix, and handles routing. Any request outside `/app/*/` that
 isn't an API or health route gets 404.
 
-### Phase 0-6: Health Polling + Orphan Cleanup + Log Capture
+### Phase 0-6: Health Polling + Orphan Cleanup + Log Capture + Metadata Protection
 
 Operational concerns that run alongside the main server.
 
@@ -732,6 +732,9 @@ Operational concerns that run alongside the main server.
 1. Background health polling loop
 2. Orphan cleanup on startup
 3. App log capture and streaming
+4. Metadata endpoint protection — per-network iptables rules blocking
+   `169.254.169.254` to prevent worker containers from accessing cloud
+   instance credentials
 
 **Health polling:**
 
