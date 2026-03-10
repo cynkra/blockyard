@@ -106,11 +106,7 @@ impl DockerBackend {
                     spec.bundle_path.display(),
                     spec.worker_mount.display()
                 ),
-                format!(
-                    "{}:{}/lib:ro",
-                    spec.library_path.display(),
-                    spec.worker_mount.display()
-                ),
+                format!("{}:/blockyard-lib:ro", spec.library_path.display()),
             ]),
             tmpfs: Some(HashMap::from([("/tmp".to_string(), "".to_string())])),
             cap_drop: Some(vec!["ALL".to_string()]),
@@ -126,7 +122,10 @@ impl DockerBackend {
 
         let config = Config {
             image: Some(spec.image.clone()),
-            env: Some(vec![format!("SHINY_PORT={}", spec.shiny_port)]),
+            env: Some(vec![
+                format!("SHINY_PORT={}", spec.shiny_port),
+                "R_LIBS=/blockyard-lib".to_string(),
+            ]),
             labels: Some(worker_labels(spec)),
             host_config: Some(host_config),
             ..Default::default()

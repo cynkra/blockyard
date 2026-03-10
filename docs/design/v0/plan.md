@@ -371,7 +371,7 @@ production backend for v0.
 2. Create container:
    - Image: spec.image
    - Network: the bridge just created
-   - Mounts: bundle → worker_mount (ro), library → worker_mount/lib (ro)
+   - Mounts: bundle → worker_mount (ro), library → /blockyard-lib (ro)
    - Tmpfs: /tmp
    - CapDrop: ALL
    - SecurityOpt: no-new-privileges

@@ -698,20 +698,16 @@ impl DockerBackend {
 }
 ```
 
-This is called at the point of use — not at server startup:
+**Wiring:** `ensure_image()` is called *inside* `DockerBackend::build()`
+and `DockerBackend::spawn()` as their first step — not by the caller.
+Image pulling is a container-runtime concept (a future local/process
+backend wouldn't have images), so it stays internal to the Docker backend.
+The `Backend` trait is not modified. The restore pipeline and proxy layer
+call `backend.build()` / `backend.spawn()` as usual and get image pulling
+for free.
 
-1. **Before `backend.build()`** (in `restore.rs`) — ensure the image is
-   fresh before each restore. Handles the case where the image was
-   garbage-collected between deploys.
-2. **Before `backend.spawn()`** (in the proxy/start path) — handles the
-   case where the image was removed between deploys. Docker images persist
-   on disk across restarts, so a startup pull would almost always be a
-   no-op. Pulling at point of use covers the same cases without blocking
-   server start (which matters if per-app custom images are added later).
-
-**Mock backend:** `ensure_image()` is backend-specific, not on the `Backend`
-trait. The mock backend doesn't need it. If we later need a trait method,
-it's a trivial addition.
+Note: the phase 0-2 implementation of `build()` and `spawn()` does not
+call `ensure_image()` yet — add these calls when landing phase 0-3.
 
 ### Step 5: `AppState` update — add `TaskStore`
 
