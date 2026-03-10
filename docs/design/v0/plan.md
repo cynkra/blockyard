@@ -359,7 +359,7 @@ production backend for v0.
 2. Per-container bridge network creation and cleanup
 3. Server joins each worker's network (multi-homing)
 4. Container hardening (cap-drop, read-only fs, no-new-privileges)
-5. Image pulling (at startup and before each build/spawn)
+5. Image pulling (on demand, inside build/spawn)
 6. Label management (`dev.blockyard/*`)
 
 **Docker backend — key operations:**

@@ -462,9 +462,10 @@ Each feature is described below with a priority annotation:
 
 - **Execution environment images.** A single server-wide Docker image
   configured in `[docker] image`. We maintain a Rocker-based image with R +
-  required system libraries. The image is pulled on server startup and on every
-  bundle deploy — never at container spawn time (which would add latency to
-  every session start). Image selection and pinning are an operational concern
+  required system libraries. The image is pulled on demand — inside
+  `DockerBackend::build()` and `DockerBackend::spawn()` — via an
+  `ensure_image()` check that pulls only if the image is not already present
+  locally. Image selection and pinning are an operational concern
   managed centrally, not by the server or app developers.
   **Priority: v0.** The server ships with a reference image; maintaining and
   publishing it is a separate but parallel concern.

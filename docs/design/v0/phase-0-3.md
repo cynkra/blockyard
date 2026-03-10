@@ -645,10 +645,9 @@ Backend trait change that isn't warranted yet.
 ### Step 4: Image pulling
 
 `DockerBackend::ensure_image()` — pull the configured image if it's not
-already present. Called at server startup and before each `build()` call.
-Not called before `spawn()` — images must be pulled during the deploy step,
-not at session start time (adding pull latency to cold starts is
-unacceptable).
+already present locally. Called on demand inside `DockerBackend::build()`
+and `DockerBackend::spawn()` as their first step. Not called at server
+startup — the image is pulled when it's actually needed.
 
 Add to `src/backend/docker.rs`:
 
@@ -705,9 +704,6 @@ backend wouldn't have images), so it stays internal to the Docker backend.
 The `Backend` trait is not modified. The restore pipeline and proxy layer
 call `backend.build()` / `backend.spawn()` as usual and get image pulling
 for free.
-
-Note: the phase 0-2 implementation of `build()` and `spawn()` does not
-call `ensure_image()` yet — add these calls when landing phase 0-3.
 
 ### Step 5: `AppState` update — add `TaskStore`
 
@@ -1269,7 +1265,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }  # BroadcastStream adapt
 |---|---|
 | `src/lib.rs` | Add `pub mod api`, `pub mod bundle`, `pub mod task` |
 | `src/app.rs` | Add `task_store: Arc<InMemoryTaskStore>` to `AppState` |
-| `src/main.rs` | Start HTTP server, pull image at startup |
+| `src/main.rs` | Start HTTP server |
 | `src/config.rs` | Add `max_bundle_size` to `StorageConfig`, env var support |
 | `src/db/sqlite.rs` | Add `delete_bundle`, `set_active_bundle`; change `create_bundle` to accept caller-supplied ID |
 | `src/backend/docker.rs` | Add `ensure_image()` method |
@@ -1290,7 +1286,7 @@ Phase 0-3 is done when:
 - `GET /api/v1/tasks/{task_id}/logs` streams buffered + live log output
 - Bearer auth middleware rejects unauthenticated requests
 - `/healthz` returns 200 without auth
-- `main.rs` starts the server, pulls the image, and serves requests
+- `main.rs` starts the server and serves requests
 - All unit tests pass (`task.rs`, `bundle/mod.rs`, `db/sqlite.rs`)
 - Integration tests pass with mock backend (`tests/bundle_test.rs`)
 - `cargo clippy` clean

@@ -914,10 +914,10 @@ Phase 0-2 is done when:
   IPs are not routable from your host, run the server inside a container
   (e.g. the devcontainer) instead.
 
-- **Image pulling is not handled in this phase.** The plan mentions image
-  pulling at startup and before each build/spawn. This is deferred to the
-  content management phase (0-3), where the bundle upload flow can trigger a
-  pull-if-missing check. For phase 0-2, images must be pre-pulled.
+- **Image pulling is not handled in this phase.** `ensure_image()` is
+  added in phase 0-3 and wired into `build()` and `spawn()` as their first
+  step — pull on demand, not at startup. For phase 0-2, images must be
+  pre-pulled.
 
 - **rv library path namespacing.** rv's default library path is
   `<project>/rv/library/<R version>/<arch>/<codename>` (e.g.
