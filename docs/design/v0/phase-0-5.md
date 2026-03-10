@@ -1036,7 +1036,7 @@ router construction):
 ```rust
 use axum::Router;
 
-pub fn app_router<B: Backend + Clone>(state: AppState<B>) -> Router {
+pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
     let api = crate::api::api_router(state.clone());
 
     Router::new()

@@ -710,7 +710,7 @@ The proxy is a fallback route in the main router — anything not matched by
 `/api/v1/*` or `/healthz` falls through to the proxy:
 
 ```rust
-pub fn server_router<B: Backend>(state: AppState<B>) -> Router {
+pub fn full_router<B: Backend>(state: AppState<B>) -> Router {
     Router::new()
         .nest("/api/v1", api_router(state.clone()))
         .route("/healthz", get(healthz))
@@ -903,7 +903,7 @@ async fn spawn_test_server() -> (SocketAddr, AppState<MockBackend>) {
     let db = SqlitePool::connect(":memory:").await.unwrap();
     run_migrations(&db).await.unwrap();
     let state = AppState::new(config, backend, db);
-    let app = server_router(state.clone());
+    let app = full_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app).into_future());
