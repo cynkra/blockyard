@@ -688,21 +688,45 @@ HTTP listener.
 
 **SessionStore + WorkerRegistry:**
 
+v0 uses concrete `DashMap`-backed structs with synchronous methods (no
+trait indirection — there is only one implementation today):
+
 ```rust
-pub trait SessionStore: Send + Sync + 'static {
-    async fn get(&self, session_id: &str) -> Option<WorkerId>;
-    async fn insert(&self, session_id: &str, worker_id: WorkerId);
-    async fn remove(&self, session_id: &str);
+pub struct SessionStore {
+    sessions: DashMap<SessionId, WorkerId>,
 }
 
-pub trait WorkerRegistry: Send + Sync + 'static {
-    async fn addr(&self, worker_id: &WorkerId) -> Option<SocketAddr>;
-    async fn insert(&self, worker_id: WorkerId, addr: SocketAddr);
-    async fn remove(&self, worker_id: &WorkerId);
+impl SessionStore {
+    pub fn get(&self, session_id: &str) -> Option<WorkerId>;
+    pub fn insert(&self, session_id: SessionId, worker_id: WorkerId);
+    pub fn remove(&self, session_id: &str) -> Option<WorkerId>;
+    pub fn remove_by_worker(&self, worker_id: &str);      // reverse cleanup
+    pub fn count_for_worker(&self, worker_id: &str) -> usize;
 }
 
-// In-memory implementations: DashMap wrappers. Trivial.
+pub struct WorkerRegistry {
+    addrs: DashMap<String, SocketAddr>,
+}
+
+impl WorkerRegistry {
+    pub fn get(&self, worker_id: &str) -> Option<SocketAddr>;
+    pub fn insert(&self, worker_id: String, addr: SocketAddr);
+    pub fn remove(&self, worker_id: &str) -> Option<SocketAddr>;
+}
 ```
+
+**Future: trait extraction.** When multi-node deployments arrive (v2+),
+these should become traits to allow swappable backends:
+
+- `SessionStore` → Redis/DB-backed implementation for shared session
+  state across nodes. Methods become async (network I/O).
+- `WorkerRegistry` → shared registry so any node can route to any
+  worker. Same async treatment.
+
+The current method signatures are designed to map cleanly onto async
+trait methods — the switch is mechanical: extract a trait, make methods
+async, and parameterize `AppState` over the trait (same pattern as
+`Backend`). The `TaskStore` (see Phase 0-3) is in the same situation.
 
 **Proxy handler integration with axum:**
 
