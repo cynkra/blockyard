@@ -4,10 +4,12 @@ import starlight from '@astrojs/starlight';
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://cynkra.github.io',
+	base: '/blockyard',
 	integrations: [
 		starlight({
 			title: 'Blockyard',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/a2-ai/blockyard' }],
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/cynkra/blockyard' }],
 			sidebar: [
 				{
 					label: 'Getting Started',
