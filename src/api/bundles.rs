@@ -79,7 +79,7 @@ pub async fn upload_bundle<B: Backend>(
         .docker
         .as_ref()
         .map(|d| d.image.clone())
-        .unwrap_or_else(|| "rocker/r-ver:latest".into());
+        .unwrap_or_else(|| crate::config::DEFAULT_IMAGE.into());
 
     // 10. Spawn async restore
     bundle::restore::spawn_restore(bundle::restore::RestoreParams {

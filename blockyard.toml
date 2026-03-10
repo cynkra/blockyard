@@ -5,7 +5,7 @@ shutdown_timeout = "30s"
 
 [docker]
 socket     = "/var/run/docker.sock"
-image      = "ghcr.io/rocker-org/r-ver:latest"
+image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838
 rv_version = "latest"   # rv release tag, e.g. "v0.18.0"
 

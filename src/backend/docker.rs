@@ -1010,7 +1010,7 @@ mod integration_tests {
     fn test_config() -> DockerConfig {
         DockerConfig {
             socket: "/var/run/docker.sock".into(),
-            image: "ghcr.io/rocker-org/r-ver:latest".into(),
+            image: crate::config::DEFAULT_IMAGE.into(),
             shiny_port: 3838,
             rv_version: "latest".into(),
         }

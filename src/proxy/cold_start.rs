@@ -52,7 +52,7 @@ pub async fn ensure_worker<B: Backend>(
         .docker
         .as_ref()
         .map(|d| d.image.clone())
-        .unwrap_or_else(|| "rocker/r-ver:latest".into());
+        .unwrap_or_else(|| crate::config::DEFAULT_IMAGE.into());
 
     let shiny_port = state
         .config

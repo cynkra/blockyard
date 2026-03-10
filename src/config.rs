@@ -63,6 +63,9 @@ pub struct ProxyConfig {
     pub log_retention: Duration,
 }
 
+/// Default Docker image for workers and builds.
+pub const DEFAULT_IMAGE: &str = "ghcr.io/rocker-org/r-ver:4.4.3";
+
 // --- defaults ---
 
 fn default_bind() -> SocketAddr {
@@ -300,7 +303,7 @@ mod tests {
         token = "test-token"
 
         [docker]
-        image = "ghcr.io/rocker-org/r-ver:latest"
+        image = "ghcr.io/rocker-org/r-ver:4.4.3"  # matches DEFAULT_IMAGE
 
         [storage]
         bundle_server_path = "/tmp/bundles"
