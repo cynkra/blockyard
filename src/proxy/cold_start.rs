@@ -27,6 +27,18 @@ pub async fn ensure_worker<B: Backend>(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    // Check per-app worker limit (if configured)
+    if let Some(max) = app.max_workers_per_app {
+        let app_worker_count = state
+            .workers
+            .iter()
+            .filter(|e| e.value().app_id == app.id)
+            .count();
+        if app_worker_count >= max as usize {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
     // Build WorkerSpec
     let worker_id = uuid::Uuid::new_v4().to_string();
     let paths = crate::bundle::BundlePaths::for_bundle(
