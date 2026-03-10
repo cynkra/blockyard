@@ -339,12 +339,13 @@ pub struct AppState<B: Backend> {
     pub config: Arc<Config>,
     pub backend: Arc<B>,
     pub db: SqlitePool,
-    pub session_store: Arc<InMemorySessionStore>,
-    pub worker_registry: Arc<InMemoryWorkerRegistry>,
-    pub task_store: Arc<InMemoryTaskStore>,
     /// Currently running workers, keyed by worker_id.
-    /// Maps worker_id → (app_id, handle, session_id).
     pub workers: Arc<DashMap<String, ActiveWorker<B::Handle>>>,
+    pub task_store: Arc<InMemoryTaskStore>,
+    pub sessions: Arc<SessionStore>,
+    pub registry: Arc<WorkerRegistry>,
+    pub ws_cache: Arc<WsCache>,
+    pub log_store: Arc<LogStore>,
 }
 ```
 
