@@ -33,7 +33,7 @@ impl WorkerHandle for MockHandle {
 
 struct MockWorker {
     _handle: MockHandle,
-    _listener: tokio::net::TcpListener,
+    server_task: tokio::task::JoinHandle<()>,
 }
 
 impl MockBackend {
@@ -82,6 +82,12 @@ impl Backend for MockBackend {
             .local_addr()
             .map_err(|e| BackendError::Spawn(e.to_string()))?;
 
+        // Spawn an HTTP + WS echo server on the listener
+        let app = axum::Router::new().fallback(mock_echo_handler);
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
         let handle = MockHandle {
             id: spec.worker_id.clone(),
             addr: actual_addr,
@@ -91,7 +97,7 @@ impl Backend for MockBackend {
             spec.worker_id.clone(),
             MockWorker {
                 _handle: handle.clone(),
-                _listener: listener,
+                server_task,
             },
         );
 
@@ -99,10 +105,12 @@ impl Backend for MockBackend {
     }
 
     async fn stop(&self, handle: &MockHandle) -> Result<(), BackendError> {
-        self.inner
+        let (_, worker) = self
+            .inner
             .workers
             .remove(handle.id())
             .ok_or_else(|| BackendError::Stop(format!("worker {} not found", handle.id())))?;
+        worker.server_task.abort();
         Ok(())
     }
 
@@ -133,6 +141,35 @@ impl Backend for MockBackend {
 
     async fn remove_resource(&self, _resource: &ManagedResource) -> Result<(), BackendError> {
         Ok(())
+    }
+}
+
+/// Echo handler for mock workers: returns request path for HTTP,
+/// echoes messages for WebSocket.
+async fn mock_echo_handler(req: axum::extract::Request) -> axum::response::Response {
+    use axum::extract::FromRequestParts;
+    use axum::response::IntoResponse;
+
+    let (mut parts, _body) = req.into_parts();
+
+    // Try to extract WebSocket upgrade
+    if let Ok(ws) =
+        axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
+    {
+        ws.on_upgrade(|mut socket| async move {
+            use futures_util::StreamExt;
+            while let Some(Ok(msg)) = socket.next().await {
+                if matches!(msg, axum::extract::ws::Message::Close(_)) {
+                    break;
+                }
+                if socket.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        })
+        .into_response()
+    } else {
+        parts.uri.path().to_string().into_response()
     }
 }
 

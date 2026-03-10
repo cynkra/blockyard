@@ -39,8 +39,10 @@ flate2      = "1"
 tar         = "0.4"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
+[dependencies.tokio-tungstenite]
+version = "0.26"
+
 [dev-dependencies]
 blockyard = { path = ".", features = ["test-support"] }
 reqwest      = { version = "0.12", features = ["json", "cookies"] }
-tokio-tungstenite = "0.26"
 assert_matches = "1"

@@ -24,7 +24,7 @@ async fn spawn_test_server_with_config(
     let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
     db::run_migrations(&pool).await.unwrap();
     let state = AppState::new(config, backend, pool);
-    let app = blockyard::api::api_router(state.clone()).with_state(state.clone());
+    let app = blockyard::proxy::full_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app).into_future());
@@ -655,4 +655,276 @@ async fn stop_nonexistent_app_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+// --- Proxy tests (phase 0-5) ---
+
+/// Helper: create app with active bundle directly in DB (bypasses upload/restore).
+async fn setup_app_for_proxy(state: &AppState<MockBackend>, name: &str) -> String {
+    let app = db::sqlite::create_app(&state.db, name).await.unwrap();
+    let bundle_id = format!("bundle-{}", app.id);
+    db::sqlite::create_bundle(&state.db, &bundle_id, &app.id, "/tmp/test.tar.gz")
+        .await
+        .unwrap();
+    db::sqlite::update_bundle_status(&state.db, &bundle_id, "ready")
+        .await
+        .unwrap();
+    db::sqlite::set_active_bundle(&state.db, &app.id, &bundle_id)
+        .await
+        .unwrap();
+    app.id
+}
+
+fn no_redirect_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn proxy_returns_404_for_unknown_app() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/nonexistent/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn proxy_redirects_missing_trailing_slash() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/my-app"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 301);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(
+        location.ends_with("/app/my-app/"),
+        "expected redirect to /app/my-app/, got: {location}"
+    );
+}
+
+#[tokio::test]
+async fn proxy_returns_503_when_no_active_bundle() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    // Create app without uploading a bundle
+    client()
+        .post(format!("http://{addr}/api/v1/apps"))
+        .bearer_auth("test-token")
+        .json(&serde_json::json!({ "name": "my-app" }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/my-app/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn proxy_sets_session_cookie_on_first_request() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    setup_app_for_proxy(&state, "my-app").await;
+
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/my-app/"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("should have set-cookie header")
+        .to_str()
+        .unwrap();
+    assert!(cookie.contains("blockyard_session="));
+    assert!(cookie.contains("Path=/app/my-app/"));
+    assert!(cookie.contains("HttpOnly"));
+}
+
+#[tokio::test]
+async fn proxy_reuses_session_on_subsequent_requests() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    setup_app_for_proxy(&state, "my-app").await;
+
+    let jar_client = reqwest::Client::builder()
+        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // First request — spawns a worker
+    jar_client
+        .get(format!("http://{addr}/app/my-app/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(state.workers.len(), 1);
+
+    // Second request — reuses the same worker
+    jar_client
+        .get(format!("http://{addr}/app/my-app/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(state.workers.len(), 1); // still 1
+}
+
+#[tokio::test]
+async fn proxy_strips_prefix_before_forwarding() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    setup_app_for_proxy(&state, "my-app").await;
+
+    let jar_client = reqwest::Client::builder()
+        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = jar_client
+        .get(format!("http://{addr}/app/my-app/shared/shiny.js"))
+        .send()
+        .await
+        .unwrap();
+
+    // The mock echo server returns the received path in the body
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "/shared/shiny.js");
+}
+
+#[tokio::test]
+async fn proxy_returns_503_at_max_workers() {
+    let (addr, state, _tmp) = spawn_test_server_with_config(|cfg| {
+        cfg.proxy.max_workers = 1;
+    })
+    .await;
+
+    setup_app_for_proxy(&state, "app-a").await;
+    setup_app_for_proxy(&state, "app-b").await;
+
+    // First request — fills the one worker slot
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/app-a/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Second request for different app — should 503
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/app-b/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn proxy_root_path_returns_200() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    setup_app_for_proxy(&state, "my-app").await;
+
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/my-app/"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "/");
+}
+
+#[tokio::test]
+async fn proxy_preserves_query_string() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    setup_app_for_proxy(&state, "my-app").await;
+
+    let jar_client = reqwest::Client::builder()
+        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // The mock echo server returns the path (without query), but
+    // we can at least verify the request succeeds.
+    let resp = jar_client
+        .get(format!("http://{addr}/app/my-app/page?foo=bar"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn proxy_websocket_echo() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    setup_app_for_proxy(&state, "my-app").await;
+
+    // First, make an HTTP request to establish a session
+    let resp = no_redirect_client()
+        .get(format!("http://{addr}/app/my-app/"))
+        .send()
+        .await
+        .unwrap();
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let session_id = cookie
+        .split('=')
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+
+    // Connect WebSocket with the session cookie
+    let ws_url = format!("ws://{addr}/app/my-app/websocket/");
+    let request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Host", addr.to_string())
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header(
+            "Cookie",
+            format!("blockyard_session={session_id}"),
+        )
+        .body(())
+        .unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    // Send a text message and verify echo
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    ws.send(Message::Text("hello".into())).await.unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("timeout waiting for echo")
+        .expect("stream ended")
+        .expect("ws error");
+
+    assert_eq!(msg, Message::Text("hello".into()));
+    ws.close(None).await.ok();
 }

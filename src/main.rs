@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build state and router
     let state = AppState::new(config.clone(), backend, db);
-    let app = blockyard::api::api_router(state.clone()).with_state(state);
+    let app = blockyard::proxy::full_router(state);
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&config.server.bind).await?;
