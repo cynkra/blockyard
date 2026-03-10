@@ -748,22 +748,25 @@ async, and parameterize `AppState` over the trait (same pattern as
 
 **Proxy handler integration with axum:**
 
-The proxy is a fallback route in the main router — anything not matched by
-`/api/v1/*` or `/healthz` falls through to the proxy:
+The proxy uses explicit routes under `/app/{name}` rather than a
+fallback catch-all — unrecognized paths get axum's default 404 instead
+of hitting the proxy:
 
 ```rust
-pub fn full_router<B: Backend>(state: AppState<B>) -> Router {
+pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
+    let api = api_router(state.clone());
+
     Router::new()
-        .nest("/api/v1", api_router(state.clone()))
-        .route("/healthz", get(healthz))
-        .fallback(proxy_handler)
+        .merge(api)
+        .route("/app/{name}", get(trailing_slash_redirect))
+        .route("/app/{name}/", any(proxy_handler_root::<B>))
+        .route("/app/{name}/{*rest}", any(proxy_handler::<B>))
         .with_state(state)
 }
 ```
 
-The proxy handler extracts the app name from the path, validates the
-`/app/{name}/` prefix, and handles routing. Any request outside `/app/*/` that
-isn't an API or health route gets 404.
+Two proxy handlers are needed because axum's `{*rest}` wildcard does
+not match an empty path — `/app/{name}/` requires its own route.
 
 ### Phase 0-6: Health Polling + Orphan Cleanup + Log Capture + Metadata Protection
 
