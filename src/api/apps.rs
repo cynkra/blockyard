@@ -121,6 +121,15 @@ pub async fn update_app<B: Backend>(
     Path(id): Path<String>,
     Json(body): Json<UpdateAppRequest>,
 ) -> Result<Json<AppResponse>, ApiError> {
+    // v0: max_sessions_per_worker is locked to 1; session-sharing is deferred to v1
+    if let Some(v) = body.max_sessions_per_worker {
+        if v != 1 {
+            return Err(bad_request(
+                "max_sessions_per_worker must be 1 in this version".to_string(),
+            ));
+        }
+    }
+
     // Verify app exists and resolve name → ID
     let existing = db::sqlite::resolve_app(&state.db, &id)
         .await
