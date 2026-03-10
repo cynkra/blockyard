@@ -138,7 +138,7 @@ max_workers          = 100
 
 ## Status
 
-Blockyard is in early development. The current phase (0-1) establishes the foundation — crate skeleton, configuration, backend trait, database schema, and CI. See [`docs/roadmap.md`](docs/roadmap.md) for the full plan.
+Blockyard is in early development. See [`docs/roadmap.md`](docs/roadmap.md) for the full plan.
 
 ## License
 

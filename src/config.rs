@@ -29,6 +29,8 @@ pub struct DockerConfig {
     pub image: String,
     #[serde(default = "default_shiny_port")]
     pub shiny_port: u16,
+    #[serde(default = "default_rv_version")]
+    pub rv_version: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -71,6 +73,9 @@ fn default_socket() -> String {
 fn default_shiny_port() -> u16 {
     3838
 }
+fn default_rv_version() -> String {
+    "latest".into()
+}
 fn default_worker_path() -> PathBuf {
     PathBuf::from("/app")
 }
@@ -100,6 +105,7 @@ pub fn supported_env_vars() -> &'static [&'static str] {
         "BLOCKYARD_DOCKER_SOCKET",
         "BLOCKYARD_DOCKER_IMAGE",
         "BLOCKYARD_DOCKER_SHINY_PORT",
+        "BLOCKYARD_DOCKER_RV_VERSION",
         "BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH",
         "BLOCKYARD_STORAGE_BUNDLE_WORKER_PATH",
         "BLOCKYARD_STORAGE_BUNDLE_RETENTION",
@@ -158,6 +164,11 @@ impl Config {
             && let (Some(docker), Ok(p)) = (&mut self.docker, v.parse())
         {
             docker.shiny_port = p;
+        }
+        if let Ok(v) = std::env::var("BLOCKYARD_DOCKER_RV_VERSION")
+            && let Some(docker) = &mut self.docker
+        {
+            docker.rv_version = v;
         }
         if let Ok(v) = std::env::var("BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH") {
             self.storage.bundle_server_path = PathBuf::from(v);
