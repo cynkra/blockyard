@@ -560,19 +560,19 @@ leftovers. Both paths converge to the same clean state.
 ### Step 9: Log capture
 
 Every codepath that spawns a worker must also start log capture by calling
-`ops::spawn_log_capture_for_app(state, worker_id, app_id, handle)`. There
+`ops::spawn_log_capture(state, worker_id, app_id, handle)`. There
 are two spawn sites:
 
 - `api/apps.rs` — `POST /apps/{id}/start` (explicit start)
 - `proxy/cold_start.rs` — on-demand spawn in `ensure_worker()` when a
   session arrives and no worker exists
 
-Both must call `spawn_log_capture_for_app` after a successful spawn.
+Both must call `spawn_log_capture` after a successful spawn.
 Without this, on-demand workers (the common case in v0, since users
 typically visit `/app/{name}/` rather than calling the start endpoint)
 would have no log capture.
 
-`spawn_log_capture_for_app` spawns a background tokio task that:
+`spawn_log_capture` spawns a background tokio task that:
 
 1. Creates a log store entry via `log_store.create(worker_id, app_id)`.
 2. Calls `backend.logs(&handle)` to get a `LogStream`.
