@@ -38,22 +38,32 @@ pub async fn write_archive(
 
     // Write to temp file in the same directory (same filesystem for rename)
     let temp_path = app_dir.join(format!(".{bundle_id}.tar.gz.tmp"));
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|e| BundleError::Storage(format!("create temp file: {e}")))?;
-    file.write_all(&data)
-        .await
-        .map_err(|e| BundleError::Storage(format!("write temp file: {e}")))?;
-    file.flush()
-        .await
-        .map_err(|e| BundleError::Storage(format!("flush temp file: {e}")))?;
+    let result = async {
+        let mut file = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(|e| BundleError::Storage(format!("create temp file: {e}")))?;
+        file.write_all(&data)
+            .await
+            .map_err(|e| BundleError::Storage(format!("write temp file: {e}")))?;
+        file.flush()
+            .await
+            .map_err(|e| BundleError::Storage(format!("flush temp file: {e}")))?;
 
-    // Atomic rename
-    tokio::fs::rename(&temp_path, &paths.archive)
-        .await
-        .map_err(|e| BundleError::Storage(format!("rename archive: {e}")))?;
+        // Atomic rename
+        tokio::fs::rename(&temp_path, &paths.archive)
+            .await
+            .map_err(|e| BundleError::Storage(format!("rename archive: {e}")))?;
 
-    Ok(paths)
+        Ok(paths)
+    }
+    .await;
+
+    // Clean up temp file on any failure
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+
+    result
 }
 
 /// Unpack the tar.gz archive into {bundle_id}/ directory.

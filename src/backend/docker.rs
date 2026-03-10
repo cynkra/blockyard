@@ -204,6 +204,20 @@ impl DockerBackend {
         Ok(())
     }
 
+    /// Best-effort force-remove a container. Used for cleanup on spawn failure.
+    async fn force_remove_container(&self, container_id: &str) {
+        let _ = self
+            .client
+            .remove_container(
+                container_id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+    }
+
     async fn disconnect_network(
         &self,
         container_id: &str,
@@ -238,19 +252,37 @@ impl Backend for DockerBackend {
             .create_network(&network_name, &spec.app_id, &spec.worker_id)
             .await?;
 
-        // 2. Create container
-        let container_id = self.create_worker_container(spec, &network_name).await?;
+        // 2. Create container — clean up network on failure
+        let container_id = match self.create_worker_container(spec, &network_name).await {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = self.client.remove_network(&network_name).await;
+                return Err(e);
+            }
+        };
 
         // 3. Join server to worker network (if running in a container)
         if let Some(ref server_id) = self.server_id {
-            self.join_network(server_id, &network_name).await?;
+            if let Err(e) = self.join_network(server_id, &network_name).await {
+                self.force_remove_container(&container_id).await;
+                let _ = self.client.remove_network(&network_name).await;
+                return Err(e);
+            }
         }
 
-        // 4. Start the container
-        self.client
+        // 4. Start the container — clean up everything on failure
+        if let Err(e) = self
+            .client
             .start_container::<String>(&container_id, None)
             .await
-            .map_err(|e| BackendError::Spawn(format!("start container: {e}")))?;
+        {
+            self.force_remove_container(&container_id).await;
+            if let Some(ref server_id) = self.server_id {
+                let _ = self.disconnect_network(server_id, &network_name).await;
+            }
+            let _ = self.client.remove_network(&network_name).await;
+            return Err(BackendError::Spawn(format!("start container: {e}")));
+        }
 
         Ok(DockerHandle {
             container_id,
