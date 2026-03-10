@@ -5,7 +5,11 @@ description: How to configure a Blockyard server.
 
 Blockyard is configured via a TOML file. By default, it looks for
 `blockyard.toml` in the current directory. Override the path with the
-`BLOCKYARD_CONFIG` environment variable.
+`--config` CLI argument:
+
+```bash
+blockyard --config /etc/blockyard/config.toml
+```
 
 Every config field can also be overridden via environment variables using the
 pattern `BLOCKYARD_<SECTION>_<FIELD>` (uppercased). For example:
@@ -41,6 +45,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `bundle_server_path` | *(required)* | Directory for uploaded bundles |
 | `bundle_worker_path` | `/app` | Mount point inside worker containers |
 | `bundle_retention` | `50` | Max bundles to keep per app before cleanup |
+| `max_bundle_size` | `104857600` | Maximum upload size in bytes (default 100 MB) |
 
 ### `[database]`
 
@@ -53,7 +58,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | Field | Default | Description |
 |---|---|---|
 | `ws_cache_ttl` | `60s` | How long to keep a backend WebSocket open after client disconnect |
-| `health_interval` | `10s` | Interval between worker health checks |
+| `health_interval` | `15s` | Interval between worker health checks |
 | `worker_start_timeout` | `60s` | Max time to wait for a worker to become healthy |
 | `max_workers` | `100` | Maximum number of concurrent worker containers |
 
@@ -75,13 +80,14 @@ rv_version = "latest"
 bundle_server_path = "/data/bundles"
 bundle_worker_path = "/app"
 bundle_retention   = 50
+max_bundle_size    = 104857600
 
 [database]
 path = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl         = "60s"
-health_interval      = "10s"
+health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 ```

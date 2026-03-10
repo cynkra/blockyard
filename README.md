@@ -1,5 +1,8 @@
 # blockyard
 
+[![ci](https://github.com/cynkra/blockyard/actions/workflows/ci.yml/badge.svg)](https://github.com/cynkra/blockyard/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/cynkra/blockyard/graph/badge.svg?token=xvgKIhFWeW)](https://codecov.io/gh/cynkra/blockyard)
+
 A containerized hosting platform for [Shiny](https://shiny.posit.co/) applications, built in Rust. Blockyard manages the deployment, scaling, and reverse-proxying of isolated R Shiny app containers using Docker.
 
 ## Overview

@@ -14,56 +14,7 @@ curl -H "Authorization: Bearer $TOKEN" ...
 
 ### `GET /healthz`
 
-Returns `200 OK`. No authentication required.
-
----
-
-## Apps
-
-### `POST /api/v1/apps`
-
-Create a new app.
-
-**Request body:**
-
-```json
-{ "name": "my-app" }
-```
-
-`name` must be a unique, URL-safe slug.
-
-**Response:** `201 Created`
-
-```json
-{
-  "id": "a3f2c1...",
-  "name": "my-app",
-  "status": "created"
-}
-```
-
-### `GET /api/v1/apps`
-
-List all apps.
-
-**Response:** `200 OK` — array of app objects.
-
-### `GET /api/v1/apps/{id}`
-
-Get a single app by ID, including its active bundle and status.
-
-### `PATCH /api/v1/apps/{id}`
-
-Update app configuration (e.g. resource limits).
-
-**Request body:** partial app object with fields to update.
-
-### `DELETE /api/v1/apps/{id}`
-
-Delete an app. Stops all workers, removes bundles from disk, and deletes
-database records.
-
-**Response:** `204 No Content`
+Returns `200 OK` with body `ok`. No authentication required.
 
 ---
 
@@ -71,9 +22,12 @@ database records.
 
 ### `POST /api/v1/apps/{id}/bundles`
 
-Upload a new bundle.
+Upload a new bundle. The app must already exist in the database.
 
 **Request body:** raw `.tar.gz` bytes (`Content-Type: application/octet-stream`).
+
+Uploads larger than `max_bundle_size` (default 100 MB) are rejected with
+`413 Payload Too Large`.
 
 **Response:** `202 Accepted`
 
@@ -91,34 +45,7 @@ to follow progress.
 
 List all bundles for an app.
 
----
-
-## App Lifecycle
-
-### `POST /api/v1/apps/{id}/start`
-
-Pre-start a worker for the app. No-op if a worker is already running.
-
-**Response:** `200 OK`
-
-### `POST /api/v1/apps/{id}/stop`
-
-Stop all workers for the app.
-
-**Response:** `200 OK`
-
-### `GET /api/v1/apps/{id}/logs`
-
-Stream container logs for the app.
-
-**Query parameters:**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `worker_id` | string | Filter to a specific worker (optional) |
-| `follow` | bool | Keep the connection open for live output |
-
-**Response:** `200 OK` — chunked `text/plain`.
+**Response:** `200 OK` — array of bundle objects.
 
 ---
 
@@ -141,15 +68,15 @@ All error responses use a consistent JSON shape:
 
 ```json
 {
-  "error": "app_not_found",
-  "message": "No app with ID a3f2c1..."
+  "error": "not_found",
+  "message": "app a3f2c1... not found"
 }
 ```
 
 | Status | Meaning |
 |---|---|
-| `400` | Bad request or validation error |
+| `400` | Bad request (e.g. empty bundle body) |
 | `401` | Missing or invalid bearer token |
 | `404` | Resource not found |
-| `409` | Conflict (e.g. duplicate app name) |
-| `503` | Max workers reached |
+| `413` | Bundle exceeds `max_bundle_size` |
+| `500` | Internal server error |

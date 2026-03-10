@@ -15,12 +15,12 @@ the right worker.
 2. **Blockyard restores dependencies** — it spins up a build container, runs
    [`rv sync`](https://github.com/a2-ai/rv) to install packages, and caches
    the resulting library.
-3. **Users visit the app** — when a request hits `/app/<name>/`, Blockyard
-   spawns a worker container, waits for it to become healthy, and proxies
-   traffic to it.
+3. **Users visit the app** *(coming soon)* — when a request hits `/app/<name>/`,
+   Blockyard will spawn a worker container, wait for it to become healthy,
+   and proxy traffic to it.
 
-Workers are isolated from each other via per-container bridge networks. Each
-container runs with a read-only filesystem, all Linux capabilities dropped,
+Workers will be isolated from each other via per-container bridge networks.
+Containers run with a read-only filesystem, all Linux capabilities dropped,
 and `no-new-privileges` set.
 
 ## Key concepts

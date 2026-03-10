@@ -44,7 +44,7 @@ cp blockyard.toml my-config.toml
 Run the server:
 
 ```bash
-BLOCKYARD_CONFIG=my-config.toml ./target/release/blockyard
+./target/release/blockyard --config my-config.toml
 ```
 
 ## Verifying the installation

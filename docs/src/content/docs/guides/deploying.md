@@ -22,7 +22,7 @@ tar -czf bundle.tar.gz -C my-app .
 ## Uploading a bundle
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-name>/bundles" \
+curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/bundles" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @bundle.tar.gz
@@ -31,6 +31,9 @@ curl -X POST "$BLOCKYARD/api/v1/apps/<app-name>/bundles" \
 The upload returns `202 Accepted` with a `task_id`. The server unpacks the
 archive, starts a build container to restore dependencies via `rv sync`,
 and streams logs to the task endpoint.
+
+Bundles larger than `max_bundle_size` (default 100 MB) are rejected with
+`413 Payload Too Large`.
 
 ## Build process
 
@@ -53,33 +56,7 @@ curl "$BLOCKYARD/api/v1/tasks/<task-id>/logs" \
 ## Updating an app
 
 To deploy a new version, upload another bundle to the same app. Once it
-builds successfully, it becomes the new active bundle. The next time a
-worker is spawned, it uses the updated code.
+builds successfully, it becomes the new active bundle.
 
-Existing workers continue running the previous version until they are
-stopped or recycled.
-
-## Starting and stopping
-
-Apps start automatically when a user visits them (on-demand cold start).
-You can also manage the lifecycle explicitly:
-
-```bash
-# Pre-start a worker
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-name>/start" \
-  -H "Authorization: Bearer $TOKEN"
-
-# Stop all workers for an app
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-name>/stop" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-## Deleting an app
-
-Deleting an app stops all its workers, removes bundles from disk, and
-deletes the database records:
-
-```bash
-curl -X DELETE "$BLOCKYARD/api/v1/apps/<app-name>" \
-  -H "Authorization: Bearer $TOKEN"
-```
+Old bundles are automatically pruned based on `bundle_retention` (default
+50 per app). The active bundle is never pruned.

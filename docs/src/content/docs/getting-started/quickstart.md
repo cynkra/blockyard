@@ -13,21 +13,14 @@ export BLOCKYARD=http://localhost:8080
 export TOKEN=your-secret-token
 ```
 
-## 1. Create an app
+## 1. Create an app record
+
+Before uploading a bundle, the app must exist in the database. Currently,
+apps are created directly in SQLite:
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "hello-shiny"}'
-```
-
-```json
-{
-  "id": "a3f2c1...",
-  "name": "hello-shiny",
-  "status": "created"
-}
+sqlite3 /data/db/blockyard.db \
+  "INSERT INTO apps (id, name) VALUES ('hello-shiny', 'hello-shiny');"
 ```
 
 ## 2. Prepare your bundle
@@ -77,14 +70,7 @@ curl "$BLOCKYARD/api/v1/tasks/t5678.../logs" \
 When the build completes, the bundle status changes to `ready` and becomes
 the active bundle for the app.
 
-## 5. Visit the app
+## What's next
 
-Open your browser to:
-
-```
-http://localhost:8080/app/hello-shiny/
-```
-
-Blockyard spawns a worker container on the first request, waits for Shiny to
-start, and proxies you through. Subsequent visits with the same session
-cookie route to the same worker.
+App lifecycle management (starting/stopping workers, on-demand proxying)
+is not yet implemented. Check back for updates as new phases are released.

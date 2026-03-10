@@ -7,7 +7,11 @@ import { Aside } from '@astrojs/starlight/components';
 
 Blockyard reads its configuration from a TOML file. The default path is
 `blockyard.toml` in the working directory. Override it with the
-`BLOCKYARD_CONFIG` environment variable.
+`--config` CLI argument:
+
+```bash
+blockyard --config /etc/blockyard/config.toml
+```
 
 ## Environment variable overrides
 
@@ -66,6 +70,7 @@ rv_version = "latest"
 bundle_server_path = "/data/bundles"
 bundle_worker_path = "/app"
 bundle_retention   = 50
+max_bundle_size    = 104857600
 ```
 
 | Field | Type | Default | Required | Description |
@@ -73,6 +78,7 @@ bundle_retention   = 50
 | `bundle_server_path` | `path` | — | **Yes** | Directory for storing uploaded bundles |
 | `bundle_worker_path` | `path` | `/app` | No | Mount point inside worker containers |
 | `bundle_retention` | `integer` | `50` | No | Max bundles kept per app (oldest pruned first) |
+| `max_bundle_size` | `integer` | `104857600` | No | Maximum bundle upload size in bytes (default 100 MB) |
 
 ## `[database]`
 
@@ -90,7 +96,7 @@ path = "/data/db/blockyard.db"
 ```toml
 [proxy]
 ws_cache_ttl         = "60s"
-health_interval      = "10s"
+health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 ```
@@ -98,6 +104,6 @@ max_workers          = 100
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `ws_cache_ttl` | `duration` | `60s` | No | Time to keep a backend WebSocket alive after client disconnects |
-| `health_interval` | `duration` | `10s` | No | How often workers are health-checked |
+| `health_interval` | `duration` | `15s` | No | How often workers are health-checked |
 | `worker_start_timeout` | `duration` | `60s` | No | Max time to wait for a new worker to become healthy |
 | `max_workers` | `integer` | `100` | No | Global cap on concurrent worker containers |
