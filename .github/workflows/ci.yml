@@ -9,19 +9,57 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  check:
+  smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --features test-support
-      - run: cargo test --features test-support
+      - run: cargo llvm-cov --features test-support --lcov --output-path lcov-unit.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov-unit
+          path: lcov-unit.info
+
+  integration:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: docker pull ghcr.io/rocker-org/r-ver:latest
+      - run: docker pull alpine:latest
+      - run: cargo llvm-cov --features docker-tests --lcov --output-path lcov-integration.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov-integration
+          path: lcov-integration.info
+
+  coverage:
+    needs: [smoke, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lcov-*
+          merge-multiple: true
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov-unit.info,lcov-integration.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
 
   docs:
+    needs: [smoke, integration]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,13 +73,3 @@ jobs:
           cache-dependency-path: docs/package-lock.json
       - run: npm ci
       - run: npm run build
-
-  docker-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: docker pull ghcr.io/rocker-org/r-ver:latest
-      - run: docker pull alpine:latest
-      - run: cargo test --features docker-tests
