@@ -881,19 +881,8 @@ async fn proxy_websocket_echo() {
         .send()
         .await
         .unwrap();
-    let cookie = resp
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let session_id = cookie
-        .split('=')
-        .nth(1)
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap();
+    let cookie = resp.headers().get("set-cookie").unwrap().to_str().unwrap();
+    let session_id = cookie.split('=').nth(1).unwrap().split(';').next().unwrap();
 
     // Connect WebSocket with the session cookie
     let ws_url = format!("ws://{addr}/app/my-app/websocket/");
@@ -904,10 +893,7 @@ async fn proxy_websocket_echo() {
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
         .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-        .header(
-            "Cookie",
-            format!("blockyard_session={session_id}"),
-        )
+        .header("Cookie", format!("blockyard_session={session_id}"))
         .body(())
         .unwrap();
 

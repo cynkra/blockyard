@@ -56,7 +56,10 @@ pub async fn get_app_by_name(pool: &SqlitePool, name: &str) -> Result<Option<App
 }
 
 /// Resolve an app by ID or name. Tries ID first, then falls back to name.
-pub async fn resolve_app(pool: &SqlitePool, id_or_name: &str) -> Result<Option<AppRow>, sqlx::Error> {
+pub async fn resolve_app(
+    pool: &SqlitePool,
+    id_or_name: &str,
+) -> Result<Option<AppRow>, sqlx::Error> {
     if let Some(app) = get_app(pool, id_or_name).await? {
         return Ok(Some(app));
     }

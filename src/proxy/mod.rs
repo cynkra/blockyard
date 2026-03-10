@@ -4,11 +4,11 @@ pub mod registry;
 pub mod session;
 pub mod ws_cache;
 
+use axum::Router;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Router;
 
 use crate::app::AppState;
 use crate::backend::Backend;
@@ -19,15 +19,9 @@ pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
 
     Router::new()
         .merge(api)
-        .route(
-            "/app/{name}",
-            axum::routing::get(trailing_slash_redirect),
-        )
+        .route("/app/{name}", axum::routing::get(trailing_slash_redirect))
         // Two routes needed: {*rest} doesn't match an empty/root path
-        .route(
-            "/app/{name}/",
-            axum::routing::any(proxy_handler_root::<B>),
-        )
+        .route("/app/{name}/", axum::routing::any(proxy_handler_root::<B>))
         .route(
             "/app/{name}/{*rest}",
             axum::routing::any(proxy_handler::<B>),
@@ -35,10 +29,7 @@ pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
         .with_state(state)
 }
 
-pub async fn trailing_slash_redirect(
-    Path(name): Path<String>,
-    req: Request,
-) -> Response {
+pub async fn trailing_slash_redirect(Path(name): Path<String>, req: Request) -> Response {
     let query = req
         .uri()
         .query()
@@ -164,14 +155,8 @@ async fn proxy_request<B: Backend + Clone>(
 
         let mut response = ws
             .on_upgrade(move |client_ws| async move {
-                if let Err(e) = forward::shuttle_ws(
-                    client_ws,
-                    addr,
-                    &path,
-                    &session_id_owned,
-                    &state,
-                )
-                .await
+                if let Err(e) =
+                    forward::shuttle_ws(client_ws, addr, &path, &session_id_owned, &state).await
                 {
                     tracing::debug!(
                         error = %e,

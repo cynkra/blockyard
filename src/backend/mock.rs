@@ -153,9 +153,7 @@ async fn mock_echo_handler(req: axum::extract::Request) -> axum::response::Respo
     let (mut parts, _body) = req.into_parts();
 
     // Try to extract WebSocket upgrade
-    if let Ok(ws) =
-        axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
-    {
+    if let Ok(ws) = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
         ws.on_upgrade(|mut socket| async move {
             use futures_util::StreamExt;
             while let Some(Ok(msg)) = socket.next().await {

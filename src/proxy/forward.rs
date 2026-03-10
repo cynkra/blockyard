@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
-use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use axum::extract::Request;
+use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
@@ -22,9 +22,7 @@ pub async fn forward_http(
     // Strip /app/{name} prefix from the URI
     let original_path = parts.uri.path();
     let prefix = format!("/app/{app_name}");
-    let new_path = original_path
-        .strip_prefix(&prefix)
-        .unwrap_or(original_path);
+    let new_path = original_path.strip_prefix(&prefix).unwrap_or(original_path);
     let new_path = if new_path.is_empty() { "/" } else { new_path };
 
     // Reconstruct URI with query string
@@ -50,10 +48,9 @@ pub async fn forward_http(
         .await
         .map_err(ForwardError::Connect)?;
 
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake(TokioIo::new(stream))
-            .await
-            .map_err(ForwardError::Handshake)?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(ForwardError::Handshake)?;
 
     // Spawn the connection driver
     tokio::spawn(async move {
@@ -62,10 +59,7 @@ pub async fn forward_http(
         }
     });
 
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(ForwardError::Send)?;
+    let resp = sender.send_request(req).await.map_err(ForwardError::Send)?;
 
     Ok(resp.map(axum::body::Body::new))
 }
@@ -126,9 +120,7 @@ pub async fn shuttle_ws<B: Backend + Clone>(
     };
 
     // Cache the backend WS if the client disconnected
-    if client_gone
-        && let Ok(backend_ws) = backend_tx.reunite(backend_rx)
-    {
+    if client_gone && let Ok(backend_ws) = backend_tx.reunite(backend_rx) {
         let state_for_expire: AppState<B> = (*state).clone();
         let sid_for_cache = session_id.to_string();
         let sid_for_expire = sid_for_cache.clone();
@@ -161,12 +153,14 @@ fn axum_to_tungstenite(msg: AxumMessage) -> Message {
         AxumMessage::Binary(b) => Message::Binary(bytes::Bytes::from(b.to_vec())),
         AxumMessage::Ping(p) => Message::Ping(bytes::Bytes::from(p.to_vec())),
         AxumMessage::Pong(p) => Message::Pong(bytes::Bytes::from(p.to_vec())),
-        AxumMessage::Close(c) => Message::Close(c.map(|cf| {
-            tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                code: cf.code.into(),
-                reason: cf.reason.to_string().into(),
-            }
-        })),
+        AxumMessage::Close(c) => {
+            Message::Close(
+                c.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: cf.code.into(),
+                    reason: cf.reason.to_string().into(),
+                }),
+            )
+        }
     }
 }
 
@@ -176,11 +170,9 @@ fn tungstenite_to_axum(msg: Message) -> AxumMessage {
         Message::Binary(b) => AxumMessage::Binary(b.to_vec().into()),
         Message::Ping(p) => AxumMessage::Ping(p.to_vec().into()),
         Message::Pong(p) => AxumMessage::Pong(p.to_vec().into()),
-        Message::Close(c) => AxumMessage::Close(c.map(|cf| {
-            axum::extract::ws::CloseFrame {
-                code: cf.code.into(),
-                reason: cf.reason.to_string().into(),
-            }
+        Message::Close(c) => AxumMessage::Close(c.map(|cf| axum::extract::ws::CloseFrame {
+            code: cf.code.into(),
+            reason: cf.reason.to_string().into(),
         })),
         Message::Frame(_) => AxumMessage::Binary(vec![].into()),
     }

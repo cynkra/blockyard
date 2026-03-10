@@ -41,7 +41,10 @@ impl SessionStore {
 
     /// Count sessions assigned to a specific worker.
     pub fn count_for_worker(&self, worker_id: &str) -> usize {
-        self.sessions.iter().filter(|e| e.value() == worker_id).count()
+        self.sessions
+            .iter()
+            .filter(|e| e.value() == worker_id)
+            .count()
     }
 }
 
@@ -67,7 +70,5 @@ pub fn extract_session_id(headers: &axum::http::HeaderMap) -> Option<String> {
 
 /// Build the Set-Cookie header value for a new session.
 pub fn session_cookie(session_id: &str, app_name: &str) -> String {
-    format!(
-        "{SESSION_COOKIE_NAME}={session_id}; Path=/app/{app_name}/; HttpOnly; SameSite=Lax"
-    )
+    format!("{SESSION_COOKIE_NAME}={session_id}; Path=/app/{app_name}/; HttpOnly; SameSite=Lax")
 }
