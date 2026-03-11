@@ -92,10 +92,15 @@ pub async fn unpack_archive(paths: &BundlePaths) -> Result<(), BundleError> {
 }
 
 /// Create the library output directory for dependency restoration.
+/// Also creates the mountpoint inside the unpacked bundle so Docker can
+/// bind-mount the library dir even when /app is mounted read-only.
 pub async fn create_library_dir(paths: &BundlePaths) -> Result<(), BundleError> {
     tokio::fs::create_dir_all(&paths.library)
         .await
         .map_err(|e| BundleError::Storage(format!("create library dir: {e}")))?;
+    tokio::fs::create_dir_all(paths.unpacked.join("rv/library"))
+        .await
+        .map_err(|e| BundleError::Storage(format!("create library mountpoint: {e}")))?;
     Ok(())
 }
 
