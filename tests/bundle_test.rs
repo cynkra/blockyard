@@ -185,6 +185,56 @@ async fn task_logs_streams_output() {
 }
 
 #[tokio::test]
+async fn task_status_returns_json() {
+    let (addr, state, _tmp) = spawn_test_server().await;
+    let app = db::sqlite::create_app(&state.db, "test-app").await.unwrap();
+
+    let resp = client()
+        .post(format!("http://{addr}/api/v1/apps/{}/bundles", app.id))
+        .header("authorization", "Bearer test-token")
+        .body(make_test_bundle())
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let task_id = body["task_id"].as_str().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/tasks/{task_id}"))
+        .header("authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let task: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(task["id"].as_str().unwrap(), task_id);
+    assert!(
+        task["status"].as_str().unwrap() == "completed"
+            || task["status"].as_str().unwrap() == "running",
+        "unexpected status: {}",
+        task["status"]
+    );
+}
+
+#[tokio::test]
+async fn task_status_nonexistent_returns_404() {
+    let (addr, _state, _tmp) = spawn_test_server().await;
+
+    let resp = client()
+        .get(format!("http://{addr}/api/v1/tasks/nonexistent"))
+        .header("authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn task_logs_nonexistent_returns_404() {
     let (addr, _state, _tmp) = spawn_test_server().await;
 

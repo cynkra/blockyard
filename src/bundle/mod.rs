@@ -221,6 +221,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_library_dir_creates_mountpoint_in_unpacked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tar_data = tokio::fs::read(make_test_targz(tmp.path())).await.unwrap();
+        let paths = write_archive(
+            tmp.path(),
+            "app-1",
+            "bundle-1",
+            bytes::Bytes::from(tar_data),
+        )
+        .await
+        .unwrap();
+        unpack_archive(&paths).await.unwrap();
+        create_library_dir(&paths).await.unwrap();
+
+        // Library output dir exists
+        assert!(paths.library.exists());
+        // Mountpoint inside unpacked bundle exists (needed for read-only /app mount)
+        assert!(paths.unpacked.join("rv/library").exists());
+    }
+
+    #[tokio::test]
     async fn delete_bundle_files_works() {
         let tmp = tempfile::TempDir::new().unwrap();
         let tar_data = tokio::fs::read(make_test_targz(tmp.path())).await.unwrap();

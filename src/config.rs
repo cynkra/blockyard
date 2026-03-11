@@ -340,6 +340,27 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn missing_token_in_toml_defaults_to_empty() {
+        let toml_without_token = r#"
+        [server]
+
+        [docker]
+        image = "ghcr.io/rocker-org/r-ver:4.4.3"
+
+        [storage]
+        bundle_server_path = "/tmp/bundles"
+
+        [database]
+        path = "/tmp/blockyard.db"
+
+        [proxy]
+        "#;
+        let config: Config = toml::from_str(toml_without_token).unwrap();
+        assert!(config.server.token.is_empty());
+        assert!(config.validate().is_err());
+    }
+
     /// Verify every leaf field in Config has a corresponding BLOCKYARD_* env var.
     #[test]
     fn env_var_coverage_complete() {
