@@ -64,12 +64,15 @@ jobs:
             type=raw,value=latest
 
       - name: Create and push multi-arch manifest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          for tag in ${{ steps.meta.outputs.tags }}; do
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
             docker buildx imagetools create -t "$tag" \
               "${{ env.SERVER_IMAGE }}:build-linux-amd64" \
               "${{ env.SERVER_IMAGE }}:build-linux-arm64"
-          done
+          done <<< "$TAGS"
 
   github-release:
     needs: server-manifest
