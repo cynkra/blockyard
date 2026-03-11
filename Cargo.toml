@@ -9,6 +9,7 @@ default = ["docker"]
 docker = ["dep:bollard"]
 docker-tests = ["docker"]
 docker-integration-tests = ["docker"]
+keycloak-integration-tests = []
 test-support = []
 
 [dependencies]
