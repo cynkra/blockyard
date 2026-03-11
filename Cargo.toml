@@ -60,3 +60,6 @@ version = "0.26"
 blockyard = { path = ".", features = ["test-support"] }
 reqwest      = { version = "0.12", features = ["json", "cookies"] }
 assert_matches = "1"
+rsa          = "0.9"
+rand         = "0.8"
+jsonwebtoken = "9"
