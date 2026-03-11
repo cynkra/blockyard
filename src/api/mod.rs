@@ -34,6 +34,10 @@ pub fn api_router<B: Backend + Clone>(state: AppState<B>) -> Router<AppState<B>>
         .route("/apps/{id}/stop", axum::routing::post(apps::stop_app::<B>))
         .route("/apps/{id}/logs", axum::routing::get(apps::app_logs::<B>))
         .route(
+            "/tasks/{task_id}",
+            axum::routing::get(tasks::get_task::<B>),
+        )
+        .route(
             "/tasks/{task_id}/logs",
             axum::routing::get(tasks::task_logs::<B>),
         )

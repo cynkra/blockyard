@@ -1,13 +1,24 @@
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Json, Response};
 use futures_util::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::api::error::not_found;
 use crate::app::AppState;
 use crate::backend::Backend;
-use crate::task::TaskStatus;
+use crate::task::{TaskState, TaskStatus};
+
+pub async fn get_task<B: Backend>(
+    State(state): State<AppState<B>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<TaskState>, Response> {
+    let task_state = state
+        .task_store
+        .get(&task_id)
+        .ok_or_else(|| not_found(format!("No task with ID {task_id}")).into_response())?;
+    Ok(Json(task_state))
+}
 
 pub async fn task_logs<B: Backend>(
     State(state): State<AppState<B>>,

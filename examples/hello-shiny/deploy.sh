@@ -76,16 +76,15 @@ echo "    task=${TASK_ID}"
 # --- Poll the task until done ---
 echo "==> Restoring dependencies (this may take a while on first run)..."
 while true; do
-  task_resp=$(auth "${BASE_URL}/api/v1/tasks/${TASK_ID}/logs" 2>/dev/null || true)
-  if echo "$task_resp" | grep -q '"done":true'; then
-    if echo "$task_resp" | grep -q '"success":true'; then
-      echo "    Restore complete!"
-    else
-      echo "ERROR: Restore failed. Check task logs:" >&2
-      echo "$task_resp" >&2
-      exit 1
-    fi
+  task_resp=$(auth "${BASE_URL}/api/v1/tasks/${TASK_ID}" 2>/dev/null || true)
+  status=$(echo "$task_resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [ "$status" = "completed" ]; then
+    echo "    Restore complete!"
     break
+  elif [ "$status" = "failed" ]; then
+    echo "ERROR: Restore failed. Logs:" >&2
+    auth "${BASE_URL}/api/v1/tasks/${TASK_ID}/logs" >&2
+    exit 1
   fi
   sleep 2
 done

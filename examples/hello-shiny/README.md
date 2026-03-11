@@ -9,8 +9,8 @@ Minimal example that boots blockyard and deploys a Shiny app.
 ## Usage
 
 ```bash
-# Start blockyard (builds the server image on first run)
-docker compose up -d --build
+# Start blockyard
+docker compose up -d
 
 # Deploy the app
 ./deploy.sh
