@@ -1,0 +1,25 @@
+services:
+  blockyard:
+    image: ghcr.io/cynkra/blockyard:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - bundles:/data/bundles
+      - db:/data/db
+    environment:
+      BLOCKYARD_SERVER_TOKEN: my-secret-token
+      RUST_LOG: blockyard=info
+    # iptables needs NET_ADMIN; SYS_ADMIN lets blockyard detect its own container ID
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  bundles:
+  db:
