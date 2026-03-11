@@ -71,7 +71,10 @@ pub async fn ensure_worker<B: Backend>(
         shiny_port,
         cmd: Some(vec![
             "Rscript".into(),
-            format!("{}/app.R", state.config.storage.bundle_worker_path.display()),
+            format!(
+                "{}/app.R",
+                state.config.storage.bundle_worker_path.display()
+            ),
         ]),
         memory_limit: app.memory_limit.clone(),
         cpu_limit: app.cpu_limit,
