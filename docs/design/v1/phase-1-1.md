@@ -67,6 +67,9 @@ sha2            = "0.10"
 
 # Encoding
 base64          = "0.22"
+
+# URL encoding for return_url in login redirects
+urlencoding     = "2"
 ```
 
 **Dependency rationale:**
@@ -318,7 +321,7 @@ impl OidcClient {
             openidconnect::reqwest::async_http_client,
         ).await?;
 
-        let client = CoreClient::from_provider_metadata(
+        let client = BlockyardClient::from_provider_metadata(
             metadata.clone(),
             ClientId::new(client_id.to_string()),
             Some(ClientSecret::new(client_secret.to_string())),
@@ -563,27 +566,9 @@ impl UserSessionStore {
 
 ### Step 5: Authorization code flow endpoints
 
-Three new routes added to the full router:
-
-```rust
-pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
-    let api = crate::api::api_router(state.clone());
-
-    let mut router = Router::new()
-        .merge(api)
-        // Auth endpoints (unauthenticated)
-        .route("/login", axum::routing::get(login_handler::<B>))
-        .route("/callback", axum::routing::get(callback_handler::<B>))
-        .route("/logout", axum::routing::post(logout_handler::<B>))
-        // Proxy routes
-        .route("/app/{name}", axum::routing::get(trailing_slash_redirect))
-        .route("/app/{name}/", axum::routing::any(proxy_handler_root::<B>))
-        .route("/app/{name}/{*rest}", axum::routing::any(proxy_handler::<B>))
-        .with_state(state);
-
-    router
-}
-```
+Three new routes: `GET /login`, `GET /callback`, `POST /logout`. These are
+registered outside the app-plane auth layer (see Step 7 for the full router
+structure).
 
 **Cookie security flags helper:**
 
@@ -838,7 +823,7 @@ async fn logout_handler<B: Backend>(
     }
 
     (
-        [(axum::http::header::SET_COOKIE, clear_cookie.to_string())],
+        [(axum::http::header::SET_COOKIE, clear_cookie)],
         axum::response::Redirect::to("/"),
     ).into_response()
 }
@@ -964,12 +949,6 @@ fn redirect_to_login(req: &Request) -> Response {
     axum::response::Redirect::to(&format!("/login?return_url={encoded}"))
         .into_response()
 }
-```
-
-Add `urlencoding` to dependencies:
-
-```toml
-urlencoding = "2"
 ```
 
 **Token refresh function:**
