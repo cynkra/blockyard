@@ -136,6 +136,10 @@ impl DockerBackend {
 
         let config = Config {
             image: Some(spec.image.clone()),
+            cmd: Some(vec![
+                "Rscript".to_string(),
+                format!("{}/app.R", spec.worker_mount.display()),
+            ]),
             env: Some(vec![
                 format!("SHINY_PORT={}", spec.shiny_port),
                 "R_LIBS=/blockyard-lib".to_string(),
