@@ -136,10 +136,7 @@ impl DockerBackend {
 
         let config = Config {
             image: Some(spec.image.clone()),
-            cmd: Some(vec![
-                "Rscript".to_string(),
-                format!("{}/app.R", spec.worker_mount.display()),
-            ]),
+            cmd: spec.cmd.clone(),
             env: Some(vec![
                 format!("SHINY_PORT={}", spec.shiny_port),
                 "R_LIBS=/blockyard-lib".to_string(),
@@ -959,6 +956,7 @@ mod unit_tests {
             library_path: "/tmp".into(),
             worker_mount: "/app".into(),
             shiny_port: 3838,
+            cmd: None,
             memory_limit: None,
             cpu_limit: None,
             labels: Default::default(),
@@ -1032,6 +1030,7 @@ mod integration_tests {
             library_path: "/tmp".into(),
             worker_mount: "/app".into(),
             shiny_port: 3838,
+            cmd: None,
             memory_limit: Some("256m".into()),
             cpu_limit: Some(0.5),
             labels: Default::default(),
@@ -1060,6 +1059,7 @@ mod integration_tests {
             library_path: "/tmp".into(),
             worker_mount: "/app".into(),
             shiny_port: 3838,
+            cmd: None,
             memory_limit: None,
             cpu_limit: None,
             labels: Default::default(),
@@ -1087,6 +1087,7 @@ mod integration_tests {
             library_path: "/tmp".into(),
             worker_mount: "/app".into(),
             shiny_port: 3838,
+            cmd: None,
             memory_limit: None,
             cpu_limit: None,
             labels: Default::default(),

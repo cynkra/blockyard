@@ -71,6 +71,7 @@ pub struct WorkerSpec {
     pub library_path: PathBuf,
     pub worker_mount: PathBuf,
     pub shiny_port: u16,
+    pub cmd: Option<Vec<String>>,
     pub memory_limit: Option<String>,
     pub cpu_limit: Option<f64>,
     pub labels: HashMap<String, String>,

@@ -269,6 +269,10 @@ pub async fn start_app<B: Backend>(
         library_path: paths.library,
         worker_mount: state.config.storage.bundle_worker_path.clone(),
         shiny_port,
+        cmd: Some(vec![
+            "Rscript".into(),
+            format!("{}/app.R", state.config.storage.bundle_worker_path.display()),
+        ]),
         memory_limit: app.memory_limit.clone(),
         cpu_limit: app.cpu_limit,
         labels,

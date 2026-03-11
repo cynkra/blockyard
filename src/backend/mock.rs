@@ -270,6 +270,7 @@ mod tests {
             library_path: "/tmp/lib".into(),
             worker_mount: "/app".into(),
             shiny_port: 3838,
+            cmd: None,
             memory_limit: None,
             cpu_limit: None,
             labels: Default::default(),
