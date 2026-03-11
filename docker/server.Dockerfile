@@ -15,7 +15,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/blockyard /usr/local/bin/blockyard
+COPY blockyard.toml /etc/blockyard/blockyard.toml
 
 EXPOSE 8080
 
-ENTRYPOINT ["blockyard"]
+ENTRYPOINT ["blockyard", "--config", "/etc/blockyard/blockyard.toml"]
