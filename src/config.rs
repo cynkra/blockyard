@@ -3,13 +3,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
     pub docker: Option<DockerConfig>,
+    #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
     pub proxy: ProxyConfig,
 }
 
@@ -17,6 +21,7 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_bind")]
     pub bind: SocketAddr,
+    #[serde(default = "default_token")]
     pub token: String,
     #[serde(default = "default_shutdown_timeout", with = "humantime_serde")]
     pub shutdown_timeout: Duration,
@@ -26,6 +31,7 @@ pub struct ServerConfig {
 pub struct DockerConfig {
     #[serde(default = "default_socket")]
     pub socket: String,
+    #[serde(default = "default_image")]
     pub image: String,
     #[serde(default = "default_shiny_port")]
     pub shiny_port: u16,
@@ -35,6 +41,7 @@ pub struct DockerConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
+    #[serde(default = "default_bundle_server_path")]
     pub bundle_server_path: PathBuf,
     #[serde(default = "default_worker_path")]
     pub bundle_worker_path: PathBuf,
@@ -46,6 +53,7 @@ pub struct StorageConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DatabaseConfig {
+    #[serde(default = "default_database_path")]
     pub path: PathBuf,
 }
 
@@ -71,17 +79,26 @@ pub const DEFAULT_IMAGE: &str = "ghcr.io/rocker-org/r-ver:4.4.3";
 fn default_bind() -> SocketAddr {
     "0.0.0.0:8080".parse().unwrap()
 }
+fn default_token() -> String {
+    "change-me-in-production".into()
+}
 fn default_shutdown_timeout() -> Duration {
     Duration::from_secs(30)
 }
 fn default_socket() -> String {
     "/var/run/docker.sock".into()
 }
+fn default_image() -> String {
+    DEFAULT_IMAGE.into()
+}
 fn default_shiny_port() -> u16 {
     3838
 }
 fn default_rv_version() -> String {
     "latest".into()
+}
+fn default_bundle_server_path() -> PathBuf {
+    PathBuf::from("/data/bundles")
 }
 fn default_worker_path() -> PathBuf {
     PathBuf::from("/app")
@@ -92,6 +109,51 @@ fn default_retention() -> u32 {
 fn default_max_bundle_size() -> usize {
     100 * 1024 * 1024
 }
+fn default_database_path() -> PathBuf {
+    PathBuf::from("/data/db/blockyard.db")
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_bind(),
+            token: default_token(),
+            shutdown_timeout: default_shutdown_timeout(),
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            bundle_server_path: default_bundle_server_path(),
+            bundle_worker_path: default_worker_path(),
+            bundle_retention: default_retention(),
+            max_bundle_size: default_max_bundle_size(),
+        }
+    }
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: default_database_path(),
+        }
+    }
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            ws_cache_ttl: default_ws_cache_ttl(),
+            health_interval: default_health_interval(),
+            worker_start_timeout: default_start_timeout(),
+            max_workers: default_max_workers(),
+            log_retention: default_log_retention(),
+        }
+    }
+}
+
 fn default_ws_cache_ttl() -> Duration {
     Duration::from_secs(60)
 }
@@ -134,16 +196,23 @@ pub fn supported_env_vars() -> &'static [&'static str] {
 
 impl Config {
     /// Load config from file + env var overrides.
-    /// File path: --config CLI arg, or ./blockyard.toml by default.
+    /// If --config is given, the file must exist. Otherwise, falls back to
+    /// ./blockyard.toml if present, or built-in defaults.
     pub fn load() -> Result<Self, ConfigError> {
-        let path = std::env::args()
+        let explicit = std::env::args()
             .skip_while(|a| a != "--config")
-            .nth(1)
-            .unwrap_or_else(|| "blockyard.toml".into());
+            .nth(1);
 
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| ConfigError::ReadFile(path.clone(), e))?;
-        let mut config: Config = toml::from_str(&text).map_err(ConfigError::Parse)?;
+        let mut config: Config = if let Some(path) = explicit {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| ConfigError::ReadFile(path.clone(), e))?;
+            toml::from_str(&text).map_err(ConfigError::Parse)?
+        } else {
+            match std::fs::read_to_string("blockyard.toml") {
+                Ok(text) => toml::from_str(&text).map_err(ConfigError::Parse)?,
+                Err(_) => Config::default(),
+            }
+        };
 
         config.apply_env_overrides();
         config.validate()?;
@@ -321,6 +390,16 @@ mod tests {
         assert_eq!(config.server.bind, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.server.token, "test-token");
         assert_eq!(config.proxy.max_workers, 100);
+    }
+
+    #[test]
+    fn empty_toml_uses_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.server.bind, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(config.server.token, "change-me-in-production");
+        assert_eq!(config.storage.bundle_server_path, PathBuf::from("/data/bundles"));
+        assert_eq!(config.database.path, PathBuf::from("/data/db/blockyard.db"));
+        assert!(config.docker.is_none());
     }
 
     #[test]
