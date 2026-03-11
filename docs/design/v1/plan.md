@@ -61,12 +61,12 @@ src/
 # --- v1 additions ---
 # OIDC / JWT
 openidconnect   = "4"           # OIDC discovery, authorization code flow
-jsonwebtoken    = "9"           # JWT decode + JWKS validation
+jsonwebtoken    = "9"           # JWT decode + JWKS validation (phase 1-2)
 
-# Session cookies
-cookie          = { version = "0.18", features = ["signed"] }
+# Session cookie signing
 hmac            = "0.12"
 sha2            = "0.10"
+base64          = "0.22"
 
 # OpenBao / Vault client
 reqwest         = { version = "0.12", features = ["json", "rustls-tls"] }
@@ -90,9 +90,8 @@ tokio = { version = "1", features = ["full", "fs"] }  # fs for async file writes
   discovery, JWKS fetching, authorization URL generation, and token exchange.
   Built on `oauth2` crate.
 - **jsonwebtoken** — lightweight JWT validation for the control plane (client
-  credentials flow). Shares the JWKS fetched by `openidconnect`.
-- **cookie** — signed cookie construction and verification. The `signed`
-  feature provides HMAC-SHA256 signing.
+  credentials flow, phase 1-2). Shares the JWKS fetched by `openidconnect`.
+- **hmac + sha2 + base64** — HMAC-SHA256 cookie signing and key derivation.
 - **reqwest** — HTTP client for OpenBao API calls. Already used in
   dev-dependencies; promoted to regular dependency.
 - **metrics + prometheus exporter** — Prometheus-compatible metrics. The
@@ -114,11 +113,12 @@ and OpenBao integration all require a logged-in user.
    `{issuer_url}/.well-known/openid-configuration`
 2. Authorization code flow endpoints: `GET /login`, `GET /callback`,
    `POST /logout`
-3. JWKS fetching and caching — periodic refresh of the IdP's signing keys
-4. Signed session cookie — HMAC-SHA256 signed, carries `sub`, `groups`,
-   `access_token`, encrypted `refresh_token`
+3. Minimal signed session cookie — HMAC-SHA256 signed, carries only `sub` +
+   `issued_at` (~100-150 bytes)
+4. Server-side session store — `DashMap<String, UserSession>` keyed by `sub`,
+   holds groups, access token, refresh token
 5. Transparent access token refresh — on each request, if access token is
-   near expiry, exchange refresh token and re-issue cookie
+   near expiry, exchange refresh token and update server-side session
 6. Auth middleware for the app plane — protect `/app/` routes; redirect
    unauthenticated users to `/login`
 7. Config additions: `[oidc]` section
@@ -146,30 +146,36 @@ expires before the cookie, the session ends at refresh token expiry regardless
 of the cookie's max-age. Conversely, a long-lived refresh token is bounded by
 the cookie max-age. Operators should align both values.
 
-```rust
-// (continued from above — not a separate block)
-```
+**Session architecture: minimal cookie + server-side store.**
 
-**Signed session cookie:**
+The cookie carries only `sub` and `issued_at`, signed with HMAC-SHA256. All
+sensitive/bulky data (groups, access token, refresh token) lives server-side
+in a `DashMap<String, UserSession>`. This avoids cookie size issues (IdP
+JWTs can be 1-2KB, easily exceeding the 4KB browser limit), eliminates the
+need for refresh token encryption, and enables immediate session invalidation
+on logout.
 
 ```rust
-/// Encoded into the session cookie value. Signed with HMAC-SHA256.
-/// The cookie is the sole source of identity — no server-side session store.
+/// Minimal payload in the session cookie.
 #[derive(Serialize, Deserialize)]
-pub struct SessionPayload {
-    pub sub: String,                 // IdP subject identifier
-    pub groups: Vec<String>,         // group memberships from groups_claim
-    pub access_token: String,        // short-lived IdP access token
-    pub refresh_token_enc: Vec<u8>,  // encrypted refresh token
-    pub expires_at: i64,             // access token expiry (unix timestamp)
-    pub issued_at: i64,              // cookie issue time
+pub struct CookiePayload {
+    pub sub: String,    // IdP subject identifier
+    pub issued_at: i64, // cookie issue time
+}
+
+/// Server-side session data, keyed by sub.
+pub struct UserSession {
+    pub groups: Vec<String>,     // group memberships from groups_claim
+    pub access_token: String,    // short-lived IdP access token
+    pub refresh_token: String,   // long-lived refresh token (plaintext, never leaves server)
+    pub expires_at: i64,         // access token expiry (unix timestamp)
 }
 ```
 
-The refresh token is encrypted (not just signed) because the cookie is
-visible to client-side JavaScript on non-httponly cookies. We use
-HMAC-SHA256 for the signature and AES-256-GCM for refresh token encryption,
-both derived from `BLOCKYARD_SESSION_SECRET`.
+Trade-off: sessions are lost on server restart — users must re-authenticate.
+This is the same failure mode as workers, proxy sessions, and task store
+(all in-memory in v1). v2's PostgreSQL migration would naturally extend to
+session state.
 
 **Authorization code flow:**
 
@@ -183,33 +189,33 @@ GET /callback?code=...&state=...
   → Exchange code for tokens at IdP token endpoint
   → Validate ID token signature against JWKS
   → Extract sub + groups from ID token claims
-  → Build SessionPayload, sign cookie, set cookie
+  → Store UserSession server-side, set signed cookie (sub + issued_at)
   → 302 to return_url from state (default: /)
 
 POST /logout
-  → Clear session cookie
+  → Remove server-side session, clear cookie
   → 302 to / (or IdP end_session_endpoint if available)
 ```
 
 **Auth middleware integration:**
 
 The v0 proxy serves apps without authentication. v1 adds a middleware layer
-that checks for a valid signed session cookie before proxying. The control
-plane API continues to use bearer token auth (upgraded to JWT in phase 1-2).
+that verifies the signed session cookie, looks up the server-side session,
+and inserts `AuthenticatedUser` into request extensions. The control plane
+API continues to use bearer token auth (upgraded to JWT in phase 1-2).
 
 ```rust
 /// App-plane auth middleware. Inserted into the proxy router.
 /// Redirects unauthenticated users to /login?return_url={current_path}.
-/// Extracts SessionPayload and inserts it into request extensions.
 async fn app_auth_middleware(
     State(state): State<AppState<B>>,
-    jar: CookieJar,
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let payload = validate_session_cookie(&state, &jar)?;
-    let payload = refresh_if_needed(&state, payload).await?;
-    req.extensions_mut().insert(payload);
+    let cookie = verify_session_cookie(&state, &req)?;
+    let session = state.user_sessions.get(&cookie.sub)?;
+    refresh_if_needed(&state, &cookie.sub).await?;
+    req.extensions_mut().insert(AuthenticatedUser { ... });
     Ok(next.run(req).await)
 }
 ```
@@ -847,6 +853,7 @@ token            = "..."               # static token (v0 compat / dev mode)
 shutdown_timeout = "30s"
 session_secret   = "..."               # HMAC key for cookie signing
                                        # use BLOCKYARD_SERVER_SESSION_SECRET env var
+external_url     = "https://blockyard.example.com"  # public URL (for redirects, cookie Secure flag)
 
 [docker]
 socket     = "/var/run/docker.sock"
@@ -903,6 +910,7 @@ enforces this.
 
 ```
 BLOCKYARD_SERVER_SESSION_SECRET
+BLOCKYARD_SERVER_EXTERNAL_URL
 BLOCKYARD_OIDC_ISSUER_URL
 BLOCKYARD_OIDC_CLIENT_ID
 BLOCKYARD_OIDC_CLIENT_SECRET
@@ -1103,13 +1111,17 @@ Extended with:
 
 ## Design Decisions
 
-1. **Cookie-only sessions (no server-side session store).** The signed cookie
-   carries all session state. This avoids a session table, simplifies
-   horizontal scaling (no shared session store), and matches the v0 design
-   where runtime state is in-memory. The trade-off: cookies are larger
-   (~1KB) and logout doesn't invalidate existing cookies — the access token
-   expires naturally. This is acceptable given short access token TTLs
-   (5–15 minutes).
+1. **Minimal cookie + server-side session store.** The signed cookie carries
+   only `sub` and `issued_at` (~100-150 bytes). All sensitive/bulky data
+   (groups, access token, refresh token) lives server-side in a
+   `DashMap<String, UserSession>` keyed by `sub`. This avoids cookie size
+   issues (IdP JWT access tokens are 1-2KB; combined with groups and
+   encrypted refresh tokens the cookie easily exceeds the 4KB browser
+   limit), removes the need for AES-GCM encryption, and enables immediate
+   session invalidation on logout. Trade-off: sessions are lost on server
+   restart, but this matches all other in-memory state in v1 (workers,
+   proxy sessions, task store). v2's PostgreSQL migration extends naturally
+   to session state.
 
 2. **Static token fallback when OIDC is not configured.** The `[oidc]`
    section is optional. When absent, the server runs in v0-compatible mode
