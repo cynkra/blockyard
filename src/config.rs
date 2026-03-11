@@ -21,7 +21,7 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_bind")]
     pub bind: SocketAddr,
-    #[serde(default = "default_token")]
+    #[serde(default)]
     pub token: String,
     #[serde(default = "default_shutdown_timeout", with = "humantime_serde")]
     pub shutdown_timeout: Duration,
@@ -79,9 +79,6 @@ pub const DEFAULT_IMAGE: &str = "ghcr.io/rocker-org/r-ver:4.4.3";
 fn default_bind() -> SocketAddr {
     "0.0.0.0:8080".parse().unwrap()
 }
-fn default_token() -> String {
-    "change-me-in-production".into()
-}
 fn default_shutdown_timeout() -> Duration {
     Duration::from_secs(30)
 }
@@ -117,7 +114,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: default_bind(),
-            token: default_token(),
+            token: String::new(),
             shutdown_timeout: default_shutdown_timeout(),
         }
     }
@@ -304,7 +301,7 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.server.token.is_empty() {
             return Err(ConfigError::Validation(
-                "server.token must not be empty".into(),
+                "server.token must be set via config file or BLOCKYARD_SERVER_TOKEN env var".into(),
             ));
         }
         #[cfg(feature = "docker")]
@@ -396,7 +393,7 @@ mod tests {
     fn empty_toml_uses_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.server.bind, "0.0.0.0:8080".parse().unwrap());
-        assert_eq!(config.server.token, "change-me-in-production");
+        assert!(config.server.token.is_empty(), "token must not have a default");
         assert_eq!(config.storage.bundle_server_path, PathBuf::from("/data/bundles"));
         assert_eq!(config.database.path, PathBuf::from("/data/db/blockyard.db"));
         assert!(config.docker.is_none());
