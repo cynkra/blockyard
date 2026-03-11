@@ -11,14 +11,15 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::app::AppState;
+use crate::auth::oidc;
 use crate::backend::Backend;
 
 /// Build the full application router: API (control plane) + proxy (data plane).
 pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
     let api = crate::api::api_router(state.clone());
 
-    Router::new()
-        .merge(api)
+    // Proxy routes with app-plane auth middleware
+    let proxy_routes = Router::new()
         .route("/app/{name}", axum::routing::get(trailing_slash_redirect))
         // Two routes needed: {*rest} doesn't match an empty/root path
         .route("/app/{name}/", axum::routing::any(proxy_handler_root::<B>))
@@ -26,6 +27,19 @@ pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
             "/app/{name}/{*rest}",
             axum::routing::any(proxy_handler::<B>),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            oidc::app_auth_middleware::<B>,
+        ));
+
+    Router::new()
+        .merge(api)
+        // Auth endpoints (outside proxy auth layer)
+        .route("/login", axum::routing::get(oidc::login_handler::<B>))
+        .route("/callback", axum::routing::get(oidc::callback_handler::<B>))
+        .route("/logout", axum::routing::post(oidc::logout_handler::<B>))
+        // Proxy with auth
+        .merge(proxy_routes)
         .with_state(state)
 }
 

@@ -18,7 +18,7 @@ pub async fn bearer_auth<B: Backend>(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match token {
-        Some(t) if t == state.config.server.token => Ok(next.run(req).await),
+        Some(t) if t == state.config.server.token.expose() => Ok(next.run(req).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }

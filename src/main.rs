@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use blockyard::app::AppState;
+use blockyard::auth::oidc::OidcClient;
+use blockyard::auth::session::{SigningKey, UserSessionStore};
 use blockyard::config::Config;
 use blockyard::ops;
 
@@ -26,7 +30,35 @@ async fn main() -> anyhow::Result<()> {
     let db = blockyard::db::create_pool(&config.database.path).await?;
 
     // Build state
-    let state = AppState::new(config.clone(), backend, db);
+    let mut state = AppState::new(config.clone(), backend, db);
+
+    // Initialize OIDC if configured
+    if let Some(oidc_config) = &config.oidc {
+        let default_url = format!("http://{}", config.server.bind);
+        let base_url = config
+            .server
+            .external_url
+            .as_deref()
+            .unwrap_or(&default_url);
+        let redirect_url = format!("{base_url}/callback");
+
+        let client = OidcClient::discover(
+            &oidc_config.issuer_url,
+            &oidc_config.client_id,
+            oidc_config.client_secret.expose(),
+            &redirect_url,
+            &oidc_config.groups_claim,
+        )
+        .await?;
+
+        let key = SigningKey::derive(config.server.session_secret.as_ref().unwrap().expose());
+
+        state.oidc_client = Some(Arc::new(client));
+        state.signing_key = Some(Arc::new(key));
+        state.user_sessions = Some(Arc::new(UserSessionStore::new()));
+
+        tracing::info!("OIDC authentication enabled");
+    }
 
     // Run startup cleanup before binding the listener
     ops::startup_cleanup(&state).await?;

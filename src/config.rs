@@ -3,6 +3,48 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Wraps a secret string. Debug and Display print "[REDACTED]".
+/// Serialize outputs "[REDACTED]" so structs containing secrets can
+/// still be serialized for introspection (e.g. env var coverage tests)
+/// without leaking the actual value.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl std::fmt::Display for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str("[REDACTED]")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -11,15 +53,40 @@ pub struct Config {
     pub storage: StorageConfig,
     pub database: DatabaseConfig,
     pub proxy: ProxyConfig,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     #[serde(default = "default_bind")]
     pub bind: SocketAddr,
-    pub token: String,
+    pub token: Secret,
     #[serde(default = "default_shutdown_timeout", with = "humantime_serde")]
     pub shutdown_timeout: Duration,
+    #[serde(default)]
+    pub session_secret: Option<Secret>,
+    #[serde(default)]
+    pub external_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OidcConfig {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: Secret,
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    #[serde(default = "default_cookie_max_age", with = "humantime_serde")]
+    pub cookie_max_age: Duration,
+}
+
+fn default_groups_claim() -> String {
+    "groups".into()
+}
+fn default_cookie_max_age() -> Duration {
+    Duration::from_secs(86400) // 24h
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -115,6 +182,8 @@ pub fn supported_env_vars() -> &'static [&'static str] {
         "BLOCKYARD_SERVER_BIND",
         "BLOCKYARD_SERVER_TOKEN",
         "BLOCKYARD_SERVER_SHUTDOWN_TIMEOUT",
+        "BLOCKYARD_SERVER_SESSION_SECRET",
+        "BLOCKYARD_SERVER_EXTERNAL_URL",
         "BLOCKYARD_DOCKER_SOCKET",
         "BLOCKYARD_DOCKER_IMAGE",
         "BLOCKYARD_DOCKER_SHINY_PORT",
@@ -129,7 +198,17 @@ pub fn supported_env_vars() -> &'static [&'static str] {
         "BLOCKYARD_PROXY_WORKER_START_TIMEOUT",
         "BLOCKYARD_PROXY_MAX_WORKERS",
         "BLOCKYARD_PROXY_LOG_RETENTION",
+        "BLOCKYARD_OIDC_ISSUER_URL",
+        "BLOCKYARD_OIDC_CLIENT_ID",
+        "BLOCKYARD_OIDC_CLIENT_SECRET",
+        "BLOCKYARD_OIDC_GROUPS_CLAIM",
+        "BLOCKYARD_OIDC_COOKIE_MAX_AGE",
     ]
+}
+
+/// Check if any env var with the given prefix is set.
+fn env_prefix_exists(prefix: &str) -> bool {
+    std::env::vars().any(|(k, _)| k.starts_with(prefix))
 }
 
 impl Config {
@@ -158,12 +237,18 @@ impl Config {
             self.server.bind = addr;
         }
         if let Ok(v) = std::env::var("BLOCKYARD_SERVER_TOKEN") {
-            self.server.token = v;
+            self.server.token = Secret::from(v.as_str());
         }
         if let Ok(v) = std::env::var("BLOCKYARD_SERVER_SHUTDOWN_TIMEOUT")
             && let Ok(d) = v.parse::<humantime::Duration>()
         {
             self.server.shutdown_timeout = d.into();
+        }
+        if let Ok(v) = std::env::var("BLOCKYARD_SERVER_SESSION_SECRET") {
+            self.server.session_secret = Some(Secret::from(v.as_str()));
+        }
+        if let Ok(v) = std::env::var("BLOCKYARD_SERVER_EXTERNAL_URL") {
+            self.server.external_url = Some(v);
         }
         if let Ok(v) = std::env::var("BLOCKYARD_DOCKER_SOCKET")
             && let Some(docker) = &mut self.docker
@@ -229,6 +314,38 @@ impl Config {
         {
             self.proxy.log_retention = d.into();
         }
+
+        // Auto-construct [oidc] section from env vars if not in TOML
+        if self.oidc.is_none() && env_prefix_exists("BLOCKYARD_OIDC_") {
+            self.oidc = Some(OidcConfig {
+                issuer_url: String::new(),
+                client_id: String::new(),
+                client_secret: Secret::from(""),
+                groups_claim: default_groups_claim(),
+                cookie_max_age: default_cookie_max_age(),
+            });
+        }
+
+        // Apply individual OIDC overrides
+        if let Some(oidc) = &mut self.oidc {
+            if let Ok(v) = std::env::var("BLOCKYARD_OIDC_ISSUER_URL") {
+                oidc.issuer_url = v;
+            }
+            if let Ok(v) = std::env::var("BLOCKYARD_OIDC_CLIENT_ID") {
+                oidc.client_id = v;
+            }
+            if let Ok(v) = std::env::var("BLOCKYARD_OIDC_CLIENT_SECRET") {
+                oidc.client_secret = Secret::from(v.as_str());
+            }
+            if let Ok(v) = std::env::var("BLOCKYARD_OIDC_GROUPS_CLAIM") {
+                oidc.groups_claim = v;
+            }
+            if let Ok(v) = std::env::var("BLOCKYARD_OIDC_COOKIE_MAX_AGE")
+                && let Ok(d) = v.parse::<humantime::Duration>()
+            {
+                oidc.cookie_max_age = d.into();
+            }
+        }
     }
 
     /// Validate config after all overrides are applied.
@@ -248,6 +365,35 @@ impl Config {
             if docker.image.is_empty() {
                 return Err(ConfigError::Validation(
                     "docker.image must not be empty".into(),
+                ));
+            }
+        }
+
+        // Validate OIDC config if present
+        if let Some(oidc) = &self.oidc {
+            if oidc.issuer_url.is_empty() {
+                return Err(ConfigError::Validation(
+                    "oidc.issuer_url must not be empty".into(),
+                ));
+            }
+            if oidc.client_id.is_empty() {
+                return Err(ConfigError::Validation(
+                    "oidc.client_id must not be empty".into(),
+                ));
+            }
+            if oidc.client_secret.is_empty() {
+                return Err(ConfigError::Validation(
+                    "oidc.client_secret must not be empty".into(),
+                ));
+            }
+            let secret_missing = self
+                .server
+                .session_secret
+                .as_ref()
+                .is_none_or(|s| s.is_empty());
+            if secret_missing {
+                return Err(ConfigError::Validation(
+                    "server.session_secret is required when [oidc] is configured".into(),
                 ));
             }
         }
@@ -315,12 +461,56 @@ mod tests {
         "#
     }
 
+    fn oidc_toml() -> &'static str {
+        r#"
+        [server]
+        token = "test-token"
+        session_secret = "super-secret-key-for-testing"
+
+        [docker]
+        image = "ghcr.io/rocker-org/r-ver:4.4.3"
+
+        [storage]
+        bundle_server_path = "/tmp/bundles"
+
+        [database]
+        path = "/tmp/blockyard.db"
+
+        [proxy]
+
+        [oidc]
+        issuer_url = "https://idp.example.com"
+        client_id = "my-client"
+        client_secret = "my-secret"
+        "#
+    }
+
     #[test]
     fn parse_minimal_config() {
         let config: Config = toml::from_str(minimal_toml()).unwrap();
         assert_eq!(config.server.bind, "0.0.0.0:8080".parse().unwrap());
-        assert_eq!(config.server.token, "test-token");
+        assert_eq!(config.server.token.expose(), "test-token");
         assert_eq!(config.proxy.max_workers, 100);
+        assert!(config.oidc.is_none());
+    }
+
+    #[test]
+    fn parse_oidc_config() {
+        let config: Config = toml::from_str(oidc_toml()).unwrap();
+        let oidc = config.oidc.as_ref().unwrap();
+        assert_eq!(oidc.issuer_url, "https://idp.example.com");
+        assert_eq!(oidc.client_id, "my-client");
+        assert_eq!(oidc.client_secret.expose(), "my-secret");
+        assert_eq!(oidc.groups_claim, "groups"); // default
+        assert_eq!(oidc.cookie_max_age, Duration::from_secs(86400)); // default
+    }
+
+    #[test]
+    fn parse_config_without_oidc_backward_compat() {
+        let config: Config = toml::from_str(minimal_toml()).unwrap();
+        assert!(config.oidc.is_none());
+        assert!(config.server.session_secret.is_none());
+        assert!(config.server.external_url.is_none());
     }
 
     #[test]
@@ -329,20 +519,100 @@ mod tests {
         unsafe { std::env::set_var("BLOCKYARD_SERVER_TOKEN", "override-token") };
         config.apply_env_overrides();
         unsafe { std::env::remove_var("BLOCKYARD_SERVER_TOKEN") };
-        assert_eq!(config.server.token, "override-token");
+        assert_eq!(config.server.token.expose(), "override-token");
     }
 
     #[test]
     fn validation_rejects_empty_token() {
         let mut config: Config = toml::from_str(minimal_toml()).unwrap();
-        config.server.token = String::new();
+        config.server.token = Secret::from("");
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_oidc_empty_issuer_url() {
+        let mut config: Config = toml::from_str(oidc_toml()).unwrap();
+        config.oidc.as_mut().unwrap().issuer_url = String::new();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("issuer_url"));
+    }
+
+    #[test]
+    fn validation_rejects_oidc_empty_client_id() {
+        let mut config: Config = toml::from_str(oidc_toml()).unwrap();
+        config.oidc.as_mut().unwrap().client_id = String::new();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("client_id"));
+    }
+
+    #[test]
+    fn validation_rejects_oidc_empty_client_secret() {
+        let mut config: Config = toml::from_str(oidc_toml()).unwrap();
+        config.oidc.as_mut().unwrap().client_secret = Secret::from("");
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("client_secret"));
+    }
+
+    #[test]
+    fn validation_rejects_oidc_without_session_secret() {
+        let mut config: Config = toml::from_str(oidc_toml()).unwrap();
+        config.server.session_secret = None;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("session_secret"));
+    }
+
+    #[test]
+    fn auto_construct_oidc_from_env() {
+        let mut config: Config = toml::from_str(minimal_toml()).unwrap();
+        assert!(config.oidc.is_none());
+
+        unsafe {
+            std::env::set_var("BLOCKYARD_OIDC_ISSUER_URL", "https://idp.example.com");
+            std::env::set_var("BLOCKYARD_OIDC_CLIENT_ID", "env-client");
+            std::env::set_var("BLOCKYARD_OIDC_CLIENT_SECRET", "env-secret");
+        }
+        config.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("BLOCKYARD_OIDC_ISSUER_URL");
+            std::env::remove_var("BLOCKYARD_OIDC_CLIENT_ID");
+            std::env::remove_var("BLOCKYARD_OIDC_CLIENT_SECRET");
+        }
+
+        let oidc = config.oidc.as_ref().unwrap();
+        assert_eq!(oidc.issuer_url, "https://idp.example.com");
+        assert_eq!(oidc.client_id, "env-client");
+        assert_eq!(oidc.client_secret.expose(), "env-secret");
+    }
+
+    #[test]
+    fn secret_debug_redacted() {
+        let s = Secret::from("my-secret");
+        assert_eq!(format!("{s:?}"), "[REDACTED]");
+    }
+
+    #[test]
+    fn secret_display_redacted() {
+        let s = Secret::from("my-secret");
+        assert_eq!(format!("{s}"), "[REDACTED]");
+    }
+
+    #[test]
+    fn secret_expose_returns_value() {
+        let s = Secret::from("my-secret");
+        assert_eq!(s.expose(), "my-secret");
+    }
+
+    #[test]
+    fn secret_deserializes_transparently() {
+        let s: Secret = serde_json::from_str(r#""hello""#).unwrap();
+        assert_eq!(s.expose(), "hello");
     }
 
     /// Verify every leaf field in Config has a corresponding BLOCKYARD_* env var.
     #[test]
     fn env_var_coverage_complete() {
-        let config: Config = toml::from_str(minimal_toml()).unwrap();
+        // Use oidc_toml so OIDC fields are included in serialization
+        let config: Config = toml::from_str(oidc_toml()).unwrap();
         let value = serde_json::to_value(&config).unwrap();
 
         let mut field_paths = Vec::new();

@@ -39,6 +39,8 @@ fn test_config(bundle_path: PathBuf) -> Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             token: "test-token".into(),
             shutdown_timeout: Duration::from_secs(5),
+            session_secret: None,
+            external_url: None,
         },
         docker: None,
         storage: StorageConfig {
@@ -57,6 +59,7 @@ fn test_config(bundle_path: PathBuf) -> Config {
             max_workers: 100,
             log_retention: Duration::from_secs(3600),
         },
+        oidc: None,
     }
 }
 
@@ -1068,6 +1071,9 @@ async fn health_poller_removes_unhealthy_workers() {
         registry: state.registry.clone(),
         ws_cache: state.ws_cache.clone(),
         log_store: state.log_store.clone(),
+        oidc_client: None,
+        signing_key: None,
+        user_sessions: None,
     };
     let handle = ops::spawn_health_poller(poller_state, token.clone());
 
@@ -1108,6 +1114,9 @@ async fn health_poller_keeps_healthy_workers() {
         registry: state.registry.clone(),
         ws_cache: state.ws_cache.clone(),
         log_store: state.log_store.clone(),
+        oidc_client: None,
+        signing_key: None,
+        user_sessions: None,
     };
     let handle = ops::spawn_health_poller(poller_state, token.clone());
 

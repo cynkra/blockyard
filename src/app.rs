@@ -3,6 +3,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use sqlx::SqlitePool;
 
+use crate::auth::oidc::OidcClient;
+use crate::auth::session::{SigningKey, UserSessionStore};
 use crate::backend::Backend;
 use crate::config::Config;
 use crate::ops::LogStore;
@@ -25,6 +27,12 @@ pub struct AppState<B: Backend> {
     pub registry: Arc<WorkerRegistry>,
     pub ws_cache: Arc<WsCache>,
     pub log_store: Arc<LogStore>,
+    /// OIDC client — None when OIDC is not configured (v0 compat).
+    pub oidc_client: Option<Arc<OidcClient>>,
+    /// HMAC signing key for session cookies — None when OIDC is not configured.
+    pub signing_key: Option<Arc<SigningKey>>,
+    /// Server-side user session store — None when OIDC is not configured.
+    pub user_sessions: Option<Arc<UserSessionStore>>,
 }
 
 /// A running worker tracked by the server.
@@ -48,6 +56,9 @@ impl<B: Backend> AppState<B> {
             registry: Arc::new(WorkerRegistry::new()),
             ws_cache: Arc::new(WsCache::new(ws_cache_ttl)),
             log_store: Arc::new(LogStore::new()),
+            oidc_client: None,
+            signing_key: None,
+            user_sessions: None,
         }
     }
 }
