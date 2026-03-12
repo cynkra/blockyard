@@ -204,9 +204,9 @@ func TestNetworkIsolation(t *testing.T) {
 	}
 
 	// Verify they cannot reach each other
-	b.mu.RLock()
+	b.mu.Lock()
 	ws1 := b.workers[id1]
-	b.mu.RUnlock()
+	b.mu.Unlock()
 
 	ip2 := strings.Split(addr2, ":")[0]
 	execResp, err := b.client.ContainerExecCreate(ctx, ws1.containerID,
@@ -267,9 +267,9 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	b.mu.RLock()
+	b.mu.Lock()
 	ws := b.workers[workerID]
-	b.mu.RUnlock()
+	b.mu.Unlock()
 
 	execResp, err := b.client.ContainerExecCreate(ctx, ws.containerID,
 		container.ExecOptions{
