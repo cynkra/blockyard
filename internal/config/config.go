@@ -27,11 +27,10 @@ type ServerConfig struct {
 }
 
 type DockerConfig struct {
-	Socket            string `toml:"socket"`
-	Image             string `toml:"image"`
-	ShinyPort         int    `toml:"shiny_port"`
-	RvVersion         string `toml:"rv_version"`
-	BlockCloudMetadata *bool  `toml:"block_cloud_metadata"`
+	Socket    string `toml:"socket"`
+	Image     string `toml:"image"`
+	ShinyPort int    `toml:"shiny_port"`
+	RvVersion string `toml:"rv_version"`
 }
 
 type StorageConfig struct {
@@ -102,10 +101,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.Docker.RvVersion == "" {
 		cfg.Docker.RvVersion = "latest"
 	}
-	if cfg.Docker.BlockCloudMetadata == nil {
-		t := true
-		cfg.Docker.BlockCloudMetadata = &t
-	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"
 	}
@@ -169,12 +164,6 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 			}
 		default:
 			switch fv.Kind() {
-			case reflect.Ptr:
-				if fv.Type().Elem().Kind() == reflect.Bool {
-					if b, err := strconv.ParseBool(val); err == nil {
-						fv.Set(reflect.ValueOf(&b))
-					}
-				}
 			case reflect.String:
 				fv.SetString(val)
 			case reflect.Bool:

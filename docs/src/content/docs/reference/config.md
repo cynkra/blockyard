@@ -62,7 +62,6 @@ rv_version = "latest"
 | `image` | `string` | — | **Yes** | Base image for worker and build containers |
 | `shiny_port` | `integer` | `3838` | No | Port Shiny listens on inside containers |
 | `rv_version` | `string` | `latest` | No | [rv](https://github.com/a2-ai/rv) release tag (e.g. `v0.18.0`) |
-| `block_cloud_metadata` | `bool` | `true` | No | Block container access to the cloud instance metadata endpoint (169.254.169.254) via iptables. Disable when `CAP_NET_ADMIN` is unavailable. |
 
 ## `[storage]`
 

@@ -359,9 +359,7 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 	}
 
 	// 3. Block metadata endpoint (iptables)
-	if d.config.BlockCloudMetadata != nil && !*d.config.BlockCloudMetadata {
-		slog.Debug("metadata endpoint blocking skipped (config)", "worker_id", spec.WorkerID)
-	} else if err := d.blockMetadataEndpoint(ctx, networkName, spec.WorkerID); err != nil {
+	if err := d.blockMetadataEndpoint(ctx, networkName, spec.WorkerID); err != nil {
 		_ = d.client.NetworkRemove(ctx, networkID)
 		return fmt.Errorf("spawn: metadata block: %w", err)
 	}

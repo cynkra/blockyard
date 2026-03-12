@@ -120,14 +120,6 @@ func TestEnvVarOverridesMaxWorkers(t *testing.T) {
 	}
 }
 
-func TestEnvVarOverridesBlockCloudMetadata(t *testing.T) {
-	t.Setenv("BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA", "false")
-	cfg := loadFromString(t, minimalTOML)
-	if cfg.Docker.BlockCloudMetadata == nil || *cfg.Docker.BlockCloudMetadata {
-		t.Error("expected BlockCloudMetadata to be false")
-	}
-}
-
 func TestEnvVarOverridesWsCacheTTL(t *testing.T) {
 	t.Setenv("BLOCKYARD_PROXY_WS_CACHE_TTL", "5m")
 	cfg := loadFromString(t, minimalTOML)

@@ -386,14 +386,15 @@ func TestBuildSuccess(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	tmp := t.TempDir()
+	bundleDir := t.TempDir()
+	libDir := t.TempDir()
 	spec := backend.BuildSpec{
 		AppID:     "test-app",
 		BundleID:  uuid.New().String()[:8],
 		Image:     "alpine:latest",
 		RvVersion: "latest",
-		BundlePath:  tmp,
-		LibraryPath: tmp,
+		BundlePath:  bundleDir,
+		LibraryPath: libDir,
 		Labels:    map[string]string{},
 	}
 
