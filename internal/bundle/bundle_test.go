@@ -53,32 +53,6 @@ func TestDeleteFiles(t *testing.T) {
 	}
 }
 
-func TestCreateLibraryDir_CreatesMountpoint(t *testing.T) {
-	tmp := t.TempDir()
-	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
-
-	// Unpack first so the unpacked dir exists.
-	data := testutil.MakeBundle(t)
-	WriteArchive(paths, bytes.NewReader(data))
-	UnpackArchive(paths)
-
-	if err := CreateLibraryDir(paths); err != nil {
-		t.Fatalf("CreateLibraryDir: %v", err)
-	}
-
-	// Host-side library dir must exist.
-	if _, err := os.Stat(paths.Library); err != nil {
-		t.Errorf("host library dir not created: %v", err)
-	}
-
-	// Mountpoint inside unpacked bundle must exist so Docker can bind-mount
-	// onto it when /app is read-only.
-	mountpoint := paths.Unpacked + "/rv/library"
-	if _, err := os.Stat(mountpoint); err != nil {
-		t.Errorf("in-bundle mountpoint not created: %v", err)
-	}
-}
-
 func TestPathTraversal(t *testing.T) {
 	tmp := t.TempDir()
 	paths := NewBundlePaths(tmp, "app-1", "bundle-1")

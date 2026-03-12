@@ -141,15 +141,9 @@ func ValidateEntrypoint(paths Paths) error {
 	return nil
 }
 
-// CreateLibraryDir creates the output directory for dependency restoration
-// and the mountpoint inside the unpacked bundle so that the build container
-// can bind-mount the library volume at /app/rv/library even when /app is
-// read-only.
+// CreateLibraryDir creates the output directory for dependency restoration.
 func CreateLibraryDir(paths Paths) error {
-	if err := os.MkdirAll(paths.Library, 0o755); err != nil {
-		return err
-	}
-	return os.MkdirAll(filepath.Join(paths.Unpacked, "rv", "library"), 0o755)
+	return os.MkdirAll(paths.Library, 0o755)
 }
 
 // DeleteFiles removes a bundle's archive, unpacked dir, and library dir.
