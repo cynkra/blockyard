@@ -18,10 +18,10 @@ jobs:
 
   docker-tests:
     runs-on: ubuntu-latest
-    if: false  # enabled in phase 2 when Docker backend is implemented
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      - run: docker pull alpine:latest
       - run: go test -tags docker_test ./...
