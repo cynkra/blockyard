@@ -5,6 +5,8 @@ package docker
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -387,7 +389,11 @@ func TestBuildSuccess(t *testing.T) {
 	}
 
 	bundleDir := t.TempDir()
-	libDir := t.TempDir()
+	// Create rv/library inside bundle so the read-only mount has the mountpoint
+	if err := os.MkdirAll(filepath.Join(bundleDir, "rv", "library"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	libDir := filepath.Join(bundleDir, "rv", "library")
 	spec := backend.BuildSpec{
 		AppID:     "test-app",
 		BundleID:  uuid.New().String()[:8],
