@@ -1,6 +1,8 @@
 package rvcache
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -17,6 +19,10 @@ const latestMaxAge = 1 * time.Hour
 
 // mu serialises downloads so concurrent restores don't race.
 var mu sync.Mutex
+
+// baseURL is the GitHub releases base URL. Tests override this to point at a
+// local httptest.Server.
+var baseURL = "https://github.com/a2-ai/rv/releases"
 
 // EnsureBinary returns the path to a cached rv binary for the given version.
 // If the binary is not cached (or stale for "latest"), it is downloaded from
@@ -54,12 +60,13 @@ func downloadURL(version string) string {
 	if runtime.GOARCH == "arm64" {
 		arch = "aarch64"
 	}
-	asset := fmt.Sprintf("rv-%s-unknown-linux-gnu", arch)
 
 	if version == "latest" {
-		return fmt.Sprintf("https://github.com/a2-ai/rv/releases/latest/download/%s", asset)
+		asset := fmt.Sprintf("rv-%s-unknown-linux-gnu.tar.gz", arch)
+		return fmt.Sprintf("%s/latest/download/%s", baseURL, asset)
 	}
-	return fmt.Sprintf("https://github.com/a2-ai/rv/releases/download/%s/%s", version, asset)
+	asset := fmt.Sprintf("rv-%s-%s-unknown-linux-gnu.tar.gz", version, arch)
+	return fmt.Sprintf("%s/download/%s/%s", baseURL, version, asset)
 }
 
 func download(ctx context.Context, url, dest string) error {
@@ -84,10 +91,10 @@ func download(ctx context.Context, url, dest string) error {
 	}
 	tmpPath := tmp.Name()
 
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	if err := extractRvFromTarGz(resp.Body, tmp); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return err
+		return fmt.Errorf("extract rv from tarball: %w", err)
 	}
 	tmp.Close()
 
@@ -102,4 +109,28 @@ func download(ctx context.Context, url, dest string) error {
 	}
 
 	return nil
+}
+
+// extractRvFromTarGz reads a gzipped tar stream and writes the "rv" entry to w.
+func extractRvFromTarGz(r io.Reader, w io.Writer) error {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return fmt.Errorf("rv binary not found in tarball")
+		}
+		if err != nil {
+			return err
+		}
+		if hdr.Name == "rv" {
+			_, err = io.Copy(w, tr)
+			return err
+		}
+	}
 }
