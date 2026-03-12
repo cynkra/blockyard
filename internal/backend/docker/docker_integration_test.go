@@ -559,11 +559,8 @@ dependencies = []
 	}
 
 	// 4. Verify that mime was installed into the library dir.
-	matches, err := filepath.Glob(filepath.Join(libDir, "*", "*", "*", "mime"))
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
-	if len(matches) == 0 {
+	mimeDir := filepath.Join(libDir, "mime")
+	if _, err := os.Stat(mimeDir); os.IsNotExist(err) {
 		// List what's actually in libDir for debugging.
 		var found []string
 		filepath.Walk(libDir, func(path string, info os.FileInfo, err error) error {
