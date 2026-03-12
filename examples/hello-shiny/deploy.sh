@@ -73,21 +73,17 @@ BUNDLE_ID=$(echo "$upload_resp" | grep -o '"bundle_id":"[^"]*"' | head -1 | cut 
 echo "    bundle=${BUNDLE_ID}"
 echo "    task=${TASK_ID}"
 
-# --- Poll the task until done ---
+# --- Stream build logs until the task finishes ---
 echo "==> Restoring dependencies (this may take a while on first run)..."
-while true; do
-  task_resp=$(auth "${BASE_URL}/api/v1/tasks/${TASK_ID}" 2>/dev/null || true)
-  status=$(echo "$task_resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-  if [ "$status" = "completed" ]; then
-    echo "    Restore complete!"
-    break
-  elif [ "$status" = "failed" ]; then
-    echo "ERROR: Restore failed. Logs:" >&2
-    auth "${BASE_URL}/api/v1/tasks/${TASK_ID}/logs" >&2
-    exit 1
-  fi
-  sleep 2
-done
+auth "${BASE_URL}/api/v1/tasks/${TASK_ID}/logs"
+
+task_resp=$(auth "${BASE_URL}/api/v1/tasks/${TASK_ID}" 2>/dev/null || true)
+status=$(echo "$task_resp" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+if [ "$status" != "completed" ]; then
+  echo "ERROR: Restore failed (status=${status})" >&2
+  exit 1
+fi
+echo "    Restore complete!"
 
 # --- Start the app ---
 echo "==> Starting app..."
