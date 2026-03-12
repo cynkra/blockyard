@@ -1,0 +1,172 @@
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/google/uuid"
+	_ "modernc.org/sqlite"
+)
+
+const schema = `
+CREATE TABLE IF NOT EXISTS apps (
+    id                      TEXT PRIMARY KEY,
+    name                    TEXT NOT NULL UNIQUE,
+    active_bundle           TEXT REFERENCES bundles(id),
+    max_workers_per_app     INTEGER,
+    max_sessions_per_worker INTEGER NOT NULL DEFAULT 1,
+    memory_limit            TEXT,
+    cpu_limit               REAL,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bundles (
+    id          TEXT PRIMARY KEY,
+    app_id      TEXT NOT NULL REFERENCES apps(id),
+    status      TEXT NOT NULL DEFAULT 'pending',
+    path        TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundles_app_id ON bundles(app_id);
+`
+
+type DB struct {
+	*sql.DB
+}
+
+func Open(path string) (*DB, error) {
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create db directory: %w", err)
+		}
+	}
+
+	sqlDB, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	if _, err := sqlDB.Exec(schema); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("create schema: %w", err)
+	}
+
+	return &DB{sqlDB}, nil
+}
+
+type AppRow struct {
+	ID                   string
+	Name                 string
+	ActiveBundle         *string
+	MaxWorkersPerApp     *int
+	MaxSessionsPerWorker int
+	MemoryLimit          *string
+	CPULimit             *float64
+	CreatedAt            string
+	UpdatedAt            string
+}
+
+type BundleRow struct {
+	ID         string
+	AppID      string
+	Status     string
+	Path       string
+	UploadedAt string
+}
+
+func (db *DB) CreateApp(name string) (*AppRow, error) {
+	id := uuid.New().String()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	_, err := db.Exec(
+		`INSERT INTO apps (id, name, max_sessions_per_worker, created_at, updated_at)
+		 VALUES (?, ?, 1, ?, ?)`,
+		id, name, now, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert app: %w", err)
+	}
+
+	return db.GetApp(id)
+}
+
+func (db *DB) GetApp(id string) (*AppRow, error) {
+	row := db.QueryRow(`SELECT id, name, active_bundle, max_workers_per_app,
+		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at
+		FROM apps WHERE id = ?`, id)
+	return scanApp(row)
+}
+
+func (db *DB) GetAppByName(name string) (*AppRow, error) {
+	row := db.QueryRow(`SELECT id, name, active_bundle, max_workers_per_app,
+		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at
+		FROM apps WHERE name = ?`, name)
+	return scanApp(row)
+}
+
+func (db *DB) ListApps() ([]AppRow, error) {
+	rows, err := db.Query(`SELECT id, name, active_bundle, max_workers_per_app,
+		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at
+		FROM apps ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var apps []AppRow
+	for rows.Next() {
+		var app AppRow
+		if err := rows.Scan(&app.ID, &app.Name, &app.ActiveBundle,
+			&app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
+			&app.MemoryLimit, &app.CPULimit,
+			&app.CreatedAt, &app.UpdatedAt); err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+func (db *DB) DeleteApp(id string) (bool, error) {
+	result, err := db.Exec(`DELETE FROM apps WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+func (db *DB) FailStaleBuilds() (int64, error) {
+	result, err := db.Exec(
+		`UPDATE bundles SET status = 'failed' WHERE status = 'building'`,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func scanApp(row *sql.Row) (*AppRow, error) {
+	var app AppRow
+	err := row.Scan(&app.ID, &app.Name, &app.ActiveBundle,
+		&app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
+		&app.MemoryLimit, &app.CPULimit,
+		&app.CreatedAt, &app.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
+}

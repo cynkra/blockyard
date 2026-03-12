@@ -1,140 +1,198 @@
-# Phase 0-2: Docker Backend + Network Isolation
+# Phase 0-2: Docker Backend
 
-Implement the `Backend` trait for Docker using `bollard`. This is the only
-production backend for v0 and the foundation that all later phases depend on
-for integration testing with real containers.
+Implement the `Backend` interface for Docker using the official Docker Go
+client (`github.com/docker/docker/client`). This is the only production
+backend for v0 and the foundation that all later phases depend on for
+integration testing with real containers.
 
 ## Deliverables
 
-1. `DockerBackend` struct with `bollard::Docker` client initialization
-2. Full `Backend` trait implementation (spawn, stop, health_check, logs, addr, build)
+1. `DockerBackend` struct with Docker client initialization
+2. Full `Backend` interface implementation (Spawn, Stop, HealthCheck, Logs, Addr, Build)
 3. Per-container bridge network creation and cleanup
 4. Server multi-homing — join each worker's network to enable direct container-to-container routing
 5. Container hardening (cap-drop ALL, read-only rootfs, no-new-privileges, tmpfs /tmp)
-6. Label management (`dev.blockyard/*`) for resource ownership tracking
-7. Orphan cleanup via `list_managed` / `remove_resource`
-8. Server ID detection (self-awareness for network joining)
-9. Docker integration tests behind `#[cfg(feature = "docker-tests")]`
-10. Enable the `docker-tests` CI job
+6. Image pulling (on demand, before build/spawn)
+7. Label management (`dev.blockyard/*`) for resource ownership tracking
+8. Orphan cleanup via `ListManaged` / `RemoveResource`
+9. Server container ID detection (self-awareness for network joining)
+10. Metadata endpoint protection (iptables rules blocking `169.254.169.254`)
+11. Docker integration tests behind `docker_test` build tag
 
 ## Step-by-step
 
 ### Step 1: DockerBackend struct and initialization
 
-`src/backend/docker.rs` — the struct holds the bollard client, the server's
-own server ID (if running in a container), and config needed for spawning.
+`internal/backend/docker/docker.go` — the struct holds the Docker client,
+the server's own container ID (if running in a container), config, and
+per-worker internal state.
 
-```rust
-#[cfg(feature = "docker")]
-use bollard::Docker;
-use crate::config::DockerConfig;
+```go
+package docker
 
-pub struct DockerBackend {
-    client: Docker,
-    server_id: Option<String>,
-    config: DockerConfig,
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"sync"
+
+	"github.com/docker/docker/client"
+
+	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/config"
+)
+
+// workerState holds per-worker internal state that callers never see.
+// The Backend interface deals only in string worker IDs; this struct
+// tracks what Docker resources are associated with each.
+type workerState struct {
+	containerID string
+	networkID   string
+	networkName string
+}
+
+// metadataMode caches the result of the first metadata endpoint check.
+type metadataMode int
+
+const (
+	metadataUnchecked metadataMode = iota
+	metadataBlocked                       // iptables rule inserted successfully
+	metadataUnreachable                   // already unreachable (operator rule)
+	metadataUnavailable                   // iptables unavailable, endpoint unreachable — ok
+)
+
+type DockerBackend struct {
+	client   *client.Client
+	serverID string // own container ID; empty = native mode
+	config   *config.DockerConfig
+
+	mu      sync.RWMutex
+	workers map[string]*workerState // keyed by worker ID from WorkerSpec
+
+	metaMu   sync.Mutex
+	metaMode metadataMode
 }
 ```
 
 **Constructor:**
 
-```rust
-impl DockerBackend {
-    pub async fn new(config: DockerConfig) -> Result<Self, BackendError> {
-        let client = Docker::connect_with_unix(
-            &config.socket,
-            120, // timeout seconds
-            bollard::API_DEFAULT_VERSION,
-        ).map_err(|e| BackendError::Spawn(format!("Docker connect failed: {e}")))?;
+```go
+func New(ctx context.Context, cfg *config.DockerConfig) (*DockerBackend, error) {
+	cli, err := client.NewClientWithOpts(
+		client.WithHost("unix://"+cfg.Socket),
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("docker client: %w", err)
+	}
 
-        // Verify connectivity
-        client.ping().await
-            .map_err(|e| BackendError::Spawn(format!("Docker ping failed: {e}")))?;
+	// Verify connectivity
+	if _, err := cli.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("docker ping: %w", err)
+	}
 
-        let server_id = detect_server_id().await;
+	serverID := detectServerID()
+	if serverID != "" {
+		slog.Info("running in container mode", "server_id", serverID)
+	} else {
+		slog.Info("running in native mode (no server container ID detected)")
+	}
 
-        Ok(Self { client, server_id, config })
-    }
+	return &DockerBackend{
+		client:   cli,
+		serverID: serverID,
+		config:   cfg,
+		workers:  make(map[string]*workerState),
+	}, nil
 }
 ```
 
-### Step 2: Server ID detection
+The constructor takes a `context.Context` for the ping check. API version
+negotiation lets the client work with any Docker daemon version without
+hardcoding an API version.
 
-The server must know its own Docker container ID to join worker networks.
-Detection order (first match wins):
+**Interface compliance:** a compile-time check ensures `DockerBackend`
+satisfies `backend.Backend`:
+
+```go
+var _ backend.Backend = (*DockerBackend)(nil)
+```
+
+### Step 2: Server container ID detection
+
+The server needs its own container ID to join worker networks. Detection
+order (first match wins):
 
 1. `BLOCKYARD_SERVER_ID` env var — explicit override for non-standard setups
 2. Parse `/proc/self/cgroup` — Docker writes the container ID in cgroup paths
 3. Read hostname — Docker sets it to the short container ID by default
-4. If all fail: `None` — assume the server is running as a native binary
-   outside Docker. Skip network joining; workers are reachable on the bridge
-   gateway IP.
+4. If all fail: empty string — native mode. Skip network joining; workers
+   are reachable on the bridge gateway IP.
 
-```rust
-async fn detect_server_id() -> Option<String> {
-    // 1. Explicit env var
-    if let Ok(id) = std::env::var("BLOCKYARD_SERVER_ID") {
-        if !id.is_empty() {
-            tracing::info!(container_id = %id, "server ID from env");
-            return Some(id);
-        }
-    }
+```go
+func detectServerID() string {
+	// 1. Explicit env var
+	if id := os.Getenv("BLOCKYARD_SERVER_ID"); id != "" {
+		slog.Info("server ID from env", "container_id", id)
+		return id
+	}
 
-    // 2. Parse /proc/self/cgroup
-    if let Ok(cgroup) = tokio::fs::read_to_string("/proc/self/cgroup").await {
-        // Look for docker container ID in cgroup paths
-        // Format: "0::/docker/<container_id>" or similar
-        for line in cgroup.lines() {
-            if let Some(id) = extract_container_id_from_cgroup(line) {
-                tracing::info!(container_id = %id, "server ID from cgroup");
-                return Some(id);
-            }
-        }
-    }
+	// 2. Parse /proc/self/cgroup
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		if id := extractContainerIDFromCgroup(string(data)); id != "" {
+			slog.Info("server ID from cgroup", "container_id", id)
+			return id
+		}
+	}
 
-    // 3. Hostname (Docker sets this to the short container ID)
-    if let Ok(hostname) = tokio::fs::read_to_string("/etc/hostname").await {
-        let hostname = hostname.trim();
-        // Docker container IDs are 12+ hex chars
-        if hostname.len() >= 12 && hostname.chars().all(|c| c.is_ascii_hexdigit()) {
-            tracing::info!(container_id = %hostname, "server ID from hostname");
-            return Some(hostname.to_string());
-        }
-    }
+	// 3. Hostname (Docker sets this to the short container ID)
+	if data, err := os.ReadFile("/etc/hostname"); err == nil {
+		hostname := strings.TrimSpace(string(data))
+		if len(hostname) >= 12 && isHex(hostname) {
+			slog.Info("server ID from hostname", "container_id", hostname)
+			return hostname
+		}
+	}
 
-    tracing::info!("no server ID detected — running in native mode");
-    None
+	return ""
 }
 
-fn extract_container_id_from_cgroup(line: &str) -> Option<String> {
-    // Match patterns like:
-    //   0::/docker/<64-char-hex-id>
-    //   0::/system.slice/docker-<64-char-hex-id>.scope
-    let parts: Vec<&str> = line.split('/').collect();
-    for (i, part) in parts.iter().enumerate() {
-        if *part == "docker" || part.starts_with("docker-") {
-            let candidate = if *part == "docker" {
-                parts.get(i + 1).map(|s| s.to_string())
-            } else {
-                // docker-<id>.scope
-                part.strip_prefix("docker-")
-                    .and_then(|s| s.strip_suffix(".scope"))
-                    .map(|s| s.to_string())
-            };
-            if let Some(id) = candidate {
-                if id.len() >= 12 && id.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return Some(id);
-                }
-            }
-        }
-    }
-    None
+func extractContainerIDFromCgroup(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		parts := strings.Split(line, "/")
+		for i, part := range parts {
+			switch {
+			case part == "docker" && i+1 < len(parts):
+				candidate := parts[i+1]
+				if len(candidate) >= 12 && isHex(candidate) {
+					return candidate
+				}
+			case strings.HasPrefix(part, "docker-") && strings.HasSuffix(part, ".scope"):
+				// docker-<id>.scope
+				candidate := strings.TrimPrefix(part, "docker-")
+				candidate = strings.TrimSuffix(candidate, ".scope")
+				if len(candidate) >= 12 && isHex(candidate) {
+					return candidate
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 ```
 
 ### Step 3: Label conventions
 
-All blockyard-managed resources (containers and networks) are labeled for
+All blockyard-managed resources (containers and networks) carry labels for
 discovery and cleanup. Labels use the `dev.blockyard/` prefix:
 
 | Label | Value | Applied to |
@@ -146,671 +204,1097 @@ discovery and cleanup. Labels use the `dev.blockyard/` prefix:
 | `dev.blockyard/role` | `worker` or `build` | All containers |
 
 These labels serve two purposes:
-- **Orphan cleanup:** `list_managed()` queries for `dev.blockyard/managed=true`
+- **Orphan cleanup:** `ListManaged()` queries for `dev.blockyard/managed=true`
 - **Debugging:** `docker ps --filter label=dev.blockyard/app-id=...`
 
-Helper to construct label maps from spec:
+Helper functions to construct label maps:
 
-```rust
-fn worker_labels(spec: &WorkerSpec) -> HashMap<String, String> {
-    let mut labels = HashMap::new();
-    labels.insert("dev.blockyard/managed".into(), "true".into());
-    labels.insert("dev.blockyard/app-id".into(), spec.app_id.clone());
-    labels.insert("dev.blockyard/worker-id".into(), spec.worker_id.clone());
-    labels.insert("dev.blockyard/role".into(), "worker".into());
-    labels.extend(spec.labels.clone());
-    labels
+```go
+func workerLabels(spec backend.WorkerSpec) map[string]string {
+	labels := map[string]string{
+		"dev.blockyard/managed":   "true",
+		"dev.blockyard/app-id":    spec.AppID,
+		"dev.blockyard/worker-id": spec.WorkerID,
+		"dev.blockyard/role":      "worker",
+	}
+	for k, v := range spec.Labels {
+		labels[k] = v
+	}
+	return labels
 }
 
-fn build_labels(spec: &BuildSpec) -> HashMap<String, String> {
-    let mut labels = HashMap::new();
-    labels.insert("dev.blockyard/managed".into(), "true".into());
-    labels.insert("dev.blockyard/app-id".into(), spec.app_id.clone());
-    labels.insert("dev.blockyard/bundle-id".into(), spec.bundle_id.clone());
-    labels.insert("dev.blockyard/role".into(), "build".into());
-    labels.extend(spec.labels.clone());
-    labels
+func buildLabels(spec backend.BuildSpec) map[string]string {
+	labels := map[string]string{
+		"dev.blockyard/managed":   "true",
+		"dev.blockyard/app-id":    spec.AppID,
+		"dev.blockyard/bundle-id": spec.BundleID,
+		"dev.blockyard/role":      "build",
+	}
+	for k, v := range spec.Labels {
+		labels[k] = v
+	}
+	return labels
 }
 
-fn network_labels(app_id: &str, worker_id: &str) -> HashMap<String, String> {
-    let mut labels = HashMap::new();
-    labels.insert("dev.blockyard/managed".into(), "true".into());
-    labels.insert("dev.blockyard/app-id".into(), app_id.into());
-    labels.insert("dev.blockyard/worker-id".into(), worker_id.into());
-    labels
-}
-```
-
-### Step 4: DockerHandle
-
-The handle returned from `spawn()`. Contains both the container ID and
-network ID so that `stop()` can clean up both.
-
-```rust
-#[derive(Debug, Clone)]
-pub struct DockerHandle {
-    pub container_id: String,
-    pub network_id: String,
-    pub network_name: String,
-}
-
-impl WorkerHandle for DockerHandle {
-    fn id(&self) -> &str {
-        &self.container_id
-    }
+func networkLabels(appID, workerID string) map[string]string {
+	return map[string]string{
+		"dev.blockyard/managed":   "true",
+		"dev.blockyard/app-id":    appID,
+		"dev.blockyard/worker-id": workerID,
+	}
 }
 ```
 
-### Step 5: spawn() — create network, create container, join, start
+### Step 4: Image pulling
+
+On-demand image pulling before `Spawn` and `Build`. Pulls only if the image
+is not already present locally. Uses the Docker client's `ImagePull` which
+returns an `io.ReadCloser` that must be fully consumed for the pull to
+complete.
+
+```go
+func (d *DockerBackend) ensureImage(ctx context.Context, image string) error {
+	// Check if image exists locally
+	_, _, err := d.client.ImageInspectWithRaw(ctx, image)
+	if err == nil {
+		return nil // already present
+	}
+
+	slog.Info("pulling image", "image", image)
+	reader, err := d.client.ImagePull(ctx, image, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull image %s: %w", image, err)
+	}
+	defer reader.Close()
+
+	// Must consume the reader for the pull to complete.
+	// Discard output — pull progress is not surfaced to callers.
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return fmt.Errorf("pull image %s: %w", image, err)
+	}
+
+	slog.Info("image pulled", "image", image)
+	return nil
+}
+```
+
+The correct import for `PullOptions` is `github.com/docker/docker/api/types/image`.
+
+### Step 5: Spawn — create network, create container, join, start
 
 The spawn flow creates an isolated network per worker, creates a hardened
 container attached to that network, optionally joins the server to the
 network, and starts the container.
 
-```rust
-async fn spawn(&self, spec: &WorkerSpec) -> Result<DockerHandle, BackendError> {
-    let network_name = format!("blockyard-{}", spec.worker_id);
+```go
+func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
+	// 1. Ensure image exists locally
+	if err := d.ensureImage(ctx, spec.Image); err != nil {
+		return fmt.Errorf("spawn: %w", err)
+	}
 
-    // 1. Create per-worker bridge network
-    let network_id = self.create_network(&network_name, &spec.app_id, &spec.worker_id).await?;
+	networkName := "blockyard-" + spec.WorkerID
 
-    // 2. Create container
-    let container_id = self.create_worker_container(spec, &network_name).await?;
+	// 2. Create per-worker bridge network
+	networkID, err := d.createNetwork(ctx, networkName, spec.AppID, spec.WorkerID)
+	if err != nil {
+		return fmt.Errorf("spawn: %w", err)
+	}
 
-    // 3. Join server to worker network (if running in a container)
-    if let Some(ref server_id) = self.server_id {
-        self.join_network(server_id, &network_name).await?;
-    }
+	// 3. Block metadata endpoint (iptables)
+	if err := d.blockMetadataEndpoint(ctx, networkName, spec.WorkerID); err != nil {
+		// Clean up the network on failure
+		_ = d.client.NetworkRemove(ctx, networkID)
+		return fmt.Errorf("spawn: metadata block: %w", err)
+	}
 
-    // 4. Start the container
-    self.client.start_container::<String>(&container_id, None).await
-        .map_err(|e| BackendError::Spawn(format!("start container: {e}")))?;
+	// 4. Create container
+	containerID, err := d.createWorkerContainer(ctx, spec, networkName)
+	if err != nil {
+		_ = d.removeMetadataRule(spec.WorkerID)
+		_ = d.client.NetworkRemove(ctx, networkID)
+		return fmt.Errorf("spawn: %w", err)
+	}
 
-    Ok(DockerHandle { container_id, network_id, network_name })
+	// 5. Join server to worker network (if running in a container)
+	if d.serverID != "" {
+		if err := d.joinNetwork(ctx, d.serverID, networkName); err != nil {
+			_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+			_ = d.removeMetadataRule(spec.WorkerID)
+			_ = d.client.NetworkRemove(ctx, networkID)
+			return fmt.Errorf("spawn: %w", err)
+		}
+	}
+
+	// 6. Start the container
+	if err := d.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+		if d.serverID != "" {
+			_ = d.disconnectNetwork(ctx, d.serverID, networkName)
+		}
+		_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		_ = d.removeMetadataRule(spec.WorkerID)
+		_ = d.client.NetworkRemove(ctx, networkID)
+		return fmt.Errorf("spawn: start container: %w", err)
+	}
+
+	// Record internal state
+	d.mu.Lock()
+	d.workers[spec.WorkerID] = &workerState{
+		containerID: containerID,
+		networkID:   networkID,
+		networkName: networkName,
+	}
+	d.mu.Unlock()
+
+	return nil
 }
 ```
 
+**Rollback on failure:** each step cleans up resources created by prior steps
+if it fails. This prevents leaked networks or containers when spawn is
+partially successful.
+
 **Network creation:**
 
-```rust
-async fn create_network(
-    &self,
-    name: &str,
-    app_id: &str,
-    worker_id: &str,
-) -> Result<String, BackendError> {
-    use bollard::network::CreateNetworkOptions;
-
-    let options = CreateNetworkOptions {
-        name: name.to_string(),
-        driver: "bridge".to_string(),
-        labels: network_labels(app_id, worker_id),
-        ..Default::default()
-    };
-
-    let response = self.client.create_network(options).await
-        .map_err(|e| BackendError::Spawn(format!("create network: {e}")))?;
-
-    Ok(response.id)
+```go
+func (d *DockerBackend) createNetwork(
+	ctx context.Context,
+	name, appID, workerID string,
+) (string, error) {
+	resp, err := d.client.NetworkCreate(ctx, name, network.CreateOptions{
+		Driver: "bridge",
+		Labels: networkLabels(appID, workerID),
+	})
+	if err != nil {
+		return "", fmt.Errorf("create network %s: %w", name, err)
+	}
+	return resp.ID, nil
 }
 ```
 
 **Container creation (hardened):**
 
-```rust
-async fn create_worker_container(
-    &self,
-    spec: &WorkerSpec,
-    network_name: &str,
-) -> Result<String, BackendError> {
-    use bollard::container::{Config, CreateContainerOptions};
-    use bollard::models::*;
+```go
+func (d *DockerBackend) createWorkerContainer(
+	ctx context.Context,
+	spec backend.WorkerSpec,
+	networkName string,
+) (string, error) {
+	containerName := "blockyard-worker-" + spec.WorkerID
 
-    let container_name = format!("blockyard-worker-{}", spec.worker_id);
+	// Build bind mounts
+	binds := []string{
+		spec.BundlePath + ":" + spec.WorkerMount + ":ro",
+	}
+	if spec.LibraryPath != "" {
+		binds = append(binds, spec.LibraryPath+":/blockyard-lib:ro")
+	}
 
-    let host_config = HostConfig {
-        network_mode: Some(network_name.to_string()),
-        binds: Some(vec![
-            format!("{}:{}:ro", spec.bundle_path.display(), spec.worker_mount.display()),
-            format!("{}:/blockyard-lib:ro", spec.library_path.display()),
-        ]),
-        tmpfs: Some(HashMap::from([("/tmp".to_string(), "".to_string())])),
-        cap_drop: Some(vec!["ALL".to_string()]),
-        security_opt: Some(vec!["no-new-privileges".to_string()]),
-        readonly_rootfs: Some(true),
-        memory: spec.memory_limit.as_ref().and_then(|m| parse_memory_limit(m)),
-        nano_cpus: spec.cpu_limit.map(|c| (c * 1e9) as i64),
-        ..Default::default()
-    };
+	// Environment
+	env := []string{
+		fmt.Sprintf("SHINY_PORT=%d", spec.ShinyPort),
+		"R_LIBS=/blockyard-lib",
+	}
 
-    let config = Config {
-        image: Some(spec.image.clone()),
-        env: Some(vec![
-            format!("SHINY_PORT={}", spec.shiny_port),
-            "R_LIBS=/blockyard-lib".to_string(),
-        ]),
-        labels: Some(worker_labels(spec)),
-        host_config: Some(host_config),
-        ..Default::default()
-    };
+	// Resource limits
+	var resources container.Resources
+	if spec.MemoryLimit != "" {
+		if mem, ok := parseMemoryLimit(spec.MemoryLimit); ok {
+			resources.Memory = mem
+		}
+	}
+	if spec.CPULimit > 0 {
+		resources.NanoCPUs = int64(spec.CPULimit * 1e9)
+	}
 
-    let options = CreateContainerOptions {
-        name: &container_name,
-        ..Default::default()
-    };
+	resp, err := d.client.ContainerCreate(ctx,
+		&container.Config{
+			Image:  spec.Image,
+			Cmd:    spec.Cmd,
+			Env:    env,
+			Labels: workerLabels(spec),
+		},
+		&container.HostConfig{
+			NetworkMode: container.NetworkMode(networkName),
+			Binds:       binds,
+			Tmpfs:       map[string]string{"/tmp": ""},
+			CapDrop:     []string{"ALL"},
+			SecurityOpt: []string{"no-new-privileges"},
+			ReadonlyRootfs: true,
+			Resources:      resources,
+		},
+		nil, // no network config beyond NetworkMode
+		nil, // no platform
+		containerName,
+	)
+	if err != nil {
+		return "", fmt.Errorf("create container %s: %w", containerName, err)
+	}
 
-    let response = self.client.create_container(Some(options), config).await
-        .map_err(|e| BackendError::Spawn(format!("create container: {e}")))?;
-
-    Ok(response.id)
+	return resp.ID, nil
 }
 ```
 
 **Memory limit parsing:**
 
-```rust
-/// Parse human-readable memory limits like "512m", "1g", "256mb" to bytes.
-fn parse_memory_limit(s: &str) -> Option<i64> {
-    let s = s.trim().to_lowercase();
-    let (num_str, multiplier) = if s.ends_with("gb") || s.ends_with("g") {
-        (s.trim_end_matches("gb").trim_end_matches('g'), 1024 * 1024 * 1024)
-    } else if s.ends_with("mb") || s.ends_with("m") {
-        (s.trim_end_matches("mb").trim_end_matches('m'), 1024 * 1024)
-    } else if s.ends_with("kb") || s.ends_with("k") {
-        (s.trim_end_matches("kb").trim_end_matches('k'), 1024)
-    } else {
-        (s.as_str(), 1)  // assume bytes
-    };
-    num_str.trim().parse::<i64>().ok().map(|n| n * multiplier)
+```go
+// parseMemoryLimit converts human-readable memory strings like "512m", "1g",
+// "256mb" to bytes. Returns (bytes, true) on success.
+func parseMemoryLimit(s string) (int64, bool) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	var numStr string
+	var multiplier int64
+
+	switch {
+	case strings.HasSuffix(s, "gb"):
+		numStr = strings.TrimSuffix(s, "gb")
+		multiplier = 1024 * 1024 * 1024
+	case strings.HasSuffix(s, "g"):
+		numStr = strings.TrimSuffix(s, "g")
+		multiplier = 1024 * 1024 * 1024
+	case strings.HasSuffix(s, "mb"):
+		numStr = strings.TrimSuffix(s, "mb")
+		multiplier = 1024 * 1024
+	case strings.HasSuffix(s, "m"):
+		numStr = strings.TrimSuffix(s, "m")
+		multiplier = 1024 * 1024
+	case strings.HasSuffix(s, "kb"):
+		numStr = strings.TrimSuffix(s, "kb")
+		multiplier = 1024
+	case strings.HasSuffix(s, "k"):
+		numStr = strings.TrimSuffix(s, "k")
+		multiplier = 1024
+	default:
+		numStr = s
+		multiplier = 1 // assume bytes
+	}
+
+	n, err := strconv.ParseInt(strings.TrimSpace(numStr), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n * multiplier, true
 }
 ```
 
-**Network joining:**
+**Network joining and disconnecting:**
 
-```rust
-async fn join_network(
-    &self,
-    container_id: &str,
-    network_name: &str,
-) -> Result<(), BackendError> {
-    use bollard::network::ConnectNetworkOptions;
-    use bollard::models::EndpointSettings;
+```go
+func (d *DockerBackend) joinNetwork(ctx context.Context, containerID, networkName string) error {
+	return d.client.NetworkConnect(ctx, networkName, containerID, nil)
+}
 
-    let options = ConnectNetworkOptions {
-        container: container_id.to_string(),
-        endpoint_config: EndpointSettings::default(),
-    };
-
-    self.client.connect_network(network_name, options).await
-        .map_err(|e| BackendError::Spawn(format!("join network: {e}")))?;
-
-    Ok(())
+func (d *DockerBackend) disconnectNetwork(ctx context.Context, containerID, networkName string) error {
+	return d.client.NetworkDisconnect(ctx, networkName, containerID, true)
 }
 ```
 
-### Step 6: addr() — resolve worker IP on its named network
+### Step 6: Addr — resolve worker IP on its named network
 
 The worker's IP address must be looked up on the specific `blockyard-*`
 network, not just any network the container is attached to.
 
-```rust
-async fn addr(&self, handle: &DockerHandle) -> Result<SocketAddr, BackendError> {
-    let info = self.client.inspect_container(&handle.container_id, None).await
-        .map_err(|e| BackendError::Addr(format!("inspect container: {e}")))?;
+```go
+func (d *DockerBackend) Addr(ctx context.Context, id string) (string, error) {
+	d.mu.RLock()
+	ws, ok := d.workers[id]
+	d.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("addr: unknown worker %s", id)
+	}
 
-    let networks = info.network_settings
-        .and_then(|ns| ns.networks)
-        .ok_or_else(|| BackendError::Addr("no networks on container".into()))?;
+	info, err := d.client.ContainerInspect(ctx, ws.containerID)
+	if err != nil {
+		return "", fmt.Errorf("addr: inspect container: %w", err)
+	}
 
-    let endpoint = networks.get(&handle.network_name)
-        .ok_or_else(|| BackendError::Addr(
-            format!("container not on network {}", handle.network_name)
-        ))?;
+	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
+		return "", fmt.Errorf("addr: no networks on container %s", id)
+	}
 
-    let ip = endpoint.ip_address.as_ref()
-        .ok_or_else(|| BackendError::Addr("no IP on network".into()))?;
+	endpoint, ok := info.NetworkSettings.Networks[ws.networkName]
+	if !ok {
+		return "", fmt.Errorf("addr: container not on network %s", ws.networkName)
+	}
 
-    let addr: std::net::IpAddr = ip.parse()
-        .map_err(|e| BackendError::Addr(format!("invalid IP '{ip}': {e}")))?;
+	if endpoint.IPAddress == "" {
+		return "", fmt.Errorf("addr: no IP on network %s", ws.networkName)
+	}
 
-    Ok(SocketAddr::new(addr, self.config.shiny_port))
+	return fmt.Sprintf("%s:%d", endpoint.IPAddress, d.config.ShinyPort), nil
 }
 ```
 
-### Step 7: stop() — stop container, disconnect server, remove network
+Returns `"host:port"` as a string, matching the `Backend` interface
+signature. The port comes from `DockerConfig.ShinyPort` (default 3838).
 
-```rust
-async fn stop(&self, handle: &DockerHandle) -> Result<(), BackendError> {
-    use bollard::container::{StopContainerOptions, RemoveContainerOptions};
+### Step 7: Stop — stop container, disconnect server, remove network
 
-    // 1. Stop the container (10s timeout)
-    self.client.stop_container(
-        &handle.container_id,
-        Some(StopContainerOptions { t: 10 }),
-    ).await.map_err(|e| BackendError::Stop(format!("stop container: {e}")))?;
+Best-effort on each step — failures in later steps don't prevent earlier
+cleanup from completing.
 
-    // 2. Remove the container
-    self.client.remove_container(
-        &handle.container_id,
-        Some(RemoveContainerOptions { force: true, ..Default::default() }),
-    ).await.map_err(|e| BackendError::Stop(format!("remove container: {e}")))?;
+```go
+func (d *DockerBackend) Stop(ctx context.Context, id string) error {
+	d.mu.Lock()
+	ws, ok := d.workers[id]
+	if ok {
+		delete(d.workers, id)
+	}
+	d.mu.Unlock()
 
-    // 3. Disconnect server from the worker's network
-    if let Some(ref server_id) = self.server_id {
-        let _ = self.disconnect_network(server_id, &handle.network_name).await;
-    }
+	if !ok {
+		return fmt.Errorf("stop: unknown worker %s", id)
+	}
 
-    // 4. Remove the network
-    self.client.remove_network(&handle.network_name).await
-        .map_err(|e| BackendError::Stop(format!("remove network: {e}")))?;
+	var firstErr error
 
-    Ok(())
-}
+	// 1. Stop the container (10s timeout)
+	timeout := 10
+	if err := d.client.ContainerStop(ctx, ws.containerID, container.StopOptions{
+		Timeout: &timeout,
+	}); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("stop container: %w", err)
+		slog.Warn("failed to stop container", "worker_id", id, "error", err)
+	}
 
-async fn disconnect_network(
-    &self,
-    container_id: &str,
-    network_name: &str,
-) -> Result<(), BackendError> {
-    use bollard::network::DisconnectNetworkOptions;
+	// 2. Remove the container
+	if err := d.client.ContainerRemove(ctx, ws.containerID, container.RemoveOptions{
+		Force: true,
+	}); err != nil {
+		slog.Warn("failed to remove container", "worker_id", id, "error", err)
+	}
 
-    let options = DisconnectNetworkOptions {
-        container: container_id.to_string(),
-        force: true,
-    };
+	// 3. Remove iptables metadata rule
+	if err := d.removeMetadataRule(id); err != nil {
+		slog.Warn("failed to remove metadata rule", "worker_id", id, "error", err)
+	}
 
-    self.client.disconnect_network(network_name, options).await
-        .map_err(|e| BackendError::Stop(format!("disconnect network: {e}")))?;
+	// 4. Disconnect server from the worker's network
+	if d.serverID != "" {
+		if err := d.disconnectNetwork(ctx, d.serverID, ws.networkName); err != nil {
+			slog.Warn("failed to disconnect from network", "worker_id", id, "error", err)
+		}
+	}
 
-    Ok(())
+	// 5. Remove the network
+	if err := d.client.NetworkRemove(ctx, ws.networkName); err != nil {
+		slog.Warn("failed to remove network", "worker_id", id, "error", err)
+	}
+
+	return firstErr
 }
 ```
 
-### Step 8: health_check() — TCP probe
+**Stop ordering matters.** Stop container first, remove container,
+disconnect server from network, remove network. If you remove the network
+before disconnecting, the network removal fails because it still has
+connected endpoints.
+
+The worker state is removed from the internal map first (under lock) so
+concurrent calls to `Addr` or `HealthCheck` for this worker return
+immediately rather than racing with cleanup.
+
+### Step 8: HealthCheck — TCP probe
 
 A simple TCP connection attempt to the worker's Shiny port. If the
 connection succeeds, the worker is healthy. No HTTP-level check — Shiny
 doesn't expose a health endpoint.
 
-```rust
-async fn health_check(&self, handle: &DockerHandle) -> bool {
-    match self.addr(handle).await {
-        Ok(addr) => tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::net::TcpStream::connect(addr),
-        )
-        .await
-        .is_ok_and(|r| r.is_ok()),
-        Err(_) => false,
-    }
+```go
+func (d *DockerBackend) HealthCheck(ctx context.Context, id string) bool {
+	addr, err := d.Addr(ctx, id)
+	if err != nil {
+		return false
+	}
+
+	// 10s timeout — must not stall the health polling loop (which runs
+	// every 15s by default).
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 ```
 
-The 10-second timeout ensures a hanging connection doesn't stall the
-health polling loop (which runs every 15s by default).
+### Step 9: Logs — stream container stdout/stderr
 
-### Step 9: logs() — stream container stdout/stderr
+Returns a `backend.LogStream` with a channel of log lines and a close
+function. A goroutine reads from the Docker log stream and sends lines on
+the channel until the container exits or `Close` is called.
 
-```rust
-async fn logs(&self, handle: &DockerHandle) -> Result<LogStream, BackendError> {
-    use bollard::container::LogsOptions;
-    use futures_util::StreamExt;
+```go
+func (d *DockerBackend) Logs(ctx context.Context, id string) (backend.LogStream, error) {
+	d.mu.RLock()
+	ws, ok := d.workers[id]
+	d.mu.RUnlock()
+	if !ok {
+		return backend.LogStream{}, fmt.Errorf("logs: unknown worker %s", id)
+	}
 
-    let options = LogsOptions::<String> {
-        follow: true,
-        stdout: true,
-        stderr: true,
-        ..Default::default()
-    };
+	reader, err := d.client.ContainerLogs(ctx, ws.containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+	})
+	if err != nil {
+		return backend.LogStream{}, fmt.Errorf("logs: %w", err)
+	}
 
-    let stream = self.client.logs(&handle.container_id, Some(options));
-    let (tx, rx) = tokio::sync::mpsc::channel(256);
+	lines := make(chan string, 256)
+	logCtx, logCancel := context.WithCancel(ctx)
 
-    tokio::spawn(async move {
-        let mut stream = std::pin::pin!(stream);
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(output) => {
-                    let line = output.to_string();
-                    if tx.send(line).await.is_err() {
-                        break; // receiver dropped
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
+	go func() {
+		defer close(lines)
+		defer reader.Close()
 
-    Ok(rx)
+		scanner := bufio.NewScanner(demuxReader(reader))
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-logCtx.Done():
+				return
+			}
+		}
+	}()
+
+	return backend.LogStream{
+		Lines: lines,
+		Close: logCancel,
+	}, nil
 }
 ```
 
-**Note:** Add `futures-util` to dependencies:
+**Docker log stream demuxing:** Docker's container log stream uses a
+multiplexed format — each frame has an 8-byte header indicating the stream
+(stdout/stderr) and the frame length. The `stdcopy` package from the Docker
+SDK handles this:
 
-```toml
-futures-util = "0.3"
-```
-
-### Step 10: build() — run a build container to completion
-
-The build flow creates a short-lived container that runs dependency
-restoration (`R -e "renv::restore()"`). The container mounts the bundle
-read-only and a library output directory read-write.
-
-```rust
-async fn build(&self, spec: &BuildSpec) -> Result<BuildResult, BackendError> {
-    use bollard::container::*;
-    use bollard::models::*;
-
-    let container_name = format!("blockyard-build-{}", spec.bundle_id);
-
-    let host_config = HostConfig {
-        binds: Some(vec![
-            format!("{}:/app:ro", spec.bundle_path.display()),
-            format!("{}:/app/rv/library:rw", spec.library_path.display()),
-        ]),
-        tmpfs: Some(HashMap::from([
-            ("/tmp".to_string(), "".to_string()),
-            ("/root/.cache/rv".to_string(), "".to_string()),
-        ])),
-        cap_drop: Some(vec!["ALL".to_string()]),
-        security_opt: Some(vec!["no-new-privileges".to_string()]),
-        // rootfs not read-only — need to write rv binary to /usr/local/bin
-        ..Default::default()
-    };
-
-    // Download rv and run sync in one shot
-    let rv_url = format!(
-        "https://github.com/a2-ai/rv/releases/download/{}/rv-x86_64-unknown-linux-gnu",
-        self.config.rv_version,
-    );
-    let install_and_sync = vec![
-        "sh".to_string(), "-c".to_string(),
-        format!("curl -sSL {rv_url} -o /usr/local/bin/rv && chmod +x /usr/local/bin/rv && rv sync"),
-    ];
-
-    let config = Config {
-        image: Some(spec.image.clone()),
-        cmd: Some(install_and_sync),
-        working_dir: Some("/app".to_string()),
-        labels: Some(build_labels(spec)),
-        host_config: Some(host_config),
-        ..Default::default()
-    };
-
-    let options = CreateContainerOptions {
-        name: &container_name,
-        ..Default::default()
-    };
-
-    let response = self.client.create_container(Some(options), config).await
-        .map_err(|e| BackendError::Build(format!("create build container: {e}")))?;
-
-    let container_id = response.id;
-
-    // Start the build container
-    self.client.start_container::<String>(&container_id, None).await
-        .map_err(|e| BackendError::Build(format!("start build container: {e}")))?;
-
-    // Wait for completion
-    let wait_result = self.client
-        .wait_container::<String>(&container_id, None)
-        .next()
-        .await;
-
-    let exit_code = match wait_result {
-        Some(Ok(response)) => Some(response.status_code),
-        Some(Err(e)) => {
-            tracing::warn!(error = %e, "build container wait error");
-            None
-        }
-        None => None,
-    };
-
-    let success = exit_code == Some(0);
-
-    // Clean up the build container
-    let _ = self.client.remove_container(
-        &container_id,
-        Some(RemoveContainerOptions { force: true, ..Default::default() }),
-    ).await;
-
-    Ok(BuildResult { success, exit_code })
+```go
+func demuxReader(r io.Reader) io.Reader {
+	pr, pw := io.Pipe()
+	go func() {
+		// stdcopy.StdCopy demuxes the Docker log stream, writing
+		// both stdout and stderr to pw.
+		_, err := stdcopy.StdCopy(pw, pw, r)
+		pw.CloseWithError(err)
+	}()
+	return pr
 }
 ```
 
-The build command is `rv sync` — rv is a declarative R package manager
-(written in Rust) that restores packages from an `rv.lock` lockfile. It
-replaces renv for dependency management.
+Import: `github.com/docker/docker/pkg/stdcopy`.
+
+### Step 10: Build — run a build container to completion
+
+The build flow creates a short-lived container that runs `rv sync` for
+dependency restoration. The container mounts the bundle read-only and a
+library output directory read-write. Build containers do not get their own
+network — they use the default bridge (they need internet access to download
+rv and packages but don't need to be proxied).
+
+```go
+func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (backend.BuildResult, error) {
+	// 1. Ensure image exists locally
+	if err := d.ensureImage(ctx, spec.Image); err != nil {
+		return backend.BuildResult{}, fmt.Errorf("build: %w", err)
+	}
+
+	containerName := "blockyard-build-" + spec.BundleID
+
+	// Download rv and run sync in one shot
+	rvURL := fmt.Sprintf(
+		"https://github.com/a2-ai/rv/releases/download/%s/rv-x86_64-unknown-linux-gnu",
+		spec.RvVersion,
+	)
+	cmd := []string{
+		"sh", "-c",
+		fmt.Sprintf(
+			"curl -sSL %s -o /usr/local/bin/rv && chmod +x /usr/local/bin/rv && rv sync",
+			rvURL,
+		),
+	}
+
+	// 2. Create container
+	resp, err := d.client.ContainerCreate(ctx,
+		&container.Config{
+			Image:      spec.Image,
+			Cmd:        cmd,
+			WorkingDir: "/app",
+			Labels:     buildLabels(spec),
+		},
+		&container.HostConfig{
+			Binds: []string{
+				spec.BundlePath + ":/app:ro",
+				spec.LibraryPath + ":/app/rv/library:rw",
+			},
+			Tmpfs: map[string]string{
+				"/tmp":           "",
+				"/root/.cache/rv": "",
+			},
+			CapDrop:     []string{"ALL"},
+			SecurityOpt: []string{"no-new-privileges"},
+			// Rootfs NOT read-only — needs to install rv binary to /usr/local/bin
+		},
+		nil, nil,
+		containerName,
+	)
+	if err != nil {
+		return backend.BuildResult{}, fmt.Errorf("build: create container: %w", err)
+	}
+
+	containerID := resp.ID
+
+	// 3. Start the build container
+	if err := d.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+		_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		return backend.BuildResult{}, fmt.Errorf("build: start container: %w", err)
+	}
+
+	// 4. Wait for exit
+	waitCh, errCh := d.client.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
+
+	var exitCode int
+	select {
+	case result := <-waitCh:
+		exitCode = int(result.StatusCode)
+	case err := <-errCh:
+		slog.Warn("build container wait error", "error", err)
+		exitCode = -1
+	case <-ctx.Done():
+		slog.Warn("build cancelled", "bundle_id", spec.BundleID)
+		exitCode = -1
+	}
+
+	success := exitCode == 0
+
+	// 5. Remove the build container
+	_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+
+	return backend.BuildResult{
+		Success:  success,
+		ExitCode: exitCode,
+	}, nil
+}
+```
 
 **Build and worker containers use the same image.** The configured image
 (`[docker] image`) is a standard rocker image (e.g. `rocker/r-ver`) — it
 ships R but not rv. The build container downloads rv from GitHub releases
-as the first step of its command, then runs `rv sync`. This is a one-line
-shell command (`curl | chmod | rv sync`). Worker containers don't need
-rv — they just run the Shiny app with the pre-built library.
+as the first step of its command, then runs `rv sync`.
 
 Using the same base image for builds and workers guarantees that the R
 version, architecture, and system libraries are identical — which means
 rv's namespaced library path (`rv/library/<R version>/<arch>/<codename>`)
 resolves to the same directory in both containers.
 
-### Step 11: list_managed() and remove_resource() — orphan cleanup
+### Step 11: ListManaged and RemoveResource — orphan cleanup
 
 Queries Docker for all containers and networks labeled with
 `dev.blockyard/managed=true`. Used at startup to clean up resources left
 behind by a previous server crash.
 
-```rust
-async fn list_managed(&self) -> Result<Vec<ManagedResource>, BackendError> {
-    use bollard::container::ListContainersOptions;
-    use bollard::network::ListNetworksOptions;
+```go
+func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResource, error) {
+	var resources []backend.ManagedResource
 
-    let mut resources = Vec::new();
+	// Find managed containers (including stopped)
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{
+		All: true,
+		Filters: filters.NewArgs(
+			filters.Arg("label", "dev.blockyard/managed=true"),
+		),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list managed containers: %w", err)
+	}
+	for _, c := range containers {
+		resources = append(resources, backend.ManagedResource{
+			ID:   c.ID,
+			Kind: backend.ResourceContainer,
+		})
+	}
 
-    // Find managed containers (including stopped)
-    let container_filters = HashMap::from([
-        ("label".to_string(), vec!["dev.blockyard/managed=true".to_string()]),
-    ]);
-    let containers = self.client.list_containers(Some(ListContainersOptions {
-        all: true,
-        filters: container_filters,
-        ..Default::default()
-    })).await.map_err(|e| BackendError::Cleanup(format!("list containers: {e}")))?;
+	// Find managed networks
+	networks, err := d.client.NetworkList(ctx, network.ListOptions{
+		Filters: filters.NewArgs(
+			filters.Arg("label", "dev.blockyard/managed=true"),
+		),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list managed networks: %w", err)
+	}
+	for _, n := range networks {
+		resources = append(resources, backend.ManagedResource{
+			ID:   n.ID,
+			Kind: backend.ResourceNetwork,
+		})
+	}
 
-    for c in containers {
-        if let Some(id) = c.id {
-            resources.push(ManagedResource {
-                id,
-                kind: ResourceKind::Container,
-            });
-        }
-    }
+	// Containers first so they're removed before their networks
+	sort.Slice(resources, func(i, j int) bool {
+		return resources[i].Kind < resources[j].Kind
+	})
 
-    // Find managed networks
-    let network_filters = HashMap::from([
-        ("label".to_string(), vec!["dev.blockyard/managed=true".to_string()]),
-    ]);
-    let networks = self.client.list_networks(Some(ListNetworksOptions {
-        filters: network_filters,
-    })).await.map_err(|e| BackendError::Cleanup(format!("list networks: {e}")))?;
-
-    for n in networks {
-        if let Some(id) = n.id {
-            resources.push(ManagedResource {
-                id,
-                kind: ResourceKind::Network,
-            });
-        }
-    }
-
-    resources.sort_by(|a, b| a.kind.cmp(&b.kind));
-    Ok(resources)
+	return resources, nil
 }
 
-async fn remove_resource(&self, resource: &ManagedResource) -> Result<(), BackendError> {
-    match resource.kind {
-        ResourceKind::Container => {
-            self.client.remove_container(
-                &resource.id,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            ).await.map_err(|e| BackendError::Cleanup(format!("remove container: {e}")))?;
-        }
-        ResourceKind::Network => {
-            self.client.remove_network(&resource.id).await
-                .map_err(|e| BackendError::Cleanup(format!("remove network: {e}")))?;
-        }
-    }
-    Ok(())
+func (d *DockerBackend) RemoveResource(ctx context.Context, r backend.ManagedResource) error {
+	switch r.Kind {
+	case backend.ResourceContainer:
+		return d.client.ContainerRemove(ctx, r.ID, container.RemoveOptions{Force: true})
+	case backend.ResourceNetwork:
+		return d.client.NetworkRemove(ctx, r.ID)
+	default:
+		return fmt.Errorf("unknown resource kind: %d", r.Kind)
+	}
 }
 ```
 
-### Step 12: Docker integration tests
+Import: `github.com/docker/docker/api/types/filters`.
 
-Add a `docker-tests` feature flag and write integration tests that exercise
-the real Docker backend. These require a running Docker daemon.
+### Step 12: Metadata endpoint protection
 
-**Cargo.toml addition:**
+Cloud providers expose instance metadata at `169.254.169.254`. Without
+protection, R code in a container can steal host IAM credentials. The
+backend inserts an iptables rule in the `DOCKER-USER` chain scoped to the
+worker network's subnet, tagged with a comment for cleanup.
 
-```toml
-[features]
-docker-tests = ["docker"]  # implies docker feature
-```
+The detection result is cached after the first spawn — we check once whether
+iptables is available and whether the metadata endpoint is reachable, then
+reuse that result for all subsequent spawns.
 
-**Tests** (`src/backend/docker.rs` or `tests/docker_test.rs`):
+```go
+func (d *DockerBackend) blockMetadataEndpoint(ctx context.Context, networkName, workerID string) error {
+	d.metaMu.Lock()
+	defer d.metaMu.Unlock()
 
-```rust
-#[cfg(all(test, feature = "docker-tests"))]
-mod tests {
-    use super::*;
+	switch d.metaMode {
+	case metadataBlocked:
+		// iptables works — insert a rule for this worker
+		return d.insertMetadataRule(ctx, networkName, workerID)
+	case metadataUnreachable:
+		// Already unreachable by operator rule — nothing to do
+		return nil
+	case metadataUnavailable:
+		// Already checked, can't block, but endpoint was unreachable — ok
+		return nil
+	}
 
-    fn test_config() -> DockerConfig {
-        DockerConfig {
-            socket: "/var/run/docker.sock".into(),
-            image: "ghcr.io/rocker-org/r-ver:latest".into(),
-            shiny_port: 3838,
-        }
-    }
+	// First spawn — detect capabilities
+	if tryIptables() {
+		d.metaMode = metadataBlocked
+		return d.insertMetadataRule(ctx, networkName, workerID)
+	}
 
-    #[tokio::test]
-    async fn spawn_and_stop_container() {
-        let backend = DockerBackend::new(test_config()).await.unwrap();
+	// iptables unavailable — check if endpoint is already unreachable
+	if !isMetadataReachable() {
+		slog.Info("metadata endpoint unreachable (operator rule); no iptables needed")
+		d.metaMode = metadataUnreachable
+		return nil
+	}
 
-        let spec = WorkerSpec {
-            app_id: "test-app".into(),
-            worker_id: format!("test-{}", uuid::Uuid::new_v4()),
-            image: "ghcr.io/rocker-org/r-ver:latest".into(),
-            bundle_path: "/tmp".into(),  // just needs to exist
-            library_path: "/tmp".into(),
-            worker_mount: "/app".into(),
-            shiny_port: 3838,
-            memory_limit: Some("256m".into()),
-            cpu_limit: Some(0.5),
-            labels: Default::default(),
-        };
+	// iptables unavailable AND endpoint is reachable — fail
+	return fmt.Errorf(
+		"metadata endpoint 169.254.169.254 is reachable and iptables is unavailable; " +
+			"add CAP_NET_ADMIN or install a blanket iptables rule to block it",
+	)
+}
 
-        let handle = backend.spawn(&spec).await.unwrap();
+func tryIptables() bool {
+	err := exec.Command("iptables", "-L", "DOCKER-USER", "-n").Run()
+	return err == nil
+}
 
-        // Container should be running
-        let addr = backend.addr(&handle).await.unwrap();
-        assert!(!addr.ip().is_unspecified());
+func isMetadataReachable() bool {
+	conn, err := net.DialTimeout("tcp", "169.254.169.254:80", 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
 
-        // Stop and clean up
-        backend.stop(&handle).await.unwrap();
-    }
+func (d *DockerBackend) insertMetadataRule(ctx context.Context, networkName, workerID string) error {
+	// Get the network's subnet
+	info, err := d.client.NetworkInspect(ctx, networkName, network.InspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect network for metadata rule: %w", err)
+	}
 
-    #[tokio::test]
-    async fn health_check_before_ready() {
-        let backend = DockerBackend::new(test_config()).await.unwrap();
+	if len(info.IPAM.Config) == 0 {
+		return fmt.Errorf("network %s has no IPAM config", networkName)
+	}
+	subnet := info.IPAM.Config[0].Subnet
 
-        let spec = WorkerSpec {
-            app_id: "test-app".into(),
-            worker_id: format!("test-{}", uuid::Uuid::new_v4()),
-            // Use a simple image that exits immediately — won't listen on a port
-            image: "alpine:latest".into(),
-            bundle_path: "/tmp".into(),
-            library_path: "/tmp".into(),
-            worker_mount: "/app".into(),
-            shiny_port: 3838,
-            memory_limit: None,
-            cpu_limit: None,
-            labels: Default::default(),
-        };
+	comment := "blockyard-" + workerID
+	err = exec.CommandContext(ctx, "iptables",
+		"-I", "DOCKER-USER",
+		"-s", subnet,
+		"-d", "169.254.169.254",
+		"-j", "DROP",
+		"-m", "comment", "--comment", comment,
+	).Run()
+	if err != nil {
+		return fmt.Errorf("insert iptables rule: %w", err)
+	}
 
-        let handle = backend.spawn(&spec).await.unwrap();
+	return nil
+}
 
-        // Health check should fail — nothing listening on port
-        let healthy = backend.health_check(&handle).await;
-        assert!(!healthy);
+func (d *DockerBackend) removeMetadataRule(workerID string) error {
+	if d.metaMode != metadataBlocked {
+		return nil
+	}
 
-        backend.stop(&handle).await.unwrap();
-    }
+	comment := "blockyard-" + workerID
 
-    #[tokio::test]
-    async fn orphan_cleanup() {
-        let backend = DockerBackend::new(test_config()).await.unwrap();
+	// List rules, find the one with our comment, delete it
+	out, err := exec.Command("iptables", "-L", "DOCKER-USER", "-n", "--line-numbers",
+		"-m", "comment", "--comment", comment).Output()
+	if err != nil {
+		return nil // best-effort
+	}
 
-        let spec = WorkerSpec {
-            app_id: "test-app".into(),
-            worker_id: format!("test-{}", uuid::Uuid::new_v4()),
-            image: "alpine:latest".into(),
-            bundle_path: "/tmp".into(),
-            library_path: "/tmp".into(),
-            worker_mount: "/app".into(),
-            shiny_port: 3838,
-            memory_limit: None,
-            cpu_limit: None,
-            labels: Default::default(),
-        };
+	// Parse line numbers and delete in reverse order
+	lines := strings.Split(string(out), "\n")
+	var ruleNums []int
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			if num, err := strconv.Atoi(fields[0]); err == nil {
+				ruleNums = append(ruleNums, num)
+			}
+		}
+	}
 
-        let handle = backend.spawn(&spec).await.unwrap();
+	// Delete in reverse order to preserve line numbers
+	sort.Sort(sort.Reverse(sort.IntSlice(ruleNums)))
+	for _, num := range ruleNums {
+		_ = exec.Command("iptables", "-D", "DOCKER-USER", strconv.Itoa(num)).Run()
+	}
 
-        // Simulate crash — don't call stop(), just list and clean up
-        let managed = backend.list_managed().await.unwrap();
-        assert!(!managed.is_empty());
-
-        for resource in &managed {
-            backend.remove_resource(resource).await.unwrap();
-        }
-
-        // Should be clean now
-        let remaining = backend.list_managed().await.unwrap();
-        assert!(remaining.is_empty());
-    }
-
-    #[tokio::test]
-    async fn memory_limit_parsing() {
-        assert_eq!(parse_memory_limit("512m"), Some(512 * 1024 * 1024));
-        assert_eq!(parse_memory_limit("1g"), Some(1024 * 1024 * 1024));
-        assert_eq!(parse_memory_limit("256mb"), Some(256 * 1024 * 1024));
-        assert_eq!(parse_memory_limit("100kb"), Some(100 * 1024));
-    }
+	return nil
 }
 ```
 
-### Step 13: Enable Docker CI job
+The iptables approach is the same as described in the plan: scoped to the
+network subnet, tagged with a `blockyard-{worker-id}` comment for cleanup.
+If iptables is unavailable (no `CAP_NET_ADMIN`), the backend falls back to
+a reachability check. If the endpoint is already unreachable
+(operator-installed blanket rule), spawn proceeds. If it's reachable and
+iptables can't block it, spawn fails.
 
-Flip the `docker-tests` CI job from `if: false` to active. The job needs
-Docker available on the runner — GitHub Actions `ubuntu-latest` has Docker
-pre-installed.
+### Step 13: Docker integration tests
+
+Tests that exercise the real Docker backend. Gated behind a `docker_test`
+build tag. Run with `go test -tags docker_test ./internal/backend/docker/`.
+Regular `go test ./...` skips them.
+
+`internal/backend/docker/docker_test.go`:
+
+```go
+//go:build docker_test
+
+package docker
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/config"
+)
+
+func testConfig() *config.DockerConfig {
+	return &config.DockerConfig{
+		Socket:    "/var/run/docker.sock",
+		Image:     "alpine:latest",
+		ShinyPort: 8080,
+		RvVersion: "latest",
+	}
+}
+
+func TestSpawnAndStop(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         []string{"sleep", "300"}, // stay alive
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// Container should have an address
+	addr, err := b.Addr(ctx, workerID)
+	if err != nil {
+		t.Fatalf("Addr: %v", err)
+	}
+	if addr == "" {
+		t.Fatal("Addr returned empty string")
+	}
+	t.Logf("worker addr: %s", addr)
+
+	// Stop and clean up
+	if err := b.Stop(ctx, workerID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Addr should fail after stop
+	if _, err := b.Addr(ctx, workerID); err == nil {
+		t.Fatal("Addr should fail after Stop")
+	}
+}
+
+func TestHealthCheckNoListener(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         []string{"sleep", "300"}, // alive but not listening
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer b.Stop(ctx, workerID)
+
+	// Give the container a moment to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Health check should fail — nothing listening on port
+	if b.HealthCheck(ctx, workerID) {
+		t.Fatal("HealthCheck should return false when nothing is listening")
+	}
+}
+
+func TestOrphanCleanup(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         []string{"sleep", "300"},
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// Simulate crash — don't call Stop, just list and clean up
+	managed, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+	if len(managed) == 0 {
+		t.Fatal("expected managed resources after spawn")
+	}
+
+	for _, r := range managed {
+		if err := b.RemoveResource(ctx, r); err != nil {
+			t.Logf("RemoveResource warning: %v", err)
+		}
+	}
+
+	// Should be clean now
+	remaining, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged after cleanup: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 remaining resources, got %d", len(remaining))
+	}
+}
+
+func TestMemoryLimitParsing(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int64
+	}{
+		{"512m", 512 * 1024 * 1024},
+		{"1g", 1024 * 1024 * 1024},
+		{"256mb", 256 * 1024 * 1024},
+		{"100kb", 100 * 1024},
+		{"1024", 1024},
+	}
+
+	for _, tt := range tests {
+		got, ok := parseMemoryLimit(tt.input)
+		if !ok {
+			t.Errorf("parseMemoryLimit(%q) returned !ok", tt.input)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("parseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestNetworkIsolation(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Spawn two workers
+	id1 := "test-" + uuid.New().String()[:8]
+	id2 := "test-" + uuid.New().String()[:8]
+	makeSpec := func(id string) backend.WorkerSpec {
+		return backend.WorkerSpec{
+			AppID:       "test-app",
+			WorkerID:    id,
+			Image:       "alpine:latest",
+			Cmd:         []string{"sleep", "300"},
+			BundlePath:  "/tmp",
+			LibraryPath: "",
+			WorkerMount: "/app",
+			ShinyPort:   8080,
+			Labels:      map[string]string{},
+		}
+	}
+
+	if err := b.Spawn(ctx, makeSpec(id1)); err != nil {
+		t.Fatalf("Spawn worker 1: %v", err)
+	}
+	defer b.Stop(ctx, id1)
+
+	if err := b.Spawn(ctx, makeSpec(id2)); err != nil {
+		t.Fatalf("Spawn worker 2: %v", err)
+	}
+	defer b.Stop(ctx, id2)
+
+	// Get their addresses
+	addr1, err := b.Addr(ctx, id1)
+	if err != nil {
+		t.Fatalf("Addr worker 1: %v", err)
+	}
+	addr2, err := b.Addr(ctx, id2)
+	if err != nil {
+		t.Fatalf("Addr worker 2: %v", err)
+	}
+
+	// Workers should be on different networks (different IPs from different subnets)
+	if addr1 == addr2 {
+		t.Fatalf("workers should have different addresses, both got %s", addr1)
+	}
+
+	// Verify they cannot reach each other by running a connectivity check
+	// from worker 1's container toward worker 2's IP
+	ip2 := strings.Split(addr2, ":")[0]
+	execResp, err := b.client.ContainerExecCreate(ctx, b.workers[id1].containerID,
+		container.ExecOptions{
+			Cmd: []string{"sh", "-c", fmt.Sprintf(
+				"wget -q -O /dev/null --timeout=2 http://%s:%d/ 2>&1 || exit 1",
+				ip2, 8080,
+			)},
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecCreate: %v", err)
+	}
+
+	if err := b.client.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+		t.Fatalf("ExecStart: %v", err)
+	}
+
+	// Wait for exec to complete and check exit code
+	time.Sleep(3 * time.Second)
+	inspect, err := b.client.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		t.Fatalf("ExecInspect: %v", err)
+	}
+
+	// Exit code should be non-zero (connection failed = isolated)
+	if inspect.ExitCode == 0 {
+		t.Fatal("worker 1 should NOT be able to reach worker 2 (network isolation broken)")
+	}
+}
+```
+
+**Note on TestMemoryLimitParsing:** this test does not require Docker and
+does not need the `docker_test` build tag, but it's placed here alongside
+the code it tests. Alternatively it could go in a `_test.go` file without
+the build tag — either works since the function is unexported and must be
+tested from the same package.
+
+### Step 14: CI configuration
+
+The CI workflow already has two jobs from phase 0-1. The `docker-tests` job
+should be enabled:
 
 ```yaml
-docker-tests:
+name: CI
+on: [push, pull_request]
+
+jobs:
+  check:
     runs-on: ubuntu-latest
-    # Removed: if: false
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: docker pull ghcr.io/rocker-org/r-ver:latest
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: go vet ./...
+      - run: go test ./...
+
+  docker-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
       - run: docker pull alpine:latest
-      - run: cargo test --features docker-tests
+      - run: go test -tags docker_test ./...
 ```
 
-**Note:** Pre-pulling images avoids timeout flakiness in tests.
+Pre-pulling `alpine:latest` avoids timeout flakiness in tests.
 
 ## Container hardening summary
 
@@ -819,14 +1303,14 @@ settings:
 
 | Setting | Value | Why |
 |---|---|---|
-| `cap_drop` | `ALL` | Drop all Linux capabilities — Shiny needs none |
-| `security_opt` | `no-new-privileges` | Prevent privilege escalation via setuid/setgid |
-| `readonly_rootfs` | `true` (workers only) | Prevent filesystem writes outside mounts |
-| `tmpfs` | `/tmp` (all), `/root/.cache/rv` (builds) | Writable scratch space |
+| `CapDrop` | `ALL` | Drop all Linux capabilities — Shiny needs none |
+| `SecurityOpt` | `no-new-privileges` | Prevent privilege escalation via setuid/setgid |
+| `ReadonlyRootfs` | `true` (workers only) | Prevent filesystem writes outside mounts |
+| `Tmpfs` | `/tmp` (all), `/root/.cache/rv` (builds) | Writable scratch space |
 | Published ports | None | Workers are only reachable via the bridge network |
 | Network | Per-worker bridge | Workers cannot reach each other |
 
-Build containers do not use `readonly_rootfs` — they need to download and
+Build containers do not use `ReadonlyRootfs` — they need to download and
 install the `rv` binary to `/usr/local/bin` before running `rv sync`. The
 build container is short-lived and discarded after completion.
 
@@ -861,62 +1345,72 @@ isolated from each other (no shared network).
 When the server is running natively (not in a container), network joining is
 skipped. Workers are reachable on the Docker bridge gateway IP instead.
 
-## New dependency
+## Imports summary
 
-```toml
-futures-util = "0.3"   # for StreamExt on bollard log streams
+The Docker Go client uses a different package layout from v25+. Key imports
+for this phase:
+
+```go
+import (
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
+)
 ```
+
+These are already covered by the `github.com/docker/docker` dependency in
+`go.mod` from phase 0-1.
 
 ## Exit criteria
 
 Phase 0-2 is done when:
 
-- `DockerBackend::new()` connects to Docker and detects server ID
-- `spawn()` creates a network + hardened container, returns a handle
-- `addr()` resolves the worker's IP on its named network
-- `stop()` cleans up the container and network
-- `health_check()` returns `true`/`false` based on TCP reachability
-- `logs()` streams container stdout/stderr
-- `build()` runs a build container to completion and returns exit code
-- `list_managed()` discovers all labeled containers and networks
-- `remove_resource()` removes containers and networks by ID
+- `New()` connects to Docker and detects server ID
+- `Spawn()` creates a network + hardened container, records internal state
+- `Addr()` resolves the worker's IP on its named network
+- `Stop()` cleans up the container, network, and iptables rule (best-effort)
+- `HealthCheck()` returns `true`/`false` based on TCP reachability
+- `Logs()` streams container stdout/stderr with proper demuxing
+- `Build()` runs a build container to completion and returns exit code
+- `ensureImage()` pulls on demand, skips if already present
+- `ListManaged()` discovers all labeled containers and networks
+- `RemoveResource()` removes containers and networks by ID
+- Metadata endpoint protection blocks `169.254.169.254` or verifies it's
+  already unreachable
 - Memory limit parsing handles common units (`m`, `g`, `mb`, `gb`)
 - All Docker integration tests pass with a real Docker daemon
-- `docker-tests` CI job is enabled and green
-- `cargo test --features test-support` still passes (mock backend unaffected)
-- `cargo clippy` clean
+- `docker_test` CI job is enabled and green
+- `go test ./...` still passes (mock backend unaffected)
+- `go vet ./...` clean
 
 ## Implementation notes
 
-- **bollard version:** 0.18 is already in Cargo.toml from phase 0-1. No
-  version change needed.
+- **Docker client version:** `github.com/docker/docker v27.5.1+incompatible`
+  is already in `go.mod` from phase 0-1. No version change needed.
 
-- **Error handling:** all Docker API calls map bollard errors to the
-  appropriate `BackendError` variant. The error message includes enough
-  context to diagnose failures (container ID, network name, etc.).
+- **Error handling:** all Docker API calls wrap errors with `fmt.Errorf`
+  including context (container ID, network name, operation). The error
+  messages are human-readable for `slog` output.
 
 - **Stop ordering matters.** When stopping a worker: stop container first,
-  remove container, disconnect server from network, remove network. If you
-  remove the network before disconnecting the server, the network removal
-  fails because it still has connected endpoints.
+  remove container, remove iptables rule, disconnect server from network,
+  remove network. If you remove the network before disconnecting the server,
+  the network removal fails because it still has connected endpoints.
 
 - **Build container cleanup.** The build container is removed after
   completion regardless of success or failure. We don't use Docker's
-  `AutoRemove` because we need to inspect the exit code before the container
+  `AutoRemove` because we need to read the exit code before the container
   disappears.
 
 - **Native mode (no server ID).** When the server runs outside Docker,
-  `spawn()` and `stop()` skip the network join/disconnect steps.
-  `addr()` returns the worker's IP on its bridge network, which must be
+  `Spawn()` and `Stop()` skip the network join/disconnect steps.
+  `Addr()` returns the worker's IP on its bridge network, which must be
   routable from the host for native mode to work. This is the case on
-  Linux and with some macOS Docker runtimes, but not all. If container
-  IPs are not routable from your host, run the server inside a container
-  (e.g. the devcontainer) instead.
-
-- **Image pulling is not handled in this phase.** `ensure_image()` is
-  added in phase 0-3 and wired into `build()` and `spawn()` as their first
-  step — pull on demand, not at startup. For phase 0-2, images must be
-  pre-pulled.
+  Linux. If container IPs are not routable from the host, run the server
+  inside a container (e.g. the devcontainer) instead.
 
 - **rv library path namespacing.** rv's default library path is
   `<project>/rv/library/<R version>/<arch>/<codename>` (e.g.
@@ -928,3 +1422,14 @@ Phase 0-2 is done when:
   2. That the worker container's R process finds the library at runtime —
      the worker container sets `R_LIBS=/blockyard-lib` so R includes the
      restored library in `.libPaths()`.
+
+- **`workerState` map is internal.** The `workers` map is not exported.
+  Callers interact only via string worker IDs through the `Backend`
+  interface. The map is protected by `sync.RWMutex` — `Addr`, `Logs`, and
+  `HealthCheck` take read locks; `Spawn` and `Stop` take write locks.
+
+- **Build logs are not streamed in this phase.** The `Build` method waits
+  for the container to exit but does not stream its logs. Log streaming for
+  build containers is wired in phase 0-3 (content management) where the
+  task store provides the streaming infrastructure. Phase 0-2's `Build`
+  returns success/failure and exit code only.

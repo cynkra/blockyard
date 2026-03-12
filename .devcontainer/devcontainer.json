@@ -1,5 +1,5 @@
 {
-  "name": "blockyard (Rust)",
+  "name": "blockyard (Go)",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
@@ -8,8 +8,7 @@
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "mounts": [
-    "source=blockyard-cargo-cache,target=/home/dev/.cargo/registry,type=volume",
-    "source=blockyard-target,target=/workspace/target,type=volume"
+    "source=blockyard-gomodcache,target=/home/dev/go/pkg/mod,type=volume"
   ],
   "runArgs": ["--env-file", ".devcontainer/.env"],
   "initializeCommand": "mkdir -p .devcontainer/.claude .devcontainer/.ssh",

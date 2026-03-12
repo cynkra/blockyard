@@ -1,0 +1,103 @@
+package server
+
+import (
+	"sync"
+
+	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/logstore"
+	"github.com/cynkra/blockyard/internal/registry"
+	"github.com/cynkra/blockyard/internal/session"
+	"github.com/cynkra/blockyard/internal/task"
+)
+
+// Server holds all shared state for the running server.
+// Passed by pointer to API handlers, proxy, and background goroutines.
+type Server struct {
+	Config   *config.Config
+	Backend  backend.Backend
+	DB       *db.DB
+	Workers  *WorkerMap
+	Sessions *session.Store
+	Registry *registry.Registry
+	Tasks    *task.Store
+	LogStore *logstore.Store
+}
+
+// ActiveWorker represents a running worker tracked by the server.
+// The worker ID is the map key in WorkerMap, not stored here.
+type ActiveWorker struct {
+	AppID string
+}
+
+// WorkerMap is a concurrent map of worker ID → ActiveWorker.
+type WorkerMap struct {
+	mu      sync.RWMutex
+	workers map[string]ActiveWorker
+}
+
+func NewWorkerMap() *WorkerMap {
+	return &WorkerMap{workers: make(map[string]ActiveWorker)}
+}
+
+func (m *WorkerMap) Get(id string) (ActiveWorker, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	w, ok := m.workers[id]
+	return w, ok
+}
+
+func (m *WorkerMap) Set(id string, w ActiveWorker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.workers[id] = w
+}
+
+func (m *WorkerMap) Delete(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.workers, id)
+}
+
+func (m *WorkerMap) Count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.workers)
+}
+
+func (m *WorkerMap) CountForApp(appID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := 0
+	for _, w := range m.workers {
+		if w.AppID == appID {
+			n++
+		}
+	}
+	return n
+}
+
+// All returns a snapshot of all worker IDs.
+func (m *WorkerMap) All() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ids := make([]string, 0, len(m.workers))
+	for id := range m.workers {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// ForApp returns all worker IDs for a given app.
+func (m *WorkerMap) ForApp(appID string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var ids []string
+	for id, w := range m.workers {
+		if w.AppID == appID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}

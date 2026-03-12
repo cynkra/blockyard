@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libsqlite3-dev \
-    libssl-dev \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,11 +32,20 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain as non-root user
+# Install Go
+ARG GO_VERSION=1.24.1
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz \
+      | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Switch to non-root user for user-local installs
 USER $USERNAME
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --component clippy,rustfmt
-ENV PATH="/home/dev/.cargo/bin:${PATH}"
+ENV GOPATH="/home/dev/go"
+ENV PATH="${GOPATH}/bin:${PATH}"
+
+# Install Go tools
+RUN go install golang.org/x/tools/gopls@latest \
+    && go install github.com/go-delve/delve/cmd/dlv@latest
 
 # Install Claude CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash

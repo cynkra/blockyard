@@ -1,615 +1,647 @@
 # blockyard v0 Implementation Plan
 
 This document is the build plan for v0 — the first working technical milestone.
-It covers project scaffolding, crate layout, dependency graph, build phases,
-key type definitions, and test strategy. The roadmap (`../roadmap.md`) is
-the source of truth for *what* v0 includes; this document describes *how* to
-build it.
+It covers project layout, dependency graph, build phases, key type definitions,
+and test strategy. The roadmap (`../roadmap.md`) is the source of truth for
+*what* v0 includes; this document describes *how* to build it.
 
-## Crate Layout
+## Project Layout
 
-A single crate with `src/lib.rs` (domain logic) and `src/main.rs` (entry
-point). Feature flags control which backends are compiled in.
+A single Go module. The `cmd/blockyard/` directory holds the entry point; all
+domain logic lives under `internal/`.
 
 ```
 blockyard/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs
-│   ├── main.rs             # entry point — config, wiring, server start
-│   ├── config.rs           # TOML config + env var overlay
+├── go.mod
+├── cmd/
+│   └── blockyard/
+│       ├── main.go                # wiring, signal handling, shutdown
+│       └── backend_docker.go      # imports docker backend, provides newBackend()
+├── internal/
+│   ├── config/
+│   │   └── config.go              # TOML parsing + env var overlay + validation
 │   ├── backend/
-│   │   ├── mod.rs          # Backend trait, WorkerSpec, BuildSpec, handles
-│   │   ├── docker.rs       # bollard-based Docker/Podman [feature = "docker"]
-│   │   └── mock.rs         # in-process mock [feature = "test-support"]
+│   │   ├── backend.go             # Backend interface, WorkerSpec, BuildSpec
+│   │   ├── docker/
+│   │   │   └── docker.go          # DockerBackend
+│   │   └── mock/
+│   │       └── mock.go            # MockBackend (imported only from _test.go)
 │   ├── db/
-│   │   ├── mod.rs          # database trait
-│   │   └── sqlite.rs       # SQLite implementation (sqlx)
+│   │   └── db.go                  # SQLite setup, migrations, queries
 │   ├── bundle/
-│   │   ├── mod.rs          # bundle upload, storage layout, retention
-│   │   └── restore.rs      # dependency restoration via backend.build()
-│   ├── proxy/
-│   │   ├── mod.rs          # HTTP/WS reverse proxy
-│   │   ├── session.rs      # SessionStore trait + in-memory impl
-│   │   ├── worker.rs       # WorkerRegistry trait + in-memory impl
-│   │   ├── cold_start.rs   # hold-until-healthy logic
-│   │   └── ws_cache.rs     # WS connection caching on disconnect
+│   │   └── bundle.go              # upload, storage, unpack, restore, retention
+│   ├── session/
+│   │   └── store.go               # SessionStore: session ID → worker ID
+│   ├── registry/
+│   │   └── registry.go            # WorkerRegistry: worker ID → "host:port"
+│   ├── logstore/
+│   │   └── store.go               # LogStore: per-worker buffer + broadcast
+│   ├── task/
+│   │   └── store.go               # in-memory task store for async restore jobs
 │   ├── api/
-│   │   ├── mod.rs          # axum router assembly
-│   │   ├── apps.rs         # CRUD + start/stop/logs endpoints
-│   │   ├── bundles.rs      # upload + list endpoints
-│   │   ├── tasks.rs        # task log streaming endpoint
-│   │   └── auth.rs         # bearer token middleware
-│   ├── health.rs           # /healthz handler + health polling loop
-│   ├── task.rs             # TaskStore trait + in-memory impl
-│   ├── cleanup.rs          # orphan cleanup on startup
-│   └── app.rs              # AppState — shared server state
-├── tests/                  # integration tests
-│   ├── api_test.rs
-│   ├── proxy_test.rs
-│   └── bundle_test.rs
-├── blockyard.toml             # example config
+│   │   ├── router.go              # chi router assembly + healthz
+│   │   ├── auth.go                # bearer token middleware
+│   │   ├── apps.go                # app CRUD + start/stop/logs endpoints
+│   │   ├── bundles.go             # upload + list endpoints
+│   │   ├── tasks.go               # task status + log streaming
+│   │   └── error.go               # shared error response helpers
+│   ├── proxy/
+│   │   ├── proxy.go               # reverse proxy handler, routing
+│   │   ├── forward.go             # HTTP forwarding, prefix stripping
+│   │   ├── ws.go                  # WebSocket forwarding + cache
+│   │   └── coldstart.go           # hold-until-healthy logic
+│   ├── ops/
+│   │   ├── ops.go                 # evict_worker, startup_cleanup, graceful_shutdown
+│   │   ├── health.go              # health polling loop
+│   │   └── logcapture.go          # per-worker log capture goroutine
+│   └── server/
+│       └── state.go               # Server struct: shared server state
+├── migrations/
+│   └── 001_initial.sql
+├── blockyard.toml                 # reference config
 ├── docs/
-│   ├── roadmap.md
-│   └── v0-plan.md          # this file
 └── .github/
     └── workflows/
         └── ci.yml
 ```
 
-**Feature flags:**
+**Backend selection via build tags:** only Docker exists for now, so
+`backend_docker.go` has no build tag. When a Kubernetes backend is added:
 
-```toml
-[features]
-default = ["docker"]
-docker = ["dep:bollard"]        # Docker/Podman backend
-test-support = []               # mock backend for tests
+```
+cmd/blockyard/backend_docker.go   # //go:build !k8s
+cmd/blockyard/backend_k8s.go      # //go:build k8s
 ```
 
-- **`docker`** (default) — compiles `backend/docker.rs` and pulls in
-  `bollard`. Disable with `--no-default-features` for mock-only test builds
-  or future k8s-only deployments.
-- **`test-support`** — compiles `backend/mock.rs`. Enabled automatically for
-  integration tests via `dev-dependencies`. Never included in production
-  builds.
+`go build` gives Docker (default). `go build -tags k8s` gives Kubernetes.
 
-```toml
-[dev-dependencies]
-blockyard = { path = ".", features = ["test-support"] }
-```
+**Mock backend:** lives in `internal/backend/mock/` and is only imported from
+`_test.go` files. Go's toolchain excludes test-only imports from production
+builds — no build tags needed.
 
-**Why a single crate:**
-
-- `main.rs` is ~50 lines of wiring — not enough logic to justify a separate
-  binary crate.
-- Integration tests in `tests/` import from `lib.rs` directly.
-- When the v2 CLI tool arrives, it becomes a second crate that depends on the
-  library. That's the point where a workspace split makes sense — not now.
+**Docker integration tests:** gated behind a `docker_test` build tag. Run
+with `go test -tags docker_test ./internal/backend/docker/`. Regular
+`go test ./...` skips them.
 
 ## Dependencies
 
-```toml
-# Cargo.toml
-[features]
-default = ["docker"]
-docker = ["dep:bollard"]
-test-support = []
+```
+go 1.24
 
-[dependencies]
-tokio       = { version = "1", features = ["full"] }
-axum        = { version = "0.8", features = ["ws"] }
-hyper       = { version = "1", features = ["full"] }
-hyper-util  = "0.1"
-http-body-util = "0.1"
-tower       = { version = "0.5", features = ["util"] }
-bollard     = { version = "0.18", optional = true }
-sqlx        = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-toml        = "0.8"
-uuid        = { version = "1", features = ["v4"] }
-tracing     = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-thiserror   = "2"
-tokio-util  = { version = "0.7", features = ["io"] }
-bytes       = "1"
-dashmap     = "6"                 # concurrent maps for session/worker stores
-tempfile    = "3"                 # atomic bundle writes
-
-[dev-dependencies]
-blockyard = { path = ".", features = ["test-support"] }
-reqwest     = { version = "0.12", features = ["json", "cookies"] }
-tokio-tungstenite = "0.26"        # WS client for proxy tests
-assert_matches = "1"
+require (
+    github.com/go-chi/chi/v5      // HTTP router: lightweight, idiomatic http.Handler
+    github.com/BurntSushi/toml     // TOML config: written by the spec co-creator
+    github.com/coder/websocket     // WebSocket: context-aware, clean API
+    github.com/docker/docker       // Docker client: official first-party
+    github.com/google/uuid         // UUIDs: standard, well-tested
+    modernc.org/sqlite             // SQLite: pure Go, no CGO needed
+)
 ```
 
 **Dependency rationale:**
 
-- **axum 0.8** — routing, middleware, extractors for the control plane API.
-  Built on hyper and tower, so the proxy layer composes naturally.
-- **hyper 1 + hyper-util** — direct HTTP client for proxying requests to
-  workers. axum handles inbound routing; hyper handles outbound forwarding and
-  WS upgrades.
-- **bollard** — async Docker Engine API client. Handles container lifecycle,
-  network management, log streaming, image pulling. Supports both Docker and
-  Podman sockets.
-- **sqlx** — compile-time checked SQL queries. SQLite for v0, PostgreSQL added
-  in v2 by switching the connection pool type. No ORM.
-- **dashmap** — lock-free concurrent `HashMap`. Used for `SessionStore` and
-  `WorkerRegistry` in-memory implementations instead of `Arc<RwLock<HashMap>>`.
-  Lower contention under concurrent proxy traffic.
+- **chi** — routing, middleware, route groups for auth separation. Implements
+  `http.Handler` so everything composes with the standard library. No
+  framework lock-in.
+- **modernc.org/sqlite** — pure Go SQLite. `CGO_ENABLED=0` builds work.
+  Blockyard's SQLite usage (metadata CRUD, not per-request writes) won't
+  hit the performance difference vs `mattn/go-sqlite3`.
+- **coder/websocket** — context-aware cancellation, maintained by Coder.
+  Simplifies WS cache TTL and disconnect tracking vs gorilla/websocket
+  (archived).
+- **docker/docker client** — official Go client for the Docker Engine API.
+  Full coverage of container lifecycle, network management, log streaming,
+  image pulling. Works with Podman's Docker-compatible socket unchanged.
+- **BurntSushi/toml** — standard Go TOML library. Env var overlay is a
+  manual layer on top (not a config framework).
+- **log/slog** (stdlib) — structured logging. JSON and text output, log
+  levels. Built into Go 1.21+.
+
+**What comes from the standard library:**
+
+- HTTP serving and reverse proxying (`net/http`, `net/http/httputil`)
+- TLS (deferred to v1, but `crypto/tls` + `autocert` when needed)
+- Concurrency (`sync`, `context`, goroutines, channels)
+- Signal handling (`os/signal`)
+- Timers and tickers (`time`)
+- Tar/gzip handling (`archive/tar`, `compress/gzip`)
+- File I/O, temp files, atomic rename (`os`, `io`)
 
 ## Build Phases
 
-The dependency graph dictates build order. Each phase produces a testable
-artifact. Phases are sequential; items within a phase can be worked in
-parallel.
+The dependency graph dictates build order. Each phase produces testable code.
+Phases are sequential; items within a phase can be worked in parallel.
 
-### Phase 0-1: Foundation ([detailed plan](phase-0-1.md))
+### Phase 1: Foundation ([detailed plan](phase-0-1.md))
 
 Establish the project skeleton, core types, config parsing, and database
 schema. Everything else builds on this.
 
 **Deliverables:**
 
-1. Crate skeleton with `src/lib.rs` + `src/main.rs`, feature flags
-2. Config parsing (`config.rs`) — TOML + env var overlay
-3. `Backend` trait + `WorkerSpec` + `BuildSpec` + handle types
+1. Go module with `cmd/blockyard/main.go` + `internal/` package structure
+2. Config parsing (`internal/config/`) — TOML + env var overlay
+3. `Backend` interface + `WorkerSpec` + `BuildSpec`
 4. Mock backend implementation (for tests)
-5. SQLite schema + migrations (`db/sqlite.rs`)
-6. `AppState` struct that holds shared server state
-7. Structured logging setup (`tracing` + `tracing-subscriber`)
+5. SQLite schema + migrations (`internal/db/`)
+6. In-memory stores: `session.Store`, `registry.Registry`, `logstore.Store`, `task.Store`
+7. `Server` struct that holds shared server state
+8. Structured logging setup (`log/slog`)
+9. GitHub Actions CI workflow
 
 **Config structure:**
 
-```rust
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    pub server: ServerConfig,
-    pub docker: DockerConfig,
-    pub storage: StorageConfig,
-    pub database: DatabaseConfig,
-    pub proxy: ProxyConfig,
+```go
+type Config struct {
+    Server   ServerConfig
+    Docker   DockerConfig
+    Storage  StorageConfig
+    Database DatabaseConfig
+    Proxy    ProxyConfig
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ServerConfig {
-    #[serde(default = "default_bind")]
-    pub bind: SocketAddr,               // default: 0.0.0.0:8080
-    pub token: String,                  // bearer token for control plane
-    #[serde(default = "default_shutdown_timeout")]
-    pub shutdown_timeout: Duration,     // default: 30s
+type ServerConfig struct {
+    Bind            string        // default: "0.0.0.0:8080"
+    Token           string        // required, no default
+    ShutdownTimeout time.Duration // default: 30s
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DockerConfig {
-    #[serde(default = "default_socket")]
-    pub socket: String,                 // default: /var/run/docker.sock
-    pub image: String,                  // e.g. ghcr.io/rocker-org/r-ver:latest
-    #[serde(default = "default_shiny_port")]
-    pub shiny_port: u16,                // default: 3838
+type DockerConfig struct {
+    Socket    string // default: "/var/run/docker.sock"
+    Image     string // required, e.g. "ghcr.io/rocker-org/r-ver:4.4.3"
+    ShinyPort int    // default: 3838
+    RvVersion string // default: "latest"
 }
 
-#[derive(Debug, Deserialize)]
-pub struct StorageConfig {
-    pub bundle_server_path: PathBuf,    // where server reads/writes bundles
-    #[serde(default = "default_worker_path")]
-    pub bundle_worker_path: PathBuf,    // mount point inside workers; default: /app
-    #[serde(default = "default_retention")]
-    pub bundle_retention: u32,          // default: 50
+type StorageConfig struct {
+    BundleServerPath string // required, e.g. "/data/bundles"
+    BundleWorkerPath string // default: "/app"
+    BundleRetention  int    // default: 50
+    MaxBundleSize    int64  // default: 104857600 (100 MiB)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DatabaseConfig {
-    pub path: PathBuf,                  // e.g. /data/db/blockyard.db
+type DatabaseConfig struct {
+    Path string // required, e.g. "/data/db/blockyard.db"
 }
 
-pub struct ProxyConfig {
-    #[serde(default = "default_ws_cache_ttl")]
-    pub ws_cache_ttl: Duration,         // default: 60s
-    #[serde(default = "default_health_interval")]
-    pub health_interval: Duration,      // default: 15s
-    #[serde(default = "default_start_timeout")]
-    pub worker_start_timeout: Duration, // default: 60s
-    #[serde(default = "default_max_workers")]
-    pub max_workers: u32,               // default: 100
+type ProxyConfig struct {
+    WsCacheTTL         time.Duration // default: 60s
+    HealthInterval     time.Duration // default: 15s
+    WorkerStartTimeout time.Duration // default: 60s
+    MaxWorkers         int           // default: 100
+    LogRetention       time.Duration // default: 1h
 }
 ```
 
-**Env var overlay:** each config field can be overridden by an env var. The
+**Env var overlay:** every config field can be overridden by an env var. The
 convention is `BLOCKYARD_` + section + `_` + field, uppercased:
 
-```
-BLOCKYARD_SERVER_BIND, BLOCKYARD_SERVER_TOKEN, BLOCKYARD_DOCKER_IMAGE, etc.
-```
+| Config path | Env var |
+|---|---|
+| `Server.Bind` | `BLOCKYARD_SERVER_BIND` |
+| `Docker.RvVersion` | `BLOCKYARD_DOCKER_RV_VERSION` |
+| `Storage.BundleServerPath` | `BLOCKYARD_STORAGE_BUNDLE_SERVER_PATH` |
+| `Proxy.WsCacheTTL` | `BLOCKYARD_PROXY_WS_CACHE_TTL` |
 
-Implementation: deserialize TOML first, then walk the struct and override any
-field that has a matching env var set. Use a derive macro or a manual overlay
-function — not a config framework. The overlay is explicit and testable.
+Implementation: deserialize TOML first, then walk the struct via reflection
+and override any field that has a matching env var set. The env var name is
+derived from the `toml` struct tags — adding a config field automatically
+gives it an env var. A test verifies no two fields produce the same env var
+name.
 
-**Backend trait (full v0 surface):**
+**Loading:** `--config <path>` flag or `./blockyard.toml` by default. TOML
+first, env var overlay second, validation third. The server refuses to start
+on any validation error.
 
-```rust
-use std::net::SocketAddr;
+**Backend interface (full v0 surface):**
 
-// RPITIT (return-position impl Trait in traits) — ensures returned futures
-// are Send, which is required for use across tokio::spawn boundaries.
-pub trait Backend: Send + Sync + 'static {
-    type Handle: WorkerHandle;
+```go
+// Backend is the pluggable container runtime abstraction.
+// Docker/Podman for v0, Kubernetes for v2.
+type Backend interface {
+    // Spawn starts a long-lived worker. The caller provides the worker ID
+    // in spec.WorkerID; the backend uses it as its internal key.
+    Spawn(ctx context.Context, spec WorkerSpec) error
 
-    /// Spawn a long-lived worker (Shiny app container).
-    fn spawn(&self, spec: &WorkerSpec)
-        -> impl std::future::Future<Output = Result<Self::Handle, BackendError>> + Send;
+    // Stop stops and removes a worker by ID.
+    Stop(ctx context.Context, id string) error
 
-    /// Stop and remove a worker.
-    fn stop(&self, handle: &Self::Handle)
-        -> impl std::future::Future<Output = Result<(), BackendError>> + Send;
+    // HealthCheck probes whether a worker is responsive.
+    HealthCheck(ctx context.Context, id string) bool
 
-    /// TCP or HTTP health check against the worker.
-    fn health_check(&self, handle: &Self::Handle)
-        -> impl std::future::Future<Output = bool> + Send;
+    // Logs streams stdout/stderr from a worker.
+    Logs(ctx context.Context, id string) (LogStream, error)
 
-    /// Stream stdout/stderr logs from the worker.
-    fn logs(&self, handle: &Self::Handle)
-        -> impl std::future::Future<Output = Result<LogStream, BackendError>> + Send;
+    // Addr resolves the worker's network address (host:port).
+    Addr(ctx context.Context, id string) (string, error)
 
-    /// Resolve the worker's address (IP + Shiny port).
-    fn addr(&self, handle: &Self::Handle)
-        -> impl std::future::Future<Output = Result<SocketAddr, BackendError>> + Send;
+    // Build runs a build task to completion (dependency restore).
+    Build(ctx context.Context, spec BuildSpec) (BuildResult, error)
 
-    /// Run a build task to completion (dependency restore).
-    /// Streams logs, returns success/failure, cleans up the build container.
-    fn build(&self, spec: &BuildSpec)
-        -> impl std::future::Future<Output = Result<BuildResult, BackendError>> + Send;
+    // ListManaged lists all resources carrying blockyard labels.
+    ListManaged(ctx context.Context) ([]ManagedResource, error)
 
-    /// List all managed resources (containers + networks) for orphan cleanup.
-    fn list_managed(&self)
-        -> impl std::future::Future<Output = Result<Vec<ManagedResource>, BackendError>> + Send;
-
-    /// Remove an orphaned resource.
-    fn remove_resource(&self, resource: &ManagedResource)
-        -> impl std::future::Future<Output = Result<(), BackendError>> + Send;
-}
-
-pub trait WorkerHandle: Send + Sync + Clone + std::fmt::Debug {
-    fn id(&self) -> &str;
+    // RemoveResource removes an orphaned resource.
+    RemoveResource(ctx context.Context, r ManagedResource) error
 }
 ```
+
+Worker handles are plain strings. Each backend maintains its own internal
+state (container metadata, network IDs, etc.) keyed by the worker ID
+provided in the spec — callers only see the string.
 
 **WorkerSpec:**
 
-```rust
-pub struct WorkerSpec {
-    pub app_id: String,
-    pub worker_id: String,
-    pub image: String,
-    pub bundle_path: PathBuf,       // server-side path to unpacked bundle
-    pub library_path: PathBuf,      // server-side path to restored R library
-    pub worker_mount: PathBuf,      // in-container mount point (bundle_worker_path)
-    pub shiny_port: u16,
-    pub memory_limit: Option<String>,
-    pub cpu_limit: Option<f64>,
-    pub labels: HashMap<String, String>,
+```go
+type WorkerSpec struct {
+    AppID       string
+    WorkerID    string
+    Image       string
+    Cmd         []string          // container command; nil = use image entrypoint
+    BundlePath  string            // server-side path to unpacked bundle
+    LibraryPath string            // server-side path to restored R library
+    WorkerMount string            // in-container mount point (BundleWorkerPath)
+    ShinyPort   int
+    MemoryLimit string            // e.g. "512m", "" if unset
+    CPULimit    float64           // fractional vCPUs, 0 if unset
+    Labels      map[string]string
 }
 ```
 
 **BuildSpec:**
 
-```rust
-pub struct BuildSpec {
-    pub app_id: String,
-    pub bundle_id: String,
-    pub image: String,
-    pub bundle_path: PathBuf,       // server-side path to unpacked bundle
-    pub library_path: PathBuf,      // server-side output path for restored library
-    pub labels: HashMap<String, String>,
+```go
+type BuildSpec struct {
+    AppID       string
+    BundleID    string
+    Image       string
+    RvVersion   string            // rv release tag, e.g. "latest" or "v0.18.0"
+    BundlePath  string            // server-side path to unpacked bundle
+    LibraryPath string            // server-side output path for restored library
+    Labels      map[string]string
+}
+```
+
+**BuildResult:**
+
+```go
+type BuildResult struct {
+    Success  bool
+    ExitCode int
+}
+```
+
+**ManagedResource:**
+
+```go
+type ManagedResource struct {
+    ID   string
+    Kind ResourceKind // Container or Network
 }
 
-pub struct BuildResult {
-    pub success: bool,
-    pub exit_code: Option<i64>,
+type ResourceKind int
+const (
+    ResourceContainer ResourceKind = iota
+    ResourceNetwork
+)
+```
+
+**LogStream:**
+
+```go
+// LogStream delivers log lines as they arrive.
+// Read from Lines until the channel is closed (container exited).
+type LogStream struct {
+    Lines <-chan string
+    // Close cancels the underlying log follow.
+    Close func()
 }
 ```
 
 **Mock backend:**
 
-```rust
-/// In-process mock backend for unit and integration tests.
-/// Does not start real containers. Tracks spawned/stopped workers
-/// in memory and exposes them for test assertions.
-pub struct MockBackend {
-    workers: DashMap<String, MockWorker>,
-    /// Configurable: should health_check return true or false?
-    pub health_response: AtomicBool,
-    /// Configurable: should build succeed or fail?
-    pub build_success: AtomicBool,
-    /// Bound port for the mock HTTP server each "worker" runs.
-    next_port: AtomicU16,
+An in-memory implementation for unit and integration tests. Does not start
+real containers. Tracks spawned/stopped workers in memory and exposes them
+for test assertions.
+
+```go
+type MockBackend struct {
+    mu             sync.RWMutex
+    workers        map[string]*mockWorker
+    healthResponse atomic.Bool  // configurable: default true
+    buildSuccess   atomic.Bool  // configurable: default true
 }
 ```
 
-The mock backend spawns a tiny `tokio::net::TcpListener` per "worker" that
-responds with 200 on any request. This lets proxy tests route real HTTP
-traffic through the proxy to the mock worker without Docker.
+The mock backend starts a lightweight `net/http/httptest` server per "worker"
+that responds with 200. This lets proxy tests route real HTTP traffic through
+the proxy to the mock worker without Docker.
 
-**AppState (shared server state):**
+**Server (shared server state):**
 
-```rust
-pub struct AppState<B: Backend> {
-    pub config: Arc<Config>,
-    pub backend: Arc<B>,
-    pub db: SqlitePool,
-    /// Currently running workers, keyed by worker_id.
-    pub workers: Arc<DashMap<String, ActiveWorker<B::Handle>>>,
-    pub task_store: Arc<InMemoryTaskStore>,
-    pub sessions: Arc<SessionStore>,
-    pub registry: Arc<WorkerRegistry>,
-    pub ws_cache: Arc<WsCache>,
-    pub log_store: Arc<LogStore>,
+```go
+type Server struct {
+    Config   *config.Config
+    Backend  backend.Backend
+    DB       *db.DB
+    Workers  *WorkerMap            // worker ID → ActiveWorker
+    Sessions *session.Store        // session ID → worker ID
+    Registry *registry.Registry    // worker ID → "host:port"
+    Tasks    *task.Store           // async restore task tracking
+    LogStore *logstore.Store       // per-worker log buffers
 }
 ```
 
-### Phase 0-2: Docker Backend + Network Isolation
+`Server` is a plain struct passed by pointer. The `Backend` field holds
+an interface value — tests assign a `*mock.MockBackend`, production wires
+in a `*docker.DockerBackend`.
 
-Implement the `Backend` trait for Docker using `bollard`. This is the only
-production backend for v0.
+All concurrent maps (in `session.Store`, `registry.Registry`, etc.) use
+`sync.RWMutex` + `map`, not `sync.Map` (the typed-key ergonomics are
+better and the access patterns don't benefit from `sync.Map`'s
+optimization for disjoint key sets).
+
+The in-memory stores (`session.Store`, `registry.Registry`,
+`logstore.Store`, `task.Store`) live in their own packages. Each is
+self-contained with no dependency on `server`. This keeps the import
+graph acyclic — `server` imports the store packages, and consumer
+packages (`api`, `proxy`, `ops`) import `server`.
+
+### Phase 2: Docker Backend ([detailed plan](phase-0-2.md))
+
+Implement the `Backend` interface for Docker using the Docker Go client.
+This is the only production backend for v0.
 
 **Deliverables:**
 
-1. `DockerBackend` — full `Backend` trait implementation
+1. `DockerBackend` — full `Backend` interface implementation
 2. Per-container bridge network creation and cleanup
-3. Server joins each worker's network (multi-homing)
-4. Container hardening (cap-drop, read-only fs, no-new-privileges)
-5. Image pulling (on demand, inside build/spawn)
+3. Server multi-homing — join each worker's network
+4. Container hardening (cap-drop ALL, read-only rootfs, no-new-privileges)
+5. Image pulling (on demand, before build/spawn)
 6. Label management (`dev.blockyard/*`)
+7. Server container ID detection (for network joining)
+8. Metadata endpoint protection (iptables rules blocking `169.254.169.254`)
+9. Docker integration tests behind `docker_test` build tag
 
-**Docker backend — key operations:**
+**DockerBackend internal state:**
 
-`spawn()` flow:
+```go
+type DockerBackend struct {
+    client            *client.Client
+    serverID          string // own container ID, empty if native mode
+    config            *config.DockerConfig
+    metadataBlockMode metadataMode // cached after first spawn
+}
 ```
-1. Create a user-defined bridge network: blockyard-{session-id}
+
+The Docker backend maintains its own per-worker state (container ID, network
+ID, network name) in an internal map keyed by the worker ID string provided
+in the `WorkerSpec`. Callers never see these details — they just pass the
+worker ID string back to `Stop`, `HealthCheck`, `Addr`, etc.
+
+**Key operations:**
+
+`Spawn` flow:
+```
+1. Ensure image exists locally (pull if not)
+2. Create per-worker bridge network: blockyard-{worker-id}
    Labels: dev.blockyard/managed=true, app-id, worker-id
-2. Create container:
-   - Image: spec.image
+3. Block metadata endpoint for the network (iptables)
+4. Create container:
+   - Image from spec
    - Network: the bridge just created
-   - Mounts: bundle → worker_mount (ro), library → /blockyard-lib (ro)
+   - Mounts: bundle → worker_mount (ro),
+            library subdir → /blockyard-lib (ro, see library path resolution below)
+   - Env: SHINY_PORT={port}, R_LIBS=/blockyard-lib
    - Tmpfs: /tmp
-   - CapDrop: ALL
-   - SecurityOpt: no-new-privileges
-   - ReadonlyRootfs: true
-   - Labels: dev.blockyard/managed=true, app-id, worker-id
+   - CapDrop: ALL, SecurityOpt: no-new-privileges, ReadonlyRootfs: true
+   - Memory/CPU limits from spec
+   - Labels: dev.blockyard/managed=true, app-id, worker-id, role=worker
    - No published ports
-3. Connect the server's own container to the new bridge network
-   (bollard: network_connect with the server's container ID)
-4. Start the container
-5. Return DockerHandle { container_id, network_id }
+5. Join the server to the worker's network (if running in a container)
+6. Start the container
 ```
 
-`addr()` flow:
+`Build` flow:
 ```
-1. Inspect the container
-2. Extract the IP address on the worker's named network
-   (not just any IP — specifically the IP on blockyard-{session-id})
-3. Return SocketAddr(ip, spec.shiny_port)
+1. Ensure image exists locally
+2. Create container:
+   - Same image as workers
+   - Mounts: bundle → /app (ro), library output dir → /app/rv/library (rw)
+   - Cmd: download rv from GitHub releases, run `rv sync`
+   - Labels: dev.blockyard/managed=true, app-id, bundle-id, role=build
+   - Tmpfs: /tmp, /root/.cache/rv
+   - Rootfs NOT read-only (needs to install rv binary)
+3. Start container
+4. Wait for exit
+5. Remove container
+6. Return BuildResult{success, exit_code}
 ```
 
-`stop()` flow:
+**Build log streaming:** `Build` is synchronous — it blocks until the
+container exits and returns `BuildResult`. It does not stream build logs.
+Phase 3 needs real-time build output for `GET /api/v1/tasks/{task_id}/logs`.
+To support this, `BuildSpec` should gain a `LogWriter io.Writer` field.
+When non-nil, `Build` streams the container's stdout/stderr to it while
+waiting for exit. Phase 3 wires this to the task store.
+
+**Library path resolution:** `rv sync` writes packages to
+`rv/library/{R_VERSION}/{ARCH}/` inside the project directory. Since the
+image is fixed server-wide, R version and architecture are constant across
+all builds. After a successful build, the server discovers the package
+directory by listing the single subdirectory under `{bundle-id}_lib/`
+(e.g. `{bundle-id}_lib/4.4/x86_64/`). This resolved path is what gets
+mounted into worker containers at `/blockyard-lib`. Workers set
+`R_LIBS=/blockyard-lib` so R finds the packages directly — no rv needed
+at runtime.
+
+`Stop` flow:
 ```
 1. Stop the container (with timeout)
 2. Remove the container
-3. Disconnect the server from the worker's bridge network
-4. Remove the bridge network
+3. Remove iptables metadata rule (by comment tag)
+4. Disconnect server from the worker's network
+5. Remove the network
+Best-effort on each step — failures don't prevent subsequent steps.
 ```
 
-`build()` flow:
-```
-1. Create container with:
-   - Image: spec.image
-   - Cmd: ["rv", "restore"]
-   - Working dir: /app
-   - Mounts:
-     - bundle → /app (ro)
-     - library output dir → /app/lib (rw) — this is the only writable mount
-   - Same hardening as workers, except library mount is rw
-   - Labels: dev.blockyard/managed=true, app-id, bundle-id
-   - AutoRemove: true
-2. Start container
-3. Attach to container stdout/stderr, stream logs to TaskStore
-4. Wait for container to exit
-5. Return BuildResult { success, exit_code }
-```
+**Server container ID detection:** the server needs its own container ID to
+join worker networks. Detection order:
 
-**Server container ID detection:** the server needs to know its own container
-ID to join worker networks. Detection order:
-
-1. `BLOCKYARD_SERVER_ID` env var — explicit override for non-standard setups
+1. `BLOCKYARD_SERVER_ID` env var — explicit override
 2. Parse `/proc/self/cgroup` — Docker writes the container ID in cgroup paths
 3. Read hostname — Docker sets it to the short container ID by default
-4. If all fail: assume native binary mode (not running in a container);
-   skip network joining, workers are reachable on the bridge gateway IP
+4. If all fail: native mode. Skip network joining; workers are reachable on
+   the bridge gateway IP.
 
-### Phase 0-3: Content Management
+**Metadata endpoint protection:** cloud providers expose instance metadata at
+`169.254.169.254`. Without protection, R code in a container can steal host
+IAM credentials. On each `Spawn`, the Docker backend inserts an iptables rule
+in the `DOCKER-USER` chain scoped to the worker network's subnet, tagged with
+a `blockyard-{worker-id}` comment for cleanup. If iptables is unavailable
+(no `CAP_NET_ADMIN`), the backend falls back to a live reachability check —
+if `169.254.169.254` is already unreachable (operator-installed blanket rule),
+spawn proceeds. If it's reachable and iptables can't block it, spawn fails.
+The detection result is cached after the first spawn.
 
-Bundle upload, dependency restoration, content registry. These form the
-deployment pipeline — the path from "user has a tar.gz" to "app is ready to
-run."
+### Phase 3: Content Management ([detailed plan](phase-0-3.md))
+
+Bundle upload, dependency restoration, content registry. The deployment
+pipeline — from tar.gz to running app.
 
 **Deliverables:**
 
-1. Bundle upload endpoint (`POST /api/v1/apps/{id}/bundles`)
-2. Bundle storage layout — atomic writes, retention cleanup
-3. Dependency restoration via `backend.build()`
-4. `TaskStore` trait + in-memory implementation
-5. Task log streaming endpoint (`GET /api/v1/tasks/{task_id}/logs`)
-6. Content registry — SQLite CRUD for apps and bundles
+1. Bundle storage — atomic writes, tar.gz unpacking, retention cleanup
+2. Dependency restoration via `backend.Build()`
+3. Async restore pipeline — wires task store, backend build, bundle status
+4. Bundle status transitions (`pending → building → ready | failed`)
+5. Bundle size limit enforcement (`MaxBundleSize`)
 
 **Bundle upload flow:**
 
 ```
-POST /api/v1/apps/{id}/bundles
-Authorization: Bearer <token>
-Content-Type: application/octet-stream
-Body: <tar.gz bytes>
-
-→ 202 Accepted
-{
-  "bundle_id": "b1234...",
-  "task_id": "t5678..."
-}
-```
-
-Server-side:
-```
 1. Validate app exists
 2. Generate bundle_id (UUID) and task_id (UUID)
-3. Write tar.gz to temp file in bundle_server_path/{app-id}/
-4. Atomically rename to {bundle-id}.tar.gz
-5. Unpack tar.gz to {bundle-id}/ directory
-6. Insert bundle row: status = "pending"
-7. Create task in TaskStore
-8. Spawn async restore task (does not block the response)
-9. Return 202 with bundle_id and task_id
+3. Enforce MaxBundleSize on the request body (reject with 413 if exceeded)
+4. Write tar.gz to temp file in {BundleServerPath}/{app-id}/
+5. Atomically rename to {bundle-id}.tar.gz
+6. Unpack tar.gz to {bundle-id}/ directory
+7. Create library output directory {bundle-id}_lib/
+8. Insert bundle row: status = "pending"
+9. Create task in TaskStore
+10. Spawn async restore goroutine (does not block the response)
+11. Return 202 with bundle_id and task_id
 ```
 
-Async restore task:
+Async restore:
 ```
-1. Call backend.build(BuildSpec { ... })
-2. Stream build logs to TaskStore
-3. On success:
+1. Update bundle status → "building"
+2. Construct BuildSpec (image, rv_version, bundle path, library path)
+3. Call backend.Build() — runs rv sync in a container
+4. On success:
    - Update bundle status → "ready"
    - Set app.active_bundle → this bundle
-4. On failure:
+   - Enforce retention (delete oldest non-active beyond limit)
+5. On failure:
    - Update bundle status → "failed"
    - Leave app.active_bundle unchanged
+6. On panic/crash:
+   - Bundle stays "building"; startup_cleanup marks it "failed"
 ```
 
-**Task log streaming:**
+**Task store:**
 
-```
-GET /api/v1/tasks/{task_id}/logs
-Authorization: Bearer <token>
-
-→ 200 OK
-Content-Type: text/plain
-Transfer-Encoding: chunked
-
-Installing packages...
-  pak::pkg_install("dplyr")
-  ...
-```
-
-Uses `axum::body::Body::from_stream()` with a `tokio::sync::broadcast`
-channel. The build process writes log lines to the channel; the HTTP handler
-reads from it. If the caller connects after the build started, they get
-buffered output (stored in the `TaskStore`) followed by live streaming.
-
-**TaskStore:**
-
-v0 uses a concrete `InMemoryTaskStore` — same rationale as
-`SessionStore`/`WorkerRegistry` (see Phase 0-5). Trait extraction
-follows the same path when persistence or distribution is needed.
-
-```rust
-pub struct InMemoryTaskStore {
-    tasks: DashMap<TaskId, TaskEntry>,
+```go
+type Store struct {
+    mu    sync.RWMutex
+    tasks map[string]*entry
 }
 
-impl InMemoryTaskStore {
-    /// Create a new task. Returns a sender for writing log output.
-    pub fn create(&self, task_id: TaskId) -> TaskSender;
-
-    /// Get the current state of a task.
-    pub fn get(&self, task_id: &str) -> Option<TaskState>;
-
-    /// Subscribe to log output. Returns buffered lines and a broadcast
-    /// receiver for live lines. Callers should skip buffer.len() items
-    /// from the receiver to deduplicate.
-    pub async fn subscribe(&self, task_id: &str)
-        -> Option<(Vec<String>, broadcast::Receiver<String>)>;
-}
-
-/// Sender handle returned from create(). The background task uses this
-/// to write log lines and mark completion.
-pub struct TaskSender { ... }
-
-impl TaskSender {
-    pub async fn send(&self, line: String);
-    pub async fn complete(self, store: &InMemoryTaskStore, success: bool);
-}
-
-pub struct TaskState {
-    pub id: TaskId,
-    pub status: TaskStatus,     // running | completed | failed
-    pub created_at: String,
-}
-
-pub enum TaskStatus {
-    Running,
-    Completed,
-    Failed,
+type entry struct {
+    id        string
+    status    Status // Running, Completed, Failed
+    createdAt time.Time
+    buffer    []string          // all lines emitted so far
+    broadcast chan string       // live followers receive here
+    done      chan struct{}     // closed when task completes
 }
 ```
 
-Each `TaskEntry` holds a `Vec<String>` of buffered log lines and a
-`tokio::sync::broadcast::Sender<String>` for live subscribers.
-Completion is driven by the `TaskSender`, not by calling a method on
-the store directly.
+**Subscribe pattern (critical for correctness):** subscribe to the broadcast
+channel first, then snapshot the buffer. Deliver the snapshot, then relay
+live lines, skipping any that were already in the snapshot. This prevents
+dropped or duplicate lines across the snapshot/live boundary.
 
-### Phase 0-4: REST API + Auth
+Tasks are in-memory only — they do not survive a server restart.
+
+**Storage layout on the server:**
+
+```
+{BundleServerPath}/
+  {app-id}/
+    {bundle-id}.tar.gz    # uploaded archive
+    {bundle-id}/          # unpacked app code
+      app.R
+      rv.lock
+      ...
+    {bundle-id}_lib/      # R package library restored by rv
+```
+
+**BundlePaths** — a shared path constructor so all code agrees on the layout:
+
+```go
+type BundlePaths struct {
+    Archive string // {base}/{app-id}/{bundle-id}.tar.gz
+    Unpacked string // {base}/{app-id}/{bundle-id}/
+    Library  string // {base}/{app-id}/{bundle-id}_lib/
+}
+
+func NewBundlePaths(base, appID, bundleID string) BundlePaths { ... }
+```
+
+### Phase 4: REST API + Auth ([detailed plan](phase-0-4.md))
 
 The control plane HTTP API. All endpoints under `/api/v1/`. Protected by
 static bearer token.
 
 **Deliverables:**
 
-1. axum router with all v0 endpoints
-2. Bearer token middleware (from `[server] token` config)
+1. chi router with all v0 endpoints
+2. Bearer token middleware (from `Config.Server.Token`)
 3. `/healthz` endpoint (unauthenticated)
 4. App CRUD endpoints
-5. Bundle endpoints
-6. App lifecycle endpoints (start/stop)
-7. App log streaming endpoint
+5. App lifecycle endpoints (start/stop)
+6. App log streaming endpoint
+7. Bundle endpoints (upload, list)
+8. Task endpoints (status, log streaming)
+9. App name validation
 
 **Router assembly:**
 
-```rust
-pub fn api_router<B: Backend>(state: AppState<B>) -> Router {
-    let authed = Router::new()
-        .route("/apps", post(create_app).get(list_apps))
-        .route("/apps/{id}", get(get_app).patch(update_app).delete(delete_app))
-        .route("/apps/{id}/bundles", post(upload_bundle).get(list_bundles))
-        .route("/apps/{id}/start", post(start_app))
-        .route("/apps/{id}/stop", post(stop_app))
-        .route("/apps/{id}/logs", get(app_logs))
-        .route("/tasks/{task_id}/logs", get(task_logs))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            bearer_auth,
-        ));
+```go
+func NewRouter(srv *server.Server) http.Handler {
+    r := chi.NewRouter()
 
-    Router::new()
-        .nest("/api/v1", authed)
-        .route("/healthz", get(healthz))
-        .with_state(state)
+    r.Get("/healthz", healthz)
+
+    r.Route("/api/v1", func(r chi.Router) {
+        r.Use(bearerAuth(srv.Config.Server.Token))
+
+        r.Post("/apps", createApp(srv))
+        r.Get("/apps", listApps(srv))
+        r.Get("/apps/{id}", getApp(srv))
+        r.Patch("/apps/{id}", updateApp(srv))
+        r.Delete("/apps/{id}", deleteApp(srv))
+
+        r.Post("/apps/{id}/bundles", uploadBundle(srv))
+        r.Get("/apps/{id}/bundles", listBundles(srv))
+
+        r.Post("/apps/{id}/start", startApp(srv))
+        r.Post("/apps/{id}/stop", stopApp(srv))
+        r.Get("/apps/{id}/logs", appLogs(srv))
+
+        r.Get("/tasks/{taskID}", getTask(srv))
+        r.Get("/tasks/{taskID}/logs", taskLogs(srv))
+    })
+
+    return r
 }
 ```
 
 **Bearer auth middleware:**
 
-```rust
-async fn bearer_auth<B: Backend>(
-    State(state): State<AppState<B>>,
-    req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let token = req.headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-
-    match token {
-        Some(t) if t == state.config.server.token => Ok(next.run(req).await),
-        _ => Err(StatusCode::UNAUTHORIZED),
+```go
+func bearerAuth(token string) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            auth := r.Header.Get("Authorization")
+            if !strings.HasPrefix(auth, "Bearer ") || auth[7:] != token {
+                writeError(w, http.StatusUnauthorized, "unauthorized")
+                return
+            }
+            next.ServeHTTP(w, r)
+        })
     }
 }
 ```
@@ -618,355 +650,326 @@ async fn bearer_auth<B: Backend>(
 
 | Endpoint | Method | Behavior |
 |---|---|---|
-| `/api/v1/apps` | POST | Create app. Body: `{ "name": "..." }`. Returns app object with generated UUID. Name must be unique, URL-safe slug. |
-| `/api/v1/apps` | GET | List all apps. Returns array of app objects. |
-| `/api/v1/apps/{id}` | GET | Get app details including active bundle, status, config. |
-| `/api/v1/apps/{id}` | PATCH | Update app config (resource limits, worker scaling). Body: partial app object. |
-| `/api/v1/apps/{id}` | DELETE | Delete app. Stops all workers, removes bundles from disk, deletes DB rows. |
-| `/api/v1/apps/{id}/bundles` | POST | Upload bundle. Body: tar.gz bytes. Returns 202 with `bundle_id` + `task_id`. |
-| `/api/v1/apps/{id}/bundles` | GET | List bundles for app. Returns array of bundle objects. |
-| `/api/v1/apps/{id}/start` | POST | Start app. No-op if already running. Creates initial worker if not already spawned (workers are also started on-demand by the proxy). |
-| `/api/v1/apps/{id}/stop` | POST | Stop app. Stops all workers, cleans up networks. |
-| `/api/v1/apps/{id}/logs` | GET | Stream app logs. Query params: `worker_id` (optional). Returns buffered lines for ended workers, streams live output for running workers. |
-| `/api/v1/tasks/{task_id}/logs` | GET | Stream task logs. Chunked plain text. |
 | `/healthz` | GET | Returns 200 OK. No auth. No dependency checks. |
+| `/api/v1/apps` | POST | Create app. Body: `{ "name": "..." }`. Validates name. Returns 201. |
+| `/api/v1/apps` | GET | List all apps with derived status (running/stopped). |
+| `/api/v1/apps/{id}` | GET | Get app by UUID or name (see below). 404 if neither matches. |
+| `/api/v1/apps/{id}` | PATCH | Update app config (resource limits). Partial update. |
+| `/api/v1/apps/{id}` | DELETE | Delete app. Stops workers, removes files, deletes DB rows. 204. |
+| `/api/v1/apps/{id}/bundles` | POST | Upload bundle (tar.gz body). Returns 202 with bundle_id + task_id. |
+| `/api/v1/apps/{id}/bundles` | GET | List bundles for app, newest first. |
+| `/api/v1/apps/{id}/start` | POST | Start app. Spawns worker. No-op if already running. Requires active bundle. |
+| `/api/v1/apps/{id}/stop` | POST | Stop app. Stops all workers (best-effort). Returns count. |
+| `/api/v1/apps/{id}/logs` | GET | Stream worker logs. Optional `worker_id` query param. |
+| `/api/v1/tasks/{taskID}` | GET | Get task status (running/completed/failed). |
+| `/api/v1/tasks/{taskID}/logs` | GET | Stream restore output. Chunked text/plain. |
 
-**Error responses** follow a consistent JSON shape:
+**App status:** not stored in the database. Derived at request time from
+whether any workers exist for the app in `Server.Workers`. The API response
+includes a `status` field ("running" or "stopped") computed from the worker
+map.
+
+**App resolution:** all `{id}` parameters across app endpoints (GET, PATCH,
+DELETE, start, stop, logs, bundles) resolve by UUID first, then by name.
+This is safe from collisions because names must start with a lowercase letter
+while UUIDs start with a hex digit.
+
+**App name validation:** 1–63 characters, lowercase ASCII letters, digits,
+and hyphens. Must start with a letter. Must not end with a hyphen. Matches
+DNS label rules.
+
+**Error responses:** consistent JSON shape on all error paths:
 
 ```json
-{
-  "error": "app_not_found",
-  "message": "No app with ID a3f2c1..."
-}
+{ "error": "app_not_found", "message": "No app with ID a3f2c1..." }
 ```
 
-HTTP status codes: 400 (bad request / validation), 401 (missing/invalid token),
-404 (not found), 409 (conflict, e.g. duplicate app name), 503 (max workers
-reached).
+`error` is a stable machine-readable code (for programmatic clients);
+`message` is human-readable context. HTTP status codes: 400 (bad request /
+validation), 401 (unauthorized), 404 (not found), 409 (conflict — duplicate
+name, no active bundle), 413 (bundle too large), 503 (at capacity). 500 for
+unexpected errors.
 
-### Phase 0-5: Proxy Layer
+### Phase 5: Proxy Layer ([detailed plan](phase-0-5.md))
 
-The HTTP/WebSocket reverse proxy that serves Shiny apps to end users. This is
-the data plane — separate from the control plane API but served by the same
-HTTP listener.
+HTTP/WebSocket reverse proxy, session management, cold-start hold, WebSocket
+session caching. This is the data plane — user browsers hit these routes.
 
 **Deliverables:**
 
 1. HTTP reverse proxy — forward requests to worker containers
-2. WebSocket upgrade and forwarding
+2. WebSocket upgrade and bidirectional forwarding
 3. Session cookie management (set on first request, read on subsequent)
-4. `SessionStore` + `WorkerRegistry` (in-memory implementations)
-5. Cold-start hold — block until worker healthy or timeout
-6. WebSocket connection caching on client disconnect
-7. Trailing-slash redirect (`/app/{name}` → `/app/{name}/`)
-8. Prefix stripping (remove `/app/{name}` before forwarding to worker)
+4. Cold-start hold — block until worker healthy or timeout
+5. WebSocket connection caching on client disconnect
+6. Trailing-slash redirect (`/app/{name}` → `/app/{name}/`)
+7. Prefix stripping (remove `/app/{name}` before forwarding)
+8. Router composition — proxy routes alongside API routes
 
 **Request flow — first visit to `/app/my-app/`:**
 
 ```
 1. Extract app name from URL path
 2. No session cookie → generate session_id (UUID)
-3. Look up app in DB → get active_bundle, status
-4. Check global worker count < max_workers → 503 if at ceiling
-5. Check app worker count < max_workers_per_app → 503 if at ceiling
-6. Call backend.spawn(WorkerSpec { ... })
-7. Register worker in WorkerRegistry
-8. Pin session in SessionStore: session_id → worker_id
-9. Poll backend.health_check(handle) with exponential backoff (100ms initial, doubling, capped at 2s)
-   - If healthy within worker_start_timeout → continue
-   - If timeout → stop worker, return 503
-10. Get worker address via backend.addr(handle)
-11. Set session cookie (session_id, path=/app/{name}/)
-12. Forward request to worker (strip /app/{name} prefix)
-13. Return response to client
+3. Look up app in DB → get active_bundle
+4. No active bundle → 503
+5. Check worker limits (global max_workers, per-app max_workers_per_app)
+6. Generate worker_id (UUID), backend.Spawn(WorkerSpec{WorkerID: worker_id, ...})
+7. backend.Addr(worker_id) → "host:port"
+8. Register in WorkerRegistry and Workers map
+9. Start log capture goroutine
+10. Pin session: SessionStore.Set(session_id, worker_id)
+11. Cold-start hold: poll HealthCheck with exponential backoff
+    (100ms initial, capped at 2s) until healthy or worker_start_timeout
+12. If timeout → evict worker, return 503
+13. Set session cookie (blockyard_session, path=/app/{name}/, HttpOnly, SameSite=Lax)
+14. Forward request to worker (strip /app/{name} prefix)
 ```
 
 **Request flow — subsequent visit (session cookie present):**
 
 ```
 1. Extract session_id from cookie
-2. SessionStore.get(session_id) → worker_id
-3. WorkerRegistry.addr(worker_id) → SocketAddr
-4. Forward request to worker
-5. Return response
+2. SessionStore.Get(session_id) → worker_id
+3. WorkerRegistry.Get(worker_id) → "host:port"
+4. If worker gone → treat as new session (re-spawn)
+5. Forward request to worker
 ```
 
 **WebSocket upgrade flow:**
 
 ```
-1. Detect Upgrade: websocket + Connection: upgrade headers
-2. Route to worker as above (session cookie lookup)
-3. Establish backend WS connection to worker
-4. Relay frames bidirectionally: client ↔ server ↔ worker
-5. On client disconnect:
-   - Do NOT close the backend WS connection
-   - Start ws_cache_ttl timer (default 60s)
-   - If client reconnects with same session_id → reattach
-   - If timer expires → close backend WS, call backend.stop()
+1. Detect upgrade headers
+2. Route to worker via session (same as HTTP)
+3. Check WsCache for existing backend connection (reconnect case)
+4. If not cached: open new WS connection to backend
+5. Bidirectional frame shuttling: two goroutines, shared context
+6. On client disconnect:
+   - Cache backend WS with TTL timer (ws_cache_ttl)
+   - Do NOT stop the worker
+7. On reconnect within TTL: resume from cache, cancel timer
+8. On TTL expiry: close backend WS, evict worker if no remaining sessions
+9. On backend disconnect: close client connection
 ```
 
-**SessionStore + WorkerRegistry:**
+**SessionStore** (`internal/session/`):
 
-v0 uses concrete `DashMap`-backed structs with synchronous methods (no
-trait indirection — there is only one implementation today):
-
-```rust
-pub struct SessionStore {
-    sessions: DashMap<SessionId, WorkerId>,
+```go
+type Store struct {
+    mu       sync.RWMutex
+    sessions map[string]string // session ID → worker ID
 }
 
-impl SessionStore {
-    pub fn get(&self, session_id: &str) -> Option<WorkerId>;
-    pub fn insert(&self, session_id: SessionId, worker_id: WorkerId);
-    pub fn remove(&self, session_id: &str) -> Option<WorkerId>;
-    pub fn remove_by_worker(&self, worker_id: &str);      // reverse cleanup
-    pub fn count_for_worker(&self, worker_id: &str) -> usize;
-}
-
-pub struct WorkerRegistry {
-    addrs: DashMap<String, SocketAddr>,
-}
-
-impl WorkerRegistry {
-    pub fn get(&self, worker_id: &str) -> Option<SocketAddr>;
-    pub fn insert(&self, worker_id: String, addr: SocketAddr);
-    pub fn remove(&self, worker_id: &str) -> Option<SocketAddr>;
-}
+// Methods: Get, Set, Delete, DeleteByWorker, CountForWorker
 ```
 
-**Future: trait extraction.** When multi-node deployments arrive (v2+),
-these should become traits to allow swappable backends:
+`DeleteByWorker(workerID)` is a reverse lookup — scans all sessions and
+removes any mapping to the given worker. Used by `evict_worker`. With
+`max_workers = 100` this is a trivial scan.
 
-- `SessionStore` → Redis/DB-backed implementation for shared session
-  state across nodes. Methods become async (network I/O).
-- `WorkerRegistry` → shared registry so any node can route to any
-  worker. Same async treatment.
+**WorkerRegistry** (`internal/registry/`):
 
-The current method signatures are designed to map cleanly onto async
-trait methods — the switch is mechanical: extract a trait, make methods
-async, and parameterize `AppState` over the trait (same pattern as
-`Backend`). The `TaskStore` (see Phase 0-3) is in the same situation.
-
-**Proxy handler integration with axum:**
-
-The proxy uses explicit routes under `/app/{name}` rather than a
-fallback catch-all — unrecognized paths get axum's default 404 instead
-of hitting the proxy:
-
-```rust
-pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
-    let api = api_router(state.clone());
-
-    Router::new()
-        .merge(api)
-        .route("/app/{name}", get(trailing_slash_redirect))
-        .route("/app/{name}/", any(proxy_handler_root::<B>))
-        .route("/app/{name}/{*rest}", any(proxy_handler::<B>))
-        .with_state(state)
+```go
+type Registry struct {
+    mu    sync.RWMutex
+    addrs map[string]string // worker ID → "host:port"
 }
+
+// Methods: Get, Set, Delete
 ```
 
-Two proxy handlers are needed because axum's `{*rest}` wildcard does
-not match an empty path — `/app/{name}/` requires its own route.
+**Session cookie:** name `blockyard_session`, value is a UUID. Path scoped
+to `/app/{name}/`. `HttpOnly`, `SameSite=Lax`. No `Secure` flag in v0 (TLS
+is terminated externally).
 
-### Phase 0-6: Health Polling + Orphan Cleanup + Log Capture + Metadata Protection
+### Phase 6: Operations ([detailed plan](phase-0-6.md))
 
-Operational concerns that run alongside the main server.
+Health polling, orphan cleanup, log capture, log retention, graceful
+shutdown. Background goroutines and lifecycle hooks.
 
 **Deliverables:**
 
-1. Background health polling loop
-2. Orphan cleanup on startup
-3. App log capture and streaming
-4. Metadata endpoint protection — per-network iptables rules blocking
-   `169.254.169.254` to prevent worker containers from accessing cloud
-   instance credentials
+1. `evict_worker` — shared helper that fully decommissions a worker
+2. `startup_cleanup` — remove orphaned containers/networks, fail stale bundles
+3. `graceful_shutdown` — stop all workers and builds on SIGTERM
+4. Health polling goroutine
+5. Per-worker log capture goroutine
+6. Log retention cleanup goroutine
+7. `main.go` wiring — startup, background tasks, signal handling, shutdown
 
-**Health polling:**
+**LogStore** (`internal/logstore/`):
 
-A `tokio::spawn`ed loop that runs every `health_interval` (default 15s):
+```go
+type Store struct {
+    mu      sync.RWMutex
+    entries map[string]*logEntry // keyed by worker ID
+}
 
-```rust
-async fn health_poll_loop<B: Backend>(state: AppState<B>) {
-    let mut interval = tokio::time::interval(state.config.proxy.health_interval);
-    loop {
-        interval.tick().await;
-        let snapshot: Vec<_> = state.workers.iter()
-            .map(|e| (e.key().clone(), e.value().handle.clone()))
-            .collect();
-
-        for (worker_id, handle) in snapshot {
-            if !state.backend.health_check(&handle).await {
-                tracing::warn!(worker_id, "worker unhealthy — evicting");
-                evict_worker(&state, &worker_id).await;
-            }
-        }
-    }
+type logEntry struct {
+    appID   string
+    buffer  []string              // capped at maxLogLines (50,000)
+    ch      chan string           // broadcast channel for live followers
+    endedAt time.Time             // zero value if still active
 }
 ```
 
-**Orphan cleanup:**
+Methods: `Create(workerID, appID) LogSender`, `Subscribe(workerID)`,
+`WorkerIDsByApp(appID)`, `MarkEnded(workerID)`, `CleanupExpired(retention)`,
+`HasActive(workerID)`.
 
-Runs once at server startup, before accepting connections:
+Subscribe uses the same subscribe-then-snapshot pattern as the task store
+to prevent dropped or duplicated lines.
 
-```rust
-async fn cleanup_orphans<B: Backend>(backend: &B) -> Result<()> {
-    let managed = backend.list_managed().await?;
-    for resource in managed {
-        tracing::info!(id = resource.id, kind = ?resource.kind, "removing orphan");
-        backend.remove_resource(&resource).await?;
-    }
-    Ok(())
+Buffer capped at 50,000 lines per worker (~10 MB at 200 bytes/line).
+
+**evict_worker:** the single codepath for decommissioning a worker.
+Idempotent. Best-effort on each step.
+
+```go
+func evictWorker(srv *server.Server, workerID string) {
+    // 1. Remove from Workers map
+    // 2. backend.Stop(ctx, workerID)
+    // 3. Remove from WorkerRegistry
+    // 4. Remove all sessions for this worker (SessionStore.DeleteByWorker)
+    // 5. Mark log stream ended (LogStore.MarkEnded)
 }
 ```
 
-`list_managed()` in the Docker backend queries for containers and networks
-with `dev.blockyard/managed=true` label. All are removed unconditionally —
-the server starts with a clean slate.
+Called by: health poller, stop endpoint, delete endpoint, WS cache TTL
+expiry, graceful shutdown.
 
-**App log capture:**
+**Health polling:** a goroutine that runs every `HealthInterval` (default
+15s). Each cycle: snapshot all worker IDs, health-check all concurrently
+(one goroutine per worker), evict any that fail.
 
-Container logs are captured via `backend.logs(handle)`, which returns a
-`LogStream` (a stream of log lines with timestamps). The proxy stores recent
-logs in a bounded ring buffer per worker. The REST API endpoint
-`GET /api/v1/apps/{id}/logs` reads from this buffer (historical) and
-optionally follows live output via `backend.logs()`.
+**Orphan cleanup:** runs once at startup, before the server accepts
+connections:
 
-Log persistence beyond the buffer is deferred — in v0, logs are available
-while the worker is running and for a short window after it stops. This is
-sufficient for development; production log aggregation should use Docker's
-native log drivers (json-file, journald, etc.).
+1. Clean up orphaned iptables rules (scan `DOCKER-USER` for
+   `blockyard-*` comments)
+2. `backend.ListManaged()` → remove all (the server just started, every
+   managed resource is an orphan from a previous crash)
+3. `db.FailStaleBuilds()` → mark `building` bundles as `failed`
+
+If the backend is unreachable at startup, the server refuses to start.
+
+**Graceful shutdown:** on SIGTERM/SIGINT:
+
+1. Stop accepting new connections (close the HTTP listener via
+   `http.Server.Shutdown` with `ShutdownTimeout` context)
+2. Cancel background goroutines (via a shared `context.Context`)
+3. Evict all tracked workers concurrently (each with a 15s timeout)
+4. Remove any remaining managed resources (build containers, networks)
+5. Fail any in-progress builds (`db.FailStaleBuilds`)
+6. Close the database
+
+A second signal during shutdown forces immediate exit.
+
+**Background goroutine cancellation:** all background goroutines (health
+poller, log retention cleaner) take a `context.Context` derived from a
+parent that is cancelled on shutdown signal. They `select` on `ctx.Done()`
+to exit cooperatively.
 
 ## Graceful Shutdown
 
-The `main.rs` wiring handles shutdown:
+Detailed in phase 6 above and in the roadmap. Summary:
 
-```rust
-async fn main() {
-    // ... config, state setup ...
-
-    let listener = TcpListener::bind(&config.server.bind).await?;
-
-    // Graceful shutdown signal
-    let shutdown = async {
-        tokio::signal::ctrl_c().await.ok();
-        // or SIGTERM via tokio::signal::unix::signal(SignalKind::terminate())
-    };
-
-    // Start server with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
-
-    // After listener closes: drain, stop workers, cleanup
-    shutdown_workers(&state).await;
-    // Flush logs, close DB
-}
 ```
-
-Shutdown sequence (from roadmap):
-1. Stop accepting new connections (axum handles this)
-2. Drain in-flight requests (up to `shutdown_timeout`)
-3. Stop all managed containers and networks
-4. Stop in-progress build containers, mark bundles as `failed`
-5. Flush logs, close DB
+SIGTERM received
+  → http.Server.Shutdown(ctx with ShutdownTimeout)
+    → stops accepting, drains in-flight (up to 30s)
+  → cancel background goroutine context
+  → wait for health poller + log cleaner to exit
+  → evict all tracked workers concurrently (15s each)
+  → backend.ListManaged → remove remaining resources
+  → db.FailStaleBuilds
+  → db.Close
+```
 
 ## Build Order and Dependency Graph
 
 ```
-Phase 0-1: Foundation
+Phase 1: Foundation
   ├── Config parsing
-  ├── Backend trait + mock
+  ├── Backend interface + mock
   ├── SQLite schema
-  └── AppState
+  ├── In-memory stores (session, registry, logstore, task)
+  └── Server state
 
-Phase 0-2: Docker Backend
-  └── depends on: Backend trait, Config
+Phase 2: Docker Backend
+  └── depends on: Backend interface, Config
 
-Phase 0-3: Content Management
+Phase 3: Content Management
   ├── Bundle upload + storage
-  ├── TaskStore + restore pipeline
-  └── depends on: Backend (build), SQLite (content registry)
+  ├── Async restore pipeline (uses task store from phase 1)
+  └── depends on: Backend (Build), SQLite (content registry)
 
-Phase 0-4: REST API + Auth
-  └── depends on: Content Management, AppState
+Phase 4: REST API + Auth
+  └── depends on: Content Management, Server state
 
-Phase 0-5: Proxy Layer
+Phase 5: Proxy Layer
   ├── Session routing
   ├── Cold-start + WS caching
-  └── depends on: Backend (spawn/stop/addr), Session/Worker stores
+  └── depends on: Backend (Spawn/Stop/Addr), Session/Worker stores
 
-Phase 0-6: Operations
+Phase 6: Operations
   ├── Health polling
   ├── Orphan cleanup
   ├── Log capture
   └── depends on: Backend, Worker tracking
 ```
 
-Phases 0-3 and 0-5 are independent of each other — they can be developed in
-parallel. Both depend on phase 0-2 only for integration testing; their unit
-tests use the mock backend from phase 0-1.
+Phases 3 and 5 are independent of each other — they can be developed in
+parallel. Both depend on phase 2 only for Docker integration testing; their
+unit tests use the mock backend from phase 1.
 
 ## Test Strategy
 
 Three levels:
 
-### Unit tests (in-crate `#[cfg(test)]` modules)
+### Unit tests (in-package `_test.go` files)
 
-- **Mock backend tests:** verify that `spawn`, `stop`, `build` update internal
-  state correctly. No I/O.
-- **Config tests:** TOML parsing, env var overlay, validation errors.
-- **Bundle storage tests:** write/unpack/retention logic using `tempdir`.
+- **Config tests:** TOML parsing, env var overlay, validation errors, env
+  var name uniqueness.
+- **Mock backend tests:** spawn/stop/health_check update internal state.
+- **Database tests:** full CRUD for apps and bundles, name uniqueness, fail
+  stale bundles, retention enforcement. Use in-memory SQLite (`:memory:`).
 - **Session/worker store tests:** concurrent insert/get/remove.
-- **Task store tests:** create, write logs, stream, complete.
-- **Auth middleware tests:** valid token, missing token, wrong token.
+- **Task store tests:** create, write logs, subscribe, complete. No dropped
+  or duplicate lines.
+- **Log store tests:** create, subscribe, mark ended, cleanup expired.
+- **App name validation tests:** valid names, invalid names.
+- **Bundle storage tests:** write/unpack/retention using temp dirs.
 
-### Integration tests (`tests/` directory)
+### Integration tests
 
-These start the full server with the mock backend and exercise HTTP endpoints:
+Start the full server (with mock backend) via `httptest.NewServer` and
+exercise HTTP endpoints with a real HTTP client:
 
-- **API tests:** CRUD apps, upload bundles, start/stop, list — all via
-  `reqwest` against the running server.
-- **Proxy tests:** the mock backend spawns tiny HTTP servers. Tests verify
-  that requests to `/app/{name}/` are forwarded correctly, session cookies
-  are set, WS upgrades work, cold-start holding works.
-- **Bundle flow tests:** upload → restore (mock build) → bundle ready →
-  app startable.
+- **API tests:** CRUD apps, upload bundles, start/stop, list — all via HTTP
+  against the running server.
+- **Proxy tests:** the mock backend's httptest servers act as workers. Tests
+  verify correct routing, session cookies, WS upgrades, cold-start holding,
+  prefix stripping.
+- **Bundle flow tests:** upload → restore (mock build) → bundle ready → app
+  startable.
 
-Test helper:
-
-```rust
-async fn spawn_test_server() -> (SocketAddr, AppState<MockBackend>) {
-    let config = test_config();
-    let backend = MockBackend::new();
-    let db = SqlitePool::connect(":memory:").await.unwrap();
-    run_migrations(&db).await.unwrap();
-    let state = AppState::new(config, backend, db);
-    let app = full_router(state.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(axum::serve(listener, app).into_future());
-    (addr, state)
-}
-```
-
-### Docker integration tests (gated behind `#[cfg(feature = "docker-tests")]`)
+### Docker integration tests (gated behind `docker_test` build tag)
 
 Tests that exercise the real Docker backend. Require a running Docker daemon.
-Run in CI with Docker-in-Docker or on a dev machine with Docker installed.
-Gated behind a feature flag so `cargo test` works without Docker.
+Run with `go test -tags docker_test ./...`. Skipped by default in
+`go test ./...`.
 
-- **Spawn and stop a container** — verify it appears in `docker ps`, responds
-  to health checks, and is removed after stop.
-- **Network isolation** — spawn two containers, verify they cannot reach each
-  other.
-- **Build (rv restore)** — run a real restore with a minimal `rv.lock`.
-- **Orphan cleanup** — create labeled containers/networks externally, run
-  cleanup, verify they are removed.
+- **Spawn and stop a container** — verify it appears in `docker ps`,
+  responds to health checks, and is removed after stop.
+- **Network isolation** — spawn two containers, verify they cannot reach
+  each other.
+- **Build (rv restore)** — run a restore with a minimal `rv.lock`.
+- **Orphan cleanup** — create labeled resources externally, run cleanup,
+  verify removed.
+- **Metadata endpoint** — verify containers cannot reach `169.254.169.254`.
 
 ## CI
-
-A single GitHub Actions workflow:
 
 ```yaml
 name: CI
@@ -977,24 +980,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
         with:
-          components: clippy, rustfmt
-      - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
-      - run: cargo test
+          go-version: '1.24'
+      - run: go vet ./...
+      - run: go test ./...
 
   docker-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --features docker-tests
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: go test -tags docker_test ./...
 ```
 
 ## Design Decisions
 
-Resolved decisions that came up during planning:
+Resolved design decisions for v0:
 
 1. **Session cookie format:** plain UUID in a `Set-Cookie` header. No HMAC
    signing in v0 — there is no user auth on the app plane, so the cookie
@@ -1005,17 +1009,53 @@ Resolved decisions that came up during planning:
    `POST /apps/{id}/stop` is called, all workers are stopped without
    draining. Graceful drain is added in v1 alongside session sharing.
 
-3. **Proxy concurrency model:** a single shared `hyper::Client` with
-   connection pooling. One session per worker in v0 means there is no
-   multiplexing benefit from per-worker clients. Revisit if v1 load
-   balancing shows contention.
+3. **No premature interface extraction.** SessionStore, WorkerRegistry,
+   TaskStore, and LogStore start as concrete structs in their own packages.
+   When v2 needs PostgreSQL or Redis backing for HA, interfaces are
+   extracted at the consumer — any struct with matching methods already
+   satisfies a Go interface.
 
-4. **Bundle upload size limit:** 100MB default, configurable via
-   `[storage] max_bundle_size`. Large bundles with vendored packages
-   could exceed this — operators can raise it.
+4. **Bundle upload size limit:** 100 MiB default (`MaxBundleSize`),
+   configurable. Enforced by reading at most `MaxBundleSize + 1` bytes from
+   the request body — if the extra byte is read, reject with 413.
 
-5. **Container startup command:** the Docker image's entrypoint runs Shiny
-   on a port specified by the `SHINY_PORT` env var. The server sets
-   `SHINY_PORT` from `[docker] shiny_port` in the container spec. Image
-   entrypoint: `R -e "shiny::runApp('/app', port = as.integer(Sys.getenv('SHINY_PORT')))"`.
-   The mount point (`/app`) matches `bundle_worker_path`.
+5. **Container startup command:** `WorkerSpec.Cmd` controls the container
+   command. In v0, the server always sets this to a hardcoded default:
+   `["R", "-e", "shiny::runApp('/app', port = as.integer(Sys.getenv('SHINY_PORT')))"]`.
+   This works with stock rocker images that don't have a Shiny-specific
+   entrypoint. `SHINY_PORT` is set from `DockerConfig.ShinyPort`. The mount
+   point (`/app`) matches `BundleWorkerPath`. Making the command
+   configurable is a potential future enhancement, not a v0 concern.
+
+6. **rv installation in build containers:** the base image (e.g.
+   `rocker/r-ver`) ships R but not rv. The build container downloads rv from
+   GitHub releases as the first step of its command:
+   `curl -sSL {url} -o /usr/local/bin/rv && chmod +x /usr/local/bin/rv && rv sync`.
+   The `RvVersion` config field controls which release tag is used. Using
+   the same base image for builds and workers guarantees matching R version,
+   architecture, and system libraries.
+
+7. **Library mount path:** `rv sync` writes packages under
+   `rv/library/{R_VERSION}/{ARCH}/` inside the build container. After a
+   successful build, the server discovers the exact subdirectory (e.g.
+   `{bundle-id}_lib/4.4/x86_64/`) and mounts it into workers at
+   `/blockyard-lib` (a fixed path outside the app directory) with
+   `R_LIBS=/blockyard-lib`. This avoids conflicts with the read-only app
+   mount at `/app` and lets R find packages directly without rv at runtime.
+
+8. **App status is not persisted.** The `apps` table has no `status` column.
+   Runtime status (running/stopped) is inferred from whether any workers
+   exist for the app. This avoids staleness on crash/restart and eliminates
+   synchronization between in-memory state and the DB.
+
+9. **No `ON DELETE CASCADE` on `bundles.app_id`.** Deleting an app requires
+   a multi-step teardown (stop workers, remove files, delete bundle rows,
+   delete app row). The FK constraint prevents the DB from silently deleting
+   bundles. The API handler orchestrates the full sequence; the FK enforces
+   ordering.
+
+10. **Circular FK between `apps` and `bundles`.** `apps.active_bundle`
+    references `bundles.id`, and `bundles.app_id` references `apps.id`. This
+    works because apps are created with `active_bundle = NULL` and the field
+    is only set later when a bundle reaches `ready` status. No deferred
+    constraints needed.
