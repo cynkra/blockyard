@@ -436,7 +436,7 @@ func TestBuildWithProductionImage(t *testing.T) {
 		AppID:       "test-app",
 		BundleID:    uuid.New().String()[:8],
 		Image:       "ghcr.io/rocker-org/r-ver:latest",
-		RvVersion:   "latest",
+		RvVersion:   "v0.19.0",
 		BundlePath:  bundleDir,
 		LibraryPath: libDir,
 		Labels:      map[string]string{},
