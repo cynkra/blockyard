@@ -27,10 +27,11 @@ type ServerConfig struct {
 }
 
 type DockerConfig struct {
-	Socket    string `toml:"socket"`
-	Image     string `toml:"image"`
-	ShinyPort int    `toml:"shiny_port"`
-	RvVersion string `toml:"rv_version"`
+	Socket            string `toml:"socket"`
+	Image             string `toml:"image"`
+	ShinyPort         int    `toml:"shiny_port"`
+	RvVersion         string `toml:"rv_version"`
+	SkipMetadataBlock bool   `toml:"skip_metadata_block"`
 }
 
 type StorageConfig struct {
@@ -166,6 +167,10 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 			switch fv.Kind() {
 			case reflect.String:
 				fv.SetString(val)
+			case reflect.Bool:
+				if b, err := strconv.ParseBool(val); err == nil {
+					fv.SetBool(b)
+				}
 			case reflect.Int, reflect.Int64:
 				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
 					fv.SetInt(n)

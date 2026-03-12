@@ -50,6 +50,10 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
+	// SQLite does not benefit from multiple concurrent connections and
+	// in-memory databases are per-connection, so pin to a single conn.
+	sqlDB.SetMaxOpenConns(1)
+
 	if err := sqlDB.Ping(); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
