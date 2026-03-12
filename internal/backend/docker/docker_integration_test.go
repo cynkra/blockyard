@@ -295,3 +295,140 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 		t.Fatal("metadata endpoint should be blocked but request succeeded")
 	}
 }
+
+func testSpawn(t *testing.T, b *DockerBackend, cmd []string) (string, backend.WorkerSpec) {
+	t.Helper()
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         cmd,
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Labels:      map[string]string{},
+	}
+	if err := b.Spawn(context.Background(), spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { b.Stop(context.Background(), workerID) })
+	return workerID, spec
+}
+
+func TestLogs(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID, _ := testSpawn(t, b, []string{"sh", "-c", "echo hello; echo world; sleep 300"})
+	time.Sleep(1 * time.Second)
+
+	stream, err := b.Logs(ctx, workerID)
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	defer stream.Close()
+
+	var lines []string
+	timeout := time.After(5 * time.Second)
+	for len(lines) < 2 {
+		select {
+		case line, ok := <-stream.Lines:
+			if !ok {
+				t.Fatalf("log stream closed early, got %d lines: %v", len(lines), lines)
+			}
+			lines = append(lines, line)
+		case <-timeout:
+			t.Fatalf("timed out waiting for log lines, got %d: %v", len(lines), lines)
+		}
+	}
+
+	if lines[0] != "hello" || lines[1] != "world" {
+		t.Errorf("unexpected log lines: %v", lines)
+	}
+}
+
+func TestLogsUnknownWorker(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = b.Logs(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for unknown worker")
+	}
+}
+
+func TestStopUnknownWorker(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := b.Stop(ctx, "nonexistent"); err == nil {
+		t.Fatal("expected error for unknown worker")
+	}
+}
+
+func TestHealthCheckUnknownWorker(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if b.HealthCheck(ctx, "nonexistent") {
+		t.Fatal("expected false for unknown worker")
+	}
+}
+
+func TestBuildSuccess(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tmp := t.TempDir()
+	spec := backend.BuildSpec{
+		AppID:     "test-app",
+		BundleID:  uuid.New().String()[:8],
+		Image:     "alpine:latest",
+		RvVersion: "latest",
+		BundlePath:  tmp,
+		LibraryPath: tmp,
+		Labels:    map[string]string{},
+	}
+
+	// Build will fail because rv download won't work, but it exercises
+	// the full create->start->wait->remove flow. We just check it
+	// returns a result with a non-zero exit code.
+	result, err := b.Build(ctx, spec)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// curl/rv won't be available in alpine, so expect failure
+	if result.Success {
+		t.Error("expected build to fail in bare alpine (no curl)")
+	}
+}
+
+func TestAddrUnknownWorker(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = b.Addr(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for unknown worker")
+	}
+}
