@@ -12,11 +12,13 @@ import (
 )
 
 type MockBackend struct {
-	mu           sync.RWMutex
-	workers      map[string]*mockWorker
-	HealthOK     atomic.Bool         // configurable: default true
-	BuildSuccess atomic.Bool         // configurable: default true
-	wsHandler    http.HandlerFunc    // optional WS handler for mock workers
+	mu               sync.RWMutex
+	workers          map[string]*mockWorker
+	managedResources []backend.ManagedResource
+	logLines         []string
+	HealthOK         atomic.Bool      // configurable: default true
+	BuildSuccess     atomic.Bool      // configurable: default true
+	wsHandler        http.HandlerFunc // optional WS handler for mock workers
 }
 
 type mockWorker struct {
@@ -54,6 +56,23 @@ func (b *MockBackend) SetWSHandler(h http.HandlerFunc) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.wsHandler = h
+}
+
+// SetManagedResources configures what ListManaged returns.
+// RemoveResource removes individual entries from this list.
+func (b *MockBackend) SetManagedResources(resources []backend.ManagedResource) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.managedResources = make([]backend.ManagedResource, len(resources))
+	copy(b.managedResources, resources)
+}
+
+// SetLogLines configures what Logs() emits for any worker.
+func (b *MockBackend) SetLogLines(lines []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.logLines = make([]string, len(lines))
+	copy(b.logLines, lines)
 }
 
 func (b *MockBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
@@ -120,7 +139,15 @@ func (b *MockBackend) HealthCheck(_ context.Context, id string) bool {
 }
 
 func (b *MockBackend) Logs(_ context.Context, _ string) (backend.LogStream, error) {
-	ch := make(chan string)
+	b.mu.RLock()
+	lines := make([]string, len(b.logLines))
+	copy(lines, b.logLines)
+	b.mu.RUnlock()
+
+	ch := make(chan string, len(lines))
+	for _, line := range lines {
+		ch <- line
+	}
 	close(ch)
 	return backend.LogStream{Lines: ch, Close: func() {}}, nil
 }
@@ -143,9 +170,21 @@ func (b *MockBackend) Build(_ context.Context, _ backend.BuildSpec) (backend.Bui
 }
 
 func (b *MockBackend) ListManaged(_ context.Context) ([]backend.ManagedResource, error) {
-	return nil, nil
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	result := make([]backend.ManagedResource, len(b.managedResources))
+	copy(result, b.managedResources)
+	return result, nil
 }
 
-func (b *MockBackend) RemoveResource(_ context.Context, _ backend.ManagedResource) error {
+func (b *MockBackend) RemoveResource(_ context.Context, r backend.ManagedResource) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, res := range b.managedResources {
+		if res.ID == r.ID && res.Kind == r.Kind {
+			b.managedResources = append(b.managedResources[:i], b.managedResources[i+1:]...)
+			return nil
+		}
+	}
 	return nil
 }

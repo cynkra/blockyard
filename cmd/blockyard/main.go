@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/cynkra/blockyard/internal/api"
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -48,12 +50,35 @@ func main() {
 
 	// Build shared state and router
 	srv := server.NewServer(cfg, be, database)
+
+	// Startup cleanup — must complete before accepting traffic.
+	if err := ops.StartupCleanup(context.Background(), srv); err != nil {
+		slog.Error("startup cleanup failed", "error", err)
+		os.Exit(1)
+	}
+
 	handler := api.NewRouter(srv)
 
 	httpServer := &http.Server{
 		Addr:    cfg.Server.Bind,
 		Handler: handler,
 	}
+
+	// Background goroutine context
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	var bgWg sync.WaitGroup
+
+	bgWg.Add(1)
+	go func() {
+		defer bgWg.Done()
+		ops.SpawnHealthPoller(bgCtx, srv)
+	}()
+
+	bgWg.Add(1)
+	go func() {
+		defer bgWg.Done()
+		ops.SpawnLogRetentionCleaner(bgCtx, srv)
+	}()
 
 	// Graceful shutdown on SIGTERM / SIGINT
 	ctx, stop := signal.NotifyContext(context.Background(),
@@ -71,6 +96,7 @@ func main() {
 	<-ctx.Done()
 	slog.Info("shutdown signal received")
 
+	// 1. Drain HTTP server
 	shutdownCtx, cancel := context.WithTimeout(context.Background(),
 		cfg.Server.ShutdownTimeout.Duration)
 	defer cancel()
@@ -78,4 +104,13 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
+
+	// 2. Cancel background goroutines and wait
+	bgCancel()
+	bgWg.Wait()
+
+	// 3. Stop all workers and clean up
+	ops.GracefulShutdown(context.Background(), srv)
+
+	slog.Info("shutdown complete")
 }

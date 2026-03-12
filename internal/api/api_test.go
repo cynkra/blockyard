@@ -506,15 +506,51 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	}
 }
 
-func TestAppLogsReturns501(t *testing.T) {
+func TestAppLogsMissingWorkerID(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs", nil)
 	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Errorf("expected 501, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 without worker_id, got %d", resp.StatusCode)
+	}
+}
+
+func TestAppLogsNotFound(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=nonexistent", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for nonexistent worker, got %d", resp.StatusCode)
+	}
+}
+
+func TestAppLogsReturnsBufferedLines(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Create log entry with some lines and mark ended
+	sender := srv.LogStore.Create("w1", id)
+	sender.Write("hello")
+	sender.Write("world")
+	srv.LogStore.MarkEnded("w1")
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=w1", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "hello\nworld\n" {
+		t.Errorf("unexpected body: %q", string(body))
 	}
 }
 

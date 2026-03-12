@@ -229,3 +229,59 @@ func TestNetworkIsolation(t *testing.T) {
 		t.Fatal("worker 1 should NOT be able to reach worker 2 (network isolation broken)")
 	}
 }
+
+func TestMetadataEndpointBlocked(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         []string{"sleep", "300"},
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer b.Stop(ctx, workerID)
+
+	time.Sleep(500 * time.Millisecond)
+
+	b.mu.RLock()
+	ws := b.workers[workerID]
+	b.mu.RUnlock()
+
+	execResp, err := b.client.ContainerExecCreate(ctx, ws.containerID,
+		container.ExecOptions{
+			Cmd: []string{"wget", "--spider", "--timeout=2",
+				"http://169.254.169.254/"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecCreate: %v", err)
+	}
+
+	if err := b.client.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+		t.Fatalf("ExecStart: %v", err)
+	}
+
+	time.Sleep(3 * time.Second)
+	inspect, err := b.client.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		t.Fatalf("ExecInspect: %v", err)
+	}
+
+	if inspect.ExitCode == 0 {
+		t.Fatal("metadata endpoint should be blocked but request succeeded")
+	}
+}

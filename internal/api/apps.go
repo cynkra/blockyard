@@ -15,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -30,12 +31,17 @@ type AppResponse struct {
 	CreatedAt            string   `json:"created_at"`
 	UpdatedAt            string   `json:"updated_at"`
 	Status               string   `json:"status"`
+	Workers              []string `json:"workers"`
 }
 
 func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
 	status := "stopped"
-	if workers.CountForApp(app.ID) > 0 {
+	workerIDs := workers.ForApp(app.ID)
+	if len(workerIDs) > 0 {
 		status = "running"
+	}
+	if workerIDs == nil {
+		workerIDs = []string{}
 	}
 	return AppResponse{
 		ID:                   app.ID,
@@ -48,6 +54,7 @@ func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
 		CreatedAt:            app.CreatedAt,
 		UpdatedAt:            app.UpdatedAt,
 		Status:               status,
+		Workers:              workerIDs,
 	}
 }
 
@@ -351,6 +358,8 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			srv.Registry.Set(workerID, addr)
 		}
 
+		ops.SpawnLogCapture(r.Context(), srv, workerID, app.ID)
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(startResponse{
 			WorkerID: workerID,
@@ -383,27 +392,79 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 	}
 }
 
-// EvictWorker fully decommissions a single worker: removes from workers map,
-// registry, sessions, stops the backend container, and marks logs ended.
-// Idempotent — safe to call if the worker is already gone.
-func EvictWorker(srv *server.Server, workerID string) {
-	srv.Workers.Delete(workerID)
-	srv.Registry.Delete(workerID)
-	srv.Sessions.DeleteByWorker(workerID)
-	if err := srv.Backend.Stop(context.Background(), workerID); err != nil {
-		slog.Warn("failed to stop worker", "worker_id", workerID, "error", err)
-	}
-	srv.LogStore.MarkEnded(workerID)
-}
-
 // stopAppWorkers stops all workers belonging to the given app. Returns
 // the count of workers stopped.
 func stopAppWorkers(srv *server.Server, appID string) int {
 	workerIDs := srv.Workers.ForApp(appID)
 	for _, wid := range workerIDs {
-		EvictWorker(srv, wid)
+		ops.EvictWorker(context.Background(), srv, wid)
 	}
 	return len(workerIDs)
+}
+
+// AppLogs streams logs from the LogStore for a specific worker.
+func AppLogs(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+
+		app, err := resolveApp(srv.DB, id)
+		if err != nil {
+			serverError(w, "db error: "+err.Error())
+			return
+		}
+		if app == nil {
+			notFound(w, "app "+id+" not found")
+			return
+		}
+
+		workerID := r.URL.Query().Get("worker_id")
+		if workerID == "" {
+			badRequest(w, "worker_id query parameter is required")
+			return
+		}
+
+		snapshot, live, ok := srv.LogStore.Subscribe(workerID)
+		if !ok {
+			notFound(w, "no logs for worker "+workerID)
+			return
+		}
+		ended := srv.LogStore.IsEnded(workerID)
+
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
+		flusher, canFlush := w.(http.Flusher)
+
+		// Write buffered lines
+		for _, line := range snapshot {
+			fmt.Fprintf(w, "%s\n", line)
+		}
+		if canFlush {
+			flusher.Flush()
+		}
+
+		// If worker already exited, return buffer only
+		if ended {
+			return
+		}
+
+		// Stream live lines
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case line, ok := <-live:
+				if !ok {
+					return // stream ended
+				}
+				fmt.Fprintf(w, "%s\n", line)
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+		}
+	}
 }
 
 func stringOrEmpty(s *string) string {

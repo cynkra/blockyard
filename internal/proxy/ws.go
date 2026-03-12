@@ -7,6 +7,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -94,12 +95,11 @@ func shuttleWS(
 					return
 				}
 				srv.Sessions.Delete(sessionID)
-				// If no other sessions reference this worker, it's idle.
-				// Phase 0-6 adds evict_worker here. For now, the health
-				// poller will eventually clean up idle workers.
+				// If no other sessions reference this worker, it's idle — evict.
 				if srv.Sessions.CountForWorker(workerID) == 0 {
-					slog.Info("ws cache expired, worker has no sessions",
+					slog.Info("ws cache expired, evicting idle worker",
 						"worker_id", workerID, "session_id", sessionID)
+					ops.EvictWorker(context.Background(), srv, workerID)
 				}
 			})
 	} else {

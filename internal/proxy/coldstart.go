@@ -12,6 +12,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -40,9 +41,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		}
 		// Worker unreachable — evict stale entry and spawn fresh
 		slog.Warn("evicting stale worker", "worker_id", wid, "error", err)
-		srv.Workers.Delete(wid)
-		srv.Registry.Delete(wid)
-		srv.Sessions.DeleteByWorker(wid)
+		ops.EvictWorker(ctx, srv, wid)
 	}
 
 	// 2. Check global worker limit
@@ -104,6 +103,8 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		srv.Backend.Stop(context.Background(), wid)
 		return "", "", err
 	}
+
+	ops.SpawnLogCapture(ctx, srv, wid, app.ID)
 
 	slog.Info("worker ready",
 		"worker_id", wid, "app_id", app.ID, "addr", a)

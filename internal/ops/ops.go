@@ -1,0 +1,220 @@
+package ops
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/cynkra/blockyard/internal/server"
+)
+
+// EvictWorker is the single codepath for decommissioning a worker.
+// Idempotent — safe to call concurrently from multiple goroutines.
+func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
+	_, found := srv.Workers.Get(workerID)
+	srv.Workers.Delete(workerID)
+	if found {
+		if err := srv.Backend.Stop(ctx, workerID); err != nil {
+			slog.Warn("evict: failed to stop worker",
+				"worker_id", workerID, "error", err)
+		}
+	}
+	srv.Registry.Delete(workerID)
+	srv.Sessions.DeleteByWorker(workerID)
+	srv.LogStore.MarkEnded(workerID)
+}
+
+// StartupCleanup removes orphaned resources and fails stale builds.
+// Called in main() before binding the listener.
+func StartupCleanup(ctx context.Context, srv *server.Server) error {
+	resources, err := srv.Backend.ListManaged(ctx)
+	if err != nil {
+		return err
+	}
+	if len(resources) > 0 {
+		slog.Info("startup: removing orphaned resources",
+			"count", len(resources))
+	}
+	for _, r := range resources {
+		if err := srv.Backend.RemoveResource(ctx, r); err != nil {
+			slog.Warn("startup: failed to remove orphan",
+				"id", r.ID, "error", err)
+		}
+	}
+
+	count, err := srv.DB.FailStaleBuilds()
+	if err != nil {
+		return fmt.Errorf("fail stale builds: %w", err)
+	}
+	if count > 0 {
+		slog.Info("startup: marked stale bundles as failed",
+			"count", count)
+	}
+
+	return nil
+}
+
+const maxMisses = 2
+
+func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
+	workerIDs := srv.Workers.All()
+	if len(workerIDs) == 0 {
+		return
+	}
+
+	type result struct {
+		workerID string
+		healthy  bool
+	}
+
+	results := make(chan result, len(workerIDs))
+	var wg sync.WaitGroup
+
+	for _, wid := range workerIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			healthy := srv.Backend.HealthCheck(ctx, id)
+			results <- result{workerID: id, healthy: healthy}
+		}(wid)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	active := make(map[string]bool, len(workerIDs))
+	for r := range results {
+		active[r.workerID] = true
+		if r.healthy {
+			delete(misses, r.workerID)
+			continue
+		}
+		misses[r.workerID]++
+		if misses[r.workerID] >= maxMisses {
+			slog.Warn("health poller: evicting unhealthy worker",
+				"worker_id", r.workerID,
+				"consecutive_misses", misses[r.workerID])
+			EvictWorker(ctx, srv, r.workerID)
+			delete(misses, r.workerID)
+		}
+	}
+
+	// Prune miss counts for workers no longer in the snapshot
+	for wid := range misses {
+		if !active[wid] {
+			delete(misses, wid)
+		}
+	}
+}
+
+// SpawnHealthPoller runs health checks at config.Proxy.HealthInterval.
+// Blocks until ctx is cancelled.
+func SpawnHealthPoller(ctx context.Context, srv *server.Server) {
+	interval := srv.Config.Proxy.HealthInterval.Duration
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	misses := make(map[string]int)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pollOnce(ctx, srv, misses)
+		}
+	}
+}
+
+// SpawnLogCapture starts a goroutine that streams logs from the backend
+// into the LogStore for the given worker.
+func SpawnLogCapture(
+	ctx context.Context,
+	srv *server.Server,
+	workerID, appID string,
+) {
+	sender := srv.LogStore.Create(workerID, appID)
+
+	go func() {
+		stream, err := srv.Backend.Logs(ctx, workerID)
+		if err != nil {
+			slog.Warn("log capture: failed to open stream",
+				"worker_id", workerID, "error", err)
+			srv.LogStore.MarkEnded(workerID)
+			return
+		}
+		defer stream.Close()
+
+		for line := range stream.Lines {
+			sender.Write(line)
+		}
+		srv.LogStore.MarkEnded(workerID)
+	}()
+}
+
+// GracefulShutdown stops all workers, removes managed resources, and
+// fails in-progress builds. Called after HTTP server drain and background
+// goroutine cancellation.
+func GracefulShutdown(ctx context.Context, srv *server.Server) {
+	workerIDs := srv.Workers.All()
+	if len(workerIDs) > 0 {
+		slog.Info("shutdown: stopping workers",
+			"count", len(workerIDs))
+	}
+
+	var wg sync.WaitGroup
+	for _, wid := range workerIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			evictCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			EvictWorker(evictCtx, srv, id)
+		}(wid)
+	}
+	wg.Wait()
+
+	// Remove remaining managed resources (build containers, networks)
+	resources, err := srv.Backend.ListManaged(ctx)
+	if err == nil {
+		for _, r := range resources {
+			_ = srv.Backend.RemoveResource(ctx, r)
+		}
+	}
+
+	// Fail in-progress builds
+	count, err := srv.DB.FailStaleBuilds()
+	if err == nil && count > 0 {
+		slog.Info("shutdown: marked stale bundles as failed",
+			"count", count)
+	}
+}
+
+// SpawnLogRetentionCleaner periodically prunes expired log entries.
+// Blocks until ctx is cancelled.
+func SpawnLogRetentionCleaner(ctx context.Context, srv *server.Server) {
+	retention := srv.Config.Proxy.LogRetention.Duration
+	interval := retention
+	if interval > 60*time.Second || interval <= 0 {
+		interval = 60 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n := srv.LogStore.CleanupExpired(retention)
+			if n > 0 {
+				slog.Debug("log retention: cleaned up entries",
+					"count", n)
+			}
+		}
+	}
+}

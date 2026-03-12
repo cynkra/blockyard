@@ -36,10 +36,7 @@ func NewRouter(srv *server.Server) http.Handler {
 
 		r.Post("/apps/{id}/start", StartApp(srv))
 		r.Post("/apps/{id}/stop", StopApp(srv))
-		r.Get("/apps/{id}/logs", func(w http.ResponseWriter, _ *http.Request) {
-			writeError(w, http.StatusNotImplemented, "not_implemented",
-				"app log streaming is implemented in phase 0-6")
-		})
+		r.Get("/apps/{id}/logs", AppLogs(srv))
 
 		r.Get("/tasks/{taskID}", GetTaskStatus(srv))
 		r.Get("/tasks/{taskID}/logs", TaskLogs(srv))

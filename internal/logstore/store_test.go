@@ -114,6 +114,39 @@ func TestWorkerIDsByApp(t *testing.T) {
 	}
 }
 
+func TestMarkEndedIdempotent(t *testing.T) {
+	s := NewStore()
+	s.Create("worker-1", "app-1")
+
+	s.MarkEnded("worker-1")
+	s.MarkEnded("worker-1") // second call must not panic
+}
+
+func TestMarkEndedNonexistent(t *testing.T) {
+	s := NewStore()
+	s.MarkEnded("nonexistent") // must not panic
+}
+
+func TestIsEnded(t *testing.T) {
+	s := NewStore()
+	s.Create("worker-1", "app-1")
+
+	if s.IsEnded("worker-1") {
+		t.Error("expected not ended before MarkEnded")
+	}
+
+	s.MarkEnded("worker-1")
+
+	if !s.IsEnded("worker-1") {
+		t.Error("expected ended after MarkEnded")
+	}
+
+	// Nonexistent worker
+	if s.IsEnded("nonexistent") {
+		t.Error("expected false for nonexistent worker")
+	}
+}
+
 func TestBufferCap(t *testing.T) {
 	s := NewStore()
 	sender := s.Create("worker-1", "app-1")

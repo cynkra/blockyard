@@ -13,10 +13,12 @@ type Store struct {
 }
 
 type logEntry struct {
+	mu      sync.Mutex // protects buffer and ended
 	appID   string
 	buffer  []string
 	ch      chan string
-	endedAt time.Time // zero if still active
+	ended   bool
+	endedAt time.Time
 }
 
 func NewStore() *Store {
@@ -39,13 +41,15 @@ func (s *Store) Create(workerID, appID string) Sender {
 // Subscribe returns a snapshot and live channel for a worker's logs.
 func (s *Store) Subscribe(workerID string) (snapshot []string, live <-chan string, ok bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	e, found := s.entries[workerID]
+	s.mu.RUnlock()
 	if !found {
 		return nil, nil, false
 	}
+	e.mu.Lock()
 	snap := make([]string, len(e.buffer))
 	copy(snap, e.buffer)
+	e.mu.Unlock()
 	return snap, e.ch, true
 }
 
@@ -61,20 +65,48 @@ func (s *Store) WorkerIDsByApp(appID string) (workerIDs []string) {
 	return workerIDs
 }
 
+// MarkEnded marks a worker's log stream as ended. Idempotent — safe to
+// call multiple times or on nonexistent workers.
 func (s *Store) MarkEnded(workerID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e, ok := s.entries[workerID]; ok {
-		e.endedAt = time.Now()
-		close(e.ch)
+	s.mu.RLock()
+	e, ok := s.entries[workerID]
+	s.mu.RUnlock()
+	if !ok {
+		return
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.ended {
+		return
+	}
+	e.ended = true
+	e.endedAt = time.Now()
+	close(e.ch)
 }
 
 func (s *Store) HasActive(workerID string) bool {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	e, ok := s.entries[workerID]
-	return ok && e.endedAt.IsZero()
+	s.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.ended
+}
+
+// IsEnded returns true if the worker's log stream has ended.
+func (s *Store) IsEnded(workerID string) bool {
+	s.mu.RLock()
+	e, ok := s.entries[workerID]
+	s.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.ended
 }
 
 // CleanupExpired removes log entries that ended more than `retention` ago.
@@ -84,7 +116,10 @@ func (s *Store) CleanupExpired(retention time.Duration) int {
 	cutoff := time.Now().Add(-retention)
 	n := 0
 	for wid, e := range s.entries {
-		if !e.endedAt.IsZero() && e.endedAt.Before(cutoff) {
+		e.mu.Lock()
+		expired := e.ended && e.endedAt.Before(cutoff)
+		e.mu.Unlock()
+		if expired {
 			delete(s.entries, wid)
 			n++
 		}
@@ -97,9 +132,11 @@ type Sender struct {
 }
 
 func (s Sender) Write(line string) {
+	s.e.mu.Lock()
 	if len(s.e.buffer) < maxLogLines {
 		s.e.buffer = append(s.e.buffer, line)
 	}
+	s.e.mu.Unlock()
 	select {
 	case s.e.ch <- line:
 	default:
