@@ -104,6 +104,170 @@ func collectEnvVarNames(t reflect.Type, prefix string) []string {
 	return names
 }
 
+func TestEnvVarOverridesDockerImage(t *testing.T) {
+	t.Setenv("BLOCKYARD_DOCKER_IMAGE", "custom-image:v2")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Docker.Image != "custom-image:v2" {
+		t.Errorf("expected custom-image:v2, got %q", cfg.Docker.Image)
+	}
+}
+
+func TestEnvVarOverridesMaxWorkers(t *testing.T) {
+	t.Setenv("BLOCKYARD_PROXY_MAX_WORKERS", "42")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Proxy.MaxWorkers != 42 {
+		t.Errorf("expected 42, got %d", cfg.Proxy.MaxWorkers)
+	}
+}
+
+func TestEnvVarOverridesSkipMetadataBlock(t *testing.T) {
+	t.Setenv("BLOCKYARD_DOCKER_SKIP_METADATA_BLOCK", "true")
+	cfg := loadFromString(t, minimalTOML)
+	if !cfg.Docker.SkipMetadataBlock {
+		t.Error("expected SkipMetadataBlock to be true")
+	}
+}
+
+func TestEnvVarOverridesWsCacheTTL(t *testing.T) {
+	t.Setenv("BLOCKYARD_PROXY_WS_CACHE_TTL", "5m")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Proxy.WsCacheTTL.Duration != 5*60*1000000000 { // 5 minutes
+		t.Errorf("expected 5m, got %v", cfg.Proxy.WsCacheTTL.Duration)
+	}
+}
+
+func TestValidationRejectsEmptyImage(t *testing.T) {
+	tomlContent := `
+[server]
+token = "test-token"
+
+[docker]
+image = ""
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil {
+		t.Error("expected validation error for empty image")
+	}
+	if err != nil && !strings.Contains(err.Error(), "docker.image") {
+		t.Errorf("expected error about docker.image, got: %v", err)
+	}
+}
+
+func TestValidationRejectsEmptyBundleServerPath(t *testing.T) {
+	tomlContent := `
+[server]
+token = "test-token"
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = ""
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil {
+		t.Error("expected validation error for empty bundle_server_path")
+	}
+	if err != nil && !strings.Contains(err.Error(), "bundle_server_path") {
+		t.Errorf("expected error about bundle_server_path, got: %v", err)
+	}
+}
+
+func TestValidationRejectsEmptyDatabasePath(t *testing.T) {
+	tomlContent := `
+[server]
+token = "test-token"
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = ""
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil {
+		t.Error("expected validation error for empty database path")
+	}
+	if err != nil && !strings.Contains(err.Error(), "database.path") {
+		t.Errorf("expected error about database.path, got: %v", err)
+	}
+}
+
+func TestValidationRejectsNonWritableBundlePath(t *testing.T) {
+	tomlContent := `
+[server]
+token = "test-token"
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "/proc/nonexistent/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil {
+		t.Error("expected validation error for non-writable bundle path")
+	}
+	if err != nil && !strings.Contains(err.Error(), "bundle_server_path") {
+		t.Errorf("expected error about bundle_server_path, got: %v", err)
+	}
+}
+
+func TestValidationRejectsNonWritableDatabaseDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	tomlContent := `
+[server]
+token = "test-token"
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "/proc/nonexistent/db/blockyard.db"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil {
+		t.Error("expected validation error for non-writable database dir")
+	}
+	if err != nil && !strings.Contains(err.Error(), "database.path parent directory") {
+		t.Errorf("expected error about database.path parent directory, got: %v", err)
+	}
+}
+
 func TestEnvVarNamesUnique(t *testing.T) {
 	names := collectEnvVarNames(reflect.TypeOf(Config{}), "BLOCKYARD")
 	seen := make(map[string]bool)

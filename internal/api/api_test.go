@@ -15,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
@@ -503,17 +504,16 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	}
 }
 
-func TestAppLogsWithoutWorkerIDNoLogs(t *testing.T) {
-	// When no worker_id is provided and no workers have run,
-	// the endpoint should return 404 (no logs available).
+func TestAppLogsWithoutWorkerIDReturns400(t *testing.T) {
+	// worker_id is required — omitting it should return 400.
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs", nil)
 	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404 without worker_id and no logs, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 without worker_id, got %d", resp.StatusCode)
 	}
 }
 
@@ -550,6 +550,309 @@ func TestAppLogsReturnsBufferedLines(t *testing.T) {
 	resp.Body.Close()
 	if string(body) != "hello\nworld\n" {
 		t.Errorf("unexpected body: %q", string(body))
+	}
+}
+
+// --- Task status tests ---
+
+func TestGetTaskStatusRunning(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("task-1")
+	sender.Write("line 1")
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-1", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["id"] != "task-1" {
+		t.Errorf("expected id=task-1, got %v", body["id"])
+	}
+	if body["status"] != "running" {
+		t.Errorf("expected status=running, got %v", body["status"])
+	}
+	if body["created_at"] == "" {
+		t.Error("expected non-empty created_at")
+	}
+
+	// Clean up
+	sender.Complete(task.Completed)
+}
+
+func TestGetTaskStatusCompleted(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("task-done")
+	sender.Write("output")
+	sender.Complete(task.Completed)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-done", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["status"] != "completed" {
+		t.Errorf("expected status=completed, got %v", body["status"])
+	}
+}
+
+func TestGetTaskStatusFailed(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("task-fail")
+	sender.Write("error output")
+	sender.Complete(task.Failed)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-fail", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["status"] != "failed" {
+		t.Errorf("expected status=failed, got %v", body["status"])
+	}
+}
+
+func TestGetTaskStatusNotFound(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/nonexistent", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// --- Task logs tests ---
+
+func TestTaskLogsNotFound(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/nonexistent/logs", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskLogsCompletedTask(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("task-logs-done")
+	sender.Write("line one")
+	sender.Write("line two")
+	sender.Complete(task.Completed)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-logs-done/logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	expected := "line one\nline two\n"
+	if string(body) != expected {
+		t.Errorf("expected %q, got %q", expected, string(body))
+	}
+}
+
+func TestTaskLogsFailedTask(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("task-logs-fail")
+	sender.Write("starting")
+	sender.Write("error: something went wrong")
+	sender.Complete(task.Failed)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-logs-fail/logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "error: something went wrong") {
+		t.Errorf("expected error line in logs, got %q", string(body))
+	}
+}
+
+func TestTaskLogsRunningTaskCompletes(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("task-logs-live")
+	sender.Write("buffered line")
+
+	// Complete the task in a goroutine after a short delay so the
+	// streaming handler sees it transition from running to done.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		sender.Write("live line")
+		time.Sleep(10 * time.Millisecond)
+		sender.Complete(task.Completed)
+	}()
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-logs-live/logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "buffered line") {
+		t.Errorf("expected buffered line in output, got %q", body)
+	}
+	if !strings.Contains(string(body), "live line") {
+		t.Errorf("expected live line in output, got %q", body)
+	}
+}
+
+// --- CreateApp error path tests ---
+
+func TestCreateAppInvalidJSON(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("POST", ts.URL+"/api/v1/apps", strings.NewReader(`{not json`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateAppMissingName(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("POST", ts.URL+"/api/v1/apps", strings.NewReader(`{}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing name, got %d", resp.StatusCode)
+	}
+}
+
+// --- UpdateApp error path tests ---
+
+func TestUpdateAppNonexistent(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/nonexistent",
+		strings.NewReader(`{"memory_limit":"256m"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppInvalidJSON(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{not json`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppEmptyBody(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200 for empty update, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- DeleteApp error path tests ---
+
+func TestDeleteAppNonexistent(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/nonexistent", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// --- StopApp error path tests ---
+
+func TestStopAppNonexistent(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/stop", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestStopAppNoRunningWorkers(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["workers_stopped"] != float64(0) {
+		t.Errorf("expected workers_stopped=0, got %v", body["workers_stopped"])
+	}
+	if body["status"] != "stopped" {
+		t.Errorf("expected status=stopped, got %v", body["status"])
 	}
 }
 
