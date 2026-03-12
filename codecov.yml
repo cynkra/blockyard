@@ -7,3 +7,7 @@ coverage:
     patch:
       default:
         target: 80%
+
+ignore:
+  - "cmd/**"                        # main() wiring — not unit-testable
+  - "internal/testutil/**"          # test helpers only
