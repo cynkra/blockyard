@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
@@ -24,7 +25,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -43,6 +44,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
+	srv.RoleCache = auth.NewRoleMappingCache()
 	handler := NewRouter(srv)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -471,7 +473,7 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -909,7 +911,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	// Create a server with a very small max bundle size
 	tmp := t.TempDir()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,

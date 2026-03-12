@@ -67,6 +67,13 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		"dev.blockyard/role":      "worker",
 	}
 
+	var extraEnv map[string]string
+	if srv.Config.Openbao != nil {
+		extraEnv = map[string]string{
+			"VAULT_ADDR": srv.Config.Openbao.Address,
+		}
+	}
+
 	spec := backend.WorkerSpec{
 		AppID:       app.ID,
 		WorkerID:    wid,
@@ -78,6 +85,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		MemoryLimit: ptrOr(app.MemoryLimit, ""),
 		CPULimit:    ptrOr(app.CPULimit, 0.0),
 		Labels:      labels,
+		Env:         extraEnv,
 	}
 
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {

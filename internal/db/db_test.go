@@ -15,7 +15,7 @@ func testDB(t *testing.T) *DB {
 func TestCreateAndGetApp(t *testing.T) {
 	db := testDB(t)
 
-	app, err := db.CreateApp("my-app")
+	app, err := db.CreateApp("my-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestCreateAndGetApp(t *testing.T) {
 func TestGetAppByName(t *testing.T) {
 	db := testDB(t)
 
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 
 	fetched, err := db.GetAppByName("my-app")
 	if err != nil {
@@ -60,11 +60,11 @@ func TestGetAppByName(t *testing.T) {
 func TestDuplicateNameFails(t *testing.T) {
 	db := testDB(t)
 
-	_, err := db.CreateApp("my-app")
+	_, err := db.CreateApp("my-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.CreateApp("my-app")
+	_, err = db.CreateApp("my-app", "admin")
 	if err == nil {
 		t.Error("expected error on duplicate name")
 	}
@@ -73,7 +73,7 @@ func TestDuplicateNameFails(t *testing.T) {
 func TestDeleteApp(t *testing.T) {
 	db := testDB(t)
 
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 	deleted, err := db.DeleteApp(app.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -91,8 +91,8 @@ func TestDeleteApp(t *testing.T) {
 func TestListApps(t *testing.T) {
 	db := testDB(t)
 
-	db.CreateApp("app-a")
-	db.CreateApp("app-b")
+	db.CreateApp("app-a", "admin")
+	db.CreateApp("app-b", "admin")
 
 	apps, err := db.ListApps()
 	if err != nil {
@@ -105,7 +105,7 @@ func TestListApps(t *testing.T) {
 
 func TestCreateAndGetBundle(t *testing.T) {
 	db := testDB(t)
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 
 	b, err := db.CreateBundle("b-1", app.ID)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestCreateAndGetBundle(t *testing.T) {
 
 func TestListBundlesByApp(t *testing.T) {
 	db := testDB(t)
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 
 	db.CreateBundle("b-1", app.ID)
 	db.CreateBundle("b-2", app.ID)
@@ -145,7 +145,7 @@ func TestListBundlesByApp(t *testing.T) {
 
 func TestUpdateBundleStatus(t *testing.T) {
 	db := testDB(t)
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 	db.CreateBundle("b-1", app.ID)
 
 	if err := db.UpdateBundleStatus("b-1", "building"); err != nil {
@@ -160,7 +160,7 @@ func TestUpdateBundleStatus(t *testing.T) {
 
 func TestSetActiveBundle(t *testing.T) {
 	db := testDB(t)
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 	db.CreateBundle("b-1", app.ID)
 
 	if err := db.SetActiveBundle(app.ID, "b-1"); err != nil {
@@ -175,7 +175,7 @@ func TestSetActiveBundle(t *testing.T) {
 
 func TestDeleteBundle(t *testing.T) {
 	db := testDB(t)
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 	db.CreateBundle("b-1", app.ID)
 
 	deleted, err := db.DeleteBundle("b-1")
@@ -194,7 +194,7 @@ func TestDeleteBundle(t *testing.T) {
 
 func TestUpdateApp(t *testing.T) {
 	db := testDB(t)
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 
 	mem := "512m"
 	cpu := 2.0
@@ -232,7 +232,7 @@ func TestUpdateAppNotFound(t *testing.T) {
 
 func TestClearActiveBundle(t *testing.T) {
 	db := testDB(t)
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 	db.CreateBundle("b-1", app.ID)
 	db.SetActiveBundle(app.ID, "b-1")
 
@@ -256,7 +256,7 @@ func TestClearActiveBundle(t *testing.T) {
 func TestFailStaleBuilds(t *testing.T) {
 	db := testDB(t)
 
-	app, _ := db.CreateApp("my-app")
+	app, _ := db.CreateApp("my-app", "admin")
 
 	// Insert a bundle in "building" state
 	_, err := db.Exec(

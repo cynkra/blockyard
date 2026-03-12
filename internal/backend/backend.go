@@ -43,6 +43,7 @@ type WorkerSpec struct {
 	MemoryLimit string            // e.g. "512m", "" if unset
 	CPULimit    float64           // fractional vCPUs, 0 if unset
 	Labels      map[string]string
+	Env         map[string]string // additional env vars (e.g. VAULT_ADDR)
 }
 
 type BuildSpec struct {

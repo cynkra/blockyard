@@ -351,7 +351,7 @@ CREATE TABLE role_mappings (
 );
 ```
 
-### Phase 1-3: Identity Injection + OpenBao Integration
+### Phase 1-3: Identity Injection + OpenBao Integration ([detailed plan](phase-1-3.md))
 
 Deliver authenticated user identity and per-user credentials to Shiny apps
 at runtime.

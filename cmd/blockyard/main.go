@@ -11,9 +11,11 @@ import (
 	"syscall"
 
 	"github.com/cynkra/blockyard/internal/api"
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
@@ -50,6 +52,64 @@ func main() {
 
 	// Build shared state and router
 	srv := server.NewServer(cfg, be, database)
+
+	// Initialize role mapping cache (always — used in both OIDC and static-token modes).
+	srv.RoleCache = auth.NewRoleMappingCache()
+	if err := srv.RoleCache.Load(database); err != nil {
+		slog.Error("failed to load role mappings", "error", err)
+		os.Exit(1)
+	}
+
+	// Initialize OIDC if configured.
+	if cfg.OIDC != nil {
+		baseURL := cfg.Server.ExternalURL
+		if baseURL == "" {
+			baseURL = "http://" + cfg.Server.Bind
+		}
+		redirectURL := baseURL + "/callback"
+
+		oidcClient, err := auth.Discover(
+			context.Background(),
+			cfg.OIDC.IssuerURL,
+			cfg.OIDC.ClientID,
+			cfg.OIDC.ClientSecret.Expose(),
+			redirectURL,
+			cfg.OIDC.GroupsClaim,
+		)
+		if err != nil {
+			slog.Error("OIDC discovery failed", "error", err)
+			os.Exit(1)
+		}
+
+		srv.OIDCClient = oidcClient
+		srv.SigningKey = auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose())
+		srv.UserSessions = auth.NewUserSessionStore()
+
+		// Initialize JWKS cache for control-plane JWT validation.
+		jwksURI := oidcClient.JWKSURI()
+		if jwksURI != "" {
+			jwksCache, err := auth.NewJWKSCache(jwksURI)
+			if err != nil {
+				slog.Error("failed to initialize JWKS cache", "error", err)
+				os.Exit(1)
+			}
+			srv.JWKSCache = jwksCache
+		}
+	}
+
+	// Initialize OpenBao if configured.
+	if cfg.Openbao != nil {
+		srv.VaultClient = integration.NewClient(
+			cfg.Openbao.Address,
+			cfg.Openbao.AdminToken.Expose(),
+		)
+		srv.VaultTokenCache = integration.NewVaultTokenCache()
+
+		if err := integration.Bootstrap(context.Background(), srv.VaultClient, cfg.Openbao.JWTAuthPath); err != nil {
+			slog.Warn("OpenBao bootstrap failed — credential injection disabled until resolved",
+				"error", err)
+		}
+	}
 
 	// Startup cleanup — must complete before accepting traffic.
 	if err := ops.StartupCleanup(context.Background(), srv); err != nil {

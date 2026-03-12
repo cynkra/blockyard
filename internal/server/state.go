@@ -3,9 +3,11 @@ package server
 import (
 	"sync"
 
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/logstore"
 	"github.com/cynkra/blockyard/internal/registry"
 	"github.com/cynkra/blockyard/internal/session"
@@ -23,6 +25,19 @@ type Server struct {
 	Registry *registry.Registry
 	Tasks    *task.Store
 	LogStore *logstore.Store
+
+	// Auth fields — nil when [oidc] is not configured (v0 compat).
+	OIDCClient   *auth.OIDCClient
+	SigningKey    *auth.SigningKey
+	UserSessions *auth.UserSessionStore
+
+	// Authorization — always initialized (used in both OIDC and static-token modes).
+	RoleCache *auth.RoleMappingCache
+	JWKSCache *auth.JWKSCache // nil when OIDC is not configured
+
+	// OpenBao — nil when [openbao] is not configured.
+	VaultClient     *integration.Client
+	VaultTokenCache *integration.VaultTokenCache
 }
 
 // NewServer creates a Server with all in-memory stores initialized.
@@ -36,6 +51,18 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 		Registry: registry.New(),
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
+	}
+}
+
+// AuthDeps returns an auth.Deps populated from this server's fields.
+// Used by the router to wire auth handlers and middleware without a
+// circular import.
+func (s *Server) AuthDeps() *auth.Deps {
+	return &auth.Deps{
+		Config:       s.Config,
+		OIDCClient:   s.OIDCClient,
+		SigningKey:    s.SigningKey,
+		UserSessions: s.UserSessions,
 	}
 }
 

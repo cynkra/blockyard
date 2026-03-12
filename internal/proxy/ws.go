@@ -27,6 +27,9 @@ func forwardClientHeaders(r *http.Request) http.Header {
 		"Sec-WebSocket-Protocol",
 		"Sec-WebSocket-Extensions",
 		"User-Agent",
+		"X-Shiny-User",
+		"X-Shiny-Groups",
+		"X-Blockyard-Vault-Token",
 	} {
 		if v := r.Header.Get(key); v != "" {
 			h.Set(key, v)

@@ -15,7 +15,7 @@ import (
 func testServer(t *testing.T) (*server.Server, *mock.MockBackend) {
 	t.Helper()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
 		Storage: config.StorageConfig{
 			BundleServerPath: t.TempDir(),
@@ -105,7 +105,7 @@ func TestStartupCleanupRemovesOrphans(t *testing.T) {
 func TestStartupCleanupFailsStaleBuilds(t *testing.T) {
 	srv, _ := testServer(t)
 
-	app, err := srv.DB.CreateApp("test-app")
+	app, err := srv.DB.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestGracefulShutdownStopsAllWorkers(t *testing.T) {
 func TestGracefulShutdownFailsInProgressBuilds(t *testing.T) {
 	srv, _ := testServer(t)
 
-	app, err := srv.DB.CreateApp("test-app")
+	app, err := srv.DB.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}

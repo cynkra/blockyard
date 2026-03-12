@@ -27,7 +27,7 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 
 	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,

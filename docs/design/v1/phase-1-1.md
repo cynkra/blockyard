@@ -376,6 +376,18 @@ type Server struct {
 	SigningKey    *auth.SigningKey
 	UserSessions *auth.UserSessionStore
 }
+
+// AuthDeps returns an auth.Deps populated from this server's fields.
+// Used by the router to wire auth handlers and middleware without a
+// circular import (auth cannot import server).
+func (s *Server) AuthDeps() *auth.Deps {
+	return &auth.Deps{
+		Config:       s.Config,
+		OIDCClient:   s.OIDCClient,
+		SigningKey:    s.SigningKey,
+		UserSessions: s.UserSessions,
+	}
+}
 ```
 
 All three auth fields are nil when OIDC is not configured (v0
@@ -622,7 +634,11 @@ structure).
 
 `internal/auth/handlers.go`:
 
-**Cookie security helpers:**
+**Dependency struct and cookie security helpers:**
+
+The `auth` package cannot import `server` (which imports `auth`), so
+handlers and middleware receive an `auth.Deps` struct instead of
+`*server.Server`. The `Server.AuthDeps()` method (see Step 7) builds it.
 
 ```go
 package auth
@@ -633,7 +649,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -644,6 +659,19 @@ import (
 // package variable so tests can override it.
 var nowUnix = func() int64 {
 	return time.Now().Unix()
+}
+
+// NowUnix is the exported accessor for nowUnix, used by tests.
+func NowUnix() int64 { return nowUnix() }
+
+// Deps carries the dependencies that auth handlers and middleware need.
+// Constructed in the router layer from the server struct, avoiding a
+// circular import between auth and server.
+type Deps struct {
+	Config       *config.Config
+	OIDCClient   *OIDCClient
+	SigningKey    *SigningKey
+	UserSessions *UserSessionStore
 }
 
 // secureFlag returns "; Secure" if external_url is HTTPS, empty
@@ -668,9 +696,9 @@ func randomHex(n int) string {
 ```go
 // LoginHandler initiates the OIDC authorization code flow.
 // Query params: ?return_url=/app/my-app/ (optional, default: /)
-func LoginHandler(srv *server.Server) http.HandlerFunc {
+func LoginHandler(deps *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if srv.OIDCClient == nil {
+		if deps.OIDCClient == nil {
 			http.NotFound(w, r)
 			return
 		}
@@ -679,7 +707,7 @@ func LoginHandler(srv *server.Server) http.HandlerFunc {
 		state := randomHex(16)
 		nonce := randomHex(16)
 
-		authURL := srv.OIDCClient.AuthCodeURL(state, nonce)
+		authURL := deps.OIDCClient.AuthCodeURL(state, nonce)
 
 		// Validate return_url to prevent open redirect attacks.
 		// Must be a relative path (starts with /, no //) or falls back to /.
@@ -694,7 +722,7 @@ func LoginHandler(srv *server.Server) http.HandlerFunc {
 			Nonce:     nonce,
 			ReturnURL: returnURL,
 		}
-		stateCookie, err := buildStateCookie(&statePayload, srv)
+		stateCookie, err := buildStateCookie(&statePayload, deps.SigningKey, deps.Config)
 		if err != nil {
 			slog.Error("failed to build state cookie", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -720,26 +748,26 @@ type oidcStatePayload struct {
 	ReturnURL string `json:"return_url"`
 }
 
-func buildStateCookie(payload *oidcStatePayload, srv *server.Server) (string, error) {
+func buildStateCookie(payload *oidcStatePayload, key *SigningKey, cfg *config.Config) (string, error) {
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(jsonBytes)
 
-	mac := hmac.New(sha256.New, srv.SigningKey.key)
+	mac := hmac.New(sha256.New, key.key)
 	mac.Write(jsonBytes)
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
 	value := encoded + "." + sig
-	secure := secureFlag(srv.Config)
+	secure := secureFlag(cfg)
 	return fmt.Sprintf(
 		"blockyard_oidc_state=%s; Path=/; HttpOnly; SameSite=Lax%s; Max-Age=300",
 		value, secure,
 	), nil
 }
 
-func extractStateCookie(r *http.Request, srv *server.Server) (*oidcStatePayload, error) {
+func extractStateCookie(r *http.Request, key *SigningKey) (*oidcStatePayload, error) {
 	cookie, err := r.Cookie("blockyard_oidc_state")
 	if err != nil {
 		return nil, fmt.Errorf("missing oidc state cookie: %w", err)
@@ -759,7 +787,7 @@ func extractStateCookie(r *http.Request, srv *server.Server) (*oidcStatePayload,
 		return nil, fmt.Errorf("decode state signature: %w", err)
 	}
 
-	mac := hmac.New(sha256.New, srv.SigningKey.key)
+	mac := hmac.New(sha256.New, key.key)
 	mac.Write(jsonBytes)
 	if !hmac.Equal(sigBytes, mac.Sum(nil)) {
 		return nil, errors.New("invalid state cookie signature")
@@ -780,15 +808,15 @@ func extractStateCookie(r *http.Request, srv *server.Server) (*oidcStatePayload,
 // Exchanges the authorization code for tokens, validates the ID token,
 // extracts user identity, stores session server-side, and sets a
 // signed session cookie.
-func CallbackHandler(srv *server.Server) http.HandlerFunc {
+func CallbackHandler(deps *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if srv.OIDCClient == nil {
+		if deps.OIDCClient == nil {
 			http.NotFound(w, r)
 			return
 		}
 
 		// 1. Extract and validate OIDC state cookie.
-		statePayload, err := extractStateCookie(r, srv)
+		statePayload, err := extractStateCookie(r, deps.SigningKey)
 		if err != nil {
 			slog.Error("invalid state cookie", "error", err)
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -803,7 +831,7 @@ func CallbackHandler(srv *server.Server) http.HandlerFunc {
 
 		// 3. Exchange authorization code for tokens.
 		code := r.URL.Query().Get("code")
-		oauth2Token, _, allClaims, err := srv.OIDCClient.Exchange(r.Context(), code)
+		oauth2Token, _, allClaims, err := deps.OIDCClient.Exchange(r.Context(), code)
 		if err != nil {
 			slog.Error("token exchange failed", "error", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
@@ -820,7 +848,7 @@ func CallbackHandler(srv *server.Server) http.HandlerFunc {
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			return
 		}
-		groups := srv.OIDCClient.ExtractGroups(allClaims)
+		groups := deps.OIDCClient.ExtractGroups(allClaims)
 
 		// 5. Store session server-side.
 		expiresAt := nowUnix() + 300 // default 5 min
@@ -828,7 +856,7 @@ func CallbackHandler(srv *server.Server) http.HandlerFunc {
 			expiresAt = oauth2Token.Expiry.Unix()
 		}
 
-		srv.UserSessions.Set(subClaim, &UserSession{
+		deps.UserSessions.Set(subClaim, &UserSession{
 			Groups:       groups,
 			AccessToken:  oauth2Token.AccessToken,
 			RefreshToken: oauth2Token.RefreshToken,
@@ -840,7 +868,7 @@ func CallbackHandler(srv *server.Server) http.HandlerFunc {
 			Sub:      subClaim,
 			IssuedAt: nowUnix(),
 		}
-		cookieValue, err := cookiePayload.Encode(srv.SigningKey)
+		cookieValue, err := cookiePayload.Encode(deps.SigningKey)
 		if err != nil {
 			slog.Error("failed to encode session cookie", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -848,11 +876,11 @@ func CallbackHandler(srv *server.Server) http.HandlerFunc {
 		}
 
 		cookieMaxAge := int64(24 * 60 * 60) // 24h default
-		if srv.Config.OIDC != nil {
-			cookieMaxAge = int64(srv.Config.OIDC.CookieMaxAge.Duration.Seconds())
+		if deps.Config.OIDC != nil {
+			cookieMaxAge = int64(deps.Config.OIDC.CookieMaxAge.Duration.Seconds())
 		}
 
-		secure := secureFlag(srv.Config)
+		secure := secureFlag(deps.Config)
 		sessionCookie := fmt.Sprintf(
 			"blockyard_session=%s; Path=/; HttpOnly; SameSite=Lax%s; Max-Age=%d",
 			cookieValue, secure, cookieMaxAge,
@@ -877,26 +905,26 @@ func CallbackHandler(srv *server.Server) http.HandlerFunc {
 // LogoutHandler clears the session cookie and removes the server-side
 // session. Redirects to / (or to the IdP's end_session_endpoint if
 // available).
-func LogoutHandler(srv *server.Server) http.HandlerFunc {
+func LogoutHandler(deps *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Remove server-side session if cookie is valid.
-		if srv.SigningKey != nil && srv.UserSessions != nil {
+		if deps.SigningKey != nil && deps.UserSessions != nil {
 			if cookieValue := extractSessionCookie(r); cookieValue != "" {
-				if payload, err := DecodeCookie(cookieValue, srv.SigningKey); err == nil {
-					srv.UserSessions.Delete(payload.Sub)
+				if payload, err := DecodeCookie(cookieValue, deps.SigningKey); err == nil {
+					deps.UserSessions.Delete(payload.Sub)
 				}
 			}
 		}
 
-		secure := secureFlag(srv.Config)
+		secure := secureFlag(deps.Config)
 		clearCookie := fmt.Sprintf(
 			"blockyard_session=; Path=/; HttpOnly%s; Max-Age=0", secure,
 		)
 		w.Header().Set("Set-Cookie", clearCookie)
 
 		// Redirect to IdP logout if available, otherwise to /.
-		if srv.OIDCClient != nil {
-			if endSession := srv.OIDCClient.EndSessionEndpoint(); endSession != "" {
+		if deps.OIDCClient != nil {
+			if endSession := deps.OIDCClient.EndSessionEndpoint(); endSession != "" {
 				http.Redirect(w, r, endSession, http.StatusFound)
 				return
 			}
@@ -939,7 +967,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 )
 
 // AuthenticatedUser represents a validated user identity extracted
@@ -969,11 +996,11 @@ func UserFromContext(ctx context.Context) *AuthenticatedUser {
 //
 // When OIDC is not configured (v0 compat), the middleware passes
 // all requests through unchanged.
-func RequireAuth(srv *server.Server) func(http.Handler) http.Handler {
+func RequireAuth(deps *Deps) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// If OIDC is not configured, pass through (v0 compat).
-			if srv.SigningKey == nil {
+			if deps.SigningKey == nil {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -986,7 +1013,7 @@ func RequireAuth(srv *server.Server) func(http.Handler) http.Handler {
 			}
 
 			// Decode and verify signature.
-			cookie, err := DecodeCookie(cookieValue, srv.SigningKey)
+			cookie, err := DecodeCookie(cookieValue, deps.SigningKey)
 			if err != nil {
 				redirectToLogin(w, r)
 				return
@@ -994,8 +1021,8 @@ func RequireAuth(srv *server.Server) func(http.Handler) http.Handler {
 
 			// Check cookie max-age.
 			maxAge := int64(24 * 60 * 60)
-			if srv.Config.OIDC != nil {
-				maxAge = int64(srv.Config.OIDC.CookieMaxAge.Duration.Seconds())
+			if deps.Config.OIDC != nil {
+				maxAge = int64(deps.Config.OIDC.CookieMaxAge.Duration.Seconds())
 			}
 			if nowUnix()-cookie.IssuedAt > maxAge {
 				redirectToLogin(w, r)
@@ -1003,7 +1030,7 @@ func RequireAuth(srv *server.Server) func(http.Handler) http.Handler {
 			}
 
 			// Look up server-side session.
-			session := srv.UserSessions.Get(cookie.Sub)
+			session := deps.UserSessions.Get(cookie.Sub)
 			if session == nil {
 				redirectToLogin(w, r)
 				return
@@ -1012,20 +1039,20 @@ func RequireAuth(srv *server.Server) func(http.Handler) http.Handler {
 			// Refresh access token if near expiry (within 60 seconds).
 			// Uses a per-user lock to prevent concurrent refresh attempts.
 			if session.ExpiresAt-nowUnix() < 60 {
-				lock := srv.UserSessions.RefreshLock(cookie.Sub)
+				lock := deps.UserSessions.RefreshLock(cookie.Sub)
 				lock.Lock()
 
 				// Re-check after acquiring the lock — another request
 				// may have already refreshed while we waited.
-				session = srv.UserSessions.Get(cookie.Sub)
+				session = deps.UserSessions.Get(cookie.Sub)
 				needsRefresh := session == nil || session.ExpiresAt-nowUnix() < 60
 
 				if needsRefresh {
-					if err := refreshAccessToken(r.Context(), srv, cookie.Sub); err != nil {
+					if err := refreshAccessToken(r.Context(), deps, cookie.Sub); err != nil {
 						lock.Unlock()
 						slog.Error("token refresh failed, removing session",
 							"sub", cookie.Sub, "error", err)
-						srv.UserSessions.Delete(cookie.Sub)
+						deps.UserSessions.Delete(cookie.Sub)
 						redirectToLogin(w, r)
 						return
 					}
@@ -1033,7 +1060,7 @@ func RequireAuth(srv *server.Server) func(http.Handler) http.Handler {
 				lock.Unlock()
 
 				// Re-read session after refresh.
-				session = srv.UserSessions.Get(cookie.Sub)
+				session = deps.UserSessions.Get(cookie.Sub)
 				if session == nil {
 					redirectToLogin(w, r)
 					return
@@ -1073,17 +1100,17 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 // refreshAccessToken exchanges the refresh token for a new access
 // token via the IdP's token endpoint and updates the server-side
 // session in place.
-func refreshAccessToken(ctx context.Context, srv *server.Server, sub string) error {
-	if srv.OIDCClient == nil {
+func refreshAccessToken(ctx context.Context, deps *Deps, sub string) error {
+	if deps.OIDCClient == nil {
 		return fmt.Errorf("OIDC not configured")
 	}
 
-	session := srv.UserSessions.Get(sub)
+	session := deps.UserSessions.Get(sub)
 	if session == nil {
 		return fmt.Errorf("session not found for sub %q", sub)
 	}
 
-	newToken, err := srv.OIDCClient.RefreshToken(ctx, session.RefreshToken)
+	newToken, err := deps.OIDCClient.RefreshToken(ctx, session.RefreshToken)
 	if err != nil {
 		return err
 	}
@@ -1098,7 +1125,7 @@ func refreshAccessToken(ctx context.Context, srv *server.Server, sub string) err
 		newRefresh = &newToken.RefreshToken
 	}
 
-	srv.UserSessions.UpdateTokens(sub, newToken.AccessToken, newRefresh, newExpiresAt)
+	deps.UserSessions.UpdateTokens(sub, newToken.AccessToken, newRefresh, newExpiresAt)
 	return nil
 }
 ```
@@ -1118,20 +1145,22 @@ Wire the auth middleware and handlers into the `chi` router:
 func buildRouter(srv *server.Server) chi.Router {
 	r := chi.NewRouter()
 
+	authDeps := srv.AuthDeps()
+
 	// API routes (bearer-token auth, outside app-plane auth).
 	r.Mount("/api/v1", api.Router(srv))
 
 	// Auth endpoints (outside app-plane auth layer).
-	r.Get("/login", auth.LoginHandler(srv))
-	r.Get("/callback", auth.CallbackHandler(srv))
-	r.Post("/logout", auth.LogoutHandler(srv))
+	r.Get("/login", auth.LoginHandler(authDeps))
+	r.Get("/callback", auth.CallbackHandler(authDeps))
+	r.Post("/logout", auth.LogoutHandler(authDeps))
 
 	// Health check (unauthenticated).
 	r.Get("/healthz", healthHandler)
 
 	// Proxy routes with app-plane auth middleware.
 	r.Route("/app", func(sub chi.Router) {
-		sub.Use(auth.RequireAuth(srv))
+		sub.Use(auth.RequireAuth(authDeps))
 		sub.Get("/{name}", trailingSlashRedirect)
 		sub.HandleFunc("/{name}/", proxyHandler(srv))
 		sub.HandleFunc("/{name}/*", proxyHandler(srv))
@@ -1156,7 +1185,7 @@ internal/
     ├── session.go     # SigningKey, CookiePayload, UserSession,
     │                  # UserSessionStore
     ├── middleware.go   # RequireAuth, AuthenticatedUser, UserFromContext
-    └── handlers.go    # LoginHandler, CallbackHandler, LogoutHandler
+    └── handlers.go    # Deps, LoginHandler, CallbackHandler, LogoutHandler
 ```
 
 ### Step 9: Test infrastructure — Mock IdP
@@ -1288,16 +1317,22 @@ parameter.
 
 `internal/auth/auth_test.go`:
 
+Tests build an `auth.Deps` directly (no `server.Server` needed) and wire
+it into a test router via `buildTestRouter(deps)`. This mirrors the real
+router's use of `srv.AuthDeps()` without pulling in the full server
+dependency tree.
+
 ```go
 func TestLoginRedirectsToIdP(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	srv := spawnTestServerWithOIDC(t, idp)
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
 
 	req := httptest.NewRequest("GET", "/login", nil)
 	w := httptest.NewRecorder()
-	srv.Router.ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
@@ -1312,43 +1347,44 @@ func TestFullAuthFlow(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	srv := spawnTestServerWithOIDC(t, idp)
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
 
 	// 1. GET /login → 302 to IdP
 	req := httptest.NewRequest("GET", "/login", nil)
 	w := httptest.NewRecorder()
-	srv.Router.ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
 	}
 
 	// 2. Simulate IdP redirect back to /callback with code + state.
-	//    Extract CSRF token from the state cookie set by /login.
-	stateCookie := extractSetCookie(w, "blockyard_oidc_state")
-	csrfToken := extractCSRFFromStateCookie(stateCookie, srv.SigningKey)
+	//    Extract CSRF token from the redirect URL's state parameter.
+	stateCookie := findCookie(w.Result(), "blockyard_oidc_state")
+	csrfToken := extractStateParam(w.Header().Get("Location"))
 
 	callbackURL := fmt.Sprintf("/callback?code=test-code&state=%s", csrfToken)
 	req = httptest.NewRequest("GET", callbackURL, nil)
 	req.AddCookie(stateCookie)
 	w = httptest.NewRecorder()
-	srv.Router.ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302 redirect, got %d", w.Code)
 	}
 
 	// 3. Verify session exists server-side.
-	session := srv.UserSessions.Get("test-sub")
+	session := deps.UserSessions.Get("test-sub")
 	if session == nil {
 		t.Fatal("expected server-side session to exist")
 	}
 
 	// 4. Access /app/my-app/ with session cookie — should succeed.
-	sessionCookie := extractSetCookie(w, "blockyard_session")
-	req = httptest.NewRequest("GET", "/app/my-app/", nil)
+	sessionCookie := findCookie(w.Result(), "blockyard_session")
+	req = httptest.NewRequest("GET", "/app/my-app/page", nil)
 	req.AddCookie(sessionCookie)
 	w = httptest.NewRecorder()
-	srv.Router.ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 
 	// Should not redirect to login (2xx or proxy-related error, not 302).
 	if w.Code == http.StatusFound {
@@ -1360,11 +1396,12 @@ func TestUnauthenticatedProxyRedirectsToLogin(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	srv := spawnTestServerWithOIDC(t, idp)
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
 
-	req := httptest.NewRequest("GET", "/app/my-app/", nil)
+	req := httptest.NewRequest("GET", "/app/my-app/page", nil)
 	w := httptest.NewRecorder()
-	srv.Router.ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
@@ -1378,7 +1415,7 @@ func TestUnauthenticatedProxyRedirectsToLogin(t *testing.T) {
 func TestLogoutRemovesSession(t *testing.T) {
 	// ... authenticate first, then POST /logout ...
 	// Verify session is removed from UserSessionStore.
-	session := srv.UserSessions.Get("test-sub")
+	session := deps.UserSessions.Get("test-sub")
 	if session != nil {
 		t.Error("expected session to be removed after logout")
 	}
@@ -1386,11 +1423,12 @@ func TestLogoutRemovesSession(t *testing.T) {
 
 func TestNoOIDCConfigPassesThrough(t *testing.T) {
 	// v0 compatibility: without [oidc] config, proxy routes are unprotected.
-	srv := spawnTestServer(t) // existing helper, no OIDC
+	deps := &auth.Deps{Config: &config.Config{}}
+	router := buildTestRouter(deps)
 
-	req := httptest.NewRequest("GET", "/app/my-app/", nil)
+	req := httptest.NewRequest("GET", "/app/my-app/page", nil)
 	w := httptest.NewRecorder()
-	srv.Router.ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 
 	// Should not redirect to login.
 	if w.Code == http.StatusFound {
@@ -1433,14 +1471,15 @@ internal/
 │   │                      # UserSessionStore
 │   ├── middleware.go       # RequireAuth, AuthenticatedUser,
 │   │                      # UserFromContext, refreshAccessToken
-│   └── handlers.go        # LoginHandler, CallbackHandler, LogoutHandler,
-│                          # oidcStatePayload, cookie helpers
+│   └── handlers.go        # Deps, LoginHandler, CallbackHandler,
+│                          # LogoutHandler, oidcStatePayload, cookie helpers
 ├── config/
 │   ├── config.go          # + OidcConfig, SessionSecret, ExternalURL,
 │   │                      # validation
 │   └── secret.go          # Secret type (new file)
 ├── server/
-│   └── state.go           # + OIDCClient, SigningKey, UserSessions fields
+│   └── state.go           # + OIDCClient, SigningKey, UserSessions fields,
+│                          # AuthDeps() method
 cmd/
 └── blockyard/
     └── main.go            # + OIDC initialization, auth route registration

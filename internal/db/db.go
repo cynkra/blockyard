@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,9 +16,11 @@ const schema = `
 CREATE TABLE IF NOT EXISTS apps (
     id                      TEXT PRIMARY KEY,
     name                    TEXT NOT NULL UNIQUE,
+    owner                   TEXT NOT NULL DEFAULT 'admin',
+    access_type             TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'public')),
     active_bundle           TEXT REFERENCES bundles(id),
     max_workers_per_app     INTEGER,
-    max_sessions_per_worker INTEGER NOT NULL DEFAULT 1,
+    max_sessions_per_worker INTEGER DEFAULT 1,
     memory_limit            TEXT,
     cpu_limit               REAL,
     created_at              TEXT NOT NULL,
@@ -32,6 +35,22 @@ CREATE TABLE IF NOT EXISTS bundles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bundles_app_id ON bundles(app_id);
+
+CREATE TABLE IF NOT EXISTS app_access (
+    app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    principal   TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('user', 'group')),
+    role        TEXT NOT NULL CHECK (role IN ('viewer', 'collaborator')),
+    granted_by  TEXT NOT NULL,
+    granted_at  TEXT NOT NULL,
+    PRIMARY KEY (app_id, principal, kind)
+);
+
+CREATE TABLE IF NOT EXISTS role_mappings (
+    group_name  TEXT NOT NULL,
+    role        TEXT NOT NULL CHECK (role IN ('admin', 'publisher', 'viewer')),
+    PRIMARY KEY (group_name)
+);
 `
 
 type DB struct {
@@ -70,6 +89,8 @@ func Open(path string) (*DB, error) {
 type AppRow struct {
 	ID                   string
 	Name                 string
+	Owner                string
+	AccessType           string
 	ActiveBundle         *string
 	MaxWorkersPerApp     *int
 	MaxSessionsPerWorker int
@@ -86,14 +107,14 @@ type BundleRow struct {
 	UploadedAt string `json:"uploaded_at"`
 }
 
-func (db *DB) CreateApp(name string) (*AppRow, error) {
+func (db *DB) CreateApp(name, owner string) (*AppRow, error) {
 	id := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := db.Exec(
-		`INSERT INTO apps (id, name, max_sessions_per_worker, created_at, updated_at)
-		 VALUES (?, ?, 1, ?, ?)`,
-		id, name, now, now,
+		`INSERT INTO apps (id, name, owner, max_sessions_per_worker, created_at, updated_at)
+		 VALUES (?, ?, ?, 1, ?, ?)`,
+		id, name, owner, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert app: %w", err)
@@ -102,42 +123,67 @@ func (db *DB) CreateApp(name string) (*AppRow, error) {
 	return db.GetApp(id)
 }
 
+const appColumns = `id, name, owner, access_type, active_bundle, max_workers_per_app,
+		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at`
+
 func (db *DB) GetApp(id string) (*AppRow, error) {
-	row := db.QueryRow(`SELECT id, name, active_bundle, max_workers_per_app,
-		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at
-		FROM apps WHERE id = ?`, id)
+	row := db.QueryRow(`SELECT `+appColumns+` FROM apps WHERE id = ?`, id)
 	return scanApp(row)
 }
 
 func (db *DB) GetAppByName(name string) (*AppRow, error) {
-	row := db.QueryRow(`SELECT id, name, active_bundle, max_workers_per_app,
-		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at
-		FROM apps WHERE name = ?`, name)
+	row := db.QueryRow(`SELECT `+appColumns+` FROM apps WHERE name = ?`, name)
 	return scanApp(row)
 }
 
 func (db *DB) ListApps() ([]AppRow, error) {
-	rows, err := db.Query(`SELECT id, name, active_bundle, max_workers_per_app,
-		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at
-		FROM apps ORDER BY created_at DESC`)
+	rows, err := db.Query(`SELECT ` + appColumns + ` FROM apps ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var apps []AppRow
-	for rows.Next() {
-		var app AppRow
-		if err := rows.Scan(&app.ID, &app.Name, &app.ActiveBundle,
-			&app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
-			&app.MemoryLimit, &app.CPULimit,
-			&app.CreatedAt, &app.UpdatedAt); err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
+	return scanApps(rows)
 }
+
+// ListAccessibleApps returns apps the caller can see: owned apps + apps
+// with an ACL grant matching the caller's sub or any of their groups +
+// public apps.
+func (db *DB) ListAccessibleApps(sub string, groups []string) ([]AppRow, error) {
+	args := []any{sub, sub} // owner check + direct user grant
+
+	groupClause := "SELECT 1 WHERE 0" // no groups -> never matches
+	if len(groups) > 0 {
+		placeholders := make([]string, len(groups))
+		for i, g := range groups {
+			placeholders[i] = "?"
+			args = append(args, g)
+		}
+		groupClause = strings.Join(placeholders, ", ")
+	}
+
+	query := fmt.Sprintf(
+		`SELECT DISTINCT a.%s
+		 FROM apps a
+		 LEFT JOIN app_access aa ON a.id = aa.app_id
+		 WHERE a.access_type = 'public'
+		    OR a.owner = ?
+		    OR (aa.kind = 'user'  AND aa.principal = ?)
+		    OR (aa.kind = 'group' AND aa.principal IN (%s))
+		 ORDER BY a.created_at DESC`,
+		strings.ReplaceAll(appColumns, "\n\t\t", " "),
+		groupClause,
+	)
+
+	// Reorder args: the query uses owner=? then principal=? then group IN(?)
+	// which matches our args order: sub, sub, groups...
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanApps(rows)
+}
+
 
 func (db *DB) DeleteApp(id string) (bool, error) {
 	result, err := db.Exec(`DELETE FROM apps WHERE id = ?`, id)
@@ -223,15 +269,16 @@ func (db *DB) DeleteBundle(id string) (bool, error) {
 	return n > 0, nil
 }
 
-// AppUpdate holds optional fields for updating an app's resource limits.
+// AppUpdate holds optional fields for updating an app's configuration.
 type AppUpdate struct {
 	MaxWorkersPerApp     *int
 	MaxSessionsPerWorker *int
 	MemoryLimit          *string
 	CPULimit             *float64
+	AccessType           *string
 }
 
-// UpdateApp applies partial updates to an app's resource limits.
+// UpdateApp applies partial updates to an app's configuration.
 // Uses fetch-modify-write since updates are rare admin operations.
 func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	app, err := db.GetApp(id)
@@ -254,6 +301,9 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	if u.CPULimit != nil {
 		app.CPULimit = u.CPULimit
 	}
+	if u.AccessType != nil {
+		app.AccessType = *u.AccessType
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(
@@ -262,10 +312,12 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 			max_sessions_per_worker = ?,
 			memory_limit = ?,
 			cpu_limit = ?,
+			access_type = ?,
 			updated_at = ?
 		WHERE id = ?`,
 		app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
 		app.MemoryLimit, app.CPULimit,
+		app.AccessType,
 		now, id,
 	)
 	if err != nil {
@@ -297,8 +349,8 @@ func (db *DB) FailStaleBuilds() (int64, error) {
 
 func scanApp(row *sql.Row) (*AppRow, error) {
 	var app AppRow
-	err := row.Scan(&app.ID, &app.Name, &app.ActiveBundle,
-		&app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
+	err := row.Scan(&app.ID, &app.Name, &app.Owner, &app.AccessType,
+		&app.ActiveBundle, &app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
 		&app.MemoryLimit, &app.CPULimit,
 		&app.CreatedAt, &app.UpdatedAt)
 	if err == sql.ErrNoRows {
@@ -308,4 +360,124 @@ func scanApp(row *sql.Row) (*AppRow, error) {
 		return nil, err
 	}
 	return &app, nil
+}
+
+func scanApps(rows *sql.Rows) ([]AppRow, error) {
+	var apps []AppRow
+	for rows.Next() {
+		var app AppRow
+		if err := rows.Scan(&app.ID, &app.Name, &app.Owner, &app.AccessType,
+			&app.ActiveBundle, &app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
+			&app.MemoryLimit, &app.CPULimit,
+			&app.CreatedAt, &app.UpdatedAt); err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// --- Role mappings ---
+
+// RoleMappingRow represents a row from the role_mappings table.
+type RoleMappingRow struct {
+	GroupName string
+	Role      string
+}
+
+func (db *DB) ListRoleMappings() ([]RoleMappingRow, error) {
+	rows, err := db.Query("SELECT group_name, role FROM role_mappings")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var mappings []RoleMappingRow
+	for rows.Next() {
+		var m RoleMappingRow
+		if err := rows.Scan(&m.GroupName, &m.Role); err != nil {
+			return nil, err
+		}
+		mappings = append(mappings, m)
+	}
+	return mappings, rows.Err()
+}
+
+func (db *DB) UpsertRoleMapping(groupName, role string) error {
+	_, err := db.Exec(
+		`INSERT INTO role_mappings (group_name, role) VALUES (?, ?)
+		 ON CONFLICT (group_name) DO UPDATE SET role = excluded.role`,
+		groupName, role,
+	)
+	return err
+}
+
+func (db *DB) DeleteRoleMapping(groupName string) (bool, error) {
+	result, err := db.Exec(
+		"DELETE FROM role_mappings WHERE group_name = ?", groupName,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+// --- App access (ACL) ---
+
+// AppAccessRow represents a row from the app_access table.
+type AppAccessRow struct {
+	AppID     string
+	Principal string
+	Kind      string
+	Role      string
+	GrantedBy string
+	GrantedAt string
+}
+
+func (db *DB) ListAppAccess(appID string) ([]AppAccessRow, error) {
+	rows, err := db.Query(
+		"SELECT app_id, principal, kind, role, granted_by, granted_at FROM app_access WHERE app_id = ?",
+		appID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var grants []AppAccessRow
+	for rows.Next() {
+		var g AppAccessRow
+		if err := rows.Scan(&g.AppID, &g.Principal, &g.Kind, &g.Role, &g.GrantedBy, &g.GrantedAt); err != nil {
+			return nil, err
+		}
+		grants = append(grants, g)
+	}
+	return grants, rows.Err()
+}
+
+func (db *DB) GrantAppAccess(appID, principal, kind, role, grantedBy string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`INSERT INTO app_access (app_id, principal, kind, role, granted_by, granted_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (app_id, principal, kind)
+		 DO UPDATE SET role = excluded.role,
+		               granted_by = excluded.granted_by,
+		               granted_at = excluded.granted_at`,
+		appID, principal, kind, role, grantedBy, now,
+	)
+	return err
+}
+
+func (db *DB) RevokeAppAccess(appID, principal, kind string) (bool, error) {
+	result, err := db.Exec(
+		"DELETE FROM app_access WHERE app_id = ? AND principal = ? AND kind = ?",
+		appID, principal, kind,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
 }

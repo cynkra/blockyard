@@ -12,6 +12,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
@@ -23,6 +25,8 @@ import (
 type AppResponse struct {
 	ID                   string   `json:"id"`
 	Name                 string   `json:"name"`
+	Owner                string   `json:"owner"`
+	AccessType           string   `json:"access_type"`
 	ActiveBundle         *string  `json:"active_bundle"`
 	MaxWorkersPerApp     *int     `json:"max_workers_per_app"`
 	MaxSessionsPerWorker int      `json:"max_sessions_per_worker"`
@@ -46,6 +50,8 @@ func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
 	return AppResponse{
 		ID:                   app.ID,
 		Name:                 app.Name,
+		Owner:                app.Owner,
+		AccessType:           app.AccessType,
 		ActiveBundle:         app.ActiveBundle,
 		MaxWorkersPerApp:     app.MaxWorkersPerApp,
 		MaxSessionsPerWorker: app.MaxSessionsPerWorker,
@@ -68,6 +74,62 @@ func resolveApp(database *db.DB, id string) (*db.AppRow, error) {
 		return app, nil
 	}
 	return database.GetAppByName(id)
+}
+
+// resolveAppRelation loads an app + ACL grants, evaluates the caller's
+// relationship. Returns the app and relation, or writes an error response
+// and returns false.
+//
+// Returns 404 both when the app doesn't exist and when the caller has no
+// access — this prevents leaking app existence to unauthorized users.
+func resolveAppRelation(
+	srv *server.Server,
+	w http.ResponseWriter,
+	caller *auth.CallerIdentity,
+	appID string,
+) (*db.AppRow, authz.AppRelation, bool) {
+	app, err := resolveApp(srv.DB, appID)
+	if err != nil {
+		serverError(w, "db error: "+err.Error())
+		return nil, authz.RelationNone, false
+	}
+	if app == nil {
+		notFound(w, "app not found")
+		return nil, authz.RelationNone, false
+	}
+
+	rows, err := srv.DB.ListAppAccess(app.ID)
+	if err != nil {
+		serverError(w, "db error: "+err.Error())
+		return nil, authz.RelationNone, false
+	}
+
+	grants := make([]authz.AccessGrant, len(rows))
+	for i, row := range rows {
+		grants[i] = accessRowToGrant(row)
+	}
+
+	relation := authz.EvaluateAccess(caller, app.Owner, grants, app.AccessType)
+
+	if relation == authz.RelationNone {
+		notFound(w, "app not found")
+		return nil, authz.RelationNone, false
+	}
+
+	return app, relation, true
+}
+
+// accessRowToGrant converts a db.AppAccessRow to an authz.AccessGrant.
+func accessRowToGrant(row db.AppAccessRow) authz.AccessGrant {
+	role, _ := authz.ParseContentRole(row.Role)
+	return authz.AccessGrant{
+		AppID:     row.AppID,
+		Principal: row.Principal,
+		Kind:      authz.AccessKind(row.Kind),
+		Role:      role,
+		GrantedBy: row.GrantedBy,
+		GrantedAt: row.GrantedAt,
+	}
 }
 
 // validateAppName checks that name is a valid URL-safe slug.
@@ -95,6 +157,12 @@ type createAppRequest struct {
 
 func CreateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanCreateApp() {
+			forbidden(w, "insufficient permissions")
+			return
+		}
+
 		var body createAppRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			badRequest(w, "invalid JSON body")
@@ -116,7 +184,7 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		app, err := srv.DB.CreateApp(body.Name)
+		app, err := srv.DB.CreateApp(body.Name, caller.Sub)
 		if err != nil {
 			serverError(w, "create app: "+err.Error())
 			return
@@ -130,7 +198,16 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 
 func ListApps(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		apps, err := srv.DB.ListApps()
+		caller := auth.CallerFromContext(r.Context())
+
+		var apps []db.AppRow
+		var err error
+
+		if caller.Role.CanViewAllApps() {
+			apps, err = srv.DB.ListApps()
+		} else {
+			apps, err = srv.DB.ListAccessibleApps(caller.Sub, caller.Groups)
+		}
 		if err != nil {
 			serverError(w, "db error: "+err.Error())
 			return
@@ -148,15 +225,11 @@ func ListApps(srv *server.Server) http.HandlerFunc {
 
 func GetApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
-			return
-		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+		app, _, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
 
@@ -170,10 +243,12 @@ type updateAppRequest struct {
 	MaxSessionsPerWorker *int     `json:"max_sessions_per_worker"`
 	MemoryLimit          *string  `json:"memory_limit"`
 	CPULimit             *float64 `json:"cpu_limit"`
+	AccessType           *string  `json:"access_type"`
 }
 
 func UpdateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
 		var body updateAppRequest
@@ -188,14 +263,26 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+
+		if !relation.CanUpdateConfig() {
+			notFound(w, "app not found")
 			return
+		}
+
+		// Changing access_type requires ACL management permission (owner or admin).
+		if body.AccessType != nil {
+			if !relation.CanManageACL() {
+				notFound(w, "app not found")
+				return
+			}
+			if *body.AccessType != "acl" && *body.AccessType != "public" {
+				badRequest(w, "access_type must be 'acl' or 'public'")
+				return
+			}
 		}
 
 		update := db.AppUpdate{
@@ -203,8 +290,9 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			MaxSessionsPerWorker: body.MaxSessionsPerWorker,
 			MemoryLimit:          body.MemoryLimit,
 			CPULimit:             body.CPULimit,
+			AccessType:           body.AccessType,
 		}
-		app, err = srv.DB.UpdateApp(app.ID, update)
+		app, err := srv.DB.UpdateApp(app.ID, update)
 		if err != nil {
 			serverError(w, "update app: "+err.Error())
 			return
@@ -217,15 +305,16 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 
 func DeleteApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+
+		if !relation.CanDelete() {
+			notFound(w, "app not found")
 			return
 		}
 
@@ -280,15 +369,16 @@ type startResponse struct {
 
 func StartApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+
+		if !relation.CanStartStop() {
+			notFound(w, "app not found")
 			return
 		}
 
@@ -370,15 +460,16 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 
 func StopApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+
+		if !relation.CanStartStop() {
+			notFound(w, "app not found")
 			return
 		}
 
@@ -405,15 +496,11 @@ func stopAppWorkers(srv *server.Server, appID string) int {
 // AppLogs streams logs from the LogStore for a specific worker.
 func AppLogs(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
-			return
-		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+		_, _, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
 
