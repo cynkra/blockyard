@@ -58,6 +58,7 @@ type BuildSpec struct {
 type BuildResult struct {
 	Success  bool
 	ExitCode int
+	Logs     string // combined stdout+stderr from the build container
 }
 
 type ManagedResource struct {

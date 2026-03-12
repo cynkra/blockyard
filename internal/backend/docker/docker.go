@@ -603,12 +603,25 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	success := exitCode == 0
 
-	// 5. Remove the build container
+	// 5. Capture build container logs before removal.
+	var buildLogs string
+	logReader, logErr := d.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+	})
+	if logErr == nil {
+		raw, _ := io.ReadAll(logReader)
+		logReader.Close()
+		buildLogs = string(raw)
+	}
+
+	// 6. Remove the build container
 	_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 
 	return backend.BuildResult{
 		Success:  success,
 		ExitCode: exitCode,
+		Logs:     buildLogs,
 	}, nil
 }
 

@@ -546,7 +546,7 @@ dependencies = []
 		t.Fatalf("Build: %v", err)
 	}
 	if !result.Success {
-		t.Fatalf("build failed with exit code %d", result.ExitCode)
+		t.Fatalf("build failed with exit code %d\n--- build logs ---\n%s", result.ExitCode, result.Logs)
 	}
 
 	// 4. Verify that mime was installed into the library dir.
