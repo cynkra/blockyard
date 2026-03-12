@@ -3,22 +3,27 @@
 Route user traffic to Shiny app containers. This is the layer that makes
 deployed apps accessible — without it, the server can manage containers
 but nobody can use them. Covers session routing, HTTP/WS forwarding,
-cold-start holding, and WebSocket session caching.
+cold-start holding, and WebSocket session caching with message buffering.
 
 ## Deliverables
 
-1. `WsCache` — WebSocket connection cache for client reconnects
-2. Session cookie helpers — set and read `blockyard_session` cookie
-3. Cold-start holding — hold initial request while worker starts, poll
+1. `wsSession` — persistent backend WebSocket reader with message
+   buffering for client reconnects
+2. `WsCache` — TTL-based cache for `wsSession` entries
+3. Session cookie helpers — set and read `blockyard_session` cookie
+4. Cold-start holding — hold initial request while worker starts, poll
    health until ready or `worker_start_timeout` expires
-4. HTTP reverse proxy — forward requests to the correct worker
-5. WebSocket reverse proxy — upgrade handling and bidirectional forwarding
-6. Proxy handler — catch-all for `/app/{name}/` routes, session
-   management, cold-start orchestration
-7. Trailing-slash redirect — `/app/{name}` → `/app/{name}/`
-8. Path prefix stripping — remove `/app/{name}` before forwarding
-9. Router composition — proxy routes alongside API routes in `NewRouter`
-10. Integration tests — end-to-end HTTP and WebSocket proxying through
+5. HTTP reverse proxy — forward requests to the correct worker
+6. WebSocket reverse proxy — upgrade handling, bidirectional forwarding,
+   session caching with message buffering
+7. Proxy handler — catch-all for `/app/{name}/` routes, session
+   management, cold-start orchestration, active bundle guard
+8. Trailing-slash redirect — `/app/{name}` → `/app/{name}/`
+9. Path prefix stripping — remove `/app/{name}` before forwarding
+10. Mock backend `SetWSHandler` — extend mock for WS integration tests
+11. Router composition — proxy routes alongside API routes in `NewRouter`
+12. Fix: enforce active bundle invariant when clearing `active_bundle`
+13. Integration tests — end-to-end HTTP and WebSocket proxying through
     mock backend
 
 ## What's already done
@@ -68,12 +73,198 @@ Phase 0-4 delivered:
 
 ## Step-by-step
 
-### Step 1: WsCache
+### Step 1: wsSession — persistent backend reader with message buffering
 
-`internal/proxy/wscache.go` — holds backend WebSocket connections after
-client disconnect, keyed by session ID. When a client reconnects within
-`ws_cache_ttl`, the cached backend connection is reused instead of
-opening a new one.
+`internal/proxy/wssession.go` — owns a backend WebSocket connection for
+its entire lifetime. A persistent reader goroutine reads from the
+backend and either forwards to an attached client or buffers messages
+for replay on reconnect.
+
+**Why not cache a raw `*websocket.Conn`.** `coder/websocket` closes the
+underlying connection when a `Read`'s context is cancelled — there is no
+way to interrupt a blocked `Read` without destroying the connection. A
+naive two-goroutine shuttle with a shared context would kill the backend
+connection when `cancel()` is called after the client disconnects. The
+`wsSession` model avoids this by making the reader goroutine the sole,
+permanent owner of `backendConn.Read` — no context cancellation is ever
+needed.
+
+**Message buffering.** While no client is attached (between disconnect
+and reconnect), messages from the backend are buffered. On reconnect,
+buffered messages are replayed before switching to live forwarding. This
+is critical for mobile and flaky connections where brief disconnects are
+frequent — without buffering, any backend messages sent during the
+disconnect window (UI updates, reactive output) are silently lost. The
+Shiny R process doesn't know the client missed them and won't re-send.
+
+```go
+package proxy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/coder/websocket"
+)
+
+// wsSession owns a backend WebSocket connection for its entire lifetime.
+// A persistent reader goroutine reads from the backend and either
+// forwards to an attached client or buffers messages for later replay.
+type wsSession struct {
+	backendConn *websocket.Conn
+
+	mu     sync.Mutex
+	client *websocket.Conn // nil when no client is attached
+	buffer []wsMsg         // messages received while detached
+	closed bool            // true after backend disconnects
+}
+
+type wsMsg struct {
+	typ  websocket.MessageType
+	data []byte
+}
+
+const maxBufferedMessages = 1000
+
+func newSession(backendConn *websocket.Conn) *wsSession {
+	s := &wsSession{
+		backendConn: backendConn,
+	}
+	go s.readLoop()
+	return s
+}
+
+// readLoop is the sole reader of backendConn. It runs for the
+// connection's entire lifetime — no other goroutine ever calls
+// backendConn.Read. Messages are forwarded to the attached client
+// or buffered if no client is attached.
+func (s *wsSession) readLoop() {
+	for {
+		typ, data, err := s.backendConn.Read(context.Background())
+		if err != nil {
+			s.mu.Lock()
+			s.closed = true
+			client := s.client
+			s.mu.Unlock()
+			if client != nil {
+				client.Close(websocket.StatusGoingAway,
+					"backend disconnected")
+			}
+			return
+		}
+
+		s.mu.Lock()
+		client := s.client
+		if client == nil {
+			// No client attached — buffer for replay on reconnect.
+			// If the buffer is full, the session is unrecoverable:
+			// dropping messages corrupts the Shiny protocol stream.
+			// Close the backend connection and let the next reconnect
+			// fail cleanly — the user reloads and gets a fresh session.
+			if len(s.buffer) >= maxBufferedMessages {
+				s.closed = true
+				s.mu.Unlock()
+				s.backendConn.CloseNow()
+				return
+			}
+			s.buffer = append(s.buffer, wsMsg{typ, data})
+			s.mu.Unlock()
+			continue
+		}
+		s.mu.Unlock()
+
+		if err := client.Write(context.Background(), typ, data); err != nil {
+			// Client write failed — detach. The shuttle goroutine
+			// will also notice and call Detach explicitly.
+			s.mu.Lock()
+			if s.client == client {
+				s.client = nil
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
+// Attach connects a client to this session. Replays any buffered
+// messages first, then sets the client for live forwarding. Holds
+// the lock during replay to ensure correct ordering between buffered
+// and live messages — the reader goroutine blocks until replay is
+// complete. This is acceptable because replay is bounded by
+// maxBufferedMessages and only happens on reconnect (infrequent).
+func (s *wsSession) Attach(client *websocket.Conn) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return errors.New("backend disconnected")
+	}
+
+	for _, msg := range s.buffer {
+		if err := client.Write(context.Background(), msg.typ, msg.data); err != nil {
+			return fmt.Errorf("replay buffered message: %w", err)
+		}
+	}
+	s.buffer = nil
+	s.client = client
+	return nil
+}
+
+// Detach removes the client from this session. The reader goroutine
+// switches to buffering mode.
+func (s *wsSession) Detach() {
+	s.mu.Lock()
+	s.client = nil
+	s.mu.Unlock()
+}
+
+// IsClosed returns true if the backend connection has disconnected.
+func (s *wsSession) IsClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+// Close shuts down the backend connection. The reader goroutine exits
+// when its next Read fails.
+func (s *wsSession) Close() {
+	s.backendConn.CloseNow()
+}
+```
+
+**Connection ownership model.** `coder/websocket` uses separate
+internal mutexes for Read and Write, so concurrent Read + Write on the
+same connection is safe. The reader goroutine is the sole caller of
+`backendConn.Read`. `shuttleWS` (in the handler's goroutine) is the
+sole caller of `backendConn.Write` (client→backend direction). The
+reader goroutine writes to `clientConn`; `shuttleWS` reads from
+`clientConn`. No concurrent Read+Read or Write+Write on any connection.
+
+**Buffer overflow.** When the buffer reaches `maxBufferedMessages`
+(1000), the session closes the backend connection and marks itself
+closed. Dropping messages — whether oldest or newest — silently
+corrupts the Shiny protocol stream (messages are ordered protocol
+events, not independent UI snapshots). A clean close is the honest
+failure mode: the user reloads and gets a fresh session.
+
+**Tests:**
+
+- `TestSessionForwardToClient` — attach a client, send a message from
+  backend, verify client receives it
+- `TestSessionBufferWhileDetached` — send messages with no client
+  attached, attach, verify replay
+- `TestSessionBufferOverflowCloses` — send `maxBufferedMessages + 1`
+  with no client, verify `IsClosed()` is true
+- `TestSessionBackendDisconnect` — close backend, verify `IsClosed()`
+  and attached client receives close frame
+- `TestSessionAttachAfterClose` — verify `Attach` returns error
+
+### Step 2: WsCache
+
+`internal/proxy/wscache.go` — holds `wsSession` entries after client
+disconnect, keyed by session ID. Entries expire after a configurable
+TTL. The TTL is set once at construction time.
 
 ```go
 package proxy
@@ -81,59 +272,62 @@ package proxy
 import (
 	"sync"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
-// WsCache holds backend WebSocket connections after client disconnect.
-// Keyed by session ID. Entries expire after a configurable TTL.
+// WsCache holds wsSession entries after client disconnect. Keyed by
+// session ID. Entries expire after the TTL set at construction time.
 type WsCache struct {
 	mu      sync.Mutex
-	entries map[string]*cachedConn
+	entries map[string]*cachedSession
+	ttl     time.Duration
 }
 
-type cachedConn struct {
-	conn  *websocket.Conn
-	timer *time.Timer
+type cachedSession struct {
+	session *wsSession
+	timer   *time.Timer
 }
 
-func NewWsCache() *WsCache {
-	return &WsCache{entries: make(map[string]*cachedConn)}
+func NewWsCache(ttl time.Duration) *WsCache {
+	return &WsCache{
+		entries: make(map[string]*cachedSession),
+		ttl:     ttl,
+	}
 }
 
-// Cache stores a backend WebSocket connection with a TTL. When the TTL
-// expires, the connection is closed and onExpire is called.
-func (c *WsCache) Cache(sessionID string, conn *websocket.Conn, ttl time.Duration, onExpire func()) {
+// Put stores a detached session. When the TTL expires without a
+// reconnect, the session is closed and onExpire is called.
+func (c *WsCache) Put(sessionID string, s *wsSession, onExpire func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Evict any existing entry for this session
 	if existing, ok := c.entries[sessionID]; ok {
 		existing.timer.Stop()
-		existing.conn.CloseNow()
+		existing.session.Close()
 		delete(c.entries, sessionID)
 	}
 
-	timer := time.AfterFunc(ttl, func() {
+	timer := time.AfterFunc(c.ttl, func() {
 		c.mu.Lock()
 		entry, ok := c.entries[sessionID]
-		if ok && entry.conn == conn {
+		removed := ok && entry.session == s
+		if removed {
 			delete(c.entries, sessionID)
 		}
 		c.mu.Unlock()
 
-		if ok {
-			conn.CloseNow()
+		if removed {
+			s.Close()
 			onExpire()
 		}
 	})
 
-	c.entries[sessionID] = &cachedConn{conn: conn, timer: timer}
+	c.entries[sessionID] = &cachedSession{session: s, timer: timer}
 }
 
-// Take reclaims a cached connection. Returns nil if no entry exists.
+// Take reclaims a cached session. Returns nil if no entry exists.
 // Stops the expiry timer.
-func (c *WsCache) Take(sessionID string) *websocket.Conn {
+func (c *WsCache) Take(sessionID string) *wsSession {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -144,14 +338,14 @@ func (c *WsCache) Take(sessionID string) *websocket.Conn {
 
 	entry.timer.Stop()
 	delete(c.entries, sessionID)
-	return entry.conn
+	return entry.session
 }
 ```
 
-`Cache` is called when the client end of a WebSocket closes but the
+`Put` is called when the client end of a WebSocket closes but the
 backend connection is still alive. `Take` is called on reconnect — if
 the client opens a new WebSocket to the same app within the TTL, the
-proxy reuses the backend connection instead of establishing a new one.
+cached session is reclaimed with its buffered messages.
 
 The `onExpire` callback is called when the TTL fires without a
 reconnect. The proxy uses this to clean up the session mapping and
@@ -159,19 +353,23 @@ reconnect. The proxy uses this to clean up the session mapping and
 sessions reference it.
 
 `time.AfterFunc` runs the callback in its own goroutine, so the lock
-inside the callback does not deadlock with `Cache` or `Take`.
+inside the callback does not deadlock with `Put` or `Take`. The
+`removed` flag ensures `onExpire` is only called when the entry was
+actually removed by the timer — not when another `Put` replaced it.
 
 **Tests:**
 
-- `TestCacheTakeBeforeExpiry` — cache a connection, take it back,
+- `TestCacheTakeBeforeExpiry` — put a session, take it back,
   verify non-nil and timer stopped
-- `TestCacheExpiry` — cache with short TTL (10ms), sleep, verify
+- `TestCacheExpiry` — put with short TTL (10ms), sleep, verify
   `Take` returns nil and `onExpire` was called
-- `TestCacheEvictsExisting` — cache twice for same session, verify
-  first connection is closed
+- `TestCacheEvictsExisting` — put twice for same session, verify
+  first session is closed
 - `TestTakeNonexistent` — take from empty cache, verify nil
+- `TestCacheExpiryAfterReplace` — put session A, put session B for
+  same key, verify session A's expiry does not call onExpire for B
 
-### Step 2: Session cookie helpers
+### Step 3: Session cookie helpers
 
 `internal/proxy/session.go` — cookie extraction and construction. The
 session store itself (`session.Store`) already exists from phase 0-1.
@@ -220,7 +418,7 @@ cloud LB). When v1 adds native TLS, the flag is set based on config.
 - `TestExtractSessionIDEmpty` — cookie with empty value returns ""
 - `TestSessionCookie` — verify name, path, HttpOnly, SameSite fields
 
-### Step 3: Cold-start holding
+### Step 4: Cold-start holding
 
 `internal/proxy/coldstart.go` — spawns a worker if none exists for the
 app, then polls health until ready. Returns the worker ID and address.
@@ -398,7 +596,7 @@ but the proxy needs to handle it defensively regardless.
 - `TestPollHealthyTimeout` — mock always returns unhealthy, verify
   `errHealthTimeout` after deadline
 
-### Step 4: HTTP forwarding
+### Step 5: HTTP forwarding
 
 `internal/proxy/forward.go` — forwards HTTP requests to the worker,
 stripping the `/app/{name}` prefix.
@@ -474,11 +672,12 @@ overrides `req.Host`.
   - `/app/myapp/foo?q=1` → `/foo?q=1` (query string preserved by
     the proxy, not by `stripAppPrefix`)
 
-### Step 5: WebSocket forwarding
+### Step 6: WebSocket forwarding
 
 `internal/proxy/ws.go` — accepts a WebSocket upgrade from the client,
-connects to the backend worker, and shuttles messages bidirectionally.
-Integrates with `WsCache` for reconnect support.
+connects to (or reclaims from cache) a backend session, and forwards
+messages bidirectionally. Integrates with `wsSession` for reconnect
+support with message buffering.
 
 ```go
 package proxy
@@ -499,12 +698,19 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 // shuttleWS accepts a WebSocket from the client, connects to (or
-// reclaims from cache) a backend WebSocket, and forwards messages
+// reclaims from cache) a backend session, and forwards messages
 // bidirectionally until one side closes.
 //
+// The backend→client direction is handled by the wsSession's persistent
+// reader goroutine. This function handles the client→backend direction
+// in the current goroutine — no additional goroutines are spawned.
+//
 // If the client disconnects while the backend is still alive, the
-// backend connection is cached for possible reconnect within the TTL.
-// If the backend disconnects, both connections are closed.
+// session is cached for possible reconnect within the TTL. Any
+// messages the backend sends during the disconnect window are buffered
+// and replayed on reconnect.
+// If the backend disconnects, the client receives a close frame and
+// the session is discarded.
 func shuttleWS(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -519,13 +725,12 @@ func shuttleWS(
 		return
 	}
 
-	// Check cache for existing backend connection (reconnect case)
-	backendConn := cache.Take(sessionID)
-	if backendConn == nil {
-		// No cached connection — dial the backend
+	// Get existing session from cache, or create a new one
+	session := cache.Take(sessionID)
+	if session == nil {
+		// No cached session — dial the backend
 		backendURL := "ws://" + addr + stripAppPrefix(r.URL.Path, appName)
-		var dialErr error
-		backendConn, _, dialErr = websocket.Dial(r.Context(), backendURL, nil)
+		backendConn, _, dialErr := websocket.Dial(r.Context(), backendURL, nil)
 		if dialErr != nil {
 			slog.Warn("ws backend dial failed",
 				"addr", addr, "error", dialErr)
@@ -533,95 +738,86 @@ func shuttleWS(
 				"backend connect failed")
 			return
 		}
+		session = newSession(backendConn)
 	}
 
-	// Bidirectional forwarding. Two goroutines: one for each direction.
-	// The first goroutine to finish signals which side disconnected.
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	const (
-		sideClient  = 1
-		sideBackend = 2
-	)
-	done := make(chan int, 2)
-
-	// client → backend
-	go func() {
-		copyWS(ctx, backendConn, clientConn)
-		done <- sideClient
-		cancel()
-	}()
-
-	// backend → client
-	go func() {
-		copyWS(ctx, clientConn, backendConn)
-		done <- sideBackend
-		cancel()
-	}()
-
-	// Wait for first close — tells us which side disconnected
-	firstClosed := <-done
-	// Wait for second goroutine to finish
-	<-done
-
-	if firstClosed == sideClient {
-		// Client disconnected, backend still alive — cache for reconnect
-		slog.Debug("ws client disconnected, caching backend",
-			"session_id", sessionID)
-		cache.Cache(sessionID, backendConn,
-			srv.Config.Proxy.WsCacheTTL.Duration, func() {
-				// TTL expired without reconnect — clean up session
-				workerID, ok := srv.Sessions.Get(sessionID)
-				if !ok {
-					return
-				}
-				srv.Sessions.Delete(sessionID)
-				// If no other sessions reference this worker, it's idle.
-				// Phase 0-6 adds evict_worker here. For now, the health
-				// poller will eventually clean up idle workers.
-				if srv.Sessions.CountForWorker(workerID) == 0 {
-					slog.Info("ws cache expired, worker has no sessions",
-						"worker_id", workerID, "session_id", sessionID)
-				}
-			})
-	} else {
-		// Backend disconnected — close both connections
-		slog.Debug("ws backend disconnected",
-			"session_id", sessionID)
+	// Attach client — replays buffered messages, then live forwarding
+	if err := session.Attach(clientConn); err != nil {
+		slog.Warn("ws attach failed", "error", err)
 		clientConn.Close(websocket.StatusGoingAway, "backend disconnected")
-		backendConn.CloseNow()
+		return
 	}
-}
 
-// copyWS reads messages from src and writes them to dst until an error
-// occurs or the context is cancelled.
-func copyWS(ctx context.Context, dst, src *websocket.Conn) {
+	// client → backend: read from client, write to backend.
+	// This is the only goroutine that reads from clientConn and the
+	// only goroutine that writes to backendConn.
+	var backendGone bool
 	for {
-		typ, data, err := src.Read(ctx)
+		typ, data, err := clientConn.Read(context.Background())
 		if err != nil {
-			return
+			break
 		}
-		if err := dst.Write(ctx, typ, data); err != nil {
-			return
+		if err := session.backendConn.Write(context.Background(), typ, data); err != nil {
+			backendGone = true
+			break
 		}
+	}
+
+	// Detach client from session — reader goroutine switches to buffering
+	session.Detach()
+	clientConn.CloseNow()
+
+	// Decide whether to cache or discard the session
+	if backendGone || session.IsClosed() {
+		// Backend died — no point caching a dead session
+		session.Close()
+		srv.Sessions.Delete(sessionID)
+	} else {
+		// Client disconnected, backend still alive — cache for reconnect
+		slog.Debug("ws client disconnected, caching session",
+			"session_id", sessionID)
+		cache.Put(sessionID, session, func() {
+			// TTL expired without reconnect — clean up session
+			workerID, ok := srv.Sessions.Get(sessionID)
+			if !ok {
+				return
+			}
+			srv.Sessions.Delete(sessionID)
+			// If no other sessions reference this worker, it's idle.
+			// Phase 0-6 adds evict_worker here. For now, the health
+			// poller will eventually clean up idle workers.
+			if srv.Sessions.CountForWorker(workerID) == 0 {
+				slog.Info("ws cache expired, worker has no sessions",
+					"worker_id", workerID, "session_id", sessionID)
+			}
+		})
 	}
 }
 ```
 
-**Bidirectional forwarding model.** Two goroutines shuttle messages in
-opposite directions. Each sends its side identifier to the `done`
-channel when it finishes. The first value received tells us which side
-disconnected first. The `cancel()` call propagates to the other
-goroutine via `coder/websocket`'s context-aware `Read` and `Write`.
+**No shared context, no goroutines.** Unlike a naive two-goroutine
+shuttle, `shuttleWS` runs the client→backend direction in its own
+goroutine (the HTTP handler's) and delegates the backend→client
+direction to the `wsSession`'s persistent reader goroutine. This
+eliminates the need for context cancellation to coordinate shutdown
+and avoids `coder/websocket`'s behavior of closing connections on
+context cancellation.
+
+**Backend disconnect detection.** The loop exits on either a client
+Read error or a backend Write error. A Write error means the backend
+connection is broken. The reader goroutine may also independently
+discover the backend is dead (Read error), setting `session.closed`.
+Both paths are checked before deciding whether to cache: if
+`backendGone || session.IsClosed()`, the session is discarded and the
+session mapping is cleaned up immediately.
 
 **Cache-on-client-disconnect.** Shiny uses WebSocket for its reactive
 communication. Browser tab switches, mobile lock screens, and brief
 network interruptions cause the client WebSocket to close. Without
 caching, the entire Shiny session state would be lost — the user sees
-a grey screen and must reload. By caching the backend connection for
+a grey screen and must reload. By caching the session for
 `ws_cache_ttl` (default 60s), a reconnecting client resumes its Shiny
-session seamlessly.
+session seamlessly with buffered messages replayed.
 
 **Cache expiry callback.** When the TTL fires without a reconnect, the
 callback cleans up the session mapping. In phase 0-5 it logs a warning;
@@ -633,12 +829,13 @@ sessions reference it.
 - `TestShuttleWSBidirectional` — mock server echoes messages. Client
   sends "hello", verifies echo received.
 - `TestShuttleWSCacheOnClientDisconnect` — client closes, verify
-  `cache.Take` returns non-nil backend connection
+  `cache.Take` returns non-nil session with buffered messages
 - `TestShuttleWSBackendDisconnect` — backend closes, verify client
   receives close frame and cache is empty
-- `TestCopyWS` — verify messages are forwarded correctly
+- `TestShuttleWSReconnectReplaysBuffer` — client disconnects, backend
+  sends messages, client reconnects, verify buffered messages received
 
-### Step 6: Proxy handler
+### Step 7: Proxy handler
 
 `internal/proxy/proxy.go` — the main proxy handler that ties together
 session management, cold-start, and forwarding.
@@ -663,7 +860,7 @@ import (
 // The returned handler captures a shared WsCache and http.Transport
 // that persist for the server's lifetime.
 func Handler(srv *server.Server) http.Handler {
-	cache := NewWsCache()
+	cache := NewWsCache(srv.Config.Proxy.WsCacheTTL.Duration)
 	transport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
@@ -684,7 +881,18 @@ func Handler(srv *server.Server) http.Handler {
 			return
 		}
 
-		// 2. Session resolution
+		// 2. Active bundle guard — defense in depth.
+		// The invariant is: if workers exist, the app has an active
+		// bundle. This is enforced by stopping workers when
+		// active_bundle is cleared (see step 12). This check catches
+		// any violation of that invariant rather than silently
+		// forwarding to a stale worker.
+		if app.ActiveBundle == nil {
+			http.Error(w, "app has no active bundle", http.StatusServiceUnavailable)
+			return
+		}
+
+		// 3. Session resolution
 		sessionID := extractSessionID(r)
 		var workerID, addr string
 		isNewSession := false
@@ -726,12 +934,12 @@ func Handler(srv *server.Server) http.Handler {
 			srv.Sessions.Set(sessionID, workerID)
 		}
 
-		// 3. Set cookie on new sessions
+		// 4. Set cookie on new sessions
 		if isNewSession {
 			http.SetCookie(w, sessionCookie(sessionID, appName))
 		}
 
-		// 4. Dispatch — WebSocket or HTTP
+		// 5. Dispatch — WebSocket or HTTP
 		if isWebSocketUpgrade(r) {
 			shuttleWS(w, r, addr, appName, sessionID, cache, srv)
 		} else {
@@ -741,6 +949,15 @@ func Handler(srv *server.Server) http.Handler {
 }
 ```
 
+**Active bundle guard.** The proxy checks `ActiveBundle != nil` before
+session resolution. This catches two cases: (a) the normal cold-start
+path where `ensureWorker` would also check, and (b) the reuse path
+where an existing worker was spawned from a bundle that has since been
+cleared. Case (b) is a bug in the Rust reference implementation — a
+worker could keep serving after its bundle was removed. The primary fix
+is in step 12 (enforce the invariant), but this guard provides
+defense in depth.
+
 **Session flow.** The handler checks for an existing session cookie
 first. If found and the pinned worker is still alive (in registry), the
 request is forwarded immediately with no cold-start delay. If the cookie
@@ -749,19 +966,21 @@ created, `ensureWorker` is called to spawn or reuse a worker, and a
 `Set-Cookie` header is added to the response.
 
 **Worker reuse.** In v0, `ensureWorker` returns the first existing
-worker for the app (if any). All sessions for the same app share one
-worker. `max_sessions_per_worker` enforcement is a v1 concern tied to
-multi-worker load balancing.
+worker for the app (if any), so sessions typically share a worker. This
+is a simplification, not a constraint — multiple workers per app can
+exist (e.g., during a redeploy or a cold-start race). The v0 constraint
+is **one session per worker**; `max_sessions_per_worker` enforcement is
+a v1 concern tied to multi-worker load balancing.
 
 **Error mapping.** Proxy errors map to 503 (capacity, no bundle, start
 timeout) or 500 (unexpected). The error responses are plain text, not
 JSON — end users see these, not API clients. Phase 0-5 keeps them
 simple; a custom error page is a future enhancement.
 
-### Step 7: Trailing-slash redirect
+### Step 8: Trailing-slash redirect
 
 `internal/proxy/proxy.go` — redirect `/app/{name}` (no trailing slash)
-to `/app/{name}/`.
+to `/app/{name}/`, preserving query string.
 
 ```go
 // RedirectTrailingSlash redirects /app/{name} to /app/{name}/. Shiny
@@ -769,7 +988,11 @@ to `/app/{name}/`.
 // trailing slash is required for correct path resolution.
 func RedirectTrailingSlash(w http.ResponseWriter, r *http.Request) {
 	appName := chi.URLParam(r, "name")
-	http.Redirect(w, r, "/app/"+appName+"/", http.StatusMovedPermanently)
+	target := "/app/" + appName + "/"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusMovedPermanently)
 }
 ```
 
@@ -779,7 +1002,56 @@ asset URLs (`shiny.js`, `shared/`, etc.) depend on the trailing slash
 being present — without it, the browser resolves relative paths against
 `/app/` instead of `/app/{name}/`.
 
-### Step 8: Router composition
+Query string is preserved — without this, authentication tokens or
+other state passed via query params would be lost on redirect.
+
+### Step 9: Mock backend `SetWSHandler`
+
+Update `internal/backend/mock/mock.go` to support configurable
+WebSocket handlers. Without this, the mock's httptest workers only
+serve `200 OK` for plain HTTP and cannot accept WebSocket upgrades,
+making WS integration tests impossible.
+
+The `MockBackend` gains a `handler` field (default: 200 OK) that is
+used when spawning new httptest workers. `SetWSHandler` overrides this
+for subsequently spawned workers.
+
+```go
+// SetWSHandler sets the HTTP handler used by subsequently spawned mock
+// workers. The handler should accept WebSocket upgrades. Workers spawned
+// before this call are not affected.
+func (b *MockBackend) SetWSHandler(h http.Handler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.handler = h
+}
+```
+
+In `Spawn`, instead of the hardcoded `200 OK` handler:
+
+```go
+func (b *MockBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	h := b.handler
+	if h == nil {
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+	}
+
+	ts := httptest.NewServer(h)
+	b.workers[spec.WorkerID] = &mockWorker{
+		id:     spec.WorkerID,
+		spec:   spec,
+		server: ts,
+	}
+	return nil
+}
+```
+
+### Step 10: Router composition
 
 Update `NewRouter` in `internal/api/router.go` to mount the proxy
 handler alongside the API routes.
@@ -795,7 +1067,7 @@ func NewRouter(srv *server.Server) http.Handler {
 
 	// Proxy routes — unauthenticated (end users access these)
 	r.Get("/app/{name}", proxy.RedirectTrailingSlash)
-	r.HandleFunc("/app/{name}/*", proxy.Handler(srv))
+	r.Handle("/app/{name}/*", proxy.Handler(srv))
 
 	// Authenticated API
 	r.Route("/api/v1", func(r chi.Router) {
@@ -822,13 +1094,14 @@ func NewRouter(srv *server.Server) http.Handler {
 }
 ```
 
-The proxy routes use `HandleFunc` which registers for all HTTP methods
+The proxy routes use `r.Handle` (not `r.HandleFunc` — `proxy.Handler`
+returns `http.Handler`, not `http.HandlerFunc`). The catch-all `/*` in
+`/app/{name}/*` matches any sub-path and registers for all HTTP methods
 (GET, POST, PUT, etc.) — Shiny sends both GET and POST requests during
-its lifecycle. The catch-all `/*` in `/app/{name}/*` matches any
-sub-path.
+its lifecycle.
 
 The `r.Get("/app/{name}", ...)` handles the exact match (no trailing
-slash) with a redirect. `r.HandleFunc("/app/{name}/*", ...)` handles
+slash) with a redirect. `r.Handle("/app/{name}/*", ...)` handles
 everything under `/app/{name}/` including the root with trailing slash
 (`/app/{name}/` matches with `*` = empty).
 
@@ -836,7 +1109,7 @@ Proxy routes are NOT behind `BearerAuth` — end users access them
 without an API token. The session cookie provides routing affinity,
 not access control. v1 adds user authentication via OIDC.
 
-### Step 9: New dependency
+### Step 11: New dependency
 
 ```
 go get github.com/coder/websocket
@@ -847,14 +1120,39 @@ and maintained by Coder. It provides both server-side `Accept` and
 client-side `Dial`, plus clean `Read`/`Write` that respect context
 cancellation. This aligns with the dependency choice in `plan.md`.
 
-### Step 10: Integration tests
+### Step 12: Enforce active bundle invariant
+
+**Bug fix (inherited from Rust reference implementation).** When
+`active_bundle` is cleared — via `PATCH` setting it to null, or via
+bundle deletion that removes the active bundle — any running workers
+for the app must be stopped. Without this, the proxy's existing-worker
+fast path returns a worker that was spawned from a now-removed bundle,
+silently serving stale code.
+
+**Invariant: if workers exist for an app, the app has an active
+bundle.**
+
+This requires changes in phase 0-4 endpoints:
+
+1. **`PATCH /apps/{id}`** — if the update clears `active_bundle` (sets
+   it to null), call `stopAppWorkers` before returning.
+2. **`DELETE /apps/{id}`** — already stops workers (phase 0-4). No
+   change needed.
+3. **Bundle deletion that removes the active bundle** — if a deleted
+   bundle was the app's `active_bundle`, clear `active_bundle` and
+   stop workers.
+
+The proxy handler's `ActiveBundle != nil` check (step 7) is a
+defense-in-depth guard that catches any violation of this invariant.
+
+### Step 13: Integration tests
 
 `internal/proxy/proxy_test.go` — tests that exercise the proxy handler
 with a mock backend. The mock backend starts `httptest` servers as fake
 workers, so HTTP and WebSocket traffic flows through the full proxy
 stack without Docker.
 
-**Test helper:**
+**Test helpers:**
 
 ```go
 package proxy
@@ -912,9 +1210,10 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 	return srv, ts
 }
 
-// createAndStartApp creates an app, uploads a bundle, waits for the
-// mock restore, and starts the app via the API. Returns the app name.
-func createAndStartApp(t *testing.T, ts *httptest.Server, name string) {
+// createAppWithBundle creates an app, uploads a bundle, and waits for
+// the mock restore to complete. Does NOT start the app — no worker is
+// spawned. Returns the app ID.
+func createAppWithBundle(t *testing.T, ts *httptest.Server, name string) string {
 	t.Helper()
 
 	// Create app
@@ -935,15 +1234,24 @@ func createAndStartApp(t *testing.T, ts *httptest.Server, name string) {
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond) // wait for mock restore
 
+	return id
+}
+
+// createAndStartApp creates an app, uploads a bundle, waits for the
+// mock restore, and starts the app via the API.
+func createAndStartApp(t *testing.T, ts *httptest.Server, name string) {
+	t.Helper()
+	id := createAppWithBundle(t, ts, name)
+
 	// Start app
-	req, _ = http.NewRequest("POST",
+	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/start", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	http.DefaultClient.Do(req)
 }
 ```
 
-**Tests:**
+**HTTP tests:**
 
 ```go
 func TestProxyHTTPForward(t *testing.T) {
@@ -1040,6 +1348,25 @@ func TestProxyTrailingSlashRedirect(t *testing.T) {
 	}
 }
 
+func TestProxyTrailingSlashPreservesQuery(t *testing.T) {
+	_, ts := testProxyServer(t)
+	createAndStartApp(t, ts, "my-app")
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(ts.URL + "/app/my-app?token=abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := resp.Header.Get("Location")
+	if loc != "/app/my-app/?token=abc" {
+		t.Errorf("expected redirect to /app/my-app/?token=abc, got %s", loc)
+	}
+}
+
 func TestProxyNonexistentApp(t *testing.T) {
 	_, ts := testProxyServer(t)
 	resp, err := http.Get(ts.URL + "/app/nonexistent/")
@@ -1071,59 +1398,37 @@ func TestProxyAppWithoutBundleReturns503(t *testing.T) {
 
 func TestProxyAtCapacityReturns503(t *testing.T) {
 	srv, ts := testProxyServer(t)
-	createAndStartApp(t, ts, "app-a")
+	// Create an app with a bundle but don't start it — no worker spawned
+	createAppWithBundle(t, ts, "full-app")
 
-	// Fill remaining capacity by registering fake workers
-	for i := srv.Workers.Count(); i < srv.Config.Proxy.MaxWorkers; i++ {
+	// Fill worker map to max_workers with fake entries
+	for i := 0; i < srv.Config.Proxy.MaxWorkers; i++ {
 		srv.Workers.Set(
 			fmt.Sprintf("fake-%d", i),
 			server.ActiveWorker{AppID: "fake"},
 		)
 	}
 
-	// Create another app with a bundle
-	createAndStartApp(t, ts, "app-b")
-	// Note: createAndStartApp uses the API start endpoint which checks
-	// the limit. We need to test the proxy path instead.
-	// Stop app-b so we can test the proxy cold start at capacity.
-	// ... (use API stop, then hit the proxy)
+	// Hit the proxy — should 503 because no worker exists for this app
+	// and we're at capacity so ensureWorker can't spawn one
+	resp, err := http.Get(ts.URL + "/app/full-app/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
 }
 ```
 
 **WebSocket tests:**
 
 ```go
-func TestProxyWebSocket(t *testing.T) {
-	_, ts := testProxyServer(t)
-	createAndStartApp(t, ts, "my-app")
-
-	// Connect via WebSocket
-	ctx := context.Background()
-	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
-		"/app/my-app/"
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
-
-	// The mock worker's httptest server doesn't speak WS by default.
-	// This test validates that the proxy correctly upgrades and
-	// attempts the backend connection. A more complete test requires
-	// configuring the mock to accept WS connections.
-}
-```
-
-WebSocket integration tests require the mock backend's `httptest`
-servers to handle WS upgrades. The mock backend can be extended to
-register a WS echo handler on each worker. Full WS round-trip tests:
-
-```go
 func TestProxyWebSocketEcho(t *testing.T) {
 	srv, ts := testProxyServer(t)
 	// Configure mock to accept WS and echo messages
-	mock := srv.Backend.(*mock.MockBackend)
-	mock.SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+	be := srv.Backend.(*mock.MockBackend)
+	be.SetWSHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
@@ -1136,7 +1441,7 @@ func TestProxyWebSocketEcho(t *testing.T) {
 			}
 			c.Write(context.Background(), typ, data)
 		}
-	})
+	}))
 
 	createAndStartApp(t, ts, "echo-app")
 
@@ -1163,22 +1468,19 @@ func TestProxyWebSocketEcho(t *testing.T) {
 }
 ```
 
-**Mock backend extension.** `MockBackend` needs a `SetWSHandler` method
-that registers a WebSocket handler on each mock worker's `httptest`
-server. The default handler serves plain HTTP (200 OK). When
-`SetWSHandler` is called, new workers use the provided handler instead.
-
 ## New source files
 
 | File | Purpose |
 |---|---|
 | `internal/proxy/proxy.go` | Proxy handler, trailing-slash redirect, `Handler()` constructor |
 | `internal/proxy/forward.go` | HTTP forwarding via `httputil.ReverseProxy`, prefix stripping |
-| `internal/proxy/ws.go` | WebSocket forwarding, bidirectional message shuttling, WS upgrade detection |
-| `internal/proxy/wscache.go` | `WsCache` — TTL-based backend WebSocket connection cache |
+| `internal/proxy/ws.go` | `shuttleWS`, `isWebSocketUpgrade` — WebSocket forwarding with session caching |
+| `internal/proxy/wssession.go` | `wsSession` — persistent backend reader goroutine with message buffering |
+| `internal/proxy/wscache.go` | `WsCache` — TTL-based cache for `wsSession` entries |
 | `internal/proxy/session.go` | Session cookie helpers — `extractSessionID`, `sessionCookie` |
 | `internal/proxy/coldstart.go` | `ensureWorker`, `pollHealthy` — cold-start orchestration |
 | `internal/proxy/proxy_test.go` | Integration tests — HTTP, WS, session, redirect, error cases |
+| `internal/proxy/wssession_test.go` | Unit tests for `wsSession` |
 | `internal/proxy/wscache_test.go` | Unit tests for `WsCache` |
 | `internal/proxy/session_test.go` | Unit tests for cookie helpers |
 | `internal/proxy/coldstart_test.go` | Unit tests for `ensureWorker` and `pollHealthy` |
@@ -1188,7 +1490,8 @@ server. The default handler serves plain HTTP (200 OK). When
 | File | Change |
 |---|---|
 | `internal/api/router.go` | Add proxy routes (`/app/{name}`, `/app/{name}/*`) to `NewRouter` |
-| `internal/backend/mock/mock.go` | Add `SetWSHandler` method for WS test support |
+| `internal/api/apps.go` | Enforce active bundle invariant: stop workers when `active_bundle` is cleared |
+| `internal/backend/mock/mock.go` | Add `handler` field and `SetWSHandler` method for WS test support |
 | `go.mod` | Add `github.com/coder/websocket` |
 
 ## Implementation notes
@@ -1205,11 +1508,13 @@ server. The default handler serves plain HTTP (200 OK). When
   routes to a different worker — there is no privilege escalation.
   v1 switches to signed cookies when OIDC is added.
 
-- **One worker per app in v0.** `ensureWorker` returns the first
-  existing worker for the app rather than spawning a new one per
-  session. Multiple sessions share the same worker. Per-session workers
-  and `max_sessions_per_worker` enforcement arrive in v1 with
-  multi-worker load balancing.
+- **Worker reuse, not a one-worker-per-app constraint.** `ensureWorker`
+  returns the first existing worker for the app rather than spawning a
+  new one per session, so sessions typically share a worker. However,
+  multiple workers per app can exist (e.g., cold-start race, redeploy
+  overlap). The v0 constraint is **one session per worker**.
+  `max_sessions_per_worker` enforcement arrives in v1 with multi-worker
+  load balancing.
 
 - **Cold-start race.** Two concurrent requests for the same app with
   no existing worker could both enter `ensureWorker` and spawn two
@@ -1228,6 +1533,13 @@ server. The default handler serves plain HTTP (200 OK). When
   allocation is cheap (a few pointers), and the underlying
   `http.Transport` is shared for connection pooling.
 
+- **Active bundle invariant.** The system maintains the invariant: if
+  workers exist for an app, the app has an active bundle. This is
+  enforced by stopping workers when `active_bundle` is cleared (step
+  12) and checked defensively in the proxy handler (step 7). This
+  fixes a bug present in the Rust reference implementation where
+  workers could continue serving after their bundle was removed.
+
 - **Phase 0-6 integration points.** Two places in the proxy code
   reference phase 0-6 work: (1) `ensureWorker` should call
   `ops.SpawnLogCapture` after a successful spawn, and (2) the WsCache
@@ -1239,6 +1551,8 @@ server. The default handler serves plain HTTP (200 OK). When
 Phase 0-5 is done when:
 
 - `GET /app/{name}` returns 301 redirect to `/app/{name}/`
+- `GET /app/{name}?q=1` redirects to `/app/{name}/?q=1` (query
+  preserved)
 - `GET /app/{name}/` proxies to a worker container, returns 200
 - Session cookie is set on first request, reused on subsequent requests
 - Requests with a valid session cookie are forwarded without cold-start
@@ -1248,15 +1562,25 @@ Phase 0-5 is done when:
 - Cold-start at global `max_workers` limit returns 503
 - Cold-start for app without active bundle returns 503
 - Cold-start timeout returns 503 and evicts the failed worker
+- Proxy returns 503 for app without active bundle even when workers
+  from a previous bundle exist (active bundle guard)
 - Request to nonexistent app returns 404
 - `/app/{name}/sub/path` is forwarded as `/sub/path` to the worker
 - WebSocket upgrade is accepted and messages are forwarded
   bidirectionally
-- WebSocket backend connection is cached on client disconnect
-- Cached WebSocket is reused on reconnect within `ws_cache_ttl`
-- Cached WebSocket is closed and session cleaned up after TTL expiry
+- WebSocket backend connection is cached in a `wsSession` on client
+  disconnect
+- Messages from backend are buffered while client is disconnected
+- Cached session is reused on reconnect within `ws_cache_ttl`, with
+  buffered messages replayed
+- Buffer overflow (1000 messages) closes the session cleanly
+- Cached session is closed and session cleaned up after TTL expiry
+- Backend disconnect during active session closes both connections
+- Backend disconnect during cache window marks session closed
+- Mock backend supports `SetWSHandler` for WS integration tests
 - Proxy routes are unauthenticated (no bearer token required)
 - API routes still require bearer auth (no regression)
+- Clearing `active_bundle` stops all running workers for the app
 - All existing phase 0-3 and 0-4 tests still pass
 - All new unit and integration tests pass
 - `go vet ./...` clean
