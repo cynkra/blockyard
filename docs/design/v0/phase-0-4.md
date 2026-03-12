@@ -8,225 +8,111 @@ v0 API surface: app CRUD, app lifecycle (start/stop), and log streaming.
 ## Deliverables
 
 1. Remove `status` column from `apps` table — runtime state is derived
-   from the workers DashMap, not stored in the DB
+   from `WorkerMap`, not stored in the DB
 2. App CRUD endpoints — create, list, get, update, delete
 3. App name validation — URL-safe slugs only
 4. App lifecycle endpoints — start and stop
 5. App log streaming endpoint
-6. `ActiveWorker.session_id` → `Option<String>`
-7. `BundlePaths::for_bundle` — shared path constructor for bundle dirs
-8. DB additions — `update_app`, `clear_active_bundle`
-9. Shared error response helpers — extract from `bundles.rs`, reuse
-10. Router expansion — wire all endpoints into `api_router`
-11. Integration tests for all new endpoints
+6. DB additions — `UpdateApp`, `ClearActiveBundle`
+7. `resolveApp` helper — resolve `{id}` by UUID first, then by name
+8. Shared error response helpers — extract from `bundles.go`, add
+   `conflict` and `serviceUnavailable`
+9. Router expansion — wire all endpoints into `NewRouter`
+10. Integration tests for all new endpoints
 
 ## What's already done
 
 Phase 0-3 delivered:
 
-- Bearer token auth middleware (`api/auth.rs`)
+- Bearer token auth middleware (`api/auth.go`)
 - `/healthz` endpoint (unauthenticated)
 - `POST /api/v1/apps/{id}/bundles` — upload bundle
 - `GET /api/v1/apps/{id}/bundles` — list bundles
-- `GET /api/v1/tasks/{task_id}/logs` — stream task logs
-- Error response helpers (`bad_request`, `not_found`, `server_error`)
-- DB queries: `create_app`, `get_app`, `get_app_by_name`, `list_apps`,
-  `delete_app`, bundle CRUD, `set_active_bundle`, `update_bundle_status`
-- `AppState` with `workers: DashMap<String, ActiveWorker<B::Handle>>`
+- `GET /api/v1/tasks/{taskID}` — task status
+- `GET /api/v1/tasks/{taskID}/logs` — stream task logs
+- Error response helpers (`writeError` with code + message)
+- DB queries: `CreateApp`, `GetApp`, `GetAppByName`, `ListApps`,
+  `DeleteApp`, bundle CRUD, `SetActiveBundle`, `UpdateBundleStatus`
+- `server.Server` with `Workers *WorkerMap`
+- `NewServer()` constructor
+- `main.go` with HTTP server and graceful shutdown
 
 ## Step-by-step
 
 ### Step 1: Remove `status` column from `apps` table
 
-The `status` column stores runtime state ("running" / "stopped"), but
-this information is inherently ephemeral — it becomes stale on server
-crash, restart, or worker failure. The workers DashMap already *is* the
-source of truth for which workers are alive. Storing a copy in SQLite
-creates a synchronization obligation with no upside.
-
-**Migration `002_remove_app_status.sql`:**
-
-```sql
--- SQLite doesn't support ALTER TABLE DROP COLUMN before 3.35.0.
--- Use the table-rebuild pattern for broad compatibility.
-CREATE TABLE apps_new (
-    id                      TEXT PRIMARY KEY,
-    name                    TEXT NOT NULL UNIQUE,
-    active_bundle           TEXT REFERENCES bundles(id),
-    max_workers_per_app     INTEGER,
-    max_sessions_per_worker INTEGER NOT NULL DEFAULT 1,
-    memory_limit            TEXT,
-    cpu_limit               REAL,
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL
-);
-
-INSERT INTO apps_new SELECT
-    id, name, active_bundle, max_workers_per_app,
-    max_sessions_per_worker, memory_limit, cpu_limit,
-    created_at, updated_at
-FROM apps;
-
-DROP TABLE apps;
-ALTER TABLE apps_new RENAME TO apps;
-```
-
-**Code changes:**
-
-- Remove `pub status: String` from `AppRow`
-- Remove `'stopped'` from the `create_app` INSERT
-- Remove the `update_app_status` function (never add it)
-- Update `db::sqlite` tests that assert `app.status`
+The `apps` table in the current schema does not have a `status` column
+(it was never added in the Go rewrite), so no schema migration is needed.
+Confirm this is the case and move on.
 
 **Deriving status at read time:**
 
-The `GET /apps/{id}` handler computes status from the workers DashMap
-before returning the response. A lightweight wrapper serializes the
-app row plus the derived status:
+The `GET /apps/{id}` handler computes status from `WorkerMap` before
+returning the response. A lightweight wrapper serializes the app row
+plus the derived status:
 
-```rust
-#[derive(serde::Serialize)]
-pub struct AppResponse {
-    #[serde(flatten)]
-    pub app: AppRow,
-    pub status: String,
+```go
+type AppResponse struct {
+    ID                   string   `json:"id"`
+    Name                 string   `json:"name"`
+    ActiveBundle         *string  `json:"active_bundle"`
+    MaxWorkersPerApp     *int     `json:"max_workers_per_app"`
+    MaxSessionsPerWorker int      `json:"max_sessions_per_worker"`
+    MemoryLimit          *string  `json:"memory_limit"`
+    CPULimit             *float64 `json:"cpu_limit"`
+    CreatedAt            string   `json:"created_at"`
+    UpdatedAt            string   `json:"updated_at"`
+    Status               string   `json:"status"`
 }
 
-fn app_status<B: Backend>(state: &AppState<B>, app_id: &str) -> String {
-    let has_workers = state.workers.iter()
-        .any(|entry| entry.value().app_id == app_id);
-    if has_workers { "running".into() } else { "stopped".into() }
-}
-```
-
-`AppResponse` flattens the DB row and adds the computed `status` field.
-This keeps the DB layer clean (no runtime state) while the API layer
-presents a complete picture. `list_apps` uses the same pattern —
-iterate the DB rows and annotate each with its derived status.
-
-### Step 2: `ActiveWorker.session_id` → `Option<String>`
-
-The `session_id` field on `ActiveWorker` is currently a `String`, and
-the start endpoint sets it to `""` because no session exists yet.
-Change it to `Option<String>`:
-
-```rust
-pub struct ActiveWorker<H: Clone> {
-    pub app_id: String,
-    pub handle: H,
-    pub session_id: Option<String>,
-}
-```
-
-The start endpoint sets `session_id: None`. The proxy layer (phase 0-5)
-sets it to `Some(session_id)` when a session is assigned.
-
-### Step 3: `BundlePaths::for_bundle` — shared path constructor
-
-Both the bundle upload flow (`write_archive`) and the start endpoint
-need to construct paths for a bundle's archive, unpacked directory, and
-library directory. Currently the start endpoint duplicates the path
-conventions inline. Extract a shared constructor:
-
-```rust
-impl BundlePaths {
-    /// Construct paths for a bundle given the base storage dir, app ID,
-    /// and bundle ID. This is the single source of truth for the on-disk
-    /// layout.
-    pub fn for_bundle(base: &Path, app_id: &str, bundle_id: &str) -> Self {
-        let app_dir = base.join(app_id);
-        Self {
-            archive: app_dir.join(format!("{bundle_id}.tar.gz")),
-            unpacked: app_dir.join(bundle_id),
-            library: app_dir.join(format!("{bundle_id}-lib")),
-        }
+func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
+    status := "stopped"
+    if workers.CountForApp(app.ID) > 0 {
+        status = "running"
+    }
+    return AppResponse{
+        ID:                   app.ID,
+        Name:                 app.Name,
+        ActiveBundle:         app.ActiveBundle,
+        MaxWorkersPerApp:     app.MaxWorkersPerApp,
+        MaxSessionsPerWorker: app.MaxSessionsPerWorker,
+        MemoryLimit:          app.MemoryLimit,
+        CPULimit:             app.CPULimit,
+        CreatedAt:            app.CreatedAt,
+        UpdatedAt:            app.UpdatedAt,
+        Status:               status,
     }
 }
 ```
 
-Update `write_archive` to use `BundlePaths::for_bundle` instead of
-constructing paths inline. The start endpoint also uses it to locate
-the bundle and library directories.
+`appResponse` wraps the DB row and adds the computed `status` field.
+`listApps` uses the same pattern — iterate the DB rows and annotate
+each with its derived status.
 
-### Step 4: Extract shared error response helpers
+### Step 2: `resolveApp` — lookup by UUID or name
 
-The `ErrorResponse` struct and helpers (`bad_request`, `not_found`,
-`server_error`) currently live in `api/bundles.rs`. Move them to a shared
-location so all API modules can use them, and add the two new variants
-needed for this phase.
+All `{id}` parameters across app endpoints (GET, PATCH, DELETE, start,
+stop, logs, bundles) resolve by UUID first, then by name. This is safe
+from collisions because names must start with a lowercase letter while
+UUIDs start with a hex digit.
 
-`src/api/error.rs`:
-
-```rust
-use axum::http::StatusCode;
-use axum::response::Json;
-
-#[derive(serde::Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub message: String,
-}
-
-/// Convenience type for handler return values.
-pub type ApiError = (StatusCode, Json<ErrorResponse>);
-
-pub fn bad_request(msg: String) -> ApiError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: "bad_request".into(),
-            message: msg,
-        }),
-    )
-}
-
-pub fn not_found(msg: String) -> ApiError {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: "not_found".into(),
-            message: msg,
-        }),
-    )
-}
-
-pub fn conflict(msg: String) -> ApiError {
-    (
-        StatusCode::CONFLICT,
-        Json(ErrorResponse {
-            error: "conflict".into(),
-            message: msg,
-        }),
-    )
-}
-
-pub fn service_unavailable(msg: String) -> ApiError {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(ErrorResponse {
-            error: "service_unavailable".into(),
-            message: msg,
-        }),
-    )
-}
-
-pub fn server_error(msg: String) -> ApiError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: "internal_error".into(),
-            message: msg,
-        }),
-    )
+```go
+func resolveApp(database *db.DB, id string) (*db.AppRow, error) {
+    app, err := database.GetApp(id)
+    if err != nil {
+        return nil, err
+    }
+    if app != nil {
+        return app, nil
+    }
+    return database.GetAppByName(id)
 }
 ```
 
-Update `api/bundles.rs` to import from `api/error.rs` instead of defining
-its own helpers. The `ErrorResponse` struct, `bad_request`, `not_found`,
-and `server_error` functions are deleted from `bundles.rs` and replaced
-with `use super::error::*`.
+All handlers that accept `{id}` call `resolveApp` instead of
+`db.GetApp` directly.
 
-### Step 5: App name validation
+### Step 3: App name validation
 
 App names are used in proxy URLs (`/app/{name}/`), so they must be
 URL-safe slugs. Validation rules:
@@ -237,140 +123,205 @@ URL-safe slugs. Validation rules:
 - Length: 1–63 characters
 - Regex: `^[a-z][a-z0-9-]*[a-z0-9]$` (or `^[a-z]$` for single char)
 
-Add a validation function in the apps module:
-
-```rust
-fn validate_app_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.len() > 63 {
-        return Err("name must be 1-63 characters".into());
+```go
+func validateAppName(name string) error {
+    if len(name) == 0 || len(name) > 63 {
+        return fmt.Errorf("name must be 1-63 characters")
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        return Err("name must contain only lowercase letters, digits, and hyphens".into());
+    for _, c := range name {
+        if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '-' {
+            return fmt.Errorf("name must contain only lowercase letters, digits, and hyphens")
+        }
     }
-    if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
-        return Err("name must start with a lowercase letter".into());
+    if name[0] < 'a' || name[0] > 'z' {
+        return fmt.Errorf("name must start with a lowercase letter")
     }
-    if name.ends_with('-') {
-        return Err("name must not end with a hyphen".into());
+    if name[len(name)-1] == '-' {
+        return fmt.Errorf("name must not end with a hyphen")
     }
-    Ok(())
+    return nil
 }
 ```
 
-### Step 6: App CRUD endpoints
+**Tests:**
 
-`src/api/apps.rs` — all app management endpoints.
+- `TestValidateAppName` — table-driven: valid names (`a`, `my-app`,
+  `app-123`), invalid names (`""`, `"A"`, `"-app"`, `"app-"`,
+  `"app_name"`, `"1app"`, 64-char string)
+
+### Step 4: Extract shared error response helpers
+
+The `writeError` function already exists in `api/error.go` from
+phase 0-3. Add convenience wrappers for common status codes:
+
+```go
+func badRequest(w http.ResponseWriter, msg string) {
+    writeError(w, http.StatusBadRequest, "bad_request", msg)
+}
+
+func notFound(w http.ResponseWriter, msg string) {
+    writeError(w, http.StatusNotFound, "not_found", msg)
+}
+
+func conflict(w http.ResponseWriter, msg string) {
+    writeError(w, http.StatusConflict, "conflict", msg)
+}
+
+func serviceUnavailable(w http.ResponseWriter, msg string) {
+    writeError(w, http.StatusServiceUnavailable, "service_unavailable", msg)
+}
+
+func serverError(w http.ResponseWriter, msg string) {
+    writeError(w, http.StatusInternalServerError, "internal_error", msg)
+}
+```
+
+Update existing handlers in `bundles.go` and `tasks.go` to use these
+wrappers instead of calling `writeError` directly.
+
+### Step 5: App CRUD endpoints
+
+`internal/api/apps.go` — all app management endpoints.
 
 **Create app:**
 
-```rust
-#[derive(serde::Deserialize)]
-pub struct CreateAppRequest {
-    pub name: String,
+```go
+type createAppRequest struct {
+    Name string `json:"name"`
 }
 
-pub async fn create_app<B: Backend>(
-    State(state): State<AppState<B>>,
-    Json(body): Json<CreateAppRequest>,
-) -> Result<(StatusCode, Json<AppResponse>), ApiError> {
-    validate_app_name(&body.name).map_err(bad_request)?;
+func CreateApp(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        var body createAppRequest
+        if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+            badRequest(w, "invalid JSON body")
+            return
+        }
 
-    // Check for duplicate name
-    let existing = db::sqlite::get_app_by_name(&state.db, &body.name)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?;
-    if existing.is_some() {
-        return Err(conflict(format!("app name '{}' already exists", body.name)));
+        if err := validateAppName(body.Name); err != nil {
+            badRequest(w, err.Error())
+            return
+        }
+
+        // Check for duplicate name
+        existing, err := srv.DB.GetAppByName(body.Name)
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+        if existing != nil {
+            conflict(w, fmt.Sprintf("app name %q already exists", body.Name))
+            return
+        }
+
+        app, err := srv.DB.CreateApp(body.Name)
+        if err != nil {
+            serverError(w, "create app: "+err.Error())
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusCreated)
+        json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
     }
-
-    let app = db::sqlite::create_app(&state.db, &body.name)
-        .await
-        .map_err(|e| server_error(format!("create app: {e}")))?;
-
-    // Newly created app has no workers → status is "stopped"
-    Ok((StatusCode::CREATED, Json(AppResponse {
-        app,
-        status: "stopped".into(),
-    })))
 }
 ```
 
 We check for duplicate names explicitly before the INSERT rather than
 relying on the UNIQUE constraint error. This produces a clear 409
-response instead of a generic 500 from a sqlx error. The DB constraint
-is still there as a safety net.
+response instead of a generic 500. The DB constraint is still there
+as a safety net.
 
 **List apps:**
 
-```rust
-pub async fn list_apps<B: Backend>(
-    State(state): State<AppState<B>>,
-) -> Result<Json<Vec<AppResponse>>, ApiError> {
-    let apps = db::sqlite::list_apps(&state.db)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?;
-    let responses = apps.into_iter()
-        .map(|app| {
-            let status = app_status(&state, &app.id);
-            AppResponse { app, status }
-        })
-        .collect();
-    Ok(Json(responses))
+```go
+func ListApps(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        apps, err := srv.DB.ListApps()
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+
+        responses := make([]AppResponse, len(apps))
+        for i, app := range apps {
+            responses[i] = appResponse(&app, srv.Workers)
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(responses)
+    }
 }
 ```
 
 **Get app:**
 
-```rust
-pub async fn get_app<B: Backend>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<String>,
-) -> Result<Json<AppResponse>, ApiError> {
-    let app = db::sqlite::get_app(&state.db, &id)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("app {id} not found")))?;
-    let status = app_status(&state, &app.id);
-    Ok(Json(AppResponse { app, status }))
+```go
+func GetApp(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id := chi.URLParam(r, "id")
+
+        app, err := resolveApp(srv.DB, id)
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+        if app == nil {
+            notFound(w, "app "+id+" not found")
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+    }
 }
 ```
 
 **Update app:**
 
-```rust
-#[derive(serde::Deserialize)]
-pub struct UpdateAppRequest {
-    pub max_workers_per_app: Option<i64>,
-    pub max_sessions_per_worker: Option<i64>,
-    pub memory_limit: Option<String>,
-    pub cpu_limit: Option<f64>,
+```go
+type updateAppRequest struct {
+    MaxWorkersPerApp     *int     `json:"max_workers_per_app"`
+    MaxSessionsPerWorker *int     `json:"max_sessions_per_worker"`
+    MemoryLimit          *string  `json:"memory_limit"`
+    CPULimit             *float64 `json:"cpu_limit"`
 }
 
-pub async fn update_app<B: Backend>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<String>,
-    Json(body): Json<UpdateAppRequest>,
-) -> Result<Json<AppResponse>, ApiError> {
-    // v0: max_sessions_per_worker is locked to 1; session-sharing is deferred to v1
-    if let Some(v) = body.max_sessions_per_worker {
-        if v != 1 {
-            return Err(bad_request(
-                "max_sessions_per_worker must be 1 in this version".to_string(),
-            ));
+func UpdateApp(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id := chi.URLParam(r, "id")
+
+        var body updateAppRequest
+        if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+            badRequest(w, "invalid JSON body")
+            return
         }
+
+        // v0: max_sessions_per_worker is locked to 1
+        if body.MaxSessionsPerWorker != nil && *body.MaxSessionsPerWorker != 1 {
+            badRequest(w, "max_sessions_per_worker must be 1 in this version")
+            return
+        }
+
+        app, err := resolveApp(srv.DB, id)
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+        if app == nil {
+            notFound(w, "app "+id+" not found")
+            return
+        }
+
+        app, err = srv.DB.UpdateApp(app.ID, body)
+        if err != nil {
+            serverError(w, "update app: "+err.Error())
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
     }
-
-    let app = db::sqlite::get_app(&state.db, &id)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("app {id} not found")))?;
-
-    let app = db::sqlite::update_app(&state.db, &app.id, &body)
-        .await
-        .map_err(|e| server_error(format!("update app: {e}")))?;
-
-    let status = app_status(&state, &app.id);
-    Ok(Json(AppResponse { app, status }))
 }
 ```
 
@@ -381,48 +332,58 @@ Active bundle is set by the restore pipeline, not by manual update.
 
 **Delete app:**
 
-```rust
-pub async fn delete_app<B: Backend>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let app = db::sqlite::get_app(&state.db, &id)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("app {id} not found")))?;
+```go
+func DeleteApp(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id := chi.URLParam(r, "id")
 
-    // 1. Stop all workers for this app
-    stop_app_workers(&state, &app.id).await;
+        app, err := resolveApp(srv.DB, id)
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+        if app == nil {
+            notFound(w, "app "+id+" not found")
+            return
+        }
 
-    // 2. Delete bundle files from disk
-    let bundles = db::sqlite::list_bundles_by_app(&state.db, &app.id)
-        .await
-        .map_err(|e| server_error(format!("list bundles: {e}")))?;
-    for bundle in &bundles {
-        let paths = crate::bundle::BundlePaths::for_bundle(
-            &state.config.storage.bundle_server_path,
-            &app.id,
-            &bundle.id,
-        );
-        crate::bundle::delete_bundle_files(&paths).await;
+        // 1. Stop all workers for this app
+        stopAppWorkers(srv, app.ID)
+
+        // 2. Delete bundle files from disk
+        bundles, err := srv.DB.ListBundlesByApp(app.ID)
+        if err != nil {
+            serverError(w, "list bundles: "+err.Error())
+            return
+        }
+        for _, b := range bundles {
+            paths := bundle.NewPaths(srv.Config.Storage.BundleServerPath, app.ID, b.ID)
+            bundle.DeleteFiles(paths)
+        }
+
+        // 3. Clear active_bundle FK before deleting bundles
+        if err := srv.DB.ClearActiveBundle(app.ID); err != nil {
+            serverError(w, "clear active bundle: "+err.Error())
+            return
+        }
+
+        // 4. Delete bundle rows
+        for _, b := range bundles {
+            srv.DB.DeleteBundle(b.ID)
+        }
+
+        // 5. Delete app row
+        if _, err := srv.DB.DeleteApp(app.ID); err != nil {
+            serverError(w, "delete app: "+err.Error())
+            return
+        }
+
+        // 6. Remove app directory from disk (best-effort)
+        appDir := filepath.Join(srv.Config.Storage.BundleServerPath, app.ID)
+        os.RemoveAll(appDir)
+
+        w.WriteHeader(http.StatusNoContent)
     }
-
-    // 3. Clear active_bundle FK before deleting bundles
-    db::sqlite::clear_active_bundle(&state.db, &app.id)
-        .await
-        .map_err(|e| server_error(format!("clear active bundle: {e}")))?;
-
-    // 4. Delete bundle rows
-    for bundle in &bundles {
-        let _ = db::sqlite::delete_bundle(&state.db, &bundle.id).await;
-    }
-
-    // 5. Delete app row
-    db::sqlite::delete_app(&state.db, &app.id)
-        .await
-        .map_err(|e| server_error(format!("delete app: {e}")))?;
-
-    Ok(StatusCode::NO_CONTENT)
 }
 ```
 
@@ -433,178 +394,237 @@ files), then delete files from disk, then clear the `active_bundle` FK
 rows, then delete the app row. The FK constraint on `bundles.app_id`
 enforces that bundles are deleted before the app.
 
-### Step 7: DB additions
+### Step 6: DB additions
 
-`src/db/sqlite.rs` — new queries for update and status management.
+New queries in `internal/db/db.go`.
 
-**update_app:**
+**UpdateApp:**
 
-```rust
-pub async fn update_app(
-    pool: &SqlitePool,
-    id: &str,
-    update: &crate::api::apps::UpdateAppRequest,
-) -> Result<AppRow, sqlx::Error> {
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // Build SET clause dynamically — only update fields that are present
-    // in the request. This avoids nullifying fields the caller didn't send.
-    //
-    // sqlx doesn't support optional binds in a static query, so we use
-    // separate queries per combination. With 4 optional fields this is
-    // manageable. Alternatively, fetch-modify-write:
-    let mut app = get_app(pool, id)
-        .await?
-        .ok_or_else(|| sqlx::Error::RowNotFound)?;
-
-    if let Some(v) = update.max_workers_per_app {
-        app.max_workers_per_app = Some(v);
+```go
+func (db *DB) UpdateApp(id string, update interface{}) (*AppRow, error) {
+    // Fetch-modify-write: read current row, overlay non-nil fields,
+    // write back. With 4 optional fields this is simpler than building
+    // a dynamic SET clause.
+    app, err := db.GetApp(id)
+    if err != nil {
+        return nil, err
     }
-    if let Some(v) = update.max_sessions_per_worker {
-        app.max_sessions_per_worker = v;
-    }
-    if let Some(ref v) = update.memory_limit {
-        app.memory_limit = Some(v.clone());
-    }
-    if let Some(v) = update.cpu_limit {
-        app.cpu_limit = Some(v);
+    if app == nil {
+        return nil, fmt.Errorf("app %q not found", id)
     }
 
-    sqlx::query_as::<_, AppRow>(
-        "UPDATE apps SET
-             max_workers_per_app = ?,
-             max_sessions_per_worker = ?,
-             memory_limit = ?,
-             cpu_limit = ?,
-             updated_at = ?
-         WHERE id = ?
-         RETURNING *"
+    // Type-assert the update payload. The api package passes
+    // updateAppRequest which has optional fields.
+    type updater interface {
+        Apply(app *AppRow)
+    }
+    if u, ok := update.(updater); ok {
+        u.Apply(app)
+    }
+
+    now := time.Now().UTC().Format(time.RFC3339)
+    _, err = db.Exec(
+        `UPDATE apps SET
+            max_workers_per_app = ?,
+            max_sessions_per_worker = ?,
+            memory_limit = ?,
+            cpu_limit = ?,
+            updated_at = ?
+        WHERE id = ?`,
+        app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
+        app.MemoryLimit, app.CPULimit,
+        now, id,
     )
-    .bind(app.max_workers_per_app)
-    .bind(app.max_sessions_per_worker)
-    .bind(&app.memory_limit)
-    .bind(app.cpu_limit)
-    .bind(&now)
-    .bind(id)
-    .fetch_one(pool)
-    .await
+    if err != nil {
+        return nil, fmt.Errorf("update app: %w", err)
+    }
+
+    return db.GetApp(id)
+}
+```
+
+Actually, to avoid a circular import between `api` and `db`, keep the
+update logic simple. Accept individual fields directly:
+
+```go
+type AppUpdate struct {
+    MaxWorkersPerApp     *int
+    MaxSessionsPerWorker *int
+    MemoryLimit          *string
+    CPULimit             *float64
+}
+
+func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
+    app, err := db.GetApp(id)
+    if err != nil {
+        return nil, err
+    }
+    if app == nil {
+        return nil, fmt.Errorf("app not found")
+    }
+
+    if u.MaxWorkersPerApp != nil {
+        app.MaxWorkersPerApp = u.MaxWorkersPerApp
+    }
+    if u.MaxSessionsPerWorker != nil {
+        app.MaxSessionsPerWorker = *u.MaxSessionsPerWorker
+    }
+    if u.MemoryLimit != nil {
+        app.MemoryLimit = u.MemoryLimit
+    }
+    if u.CPULimit != nil {
+        app.CPULimit = u.CPULimit
+    }
+
+    now := time.Now().UTC().Format(time.RFC3339)
+    _, err = db.Exec(
+        `UPDATE apps SET
+            max_workers_per_app = ?,
+            max_sessions_per_worker = ?,
+            memory_limit = ?,
+            cpu_limit = ?,
+            updated_at = ?
+        WHERE id = ?`,
+        app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
+        app.MemoryLimit, app.CPULimit,
+        now, id,
+    )
+    if err != nil {
+        return nil, fmt.Errorf("update app: %w", err)
+    }
+
+    return db.GetApp(id)
 }
 ```
 
 The fetch-modify-write pattern is fine here because updates are rare
-admin operations, not high-frequency paths. No concurrent update
-contention expected.
+admin operations, not high-frequency paths. `AppUpdate` lives in the
+`db` package to avoid circular imports. The API handler maps its
+request struct to `db.AppUpdate`.
 
-**clear_active_bundle:**
+**ClearActiveBundle:**
 
-```rust
-pub async fn clear_active_bundle(
-    pool: &SqlitePool,
-    app_id: &str,
-) -> Result<bool, sqlx::Error> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let result = sqlx::query(
-        "UPDATE apps SET active_bundle = NULL, updated_at = ? WHERE id = ?"
+```go
+func (db *DB) ClearActiveBundle(appID string) error {
+    now := time.Now().UTC().Format(time.RFC3339)
+    _, err := db.Exec(
+        `UPDATE apps SET active_bundle = NULL, updated_at = ? WHERE id = ?`,
+        now, appID,
     )
-    .bind(&now)
-    .bind(app_id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    return err
 }
 ```
 
-### Step 8: App lifecycle — start
+### Step 7: App lifecycle — start
 
 `POST /api/v1/apps/{id}/start` — start an app by spawning a worker.
 
-```rust
-#[derive(serde::Serialize)]
-pub struct StartResponse {
-    pub worker_id: String,
-    pub status: String,
+```go
+type startResponse struct {
+    WorkerID string `json:"worker_id"`
+    Status   string `json:"status"`
 }
 
-pub async fn start_app<B: Backend>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<String>,
-) -> Result<Json<StartResponse>, ApiError> {
-    let app = db::sqlite::get_app(&state.db, &id)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("app {id} not found")))?;
+func StartApp(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id := chi.URLParam(r, "id")
 
-    // Already running — return existing state
-    let existing_worker = state.workers.iter()
-        .find(|entry| entry.value().app_id == id)
-        .map(|entry| entry.key().clone());
-    if let Some(worker_id) = existing_worker {
-        return Ok(Json(StartResponse {
-            worker_id,
-            status: "running".into(),
-        }));
+        app, err := resolveApp(srv.DB, id)
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+        if app == nil {
+            notFound(w, "app "+id+" not found")
+            return
+        }
+
+        // Already running — return existing worker
+        workerIDs := srv.Workers.ForApp(app.ID)
+        if len(workerIDs) > 0 {
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(startResponse{
+                WorkerID: workerIDs[0],
+                Status:   "running",
+            })
+            return
+        }
+
+        // Must have an active bundle
+        if app.ActiveBundle == nil {
+            conflict(w, "app has no active bundle — upload and build a bundle first")
+            return
+        }
+
+        // Check global worker limit
+        if srv.Workers.Count() >= srv.Config.Proxy.MaxWorkers {
+            serviceUnavailable(w, "max workers reached")
+            return
+        }
+
+        // Build WorkerSpec
+        workerID := uuid.New().String()
+        paths := bundle.NewPaths(
+            srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
+        )
+
+        labels := map[string]string{
+            "dev.blockyard/managed":   "true",
+            "dev.blockyard/app-id":    app.ID,
+            "dev.blockyard/worker-id": workerID,
+            "dev.blockyard/role":      "worker",
+        }
+
+        spec := backend.WorkerSpec{
+            AppID:       app.ID,
+            WorkerID:    workerID,
+            Image:       srv.Config.Docker.Image,
+            BundlePath:  paths.Unpacked,
+            LibraryPath: paths.Library,
+            WorkerMount: srv.Config.Storage.BundleWorkerPath,
+            ShinyPort:   srv.Config.Docker.ShinyPort,
+            MemoryLimit: stringOrEmpty(app.MemoryLimit),
+            CPULimit:    floatOrZero(app.CPULimit),
+            Labels:      labels,
+        }
+
+        // Spawn worker
+        if err := srv.Backend.Spawn(r.Context(), spec); err != nil {
+            serverError(w, "spawn worker: "+err.Error())
+            return
+        }
+
+        // Register in worker map
+        srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID})
+
+        // Register address
+        addr, err := srv.Backend.Addr(r.Context(), workerID)
+        if err != nil {
+            slog.Warn("failed to get worker address", "worker_id", workerID, "error", err)
+        } else {
+            srv.Registry.Set(workerID, addr)
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(startResponse{
+            WorkerID: workerID,
+            Status:   "running",
+        })
     }
+}
 
-    // Must have an active bundle
-    let bundle_id = app.active_bundle.as_ref()
-        .ok_or_else(|| bad_request(
-            "app has no active bundle — upload and build a bundle first".into()
-        ))?;
-
-    // Check global worker limit
-    if state.workers.len() >= state.config.proxy.max_workers as usize {
-        return Err(service_unavailable("max workers reached".into()));
+func stringOrEmpty(s *string) string {
+    if s == nil {
+        return ""
     }
+    return *s
+}
 
-    // Build WorkerSpec
-    let worker_id = uuid::Uuid::new_v4().to_string();
-    let paths = crate::bundle::BundlePaths::for_bundle(
-        &state.config.storage.bundle_server_path,
-        &app.id,
-        bundle_id,
-    );
-
-    let image = state.config.docker.as_ref()
-        .map(|d| d.image.clone())
-        .unwrap_or_else(|| "rocker/r-ver:latest".into());
-
-    let shiny_port = state.config.docker.as_ref()
-        .map(|d| d.shiny_port)
-        .unwrap_or(3838);
-
-    let mut labels = std::collections::HashMap::new();
-    labels.insert("dev.blockyard/app-id".into(), app.id.clone());
-    labels.insert("dev.blockyard/worker-id".into(), worker_id.clone());
-
-    let spec = crate::backend::WorkerSpec {
-        app_id: app.id.clone(),
-        worker_id: worker_id.clone(),
-        image,
-        bundle_path: paths.unpacked,
-        library_path: paths.library,
-        worker_mount: state.config.storage.bundle_worker_path.clone(),
-        shiny_port,
-        memory_limit: app.memory_limit.clone(),
-        cpu_limit: app.cpu_limit,
-        labels,
-    };
-
-    // Spawn worker
-    let handle = state.backend.spawn(&spec)
-        .await
-        .map_err(|e| server_error(format!("spawn worker: {e}")))?;
-
-    // Track worker — no session yet, assigned by proxy in phase 0-5
-    state.workers.insert(worker_id.clone(), crate::app::ActiveWorker {
-        app_id: app.id.clone(),
-        handle,
-        session_id: None,
-    });
-
-    Ok(Json(StartResponse {
-        worker_id,
-        status: "running".into(),
-    }))
+func floatOrZero(f *float64) float64 {
+    if f == nil {
+        return 0
+    }
+    return *f
 }
 ```
 
@@ -612,472 +632,522 @@ The start endpoint spawns a single worker. In v0, the proxy (phase 0-5)
 will also spawn workers on-demand. The start endpoint is for explicit
 pre-warming — e.g. start the app before the first user hits it.
 
-The "already running" check uses the workers DashMap, not a stored DB
-status. If any worker exists for this app, the app is running.
+The "already running" check uses `WorkerMap`, not a stored DB status.
+If any worker exists for this app, the app is running.
 
-`session_id` is set to `None` because the start endpoint creates a
-worker without a session. The proxy (phase 0-5) sets it to
-`Some(session_id)` when a user session is assigned to this worker.
+Start does not health-check. The proxy layer (phase 0-5) handles
+cold-start holding — when a request arrives for a starting worker, the
+proxy polls `HealthCheck` until the worker is ready or the timeout
+expires. The start endpoint's job is just to pre-warm the container.
 
-### Step 9: App lifecycle — stop
+### Step 8: App lifecycle — stop
 
 `POST /api/v1/apps/{id}/stop` — stop all workers for an app.
 
-```rust
-pub async fn stop_app<B: Backend>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let app = db::sqlite::get_app(&state.db, &id)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("app {id} not found")))?;
+```go
+func StopApp(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id := chi.URLParam(r, "id")
 
-    let stopped = stop_app_workers(&state, &app.id).await;
+        app, err := resolveApp(srv.DB, id)
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+        if app == nil {
+            notFound(w, "app "+id+" not found")
+            return
+        }
 
-    Ok(Json(serde_json::json!({
-        "status": "stopped",
-        "workers_stopped": stopped,
-    })))
+        stopped := stopAppWorkers(srv, app.ID)
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "status":          "stopped",
+            "workers_stopped": stopped,
+        })
+    }
 }
 ```
 
 **Shared helper — stop all workers for an app:**
 
-```rust
-/// Stop all workers belonging to the given app. Returns the count of
-/// workers stopped. Errors from individual worker stops are logged
-/// but do not fail the operation — best-effort cleanup.
-async fn stop_app_workers<B: Backend>(state: &AppState<B>, app_id: &str) -> usize {
-    let worker_ids: Vec<String> = state.workers.iter()
-        .filter(|entry| entry.value().app_id == app_id)
-        .map(|entry| entry.key().clone())
-        .collect();
-
-    let mut stopped = 0;
-    for worker_id in &worker_ids {
-        if let Some((_, worker)) = state.workers.remove(worker_id) {
-            if let Err(e) = state.backend.stop(&worker.handle).await {
-                tracing::warn!(
-                    worker_id,
-                    app_id,
-                    error = %e,
-                    "failed to stop worker"
-                );
-            }
-            stopped += 1;
+```go
+// stopAppWorkers stops all workers belonging to the given app. Returns
+// the count of workers stopped. Errors from individual worker stops
+// are logged but do not fail the operation — best-effort cleanup.
+func stopAppWorkers(srv *server.Server, appID string) int {
+    workerIDs := srv.Workers.ForApp(appID)
+    stopped := 0
+    for _, wid := range workerIDs {
+        srv.Workers.Delete(wid)
+        srv.Registry.Delete(wid)
+        srv.Sessions.DeleteByWorker(wid)
+        if err := srv.Backend.Stop(context.Background(), wid); err != nil {
+            slog.Warn("failed to stop worker",
+                "worker_id", wid, "app_id", appID, "error", err)
         }
+        stopped++
     }
-
-    stopped
+    return stopped
 }
 ```
 
-`stop_app_workers` is used by both `stop_app` and `delete_app`. It
-removes workers from the DashMap first, then stops them via the backend.
+`stopAppWorkers` is used by both `StopApp` and `DeleteApp`. It removes
+workers from the `WorkerMap` first, then stops them via the backend.
 This ordering means that concurrent requests won't try to route to a
 worker that is being torn down.
 
-### Step 10: App log streaming
+### Step 9: App log streaming
 
 `GET /api/v1/apps/{id}/logs` — stream logs from a running worker.
 
 Query parameters:
 - `worker_id` (optional) — stream logs from a specific worker. If
   omitted, pick the first worker found for this app.
-- `follow` (optional, bool, default true) — whether to follow live
-  output or return buffered logs and close.
 
-```rust
-#[derive(serde::Deserialize)]
-pub struct LogsQuery {
-    pub worker_id: Option<String>,
-    #[serde(default = "default_true")]
-    pub follow: bool,
-}
+```go
+func AppLogs(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        id := chi.URLParam(r, "id")
 
-fn default_true() -> bool { true }
+        app, err := resolveApp(srv.DB, id)
+        if err != nil {
+            serverError(w, "db error: "+err.Error())
+            return
+        }
+        if app == nil {
+            notFound(w, "app "+id+" not found")
+            return
+        }
 
-pub async fn app_logs<B: Backend>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<String>,
-    Query(query): Query<LogsQuery>,
-) -> Result<axum::response::Response, ApiError> {
-    let _app = db::sqlite::get_app(&state.db, &id)
-        .await
-        .map_err(|e| server_error(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("app {id} not found")))?;
+        // Find the worker
+        workerID := r.URL.Query().Get("worker_id")
+        if workerID == "" {
+            workerIDs := srv.Workers.ForApp(app.ID)
+            if len(workerIDs) == 0 {
+                notFound(w, "no running workers for this app")
+                return
+            }
+            workerID = workerIDs[0]
+        } else {
+            // Verify the worker exists and belongs to this app
+            worker, ok := srv.Workers.Get(workerID)
+            if !ok {
+                notFound(w, "worker "+workerID+" not found")
+                return
+            }
+            if worker.AppID != app.ID {
+                notFound(w, fmt.Sprintf(
+                    "worker %s does not belong to app %s", workerID, id))
+                return
+            }
+        }
 
-    // Find the worker
-    let (worker_id, worker) = if let Some(ref wid) = query.worker_id {
-        let w = state.workers.get(wid)
-            .ok_or_else(|| not_found(format!("worker {wid} not found")))?;
-        (wid.clone(), w.clone())
-    } else {
-        // Find any worker for this app
-        state.workers.iter()
-            .find(|entry| entry.value().app_id == id)
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .ok_or_else(|| not_found("no running workers for this app".into()))?
-    };
+        // Get log stream from backend
+        logStream, err := srv.Backend.Logs(r.Context(), workerID)
+        if err != nil {
+            serverError(w, "log stream: "+err.Error())
+            return
+        }
+        defer logStream.Close()
 
-    // Verify the worker belongs to this app
-    if worker.app_id != id {
-        return Err(not_found(format!(
-            "worker {worker_id} does not belong to app {id}"
-        )));
+        w.Header().Set("Content-Type", "text/plain")
+        w.Header().Set("Transfer-Encoding", "chunked")
+        w.Header().Set("X-Content-Type-Options", "nosniff")
+
+        flusher, canFlush := w.(http.Flusher)
+
+        ctx := r.Context()
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case line, ok := <-logStream.Lines:
+                if !ok {
+                    return
+                }
+                fmt.Fprintf(w, "%s\n", line)
+                if canFlush {
+                    flusher.Flush()
+                }
+            }
+        }
     }
-
-    // Get log stream from backend
-    let rx = state.backend.logs(&worker.handle)
-        .await
-        .map_err(|e| server_error(format!("log stream: {e}")))?;
-
-    // Convert to streaming response
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-        .map(|line| Ok::<_, std::io::Error>(format!("{line}\n")));
-
-    let body = axum::body::Body::from_stream(stream);
-    let response = axum::response::Response::builder()
-        .header("content-type", "text/plain")
-        .header("transfer-encoding", "chunked")
-        .body(body)
-        .unwrap();
-
-    Ok(response)
 }
 ```
 
-The log endpoint streams lines from `backend.logs()`, which returns a
-`tokio::sync::mpsc::Receiver<String>`. The stream stays open as long as
-the backend produces output (follow behavior). If `follow=false`, the
-backend implementation should close the stream after returning buffered
-output — but this is a backend concern, not the API layer's. In v0
-the Docker backend's `logs()` always follows; a non-following mode can
-be added later if needed.
+The handler streams lines from `backend.Logs()`, which returns a
+`LogStream` with a channel of lines. The stream stays open as long as
+the backend produces output. The loop exits when the backend closes
+the channel (container exited) or the client disconnects
+(`r.Context().Done()`).
+
+### Step 10: Update bundle endpoints to use `resolveApp`
+
+Update `UploadBundle` and `ListBundles` in `bundles.go` to call
+`resolveApp` instead of `srv.DB.GetApp` so that all `{id}` parameters
+consistently resolve by UUID-then-name.
 
 ### Step 11: Router expansion
 
-Update `api_router` in `src/api/mod.rs` to wire all endpoints:
+Update `NewRouter` in `internal/api/router.go` to wire all endpoints:
 
-```rust
-pub mod apps;
-pub mod auth;
-pub mod bundles;
-pub mod error;
-pub mod tasks;
+```go
+func NewRouter(srv *server.Server) http.Handler {
+    r := chi.NewRouter()
 
-pub fn api_router<B: Backend + Clone>(state: AppState<B>) -> Router<AppState<B>> {
-    let max_body = state.config.storage.max_bundle_size;
+    // Unauthenticated
+    r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+        w.Write([]byte("ok"))
+    })
 
-    let authed = Router::new()
-        .route("/apps", post(apps::create_app::<B>).get(apps::list_apps::<B>))
-        .route(
-            "/apps/{id}",
-            get(apps::get_app::<B>)
-                .patch(apps::update_app::<B>)
-                .delete(apps::delete_app::<B>),
-        )
-        .route(
-            "/apps/{id}/bundles",
-            post(bundles::upload_bundle::<B>).get(bundles::list_bundles::<B>),
-        )
-        .route("/apps/{id}/start", post(apps::start_app::<B>))
-        .route("/apps/{id}/stop", post(apps::stop_app::<B>))
-        .route("/apps/{id}/logs", get(apps::app_logs::<B>))
-        .route("/tasks/{task_id}/logs", get(tasks::task_logs::<B>))
-        .layer(axum::extract::DefaultBodyLimit::max(max_body))
-        .layer(middleware::from_fn_with_state(
-            state,
-            auth::bearer_auth::<B>,
-        ));
+    // Authenticated API
+    r.Route("/api/v1", func(r chi.Router) {
+        r.Use(BearerAuth(srv))
 
-    Router::new()
-        .nest("/api/v1", authed)
-        .route("/healthz", axum::routing::get(healthz))
+        r.Post("/apps", CreateApp(srv))
+        r.Get("/apps", ListApps(srv))
+        r.Get("/apps/{id}", GetApp(srv))
+        r.Patch("/apps/{id}", UpdateApp(srv))
+        r.Delete("/apps/{id}", DeleteApp(srv))
+
+        r.Post("/apps/{id}/bundles", UploadBundle(srv))
+        r.Get("/apps/{id}/bundles", ListBundles(srv))
+
+        r.Post("/apps/{id}/start", StartApp(srv))
+        r.Post("/apps/{id}/stop", StopApp(srv))
+        r.Get("/apps/{id}/logs", AppLogs(srv))
+
+        r.Get("/tasks/{taskID}", GetTaskStatus(srv))
+        r.Get("/tasks/{taskID}/logs", TaskLogs(srv))
+    })
+
+    return r
 }
 ```
 
-### Step 12: New dependency
+### Step 12: Integration tests
 
-```toml
-tokio-stream = "0.1"   # ReceiverStream wrapper for log streaming
-```
-
-`tokio-stream` is used in the app logs endpoint to convert
-`mpsc::Receiver` into a `Stream` that `Body::from_stream` can consume.
-If this dependency is already pulled in transitively, make it explicit.
-
-### Step 13: Integration tests
-
-Extend `tests/bundle_test.rs` (or create `tests/api_test.rs`) with
-tests for the new endpoints. All tests use the existing
-`spawn_test_server()` helper with `MockBackend`.
+`internal/api/api_test.go` — extend with tests for all new endpoints.
+Use the existing `testServer` helper with `MockBackend`.
 
 **App CRUD tests:**
 
-```rust
-#[tokio::test]
-async fn create_app_returns_201() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
+```go
+func TestCreateApp(t *testing.T) {
+    _, ts := testServer(t)
+    body := `{"name":"my-app"}`
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(body))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
 
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["name"], "my-app");
-    assert_eq!(body["status"], "stopped");
-}
-
-#[tokio::test]
-async fn create_app_rejects_invalid_name() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    // Uppercase
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "My-App" }))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 400);
-
-    // Leading hyphen
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "-app" }))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 400);
-}
-
-#[tokio::test]
-async fn create_duplicate_name_returns_409() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-
-    assert_eq!(resp.status(), 409);
-}
-
-#[tokio::test]
-async fn list_apps_returns_all() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    for name in ["app-a", "app-b"] {
-        client.post(format!("http://{addr}/api/v1/apps"))
-            .bearer_auth("test-token")
-            .json(&serde_json::json!({ "name": name }))
-            .send().await.unwrap();
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if resp.StatusCode != http.StatusCreated {
+        t.Errorf("expected 201, got %d", resp.StatusCode)
     }
 
-    let resp = client.get(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-
-    assert_eq!(resp.status(), 200);
-    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
-    assert_eq!(body.len(), 2);
+    var result map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&result)
+    if result["name"] != "my-app" {
+        t.Errorf("expected name=my-app, got %v", result["name"])
+    }
+    if result["status"] != "stopped" {
+        t.Errorf("expected status=stopped, got %v", result["status"])
+    }
 }
 
-#[tokio::test]
-async fn get_app_returns_details() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
+func TestCreateAppRejectsInvalidName(t *testing.T) {
+    _, ts := testServer(t)
+    for _, name := range []string{"My-App", "-app", "app-", "app_name", "1app"} {
+        body := fmt.Sprintf(`{"name":"%s"}`, name)
+        req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+            strings.NewReader(body))
+        req.Header.Set("Authorization", "Bearer test-token")
+        req.Header.Set("Content-Type", "application/json")
 
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-    let created: serde_json::Value = resp.json().await.unwrap();
-    let id = created["id"].as_str().unwrap();
-
-    let resp = client.get(format!("http://{addr}/api/v1/apps/{id}"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["name"], "my-app");
+        resp, _ := http.DefaultClient.Do(req)
+        if resp.StatusCode != http.StatusBadRequest {
+            t.Errorf("name %q: expected 400, got %d", name, resp.StatusCode)
+        }
+    }
 }
 
-#[tokio::test]
-async fn get_nonexistent_app_returns_404() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    let resp = client.get(format!("http://{addr}/api/v1/apps/nonexistent"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 404);
+func TestCreateDuplicateNameReturns409(t *testing.T) {
+    _, ts := testServer(t)
+    body := `{"name":"my-app"}`
+    for range 2 {
+        req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+            strings.NewReader(body))
+        req.Header.Set("Authorization", "Bearer test-token")
+        req.Header.Set("Content-Type", "application/json")
+        resp, _ := http.DefaultClient.Do(req)
+        // First call: 201, second: 409
+        _ = resp
+    }
+    // Second call
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(body))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ := http.DefaultClient.Do(req)
+    if resp.StatusCode != http.StatusConflict {
+        t.Errorf("expected 409, got %d", resp.StatusCode)
+    }
 }
 
-#[tokio::test]
-async fn update_app_modifies_fields() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
+func TestListApps(t *testing.T) {
+    _, ts := testServer(t)
+    for _, name := range []string{"app-a", "app-b"} {
+        req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+            strings.NewReader(fmt.Sprintf(`{"name":"%s"}`, name)))
+        req.Header.Set("Authorization", "Bearer test-token")
+        req.Header.Set("Content-Type", "application/json")
+        http.DefaultClient.Do(req)
+    }
 
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-    let created: serde_json::Value = resp.json().await.unwrap();
-    let id = created["id"].as_str().unwrap();
+    req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ := http.DefaultClient.Do(req)
 
-    let resp = client.patch(format!("http://{addr}/api/v1/apps/{id}"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "memory_limit": "512m" }))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["memory_limit"], "512m");
+    if resp.StatusCode != 200 {
+        t.Errorf("expected 200, got %d", resp.StatusCode)
+    }
+    var apps []map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&apps)
+    if len(apps) != 2 {
+        t.Errorf("expected 2 apps, got %d", len(apps))
+    }
 }
 
-#[tokio::test]
-async fn delete_app_returns_204() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
+func TestGetAppByID(t *testing.T) {
+    _, ts := testServer(t)
+    // Create
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(`{"name":"my-app"}`))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ := http.DefaultClient.Do(req)
+    var created map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&created)
+    id := created["id"].(string)
 
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-    let created: serde_json::Value = resp.json().await.unwrap();
-    let id = created["id"].as_str().unwrap();
+    // Get by UUID
+    req, _ = http.NewRequest("GET", ts.URL+"/api/v1/apps/"+id, nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 200 {
+        t.Errorf("expected 200, got %d", resp.StatusCode)
+    }
 
-    let resp = client.delete(format!("http://{addr}/api/v1/apps/{id}"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 204);
+    // Get by name
+    req, _ = http.NewRequest("GET", ts.URL+"/api/v1/apps/my-app", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 200 {
+        t.Errorf("expected 200 for name lookup, got %d", resp.StatusCode)
+    }
+}
 
-    let resp = client.get(format!("http://{addr}/api/v1/apps/{id}"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 404);
+func TestGetNonexistentAppReturns404(t *testing.T) {
+    _, ts := testServer(t)
+    req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps/nonexistent", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ := http.DefaultClient.Do(req)
+    if resp.StatusCode != 404 {
+        t.Errorf("expected 404, got %d", resp.StatusCode)
+    }
+}
+
+func TestUpdateApp(t *testing.T) {
+    _, ts := testServer(t)
+    // Create
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(`{"name":"my-app"}`))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ := http.DefaultClient.Do(req)
+    var created map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&created)
+    id := created["id"].(string)
+
+    // Update
+    req, _ = http.NewRequest("PATCH", ts.URL+"/api/v1/apps/"+id,
+        strings.NewReader(`{"memory_limit":"512m"}`))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 200 {
+        t.Errorf("expected 200, got %d", resp.StatusCode)
+    }
+    var updated map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&updated)
+    if updated["memory_limit"] != "512m" {
+        t.Errorf("expected memory_limit=512m, got %v", updated["memory_limit"])
+    }
+}
+
+func TestDeleteApp(t *testing.T) {
+    _, ts := testServer(t)
+    // Create
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(`{"name":"my-app"}`))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ := http.DefaultClient.Do(req)
+    var created map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&created)
+    id := created["id"].(string)
+
+    // Delete
+    req, _ = http.NewRequest("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 204 {
+        t.Errorf("expected 204, got %d", resp.StatusCode)
+    }
+
+    // Confirm gone
+    req, _ = http.NewRequest("GET", ts.URL+"/api/v1/apps/"+id, nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 404 {
+        t.Errorf("expected 404, got %d", resp.StatusCode)
+    }
 }
 ```
 
 **App lifecycle tests:**
 
-```rust
-#[tokio::test]
-async fn start_app_without_bundle_returns_400() {
-    let (addr, _state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-    let created: serde_json::Value = resp.json().await.unwrap();
-    let id = created["id"].as_str().unwrap();
-
-    let resp = client.post(format!("http://{addr}/api/v1/apps/{id}/start"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 400);
-}
-
-#[tokio::test]
-async fn start_and_stop_app() {
-    let (addr, state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    // Create app
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-    let created: serde_json::Value = resp.json().await.unwrap();
-    let id = created["id"].as_str().unwrap();
-
-    // Upload bundle and wait for restore
-    let bundle_bytes = create_test_bundle();
-    client.post(format!("http://{addr}/api/v1/apps/{id}/bundles"))
-        .bearer_auth("test-token")
-        .body(bundle_bytes)
-        .send().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+```go
+func TestStartAppWithoutBundleReturnsConflict(t *testing.T) {
+    _, ts := testServer(t)
+    // Create app (no bundle)
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(`{"name":"my-app"}`))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ := http.DefaultClient.Do(req)
+    var created map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&created)
+    id := created["id"].(string)
 
     // Start
-    let resp = client.post(format!("http://{addr}/api/v1/apps/{id}/start"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "running");
-    assert!(!body["worker_id"].as_str().unwrap().is_empty());
+    req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != http.StatusConflict {
+        t.Errorf("expected 409, got %d", resp.StatusCode)
+    }
+}
 
-    // Verify worker was spawned in mock backend
-    assert_eq!(state.workers.len(), 1);
+func TestStartAndStopApp(t *testing.T) {
+    srv, ts := testServer(t)
 
-    // Start again — should be no-op
-    let resp = client.post(format!("http://{addr}/api/v1/apps/{id}/start"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(state.workers.len(), 1); // still 1
+    // Create app
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(`{"name":"my-app"}`))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ := http.DefaultClient.Do(req)
+    var created map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&created)
+    id := created["id"].(string)
+
+    // Upload bundle and wait for restore
+    req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
+        bytes.NewReader(makeTestBundle(t)))
+    req.Header.Set("Authorization", "Bearer test-token")
+    http.DefaultClient.Do(req)
+    time.Sleep(200 * time.Millisecond)
+
+    // Start
+    req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 200 {
+        t.Errorf("expected 200, got %d", resp.StatusCode)
+    }
+    var startBody map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&startBody)
+    if startBody["status"] != "running" {
+        t.Errorf("expected status=running, got %v", startBody["status"])
+    }
+
+    // Verify worker count
+    if srv.Workers.Count() != 1 {
+        t.Errorf("expected 1 worker, got %d", srv.Workers.Count())
+    }
+
+    // Start again — should be no-op, return same worker
+    req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 200 {
+        t.Errorf("expected 200 on second start, got %d", resp.StatusCode)
+    }
+    if srv.Workers.Count() != 1 {
+        t.Errorf("expected still 1 worker, got %d", srv.Workers.Count())
+    }
 
     // Stop
-    let resp = client.post(format!("http://{addr}/api/v1/apps/{id}/stop"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "stopped");
-    assert_eq!(body["workers_stopped"], 1);
+    req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 200 {
+        t.Errorf("expected 200, got %d", resp.StatusCode)
+    }
+    var stopBody map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&stopBody)
+    if stopBody["workers_stopped"] != float64(1) {
+        t.Errorf("expected workers_stopped=1, got %v", stopBody["workers_stopped"])
+    }
 
-    assert_eq!(state.workers.len(), 0);
+    if srv.Workers.Count() != 0 {
+        t.Errorf("expected 0 workers, got %d", srv.Workers.Count())
+    }
 }
-```
 
-**Delete with running workers:**
+func TestDeleteAppStopsWorkers(t *testing.T) {
+    srv, ts := testServer(t)
 
-```rust
-#[tokio::test]
-async fn delete_app_stops_workers_first() {
-    let (addr, state) = spawn_test_server().await;
-    let client = reqwest::Client::new();
+    // Create, upload, start
+    req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+        strings.NewReader(`{"name":"my-app"}`))
+    req.Header.Set("Authorization", "Bearer test-token")
+    req.Header.Set("Content-Type", "application/json")
+    resp, _ := http.DefaultClient.Do(req)
+    var created map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&created)
+    id := created["id"].(string)
 
-    // Create app, upload bundle, start
-    let resp = client.post(format!("http://{addr}/api/v1/apps"))
-        .bearer_auth("test-token")
-        .json(&serde_json::json!({ "name": "my-app" }))
-        .send().await.unwrap();
-    let created: serde_json::Value = resp.json().await.unwrap();
-    let id = created["id"].as_str().unwrap();
+    req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
+        bytes.NewReader(makeTestBundle(t)))
+    req.Header.Set("Authorization", "Bearer test-token")
+    http.DefaultClient.Do(req)
+    time.Sleep(200 * time.Millisecond)
 
-    let bundle_bytes = create_test_bundle();
-    client.post(format!("http://{addr}/api/v1/apps/{id}/bundles"))
-        .bearer_auth("test-token")
-        .body(bundle_bytes)
-        .send().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    http.DefaultClient.Do(req)
+    if srv.Workers.Count() != 1 {
+        t.Fatalf("expected 1 worker, got %d", srv.Workers.Count())
+    }
 
-    client.post(format!("http://{addr}/api/v1/apps/{id}/start"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(state.workers.len(), 1);
-
-    // Delete — should stop workers and clean up
-    let resp = client.delete(format!("http://{addr}/api/v1/apps/{id}"))
-        .bearer_auth("test-token")
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 204);
-    assert_eq!(state.workers.len(), 0);
+    // Delete
+    req, _ = http.NewRequest("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+    req.Header.Set("Authorization", "Bearer test-token")
+    resp, _ = http.DefaultClient.Do(req)
+    if resp.StatusCode != 204 {
+        t.Errorf("expected 204, got %d", resp.StatusCode)
+    }
+    if srv.Workers.Count() != 0 {
+        t.Errorf("expected 0 workers after delete, got %d", srv.Workers.Count())
+    }
 }
 ```
 
@@ -1087,7 +1157,7 @@ async fn delete_app_stops_workers_first() {
 |---|---|---|---|
 | `/api/v1/apps` | POST | **new** | Create app. Body: `{ "name": "..." }`. Returns 201 with app object. |
 | `/api/v1/apps` | GET | **new** | List all apps. Returns array. |
-| `/api/v1/apps/{id}` | GET | **new** | Get app details. |
+| `/api/v1/apps/{id}` | GET | **new** | Get app details. Resolves by UUID then name. |
 | `/api/v1/apps/{id}` | PATCH | **new** | Update app config. Body: partial fields. |
 | `/api/v1/apps/{id}` | DELETE | **new** | Delete app. Stops workers, removes files, deletes DB rows. Returns 204. |
 | `/api/v1/apps/{id}/bundles` | POST | 0-3 | Upload bundle. Returns 202. |
@@ -1095,68 +1165,71 @@ async fn delete_app_stops_workers_first() {
 | `/api/v1/apps/{id}/start` | POST | **new** | Start app. Spawns worker. No-op if running. |
 | `/api/v1/apps/{id}/stop` | POST | **new** | Stop app. Stops all workers. |
 | `/api/v1/apps/{id}/logs` | GET | **new** | Stream worker logs. Chunked text/plain. |
-| `/api/v1/tasks/{task_id}/logs` | GET | 0-3 | Stream task logs. |
+| `/api/v1/tasks/{taskID}` | GET | 0-3 | Task status. |
+| `/api/v1/tasks/{taskID}/logs` | GET | 0-3 | Stream task logs. |
 | `/healthz` | GET | 0-3 | Returns 200. No auth. |
+
+## New source files
+
+| File | Purpose |
+|---|---|
+| `internal/api/apps.go` | App CRUD + lifecycle + logs handlers |
+
+## Modified files
+
+| File | Change |
+|---|---|
+| `internal/db/db.go` | Add `AppUpdate`, `UpdateApp`, `ClearActiveBundle` |
+| `internal/db/db_test.go` | Add tests for `UpdateApp`, `ClearActiveBundle` |
+| `internal/api/error.go` | Add convenience wrappers (`badRequest`, `notFound`, `conflict`, `serviceUnavailable`, `serverError`) |
+| `internal/api/router.go` | Wire all new endpoints |
+| `internal/api/bundles.go` | Use `resolveApp` for `{id}` resolution |
+| `internal/api/tasks.go` | Use convenience error wrappers |
+| `internal/api/api_test.go` | Add integration tests for all new endpoints |
 
 ## Implementation notes
 
-- **App status is derived, not stored.** The `status` column is removed
-  from the `apps` table. Runtime state ("running" / "stopped") is
-  computed from the workers DashMap at request time. This avoids
-  staleness on server crash/restart and eliminates the sync obligation
-  between in-memory state and the DB. The API returns `AppResponse`
-  (which wraps `AppRow` + derived `status`) so callers still see a
-  `status` field in the JSON. If a persistent "admin intent" field is
-  needed later (e.g. "disabled"), add a new column with a clear name.
+- **App status is derived, not stored.** Runtime state ("running" /
+  "stopped") is computed from `WorkerMap` at request time. The API
+  returns `AppResponse` (which wraps `AppRow` + derived `status`) so
+  callers still see a `status` field in the JSON.
 
-- **`stop_app_workers` is best-effort.** Individual worker stop failures
+- **`stopAppWorkers` is best-effort.** Individual worker stop failures
   are logged but don't block the operation. If a container is already
   gone (e.g. it crashed), the stop call fails but the worker is still
-  removed from the DashMap. The Docker backend already handles
-  idempotent stop/remove (ignores 404/304/409 errors from the Docker
-  API).
+  removed from the `WorkerMap`.
 
 - **No drain on stop.** When `POST /apps/{id}/stop` is called, workers
   are stopped immediately without waiting for in-flight requests to
   complete. Graceful drain is a v1 feature alongside session sharing.
 
-- **Worker lookup by app_id scans the DashMap.** `state.workers` is
-  keyed by `worker_id`, not `app_id`. Finding workers for an app
-  requires iterating all entries. With `max_workers = 100`, this is a
-  trivial scan. If v2 needs faster lookup, add a secondary index
-  (`DashMap<String, Vec<String>>` mapping app_id → worker_ids).
+- **Worker lookup by app_id scans the WorkerMap.** `WorkerMap` is keyed
+  by `worker_id`, not `app_id`. Finding workers for an app requires
+  iterating all entries via `ForApp`. With `max_workers = 100`, this is
+  a trivial scan.
 
 - **Start does not health-check.** The start endpoint spawns the worker
-  and returns immediately. It does not wait for the worker to become
-  healthy. The proxy layer (phase 0-5) handles cold-start holding —
-  when a request arrives for a starting worker, the proxy polls
-  `health_check` until the worker is ready or the timeout expires.
-  The start endpoint's job is just to pre-warm the container.
+  and returns immediately. The proxy layer (phase 0-5) handles cold-start
+  holding.
 
-- **Log streaming and `follow` parameter.** The `follow` query param is
-  accepted but the Docker backend's `logs()` always follows. A
-  non-following mode (return buffered output and close) is not needed
-  for v0 — callers can simply close the connection when they've read
-  enough. If non-following is needed later, it's a backend-level
-  change, not an API-level one.
+- **Log streaming uses `backend.Logs()`.** The handler streams lines
+  from the backend's log channel until the container exits or the client
+  disconnects. The Docker backend always follows; there is no non-follow
+  mode in v0.
 
-- **Test helper `create_test_bundle`.** The integration tests need a
-  function that creates a minimal valid tar.gz for upload. This already
-  exists in the phase 0-3 test suite — reuse it.
+- **`resolveApp` enables name-based URLs.** All `{id}` params resolve
+  UUID first, name second. No collision risk because names must start
+  with `[a-z]` and UUIDs start with `[0-9a-f]`.
 
 ## Exit criteria
 
 Phase 0-4 is done when:
 
-- `status` column removed from `apps` table via migration
-- App status is derived from workers DashMap, not stored
+- App status is derived from `WorkerMap`, not stored
 - `AppResponse` includes computed `status` field in all app endpoints
-- `ActiveWorker.session_id` is `Option<String>`
-- `BundlePaths::for_bundle` is the single source of truth for bundle
-  paths, used by both bundle upload and worker start
 - `POST /api/v1/apps` creates an app with a validated name, returns 201
 - `GET /api/v1/apps` lists all apps with derived status
-- `GET /api/v1/apps/{id}` returns app details or 404
+- `GET /api/v1/apps/{id}` returns app details, resolves by UUID or name
 - `PATCH /api/v1/apps/{id}` updates resource limits, returns updated app
 - `DELETE /api/v1/apps/{id}` stops workers, cleans up files, returns 204
 - `POST /api/v1/apps/{id}/start` spawns a worker, returns worker_id
@@ -1164,10 +1237,10 @@ Phase 0-4 is done when:
 - `GET /api/v1/apps/{id}/logs` streams worker logs as chunked text
 - Invalid app names are rejected with 400
 - Duplicate app names are rejected with 409
-- Starting without an active bundle returns 400
+- Starting without an active bundle returns 409
 - Starting at max_workers limit returns 503
 - Error responses follow the `{ "error": "...", "message": "..." }` shape
 - All existing phase 0-3 tests still pass
 - All new integration tests pass
-- `cargo clippy` clean
-- `cargo test --features test-support` green
+- `go vet ./...` clean
+- `go test ./...` green

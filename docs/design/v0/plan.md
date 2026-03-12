@@ -690,6 +690,13 @@ validation), 401 (unauthorized), 404 (not found), 409 (conflict — duplicate
 name, no active bundle), 413 (bundle too large), 503 (at capacity). 500 for
 unexpected errors.
 
+**Deferred from phase 3:**
+
+- Expand integration tests to use `POST /api/v1/apps` (HTTP) instead of
+  direct DB calls for app setup
+- Add full end-to-end test: create app → upload bundle → wait for restore →
+  verify active bundle → start app
+
 ### Phase 5: Proxy Layer ([detailed plan](phase-0-5.md))
 
 HTTP/WebSocket reverse proxy, session management, cold-start hold, WebSocket
