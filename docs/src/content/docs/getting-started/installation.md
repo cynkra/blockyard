@@ -31,7 +31,7 @@ persists application data (bundles, database) in a named volume.
 ```bash
 git clone https://github.com/cynkra/blockyard.git
 cd blockyard
-cargo build --release
+go build -o blockyard ./cmd/blockyard
 ```
 
 Copy and edit the example configuration:
@@ -44,7 +44,7 @@ cp blockyard.toml my-config.toml
 Run the server:
 
 ```bash
-./target/release/blockyard --config my-config.toml
+./blockyard -config my-config.toml
 ```
 
 ## Verifying the installation

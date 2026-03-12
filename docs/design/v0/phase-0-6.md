@@ -13,13 +13,16 @@ a Shiny app printed to stdout.
    `SpawnLogRetentionCleaner`
 3. Updated `GET /api/v1/apps/{id}/logs` — serve from LogStore (live and
    historical) instead of returning 501; `worker_id` is required
-4. Mock backend additions — `SetManagedResources()`, `SetLogLines()`
-5. `main.go` wiring — startup cleanup, background goroutines, graceful
+4. Worker IDs in app detail response — `AppResponse` gains a `workers`
+   field listing active worker IDs, so callers can discover which
+   `worker_id` to pass to the logs endpoint
+5. Mock backend additions — `SetManagedResources()`, `SetLogLines()`
+6. `main.go` wiring — startup cleanup, background goroutines, graceful
    shutdown
-6. Unit tests for ops package
-7. Integration tests — orphan cleanup, stale bundle recovery, graceful
+7. Unit tests for ops package
+8. Integration tests — orphan cleanup, stale bundle recovery, graceful
    shutdown, health poller behavior, log capture and persistence
-8. Docker integration tests — startup cleanup with real containers,
+9. Docker integration tests — startup cleanup with real containers,
    metadata endpoint blocked
 
 ## What's already done
@@ -629,7 +632,53 @@ version) once the worker was gone.
 `IsEnded` is a new trivial method on LogStore (check `e.ended` under
 lock).
 
-### Step 9: Mock backend updates
+### Step 9: Worker IDs in app detail response
+
+The logs endpoint requires `worker_id`, so callers need a way to
+discover active worker IDs. Add a `workers` field to `AppResponse`:
+
+```go
+type AppResponse struct {
+    // ... existing fields ...
+    Status  string   `json:"status"`
+    Workers []string `json:"workers"` // active worker IDs (empty when stopped)
+}
+```
+
+The `appResponse` helper already receives the `WorkerMap`. Populate
+the new field from `workers.ForApp(app.ID)`:
+
+```go
+func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
+    status := "stopped"
+    workerIDs := workers.ForApp(app.ID)
+    if len(workerIDs) > 0 {
+        status = "running"
+    }
+    return AppResponse{
+        // ... existing fields ...
+        Status:  status,
+        Workers: workerIDs,
+    }
+}
+```
+
+When the app is stopped, `Workers` is an empty slice (serializes as
+`[]` in JSON, not `null`). This is consistent — `status: "running"`
+always has at least one entry in `workers`.
+
+The list endpoint (`GET /api/v1/apps`) also uses `appResponse`, so
+worker IDs are included there too. This is intentional — an admin
+listing apps can see at a glance which workers are active without
+making per-app detail calls.
+
+**Tests:**
+
+- Existing integration tests for `GET /api/v1/apps/{id}` gain
+  assertions on the `workers` field (empty when stopped, contains
+  worker ID after start)
+
+### Step 10: Mock backend updates
 
 Add test helpers to `MockBackend`:
 
@@ -663,7 +712,7 @@ func (b *MockBackend) SetLogLines(lines []string) {
 deletes the matching entry from the slice. `Logs` sends lines from
 `b.logLines` then closes the channel.
 
-### Step 10: `main.go` wiring
+### Step 11: `main.go` wiring
 
 ```go
 func main() {
@@ -719,7 +768,7 @@ in the background with cooperative cancellation via `context.Context`.
 `GracefulShutdown` runs after background goroutines have stopped and the
 HTTP server has finished draining.
 
-### Step 11: Docker integration tests
+### Step 12: Docker integration tests
 
 Gated behind `docker_test` build tag. Added to
 `internal/backend/docker/docker_integration_test.go`.
@@ -746,8 +795,7 @@ implemented.
 | `internal/logstore/store.go` | Fix `MarkEnded` idempotency, fix `Sender.Write` thread safety, add per-entry mutex, add `IsEnded` |
 | `internal/logstore/store_test.go` | Add tests for idempotency, `IsEnded` |
 | `internal/backend/mock/mock.go` | Add `SetManagedResources()`, `SetLogLines()`, persistent resource list, updated `ListManaged`/`RemoveResource`/`Logs` |
-| `internal/api/apps.go` | Replace `appLogs` 501 stub with LogStore-backed implementation (phase 0-4 creates this file; phase 0-6 updates it) |
-| `internal/api/apps.go` | Replace `stopAppWorkers` inline cleanup with `ops.EvictWorker` calls (phase 0-4 creates this file; phase 0-6 updates it) |
+| `internal/api/apps.go` | Replace `appLogs` 501 stub with LogStore-backed implementation; add `workers` field to `AppResponse` populated from `WorkerMap.ForApp()`; replace `stopAppWorkers` inline cleanup with `ops.EvictWorker` calls (phase 0-4 creates this file; phase 0-6 updates it) |
 | `proxy/coldstart.go` | Add `ops.SpawnLogCapture` call after successful spawn (phase 0-5 creates this file; phase 0-6 updates it) |
 | `cmd/blockyard/main.go` | Startup cleanup, background goroutines (health poller + log cleaner), graceful shutdown wiring |
 | `internal/backend/docker/docker_integration_test.go` | Add `TestMetadataEndpointBlocked` |
@@ -763,6 +811,8 @@ Phase 0-6 is done when:
 - `MarkEnded` is idempotent (no panic on double call)
 - `Sender.Write` is thread-safe (no data race with `Subscribe`)
 - `GET .../logs` requires `worker_id` (returns 400 if missing)
+- `GET /api/v1/apps/{id}` and `GET /api/v1/apps` include a `workers`
+  array listing active worker IDs
 - Orphan cleanup runs on startup and removes stale managed resources;
   startup fails if the backend is unreachable
 - Stale `building` bundles are marked `failed` on startup
