@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/db"
@@ -26,6 +28,7 @@ type RestoreParams struct {
 	RvBinaryPath string // if set, skip download and use this path directly
 	Retention    int
 	BasePath     string // bundle_server_path for retention cleanup
+	HostBasePath string // host-side equivalent of BasePath for Docker bind mounts
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
@@ -65,6 +68,15 @@ func SpawnRestore(params RestoreParams) {
 	}()
 }
 
+// toHostPath translates a server-side path to the corresponding host path
+// by replacing the BasePath prefix with HostBasePath.
+func (p RestoreParams) toHostPath(serverPath string) string {
+	if p.HostBasePath == "" || p.HostBasePath == p.BasePath {
+		return serverPath
+	}
+	return filepath.Join(p.HostBasePath, strings.TrimPrefix(serverPath, p.BasePath))
+}
+
 func runRestore(p RestoreParams) error {
 	// 1. Update status to "building"
 	if err := p.DB.UpdateBundleStatus(p.BundleID, "building"); err != nil {
@@ -83,6 +95,15 @@ func runRestore(p RestoreParams) error {
 		}
 	}
 
+	// Sanity-check: verify the rv binary is a regular file. In Docker-in-Docker
+	// setups, a missing bind-mount source gets auto-created as a directory,
+	// producing a confusing "is a directory: permission denied" error.
+	if fi, err := os.Stat(rvBinaryPath); err != nil {
+		return fmt.Errorf("rv binary not found at %s: %w", rvBinaryPath, err)
+	} else if fi.IsDir() {
+		return fmt.Errorf("rv binary path %s is a directory, not a file", rvBinaryPath)
+	}
+
 	// 3. Set library path in rproject.toml so rv writes to the mounted volume.
 	if err := SetLibraryPath(p.Paths, BuildContainerLibPath); err != nil {
 		return fmt.Errorf("set library path: %w", err)
@@ -99,9 +120,9 @@ func runRestore(p RestoreParams) error {
 		AppID:        p.AppID,
 		BundleID:     p.BundleID,
 		Image:        p.Image,
-		RvBinaryPath: rvBinaryPath,
-		BundlePath:   p.Paths.Unpacked,
-		LibraryPath:  p.Paths.Library,
+		RvBinaryPath: p.toHostPath(rvBinaryPath),
+		BundlePath:   p.toHostPath(p.Paths.Unpacked),
+		LibraryPath:  p.toHostPath(p.Paths.Library),
 		Labels:       labels,
 	}
 

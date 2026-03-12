@@ -56,8 +56,8 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 
 	// 4. Build WorkerSpec and spawn
 	wid := uuid.New().String()
-	paths := bundle.NewBundlePaths(
-		srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
+	hostPaths := bundle.NewBundlePaths(
+		srv.Config.Storage.BundleHostPath, app.ID, *app.ActiveBundle,
 	)
 
 	labels := map[string]string{
@@ -71,8 +71,8 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		AppID:       app.ID,
 		WorkerID:    wid,
 		Image:       srv.Config.Docker.Image,
-		BundlePath:  paths.Unpacked,
-		LibraryPath: paths.Library,
+		BundlePath:  hostPaths.Unpacked,
+		LibraryPath: hostPaths.Library,
 		WorkerMount: srv.Config.Storage.BundleWorkerPath,
 		ShinyPort:   srv.Config.Docker.ShinyPort,
 		MemoryLimit: ptrOr(app.MemoryLimit, ""),

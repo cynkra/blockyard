@@ -95,6 +95,7 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			RvBinaryPath: srv.Config.Docker.RvBinaryPath,
 			Retention:    srv.Config.Storage.BundleRetention,
 			BasePath:     srv.Config.Storage.BundleServerPath,
+			HostBasePath: srv.Config.Storage.BundleHostPath,
 		})
 
 		// 10. Return 202

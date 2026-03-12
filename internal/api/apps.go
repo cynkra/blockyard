@@ -317,8 +317,8 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 
 		// Build WorkerSpec
 		workerID := uuid.New().String()
-		paths := bundle.NewBundlePaths(
-			srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
+		hostPaths := bundle.NewBundlePaths(
+			srv.Config.Storage.BundleHostPath, app.ID, *app.ActiveBundle,
 		)
 
 		labels := map[string]string{
@@ -335,8 +335,8 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			Cmd: []string{"R", "-e",
 				fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
 					srv.Config.Storage.BundleWorkerPath)},
-			BundlePath:  paths.Unpacked,
-			LibraryPath: paths.Library,
+			BundlePath:  hostPaths.Unpacked,
+			LibraryPath: hostPaths.Library,
 			WorkerMount: srv.Config.Storage.BundleWorkerPath,
 			ShinyPort:   srv.Config.Docker.ShinyPort,
 			MemoryLimit: stringOrEmpty(app.MemoryLimit),

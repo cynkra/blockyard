@@ -25,12 +25,13 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 	t.Helper()
 	tmp := t.TempDir()
 
+	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
 		Server: config.ServerConfig{Token: "test-token"},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,
-			RvBinaryPath: "/dummy/rv",
+			RvBinaryPath: rvBin,
 		},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,

@@ -11,18 +11,20 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/testutil"
 )
 
 func testColdstartServer(t *testing.T) *server.Server {
 	t.Helper()
 	tmp := t.TempDir()
 
+	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
 		Server: config.ServerConfig{Token: "test-token"},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,
-			RvBinaryPath: "/dummy/rv",
+			RvBinaryPath: rvBin,
 		},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,

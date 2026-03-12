@@ -36,6 +36,7 @@ type DockerConfig struct {
 
 type StorageConfig struct {
 	BundleServerPath string `toml:"bundle_server_path"`
+	BundleHostPath   string `toml:"bundle_host_path"`
 	BundleWorkerPath string `toml:"bundle_worker_path"`
 	BundleRetention  int    `toml:"bundle_retention"`
 	MaxBundleSize    int64  `toml:"max_bundle_size"`
@@ -101,6 +102,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Docker.RvVersion == "" {
 		cfg.Docker.RvVersion = "v0.19.0"
+	}
+	if cfg.Storage.BundleHostPath == "" {
+		cfg.Storage.BundleHostPath = cfg.Storage.BundleServerPath
 	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"

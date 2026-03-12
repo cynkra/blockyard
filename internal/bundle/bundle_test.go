@@ -335,7 +335,7 @@ func TestRunRestore_Success(t *testing.T) {
 		Paths:     paths,
 		Image:     "test-image",
 		RvVersion:    "4.4.0",
-		RvBinaryPath: "/dummy/rv",
+		RvBinaryPath: testutil.FakeRvBinary(t),
 		Retention: 5,
 		BasePath:  tmp,
 	}
@@ -391,7 +391,7 @@ func TestRunRestore_BuildFailure(t *testing.T) {
 		Paths:     paths,
 		Image:     "test-image",
 		RvVersion:    "4.4.0",
-		RvBinaryPath: "/dummy/rv",
+		RvBinaryPath: testutil.FakeRvBinary(t),
 		Retention: 5,
 		BasePath:  tmp,
 	}

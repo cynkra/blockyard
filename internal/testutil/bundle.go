@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"os"
 	"testing"
 )
 
@@ -45,6 +46,17 @@ func MakeBundleWithoutEntrypoint(t *testing.T) []byte {
 	tw.Close()
 	gz.Close()
 	return buf.Bytes()
+}
+
+// FakeRvBinary creates a temp file that stands in for the rv binary in tests.
+func FakeRvBinary(t *testing.T) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "rv-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return f.Name()
 }
 
 // MakeTraversalBundle returns a tar.gz with a path traversal entry.
