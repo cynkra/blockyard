@@ -15,3 +15,23 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(errorResponse{Error: code, Message: msg})
 }
+
+func badRequest(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusBadRequest, "bad_request", msg)
+}
+
+func notFound(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusNotFound, "not_found", msg)
+}
+
+func conflict(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusConflict, "conflict", msg)
+}
+
+func serviceUnavailable(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusServiceUnavailable, "service_unavailable", msg)
+}
+
+func serverError(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusInternalServerError, "internal_error", msg)
+}

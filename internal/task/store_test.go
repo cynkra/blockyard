@@ -41,19 +41,9 @@ func TestSubscribeAndWrite(t *testing.T) {
 		t.Errorf("unexpected snapshot: %v", snapshot)
 	}
 
-	// Drain any buffered lines that overlap with the snapshot
-	drained := 0
-	for drained < len(snapshot) {
-		select {
-		case <-live:
-			drained++
-		default:
-			// Channel may not have all overlap lines buffered
-			drained = len(snapshot)
-		}
-	}
-
-	// Write after subscribe — should appear on live channel
+	// No dedup needed — live channel only delivers lines written
+	// after Subscribe was called. Write a new line and verify it
+	// arrives without any overlap.
 	sender.Write("line 3")
 	select {
 	case line := <-live:
@@ -72,6 +62,42 @@ func TestSubscribeAndWrite(t *testing.T) {
 	}
 }
 
+func TestSubscribeNoDuplicates(t *testing.T) {
+	s := NewStore()
+	sender := s.Create("task-1")
+
+	// Write lines before subscribing
+	sender.Write("before-1")
+	sender.Write("before-2")
+
+	snapshot, live, _, ok := s.Subscribe("task-1")
+	if !ok {
+		t.Fatal("expected task to exist")
+	}
+	if len(snapshot) != 2 {
+		t.Fatalf("expected 2 snapshot lines, got %d", len(snapshot))
+	}
+
+	// The live channel should be empty — no overlap with snapshot
+	select {
+	case line := <-live:
+		t.Errorf("expected empty live channel, got %q", line)
+	default:
+		// expected
+	}
+
+	// New line after subscribe should appear on live
+	sender.Write("after-1")
+	select {
+	case line := <-live:
+		if line != "after-1" {
+			t.Errorf("expected 'after-1', got %q", line)
+		}
+	default:
+		t.Error("expected line on live channel")
+	}
+}
+
 func TestComplete(t *testing.T) {
 	s := NewStore()
 	sender := s.Create("task-1")
@@ -87,10 +113,20 @@ func TestComplete(t *testing.T) {
 		t.Errorf("expected Completed, got %d", status)
 	}
 
-	_, _, done, ok := s.Subscribe("task-1")
+	snapshot, live, done, ok := s.Subscribe("task-1")
 	if !ok {
 		t.Fatal("expected task to exist")
 	}
+	if len(snapshot) != 1 {
+		t.Errorf("expected 1 snapshot line, got %d", len(snapshot))
+	}
+
+	// live channel should be closed for completed tasks
+	_, chanOpen := <-live
+	if chanOpen {
+		t.Error("expected live channel to be closed for completed task")
+	}
+
 	select {
 	case <-done:
 		// expected

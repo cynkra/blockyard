@@ -227,7 +227,7 @@ pub async fn start_app<B: Backend>(
 
     // Must have an active bundle
     let bundle_id = app.active_bundle.as_ref().ok_or_else(|| {
-        bad_request("app has no active bundle — upload and build a bundle first".into())
+        conflict("app has no active bundle — upload and build a bundle first".into())
     })?;
 
     // Check global worker limit

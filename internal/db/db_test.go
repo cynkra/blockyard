@@ -192,6 +192,67 @@ func TestDeleteBundle(t *testing.T) {
 	}
 }
 
+func TestUpdateApp(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app")
+
+	mem := "512m"
+	cpu := 2.0
+	workers := 3
+	updated, err := db.UpdateApp(app.ID, AppUpdate{
+		MemoryLimit:      &mem,
+		CPULimit:         &cpu,
+		MaxWorkersPerApp: &workers,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.MemoryLimit == nil || *updated.MemoryLimit != "512m" {
+		t.Errorf("expected memory_limit=512m, got %v", updated.MemoryLimit)
+	}
+	if updated.CPULimit == nil || *updated.CPULimit != 2.0 {
+		t.Errorf("expected cpu_limit=2.0, got %v", updated.CPULimit)
+	}
+	if updated.MaxWorkersPerApp == nil || *updated.MaxWorkersPerApp != 3 {
+		t.Errorf("expected max_workers_per_app=3, got %v", updated.MaxWorkersPerApp)
+	}
+	// Unchanged field should keep default
+	if updated.MaxSessionsPerWorker != 1 {
+		t.Errorf("expected max_sessions_per_worker=1, got %d", updated.MaxSessionsPerWorker)
+	}
+}
+
+func TestUpdateAppNotFound(t *testing.T) {
+	db := testDB(t)
+	_, err := db.UpdateApp("nonexistent", AppUpdate{})
+	if err == nil {
+		t.Error("expected error for nonexistent app")
+	}
+}
+
+func TestClearActiveBundle(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app")
+	db.CreateBundle("b-1", app.ID)
+	db.SetActiveBundle(app.ID, "b-1")
+
+	// Verify it's set
+	fetched, _ := db.GetApp(app.ID)
+	if fetched.ActiveBundle == nil {
+		t.Fatal("expected active bundle to be set")
+	}
+
+	// Clear it
+	if err := db.ClearActiveBundle(app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	fetched, _ = db.GetApp(app.ID)
+	if fetched.ActiveBundle != nil {
+		t.Errorf("expected nil active bundle, got %v", fetched.ActiveBundle)
+	}
+}
+
 func TestFailStaleBuilds(t *testing.T) {
 	db := testDB(t)
 

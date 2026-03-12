@@ -129,6 +129,18 @@ func UnpackArchive(paths Paths) error {
 	return nil
 }
 
+// ValidateEntrypoint checks that the unpacked bundle contains an app.R file
+// at the top level. In v0, all deployments must have this entrypoint.
+func ValidateEntrypoint(paths Paths) error {
+	entrypoint := filepath.Join(paths.Unpacked, "app.R")
+	if _, err := os.Stat(entrypoint); os.IsNotExist(err) {
+		return fmt.Errorf("bundle must contain an app.R entrypoint")
+	} else if err != nil {
+		return fmt.Errorf("check entrypoint: %w", err)
+	}
+	return nil
+}
+
 // CreateLibraryDir creates the output directory for dependency restoration.
 func CreateLibraryDir(paths Paths) error {
 	return os.MkdirAll(paths.Library, 0o755)

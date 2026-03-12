@@ -76,10 +76,10 @@ type AppRow struct {
 }
 
 type BundleRow struct {
-	ID         string
-	AppID      string
-	Status     string
-	UploadedAt string
+	ID         string `json:"id"`
+	AppID      string `json:"app_id"`
+	Status     string `json:"status"`
+	UploadedAt string `json:"uploaded_at"`
 }
 
 func (db *DB) CreateApp(name string) (*AppRow, error) {
@@ -217,6 +217,68 @@ func (db *DB) DeleteBundle(id string) (bool, error) {
 	}
 	n, _ := result.RowsAffected()
 	return n > 0, nil
+}
+
+// AppUpdate holds optional fields for updating an app's resource limits.
+type AppUpdate struct {
+	MaxWorkersPerApp     *int
+	MaxSessionsPerWorker *int
+	MemoryLimit          *string
+	CPULimit             *float64
+}
+
+// UpdateApp applies partial updates to an app's resource limits.
+// Uses fetch-modify-write since updates are rare admin operations.
+func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
+	app, err := db.GetApp(id)
+	if err != nil {
+		return nil, err
+	}
+	if app == nil {
+		return nil, fmt.Errorf("app not found")
+	}
+
+	if u.MaxWorkersPerApp != nil {
+		app.MaxWorkersPerApp = u.MaxWorkersPerApp
+	}
+	if u.MaxSessionsPerWorker != nil {
+		app.MaxSessionsPerWorker = *u.MaxSessionsPerWorker
+	}
+	if u.MemoryLimit != nil {
+		app.MemoryLimit = u.MemoryLimit
+	}
+	if u.CPULimit != nil {
+		app.CPULimit = u.CPULimit
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = db.Exec(
+		`UPDATE apps SET
+			max_workers_per_app = ?,
+			max_sessions_per_worker = ?,
+			memory_limit = ?,
+			cpu_limit = ?,
+			updated_at = ?
+		WHERE id = ?`,
+		app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
+		app.MemoryLimit, app.CPULimit,
+		now, id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update app: %w", err)
+	}
+
+	return db.GetApp(id)
+}
+
+// ClearActiveBundle sets active_bundle to NULL for the given app.
+func (db *DB) ClearActiveBundle(appID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE apps SET active_bundle = NULL, updated_at = ? WHERE id = ?`,
+		now, appID,
+	)
+	return err
 }
 
 func (db *DB) FailStaleBuilds() (int64, error) {

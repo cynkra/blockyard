@@ -20,8 +20,22 @@ func NewRouter(srv *server.Server) http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(BearerAuth(srv))
 
+		r.Post("/apps", CreateApp(srv))
+		r.Get("/apps", ListApps(srv))
+		r.Get("/apps/{id}", GetApp(srv))
+		r.Patch("/apps/{id}", UpdateApp(srv))
+		r.Delete("/apps/{id}", DeleteApp(srv))
+
 		r.Post("/apps/{id}/bundles", UploadBundle(srv))
 		r.Get("/apps/{id}/bundles", ListBundles(srv))
+
+		r.Post("/apps/{id}/start", StartApp(srv))
+		r.Post("/apps/{id}/stop", StopApp(srv))
+		r.Get("/apps/{id}/logs", func(w http.ResponseWriter, _ *http.Request) {
+			writeError(w, http.StatusNotImplemented, "not_implemented",
+				"app log streaming is implemented in phase 0-6")
+		})
+
 		r.Get("/tasks/{taskID}", GetTaskStatus(srv))
 		r.Get("/tasks/{taskID}/logs", TaskLogs(srv))
 	})

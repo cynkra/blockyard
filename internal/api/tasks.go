@@ -17,8 +17,7 @@ func GetTaskStatus(srv *server.Server) http.HandlerFunc {
 
 		status, ok := srv.Tasks.Status(taskID)
 		if !ok {
-			writeError(w, http.StatusNotFound, "not_found",
-				"task "+taskID+" not found")
+			notFound(w, "task "+taskID+" not found")
 			return
 		}
 
@@ -44,15 +43,13 @@ func TaskLogs(srv *server.Server) http.HandlerFunc {
 
 		status, ok := srv.Tasks.Status(taskID)
 		if !ok {
-			writeError(w, http.StatusNotFound, "not_found",
-				"task "+taskID+" not found")
+			notFound(w, "task "+taskID+" not found")
 			return
 		}
 
 		snapshot, live, done, ok := srv.Tasks.Subscribe(taskID)
 		if !ok {
-			writeError(w, http.StatusNotFound, "not_found",
-				"task "+taskID+" not found")
+			notFound(w, "task "+taskID+" not found")
 			return
 		}
 
@@ -75,18 +72,9 @@ func TaskLogs(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// Drain any overlap between snapshot and live channel
-		drained := 0
-		for drained < len(snapshot) {
-			select {
-			case <-live:
-				drained++
-			default:
-				drained = len(snapshot)
-			}
-		}
-
-		// Follow live output until task completes or client disconnects
+		// Follow live output until task completes or client disconnects.
+		// No dedup needed — Subscribe guarantees the live channel only
+		// delivers lines written after the snapshot.
 		ctx := r.Context()
 		for {
 			select {

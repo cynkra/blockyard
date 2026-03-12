@@ -17,16 +17,14 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := chi.URLParam(r, "id")
 
-		// 1. Validate app exists
-		app, err := srv.DB.GetApp(appID)
+		// 1. Validate app exists (resolve by UUID then name)
+		app, err := resolveApp(srv.DB, appID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error",
-				"db error: "+err.Error())
+			serverError(w, "db error: "+err.Error())
 			return
 		}
 		if app == nil {
-			writeError(w, http.StatusNotFound, "not_found",
-				"app "+appID+" not found")
+			notFound(w, "app "+appID+" not found")
 			return
 		}
 
@@ -48,39 +46,42 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 					"bundle exceeds max_bundle_size")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal_error",
-				"write archive: "+err.Error())
+			serverError(w, "write archive: "+err.Error())
 			return
 		}
 
 		// 5. Unpack
 		if err := bundle.UnpackArchive(paths); err != nil {
 			bundle.DeleteFiles(paths)
-			writeError(w, http.StatusInternalServerError, "internal_error",
-				"unpack: "+err.Error())
+			serverError(w, "unpack: "+err.Error())
 			return
 		}
 
-		// 6. Create library dir
+		// 6. Validate entrypoint
+		if err := bundle.ValidateEntrypoint(paths); err != nil {
+			bundle.DeleteFiles(paths)
+			badRequest(w, err.Error())
+			return
+		}
+
+		// 7. Create library dir
 		if err := bundle.CreateLibraryDir(paths); err != nil {
 			bundle.DeleteFiles(paths)
-			writeError(w, http.StatusInternalServerError, "internal_error",
-				"create library dir: "+err.Error())
+			serverError(w, "create library dir: "+err.Error())
 			return
 		}
 
-		// 7. Insert bundle row (status = pending)
+		// 8. Insert bundle row (status = pending)
 		if _, err := srv.DB.CreateBundle(bundleID, app.ID); err != nil {
 			bundle.DeleteFiles(paths)
-			writeError(w, http.StatusInternalServerError, "internal_error",
-				"create bundle row: "+err.Error())
+			serverError(w, "create bundle row: "+err.Error())
 			return
 		}
 
-		// 8. Create task in TaskStore
+		// 9. Create task in TaskStore
 		sender := srv.Tasks.Create(taskID)
 
-		// 9. Spawn async restore
+		// 10. Spawn async restore
 		bundle.SpawnRestore(bundle.RestoreParams{
 			Backend:   srv.Backend,
 			DB:        srv.DB,
@@ -111,10 +112,20 @@ func ListBundles(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := chi.URLParam(r, "id")
 
-		bundles, err := srv.DB.ListBundlesByApp(appID)
+		// Resolve app by UUID then name to get the canonical ID
+		app, err := resolveApp(srv.DB, appID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error",
-				"db error: "+err.Error())
+			serverError(w, "db error: "+err.Error())
+			return
+		}
+		if app == nil {
+			notFound(w, "app "+appID+" not found")
+			return
+		}
+
+		bundles, err := srv.DB.ListBundlesByApp(app.ID)
+		if err != nil {
+			serverError(w, "db error: "+err.Error())
 			return
 		}
 
