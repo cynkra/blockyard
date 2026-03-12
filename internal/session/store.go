@@ -3,7 +3,7 @@ package session
 import "sync"
 
 type Store struct {
-	mu       sync.RWMutex
+	mu       sync.Mutex
 	sessions map[string]string // session ID → worker ID
 }
 
@@ -12,8 +12,8 @@ func NewStore() *Store {
 }
 
 func (s *Store) Get(sessionID string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	wid, ok := s.sessions[sessionID]
 	return wid, ok
 }
@@ -46,8 +46,8 @@ func (s *Store) DeleteByWorker(workerID string) int {
 }
 
 func (s *Store) CountForWorker(workerID string) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := 0
 	for _, wid := range s.sessions {
 		if wid == workerID {

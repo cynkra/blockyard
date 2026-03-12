@@ -12,7 +12,7 @@ import (
 )
 
 type MockBackend struct {
-	mu               sync.RWMutex
+	mu               sync.Mutex
 	workers          map[string]*mockWorker
 	managedResources []backend.ManagedResource
 	logLines         []string
@@ -37,14 +37,14 @@ func New() *MockBackend {
 }
 
 func (b *MockBackend) WorkerCount() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return len(b.workers)
 }
 
 func (b *MockBackend) HasWorker(id string) bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	_, ok := b.workers[id]
 	return ok
 }
@@ -107,8 +107,8 @@ func (b *MockBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
 
 // GetWorkerURL returns the httptest server URL for a worker (for testing).
 func (b *MockBackend) GetWorkerURL(id string) string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	w, ok := b.workers[id]
 	if !ok {
 		return ""
@@ -129,9 +129,9 @@ func (b *MockBackend) Stop(_ context.Context, id string) error {
 }
 
 func (b *MockBackend) HealthCheck(_ context.Context, id string) bool {
-	b.mu.RLock()
+	b.mu.Lock()
 	_, ok := b.workers[id]
-	b.mu.RUnlock()
+	b.mu.Unlock()
 	if !ok {
 		return false
 	}
@@ -139,10 +139,10 @@ func (b *MockBackend) HealthCheck(_ context.Context, id string) bool {
 }
 
 func (b *MockBackend) Logs(_ context.Context, _ string) (backend.LogStream, error) {
-	b.mu.RLock()
+	b.mu.Lock()
 	lines := make([]string, len(b.logLines))
 	copy(lines, b.logLines)
-	b.mu.RUnlock()
+	b.mu.Unlock()
 
 	ch := make(chan string, len(lines))
 	for _, line := range lines {
@@ -153,8 +153,8 @@ func (b *MockBackend) Logs(_ context.Context, _ string) (backend.LogStream, erro
 }
 
 func (b *MockBackend) Addr(_ context.Context, id string) (string, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	w, ok := b.workers[id]
 	if !ok {
 		return "", fmt.Errorf("worker %q not found", id)
@@ -170,8 +170,8 @@ func (b *MockBackend) Build(_ context.Context, _ backend.BuildSpec) (backend.Bui
 }
 
 func (b *MockBackend) ListManaged(_ context.Context) ([]backend.ManagedResource, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	result := make([]backend.ManagedResource, len(b.managedResources))
 	copy(result, b.managedResources)
 	return result, nil

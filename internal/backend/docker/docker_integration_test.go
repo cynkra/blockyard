@@ -24,8 +24,9 @@ func testConfig() *config.DockerConfig {
 		ShinyPort: 8080,
 		RvVersion: "latest",
 	}
-	if os.Getenv("BLOCKYARD_DOCKER_SKIP_METADATA_BLOCK") == "true" {
-		cfg.SkipMetadataBlock = true
+	if os.Getenv("BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA") == "false" {
+		f := false
+		cfg.BlockCloudMetadata = &f
 	}
 	return cfg
 }
@@ -237,8 +238,8 @@ func TestNetworkIsolation(t *testing.T) {
 
 func TestMetadataEndpointBlocked(t *testing.T) {
 	cfg := testConfig()
-	if cfg.SkipMetadataBlock {
-		t.Skip("metadata blocking disabled via BLOCKYARD_DOCKER_SKIP_METADATA_BLOCK")
+	if cfg.BlockCloudMetadata != nil && !*cfg.BlockCloudMetadata {
+		t.Skip("metadata blocking disabled via BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA")
 	}
 	ctx := context.Background()
 	b, err := New(ctx, cfg)

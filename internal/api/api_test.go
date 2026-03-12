@@ -504,8 +504,7 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	}
 }
 
-func TestAppLogsWithoutWorkerIDReturns400(t *testing.T) {
-	// worker_id is required — omitting it should return 400.
+func TestAppLogsMissingWorkerID(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)

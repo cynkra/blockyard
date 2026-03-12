@@ -11,10 +11,12 @@ const (
 	Running Status = iota
 	Completed
 	Failed
+
+	maxTaskLogLines = 50_000
 )
 
 type Store struct {
-	mu    sync.RWMutex
+	mu    sync.Mutex
 	tasks map[string]*entry
 }
 
@@ -47,8 +49,8 @@ func (s *Store) Create(id string) Sender {
 
 // Status returns the task's current status. Returns false if not found.
 func (s *Store) Status(id string) (Status, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	e, ok := s.tasks[id]
 	if !ok {
 		return 0, false
@@ -61,8 +63,8 @@ func (s *Store) Status(id string) (Status, bool) {
 // CreatedAt returns the task's creation timestamp as an RFC3339 string.
 // Returns empty string if the task is not found.
 func (s *Store) CreatedAt(id string) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	e, ok := s.tasks[id]
 	if !ok {
 		return ""
@@ -77,9 +79,9 @@ func (s *Store) CreatedAt(id string) string {
 // delivers new lines — no dedup needed by the caller. The done
 // channel is closed when the task completes.
 func (s *Store) Subscribe(id string) (snapshot []string, live <-chan string, done <-chan struct{}, ok bool) {
-	s.mu.RLock()
+	s.mu.Lock()
 	e, found := s.tasks[id]
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	if !found {
 		return nil, nil, nil, false
 	}
@@ -112,7 +114,9 @@ func (s Sender) Write(line string) {
 	s.e.mu.Lock()
 	defer s.e.mu.Unlock()
 
-	s.e.buffer = append(s.e.buffer, line)
+	if len(s.e.buffer) < maxTaskLogLines {
+		s.e.buffer = append(s.e.buffer, line)
+	}
 	// Non-blocking send to all subscribers — if a subscriber's
 	// channel is full, the line is dropped from live delivery
 	// but retained in the buffer for future subscribers.

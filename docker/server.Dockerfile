@@ -1,11 +1,14 @@
-FROM rust:1-bookworm AS builder
+FROM golang:1.24-bookworm AS builder
 
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/ cmd/
+COPY internal/ internal/
 COPY migrations/ migrations/
 
-RUN cargo build --release --locked
+RUN CGO_ENABLED=0 go build -o /blockyard ./cmd/blockyard
 
 FROM debian:bookworm-slim
 
@@ -14,7 +17,7 @@ RUN apt-get update \
        ca-certificates curl iptables \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/target/release/blockyard /usr/local/bin/blockyard
+COPY --from=builder /blockyard /usr/local/bin/blockyard
 COPY blockyard.toml /etc/blockyard/blockyard.toml
 
 EXPOSE 8080

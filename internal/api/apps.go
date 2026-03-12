@@ -418,24 +418,15 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 		}
 
 		workerID := r.URL.Query().Get("worker_id")
+		if workerID == "" {
+			badRequest(w, "worker_id query parameter is required")
+			return
+		}
 
-		var (
-			snapshot []string
-			live     <-chan string
-			ok       bool
-		)
-		if workerID != "" {
-			snapshot, live, ok = srv.LogStore.Subscribe(workerID)
-			if !ok {
-				notFound(w, "no logs for worker "+workerID)
-				return
-			}
-		} else {
-			workerID, snapshot, live, ok = srv.LogStore.SubscribeByApp(app.ID)
-			if !ok {
-				notFound(w, "no logs available for this app")
-				return
-			}
+		snapshot, live, ok := srv.LogStore.Subscribe(workerID)
+		if !ok {
+			notFound(w, "no logs for worker "+workerID)
+			return
 		}
 		ended := srv.LogStore.IsEnded(workerID)
 

@@ -3,7 +3,7 @@ package registry
 import "sync"
 
 type Registry struct {
-	mu    sync.RWMutex
+	mu    sync.Mutex
 	addrs map[string]string // worker ID → "host:port"
 }
 
@@ -12,8 +12,8 @@ func New() *Registry {
 }
 
 func (r *Registry) Get(workerID string) (string, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	addr, ok := r.addrs[workerID]
 	return addr, ok
 }

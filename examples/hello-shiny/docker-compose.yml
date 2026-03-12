@@ -9,11 +9,9 @@ services:
       - db:/data/db
     environment:
       BLOCKYARD_SERVER_TOKEN: my-secret-token
-      RUST_LOG: blockyard=info
-    # iptables needs NET_ADMIN; SYS_ADMIN lets blockyard detect its own container ID
+    # iptables metadata-endpoint blocking needs NET_ADMIN
     cap_add:
       - NET_ADMIN
-      - SYS_ADMIN
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
       interval: 5s

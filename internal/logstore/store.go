@@ -8,7 +8,7 @@ import (
 const maxLogLines = 50_000
 
 type Store struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	entries map[string]*logEntry
 }
 
@@ -40,9 +40,9 @@ func (s *Store) Create(workerID, appID string) Sender {
 
 // Subscribe returns a snapshot and live channel for a worker's logs.
 func (s *Store) Subscribe(workerID string) (snapshot []string, live <-chan string, ok bool) {
-	s.mu.RLock()
+	s.mu.Lock()
 	e, found := s.entries[workerID]
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	if !found {
 		return nil, nil, false
 	}
@@ -55,8 +55,8 @@ func (s *Store) Subscribe(workerID string) (snapshot []string, live <-chan strin
 
 // WorkerIDsByApp returns worker IDs for all workers of the given app.
 func (s *Store) WorkerIDsByApp(appID string) (workerIDs []string) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for wid, e := range s.entries {
 		if e.appID == appID {
 			workerIDs = append(workerIDs, wid)
@@ -65,44 +65,14 @@ func (s *Store) WorkerIDsByApp(appID string) (workerIDs []string) {
 	return workerIDs
 }
 
-// SubscribeByApp finds a worker for the given app and subscribes to its
-// logs. Prefers a live (not ended) worker over an ended one.
-func (s *Store) SubscribeByApp(appID string) (workerID string, snapshot []string, live <-chan string, ok bool) {
-	s.mu.RLock()
-	// First pass: find a live worker
-	var fallbackID string
-	for wid, e := range s.entries {
-		if e.appID != appID {
-			continue
-		}
-		e.mu.Lock()
-		ended := e.ended
-		e.mu.Unlock()
-		if !ended {
-			s.mu.RUnlock()
-			snapshot, live, ok = s.Subscribe(wid)
-			return wid, snapshot, live, ok
-		}
-		if fallbackID == "" {
-			fallbackID = wid
-		}
-	}
-	s.mu.RUnlock()
 
-	// Second pass: use any ended worker
-	if fallbackID != "" {
-		snapshot, live, ok = s.Subscribe(fallbackID)
-		return fallbackID, snapshot, live, ok
-	}
-	return "", nil, nil, false
-}
 
 // MarkEnded marks a worker's log stream as ended. Idempotent — safe to
 // call multiple times or on nonexistent workers.
 func (s *Store) MarkEnded(workerID string) {
-	s.mu.RLock()
+	s.mu.Lock()
 	e, ok := s.entries[workerID]
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	if !ok {
 		return
 	}
@@ -117,9 +87,9 @@ func (s *Store) MarkEnded(workerID string) {
 }
 
 func (s *Store) HasActive(workerID string) bool {
-	s.mu.RLock()
+	s.mu.Lock()
 	e, ok := s.entries[workerID]
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	if !ok {
 		return false
 	}
@@ -130,9 +100,9 @@ func (s *Store) HasActive(workerID string) bool {
 
 // IsEnded returns true if the worker's log stream has ended.
 func (s *Store) IsEnded(workerID string) bool {
-	s.mu.RLock()
+	s.mu.Lock()
 	e, ok := s.entries[workerID]
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	if !ok {
 		return false
 	}

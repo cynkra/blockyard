@@ -47,7 +47,7 @@ type ActiveWorker struct {
 
 // WorkerMap is a concurrent map of worker ID → ActiveWorker.
 type WorkerMap struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	workers map[string]ActiveWorker
 }
 
@@ -56,8 +56,8 @@ func NewWorkerMap() *WorkerMap {
 }
 
 func (m *WorkerMap) Get(id string) (ActiveWorker, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	w, ok := m.workers[id]
 	return w, ok
 }
@@ -75,14 +75,14 @@ func (m *WorkerMap) Delete(id string) {
 }
 
 func (m *WorkerMap) Count() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return len(m.workers)
 }
 
 func (m *WorkerMap) CountForApp(appID string) int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	n := 0
 	for _, w := range m.workers {
 		if w.AppID == appID {
@@ -94,8 +94,8 @@ func (m *WorkerMap) CountForApp(appID string) int {
 
 // All returns a snapshot of all worker IDs.
 func (m *WorkerMap) All() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	ids := make([]string, 0, len(m.workers))
 	for id := range m.workers {
 		ids = append(ids, id)
@@ -105,8 +105,8 @@ func (m *WorkerMap) All() []string {
 
 // ForApp returns all worker IDs for a given app.
 func (m *WorkerMap) ForApp(appID string) []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var ids []string
 	for id, w := range m.workers {
 		if w.AppID == appID {

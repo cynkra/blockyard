@@ -118,15 +118,17 @@ Stop all workers for an app.
 
 ### `GET /api/v1/apps/{id}/logs`
 
-> **Not yet implemented.** This endpoint currently returns `501 Not Implemented`.
-
 Stream logs from a running worker. Returns chunked `text/plain`.
+
+If the worker has already exited (but is within the log retention window), the
+buffered logs are returned as a complete response. If the worker is still
+running, buffered lines are sent immediately followed by live streaming.
 
 **Query parameters:**
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `worker_id` | `string` | — | Stream logs from a specific worker. If omitted, picks the first worker for the app. |
+| `worker_id` | `string` | — | **Required.** The worker to stream logs from. Use the `workers` field from the app response to discover IDs. |
 
 ---
 
@@ -172,7 +174,8 @@ Get the current status of a background task.
 ```json
 {
   "id": "t5678...",
-  "status": "running"
+  "status": "running",
+  "created_at": "2024-01-15T09:30:00Z"
 }
 ```
 

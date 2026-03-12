@@ -120,11 +120,11 @@ func TestEnvVarOverridesMaxWorkers(t *testing.T) {
 	}
 }
 
-func TestEnvVarOverridesSkipMetadataBlock(t *testing.T) {
-	t.Setenv("BLOCKYARD_DOCKER_SKIP_METADATA_BLOCK", "true")
+func TestEnvVarOverridesBlockCloudMetadata(t *testing.T) {
+	t.Setenv("BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA", "false")
 	cfg := loadFromString(t, minimalTOML)
-	if !cfg.Docker.SkipMetadataBlock {
-		t.Error("expected SkipMetadataBlock to be true")
+	if cfg.Docker.BlockCloudMetadata == nil || *cfg.Docker.BlockCloudMetadata {
+		t.Error("expected BlockCloudMetadata to be false")
 	}
 }
 

@@ -26,12 +26,11 @@ Connect:
   is one container per session (`max_sessions_per_worker = 1`). See the Worker
   Scaling feature entry for details.
 
-**Milestones:** v0 is the first working technical milestone — core
-infrastructure, no user auth on the app plane. v1 is the MVP: the minimum
-needed to host a real blockr app for real users. v1 adds user auth (OIDC),
-identity injection, per-user credential management (the integration system),
-and load balancing. Nothing in "later" or beyond is required to call the
-product useful.
+**Milestones:** v0 is the core infrastructure — no user auth on the app
+plane. v1 is the MVP: the minimum needed to host a real blockr app for real
+users. v1 adds user auth (OIDC), identity injection, per-user credential
+management (the integration system), and load balancing. Nothing beyond v1 is
+required to call the product useful.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
 interface (Docker vs. Kubernetes). This abstraction is worth its complexity
@@ -221,9 +220,9 @@ plane protected by a single static bearer token in config.
 - **Session and worker routing.** Cookie-based session pinning. A session store
   maps session IDs to worker IDs; a worker registry maps worker IDs to network
   addresses. These start as concrete in-memory structs for v0. When v2 needs
-  PostgreSQL-backed implementations for HA, extracting an interface in Go is a
-  low-cost mechanical refactor — define the interface at the call site and any
-  struct with matching methods already satisfies it.
+  PostgreSQL-backed implementations for HA, extracting an interface is a
+  low-cost refactor — define the interface at the call site and any struct with
+  matching methods already satisfies it.
 
   On first request to `/app/{name}/`, the proxy sets a session cookie containing
   a generated session ID. Subsequent requests — including WebSocket reconnects

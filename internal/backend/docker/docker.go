@@ -53,7 +53,7 @@ type DockerBackend struct {
 	serverID string // own container ID; empty = native mode
 	config   *config.DockerConfig
 
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	workers map[string]*workerState // keyed by worker ID
 
 	metaMu   sync.Mutex
@@ -359,7 +359,7 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 	}
 
 	// 3. Block metadata endpoint (iptables)
-	if d.config.SkipMetadataBlock {
+	if d.config.BlockCloudMetadata != nil && !*d.config.BlockCloudMetadata {
 		slog.Debug("metadata endpoint blocking skipped (config)", "worker_id", spec.WorkerID)
 	} else if err := d.blockMetadataEndpoint(ctx, networkName, spec.WorkerID); err != nil {
 		_ = d.client.NetworkRemove(ctx, networkID)
@@ -474,9 +474,9 @@ func (d *DockerBackend) HealthCheck(ctx context.Context, id string) bool {
 }
 
 func (d *DockerBackend) Logs(ctx context.Context, id string) (backend.LogStream, error) {
-	d.mu.RLock()
+	d.mu.Lock()
 	ws, ok := d.workers[id]
-	d.mu.RUnlock()
+	d.mu.Unlock()
 	if !ok {
 		return backend.LogStream{}, fmt.Errorf("logs: unknown worker %s", id)
 	}
@@ -514,9 +514,9 @@ func (d *DockerBackend) Logs(ctx context.Context, id string) (backend.LogStream,
 }
 
 func (d *DockerBackend) Addr(ctx context.Context, id string) (string, error) {
-	d.mu.RLock()
+	d.mu.Lock()
 	ws, ok := d.workers[id]
-	d.mu.RUnlock()
+	d.mu.Unlock()
 	if !ok {
 		return "", fmt.Errorf("addr: unknown worker %s", id)
 	}
