@@ -14,7 +14,7 @@ func BearerAuth(srv *server.Server) func(http.Handler) http.Handler {
 			auth := r.Header.Get("Authorization")
 			token, found := strings.CutPrefix(auth, "Bearer ")
 			if !found || token != srv.Config.Server.Token {
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 				return
 			}
 			next.ServeHTTP(w, r)

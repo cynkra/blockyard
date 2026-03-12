@@ -65,6 +65,38 @@ func (s *Store) WorkerIDsByApp(appID string) (workerIDs []string) {
 	return workerIDs
 }
 
+// SubscribeByApp finds a worker for the given app and subscribes to its
+// logs. Prefers a live (not ended) worker over an ended one.
+func (s *Store) SubscribeByApp(appID string) (workerID string, snapshot []string, live <-chan string, ok bool) {
+	s.mu.RLock()
+	// First pass: find a live worker
+	var fallbackID string
+	for wid, e := range s.entries {
+		if e.appID != appID {
+			continue
+		}
+		e.mu.Lock()
+		ended := e.ended
+		e.mu.Unlock()
+		if !ended {
+			s.mu.RUnlock()
+			snapshot, live, ok = s.Subscribe(wid)
+			return wid, snapshot, live, ok
+		}
+		if fallbackID == "" {
+			fallbackID = wid
+		}
+	}
+	s.mu.RUnlock()
+
+	// Second pass: use any ended worker
+	if fallbackID != "" {
+		snapshot, live, ok = s.Subscribe(fallbackID)
+		return fallbackID, snapshot, live, ok
+	}
+	return "", nil, nil, false
+}
+
 // MarkEnded marks a worker's log stream as ended. Idempotent — safe to
 // call multiple times or on nonexistent workers.
 func (s *Store) MarkEnded(workerID string) {

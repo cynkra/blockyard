@@ -25,6 +25,7 @@ func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName string, t
 		req.URL.Path = stripAppPrefix(req.URL.Path, appName)
 		req.URL.RawPath = ""
 		req.Host = addr
+		req.Header.Set("X-Forwarded-Proto", "http")
 	}
 
 	proxy.ServeHTTP(w, r)

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -29,6 +30,9 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 // StartupCleanup removes orphaned resources and fails stale builds.
 // Called in main() before binding the listener.
 func StartupCleanup(ctx context.Context, srv *server.Server) error {
+	// Remove orphaned iptables rules from previous runs.
+	docker.CleanupOrphanMetadataRules()
+
 	resources, err := srv.Backend.ListManaged(ctx)
 	if err != nil {
 		return err

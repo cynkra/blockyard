@@ -95,7 +95,10 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 	srv.Workers.Set(wid, server.ActiveWorker{AppID: app.ID})
 	srv.Registry.Set(wid, a)
 
-	// 6. Cold-start hold — poll health with exponential backoff
+	// 6. Start log capture before health polling so startup output is captured.
+	ops.SpawnLogCapture(ctx, srv, wid, app.ID)
+
+	// 7. Cold-start hold — poll health with exponential backoff
 	if err := pollHealthy(ctx, srv, wid); err != nil {
 		// Health check timed out — evict the worker
 		srv.Workers.Delete(wid)
@@ -103,8 +106,6 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		srv.Backend.Stop(context.Background(), wid)
 		return "", "", err
 	}
-
-	ops.SpawnLogCapture(ctx, srv, wid, app.ID)
 
 	slog.Info("worker ready",
 		"worker_id", wid, "app_id", app.ID, "addr", a)

@@ -29,6 +29,20 @@ type RestoreParams struct {
 // Returns immediately.
 func SpawnRestore(params RestoreParams) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("restore task panicked",
+					"app_id", params.AppID,
+					"bundle_id", params.BundleID,
+					"panic", r)
+				params.Sender.Write(fmt.Sprintf("FATAL: restore task panicked: %v", r))
+				params.Sender.Complete(task.Failed)
+				if err := params.DB.UpdateBundleStatus(params.BundleID, "failed"); err != nil {
+					slog.Error("restore: update status to failed after panic",
+						"bundle_id", params.BundleID, "error", err)
+				}
+			}
+		}()
 		err := runRestore(params)
 		if err != nil {
 			params.Sender.Write(fmt.Sprintf("ERROR: %s", err))

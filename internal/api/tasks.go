@@ -29,10 +29,13 @@ func GetTaskStatus(srv *server.Server) http.HandlerFunc {
 			statusStr = "failed"
 		}
 
+		createdAt := srv.Tasks.CreatedAt(taskID)
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"id":     taskID,
-			"status": statusStr,
+			"id":         taskID,
+			"status":     statusStr,
+			"created_at": createdAt,
 		})
 	}
 }

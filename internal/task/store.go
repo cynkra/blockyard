@@ -58,6 +58,20 @@ func (s *Store) Status(id string) (Status, bool) {
 	return e.status, true
 }
 
+// CreatedAt returns the task's creation timestamp as an RFC3339 string.
+// Returns empty string if the task is not found.
+func (s *Store) CreatedAt(id string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.tasks[id]
+	if !ok {
+		return ""
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.createdAt.Format(time.RFC3339)
+}
+
 // Subscribe returns a snapshot of buffered lines and a channel for
 // live lines written after the snapshot. The live channel only
 // delivers new lines — no dedup needed by the caller. The done

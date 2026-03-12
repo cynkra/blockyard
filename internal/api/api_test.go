@@ -196,9 +196,6 @@ func TestListBundles(t *testing.T) {
 		http.DefaultClient.Do(req)
 	}
 
-	// Give restore goroutines time to finish
-	time.Sleep(100 * time.Millisecond)
-
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/bundles", nil)
 	resp, _ := http.DefaultClient.Do(req)
 
@@ -506,15 +503,17 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	}
 }
 
-func TestAppLogsMissingWorkerID(t *testing.T) {
+func TestAppLogsWithoutWorkerIDNoLogs(t *testing.T) {
+	// When no worker_id is provided and no workers have run,
+	// the endpoint should return 404 (no logs available).
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs", nil)
 	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400 without worker_id, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 without worker_id and no logs, got %d", resp.StatusCode)
 	}
 }
 
