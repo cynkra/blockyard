@@ -23,7 +23,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     env:
-      BLOCKYARD_DOCKER_SKIP_METADATA_BLOCK: "true"
+      BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
