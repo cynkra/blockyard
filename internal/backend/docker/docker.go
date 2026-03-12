@@ -560,8 +560,8 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		},
 		&container.HostConfig{
 			Binds: []string{
-				spec.BundlePath + ":/app:ro",
-				spec.LibraryPath + ":/app/rv/library:rw",
+				spec.BundlePath + ":/app",
+				spec.LibraryPath + ":/app/rv/library",
 				spec.RvBinaryPath + ":/usr/local/bin/rv:ro",
 			},
 			Tmpfs: map[string]string{
