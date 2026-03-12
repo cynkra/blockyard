@@ -5,52 +5,45 @@ deferred from v0/v1 planning.
 
 ## Deferred from v0/v1
 
-### Backend crate extraction
+### Backend package extraction
 
-v0 uses a single crate with feature-gated backends:
-
-```toml
-[features]
-default = ["docker"]
-docker = ["dep:bollard"]
-```
-
-`docker.rs` is behind `#[cfg(feature = "docker")]`. This works for one or two
-backends but may become unwieldy when Kubernetes arrives. At that point,
-consider extracting a trait crate:
+v0 uses a single module with build-tag-gated backends. This works for one or
+two backends but may become unwieldy when Kubernetes arrives. At that point,
+consider extracting separate packages or modules:
 
 ```
-blockyard/               # binary + app logic
-blockyard-core/          # traits: Backend, WorkerHandle, SessionStore, etc.
-blockyard-backend-docker/      # depends on core + bollard
-blockyard-backend-k8s/         # depends on core + kube-rs
+blockyard/
+├── internal/backend/           # Backend interface + shared types
+├── internal/backend/docker/    # Docker implementation
+├── internal/backend/k8s/       # Kubernetes implementation
 ```
 
-**What triggers the refactor:** if adding the k8s backend to the single crate
+**What triggers the refactor:** if adding the k8s backend to the single module
 causes problems — conditional compilation sprawl, test matrix complexity, or
-the trait definitions needing to change to accommodate both backends — then
-extract. If feature flags remain clean, keep the single crate.
+the interface definitions needing to change to accommodate both backends — then
+extract. If build tags remain clean, keep the single module.
 
 **What the refactor involves:**
 
-- Extract all traits (`Backend`, `WorkerHandle`, `SessionStore`,
+- Extract all interfaces (`Backend`, `WorkerHandle`, `SessionStore`,
   `WorkerRegistry`, `TaskStore`) and their associated types (`WorkerSpec`,
-  `BuildSpec`, `BuildResult`, `ManagedResource`, `LogStream`) into
-  `blockyard-core`
-- Each backend crate depends on `blockyard-core` for the trait definitions
-- The main crate depends on `blockyard-core` and on each backend crate
-  (optionally, via features)
-- The mock backend stays in the main crate (test-only code, no heavy deps)
+  `BuildSpec`, `BuildResult`, `ManagedResource`, `LogStream`) into a shared
+  package
+- Each backend package depends on the shared package for the interface
+  definitions
+- The main package depends on the shared package and on each backend package
+  (optionally, via build tags)
+- The mock backend stays in the main module (test-only code, no heavy deps)
 
-### Trait extraction for SessionStore, WorkerRegistry, TaskStore
+### Interface extraction for SessionStore, WorkerRegistry, TaskStore
 
 v0 implemented `SessionStore`, `WorkerRegistry`, and `TaskStore` as concrete
-`DashMap`-backed structs with synchronous methods. The roadmap describes them
-as traits with swappable implementations (in-memory for single-node,
+`sync.Map`-backed structs with synchronous methods. The roadmap describes them
+as interfaces with swappable implementations (in-memory for single-node,
 PostgreSQL-backed for k8s HA). v1 continues with concrete structs since it
 runs a single server.
 
-For v2 multi-node deployments, these need to become traits:
+For v2 multi-node deployments, these need to become interfaces:
 
 - `SessionStore` → async methods, Redis or PostgreSQL-backed implementation
   for shared session state across nodes
@@ -58,9 +51,9 @@ For v2 multi-node deployments, these need to become traits:
   to any worker
 - `TaskStore` → async methods, PostgreSQL-backed for HA
 
-The current method signatures were designed to map cleanly onto async trait
-methods — the switch is mechanical: extract a trait, make methods async, and
-parameterize `AppState` over the trait (same pattern as `Backend`).
+The current method signatures were designed to map cleanly onto interface
+methods — the switch is mechanical: extract an interface and parameterize
+`AppState` over the interface (same pattern as `Backend`).
 
 **Trigger:** when the Kubernetes backend is implemented and multi-replica
 server deployments are needed.
@@ -83,11 +76,11 @@ Kubernetes, use an init container or shared volume.
 
 From `../roadmap.md` items 31–39:
 
-1. **Kubernetes backend** — Deployments for apps, Jobs for tasks; `kube-rs`
+1. **Kubernetes backend** — Deployments for apps, Jobs for tasks
 2. **Bundle rollback** — activate a previous bundle; drain sessions gracefully
 3. **Per-content resource limit enforcement** — CPU/memory caps via Docker /
    K8s (fields carried in `WorkerSpec` from v0)
-4. **CLI tool** — dedicated Rust binary for deployment and management
+4. **CLI tool** — dedicated binary for deployment and management
 5. **Web UI** — admin dashboard, content browser, log viewer; credential
    enrollment UI
 6. **Multiple execution environment images** — per-app image selection

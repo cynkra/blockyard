@@ -953,7 +953,7 @@ func Handler(srv *server.Server) http.Handler {
 session resolution. This catches two cases: (a) the normal cold-start
 path where `ensureWorker` would also check, and (b) the reuse path
 where an existing worker was spawned from a bundle that has since been
-cleared. Case (b) is a bug in the Rust reference implementation — a
+cleared. Case (b) is a bug in the prior reference implementation — a
 worker could keep serving after its bundle was removed. The primary fix
 is in step 12 (enforce the invariant), but this guard provides
 defense in depth.
@@ -1122,7 +1122,7 @@ cancellation. This aligns with the dependency choice in `plan.md`.
 
 ### Step 12: Enforce active bundle invariant
 
-**Bug fix (inherited from Rust reference implementation).** When
+**Bug fix (inherited from prior reference implementation).** When
 `active_bundle` is cleared — via `PATCH` setting it to null, or via
 bundle deletion that removes the active bundle — any running workers
 for the app must be stopped. Without this, the proxy's existing-worker
@@ -1537,7 +1537,7 @@ func TestProxyWebSocketEcho(t *testing.T) {
   workers exist for an app, the app has an active bundle. This is
   enforced by stopping workers when `active_bundle` is cleared (step
   12) and checked defensively in the proxy handler (step 7). This
-  fixes a bug present in the Rust reference implementation where
+  fixes a bug present in the prior reference implementation where
   workers could continue serving after their bundle was removed.
 
 - **Phase 0-6 integration points.** Two places in the proxy code

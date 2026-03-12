@@ -3,7 +3,7 @@
 [![ci](https://github.com/cynkra/blockyard/actions/workflows/ci.yml/badge.svg)](https://github.com/cynkra/blockyard/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/cynkra/blockyard/graph/badge.svg?token=xvgKIhFWeW)](https://codecov.io/gh/cynkra/blockyard)
 
-A containerized hosting platform for [Shiny](https://shiny.posit.co/) applications, built in Rust. Blockyard manages the deployment, scaling, and reverse-proxying of isolated R Shiny app containers using Docker.
+A containerized hosting platform for [Shiny](https://shiny.posit.co/) applications, built in Go. Blockyard manages the deployment, scaling, and reverse-proxying of isolated R Shiny app containers using Docker.
 
 ## Overview
 
@@ -23,7 +23,7 @@ Client Request
       │
       ▼
   ┌────────┐     ┌──────────┐     ┌──────────────────┐
-  │  Axum  │────▶│  Reverse │────▶│  Shiny Container │
+  │  Chi   │────▶│  Reverse │────▶│  Shiny Container │
   │ Router │     │  Proxy   │     │  (per session)   │
   └────────┘     └──────────┘     └──────────────────┘
       │
@@ -33,21 +33,21 @@ Client Request
   └────────┘
 ```
 
-The server is generic over a `Backend` trait, allowing the Docker runtime to be swapped for a mock backend during testing.
+The server is generic over a `Backend` interface, allowing the Docker runtime to be swapped for a mock backend during testing.
 
 ## Tech Stack
 
-- **Rust** (2024 edition) with **Tokio** async runtime
-- **Axum** — HTTP router with WebSocket support
-- **Bollard** — Docker API client
-- **SQLx** + **SQLite** — async database with compile-time checked queries
-- **Tracing** — structured JSON logging
+- **Go** 1.24 with standard library `net/http`
+- **Chi** — HTTP router with middleware support
+- **Docker SDK** — Docker API client (`github.com/docker/docker`)
+- **modernc.org/sqlite** — pure-Go SQLite driver
+- **log/slog** — structured JSON logging
 
 ## Getting Started
 
 ### Prerequisites
 
-- Rust (stable)
+- Go 1.24+
 - Docker or Podman
 - SQLite 3
 
@@ -66,14 +66,11 @@ All settings can be overridden with environment variables using the
 ### Build & Run
 
 ```bash
-# Build with Docker backend (default)
-cargo build --release
-
-# Build without Docker (for testing)
-cargo build --no-default-features --features test-support
+# Build
+go build -o blockyard ./cmd/blockyard
 
 # Run tests
-cargo test --features test-support
+go test ./...
 ```
 
 ### Dev Container
@@ -86,48 +83,60 @@ code .
 # Then: Reopen in Container
 ```
 
-**Native mode** (`cargo run` directly) requires that Docker container
-IPs on bridge networks are routable from the host. This is the case on
-Linux and with some macOS Docker runtimes, but not all. If container IPs
-are not routable from your host, run the server inside a container
-(e.g. the devcontainer) instead.
+**Native mode** (`go run ./cmd/blockyard` directly) requires that Docker
+container IPs on bridge networks are routable from the host. This is the
+case on Linux and with some macOS Docker runtimes, but not all. If
+container IPs are not routable from your host, run the server inside a
+container (e.g. the devcontainer) instead.
 
 ## Project Structure
 
 ```
-src/
-├── main.rs              # Entry point
-├── lib.rs               # Public API
-├── config.rs            # TOML + env var configuration
-├── app.rs               # Shared application state
-├── task.rs              # In-memory task tracking & log streaming
+cmd/
+└── blockyard/
+    └── main.go              # Entry point
+internal/
+├── config/
+│   └── config.go            # TOML + env var configuration
+├── server/
+│   └── state.go             # Shared application state
+├── task/
+│   └── store.go             # In-memory task tracking & log streaming
 ├── api/
-│   ├── mod.rs           # Router setup
-│   ├── auth.rs          # Bearer token middleware
-│   ├── apps.rs          # App CRUD & lifecycle endpoints
-│   ├── bundles.rs       # Bundle upload & list endpoints
-│   ├── tasks.rs         # Task log streaming endpoint
-│   └── error.rs         # Shared error response helpers
+│   ├── router.go            # Router setup
+│   ├── auth.go              # Bearer token middleware
+│   ├── apps.go              # App CRUD & lifecycle endpoints
+│   ├── bundles.go           # Bundle upload & list endpoints
+│   ├── tasks.go             # Task log streaming endpoint
+│   └── error.go             # Shared error response helpers
 ├── backend/
-│   ├── mod.rs           # Backend trait definition
-│   ├── docker.rs        # Docker/Podman implementation
-│   └── mock.rs          # In-memory mock for tests
+│   ├── backend.go           # Backend interface definition
+│   ├── docker/
+│   │   └── docker.go        # Docker/Podman implementation
+│   └── mock/
+│       └── mock.go          # In-memory mock for tests
 ├── bundle/
-│   ├── mod.rs           # Archive storage, unpacking, retention
-│   └── restore.rs       # Dependency restoration pipeline
+│   ├── bundle.go            # Archive storage, unpacking, retention
+│   └── restore.go           # Dependency restoration pipeline
 ├── proxy/
-│   ├── mod.rs           # Reverse proxy router (/app/{name}/)
-│   ├── forward.rs       # HTTP and WebSocket forwarding
-│   ├── cold_start.rs    # On-demand worker startup
-│   ├── registry.rs      # Worker address caching
-│   ├── session.rs       # Session-to-worker mapping
-│   └── ws_cache.rs      # WebSocket connection caching
-├── ops.rs               # Health polling, log capture, orphan cleanup
-└── db/
-    ├── mod.rs           # Pool creation & migrations
-    └── sqlite.rs        # App & bundle CRUD queries
+│   ├── proxy.go             # Reverse proxy router (/app/{name}/)
+│   ├── forward.go           # HTTP and WebSocket forwarding
+│   ├── coldstart.go         # On-demand worker startup
+│   ├── session.go           # Session-to-worker mapping
+│   ├── ws.go                # WebSocket proxying
+│   └── wscache.go           # WebSocket connection caching
+├── ops/
+│   └── ops.go               # Health polling, log capture, orphan cleanup
+├── db/
+│   └── db.go                # Pool creation, migrations & CRUD queries
+├── logstore/
+│   └── store.go             # Container log storage
+├── registry/
+│   └── registry.go          # Worker address caching
+└── session/
+    └── store.go             # Session store
 migrations/
-├── 001_initial.sql      # Initial schema
+├── 001_initial.sql          # Initial schema
 └── 002_remove_app_status.sql  # Remove runtime status from apps table
 ```
 

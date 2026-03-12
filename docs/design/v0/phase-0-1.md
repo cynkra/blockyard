@@ -111,9 +111,9 @@ require (
 ```
 
 Dependencies used in later phases (chi, websocket, docker) are listed in
-`go.mod` from the start. Unlike Rust, Go does not warn on declared-but-
-unused module dependencies — only unused *imports* in source files are
-errors. Declaring them upfront avoids repeated `go get` churn across phases.
+`go.mod` from the start. Go does not warn on declared-but-unused module
+dependencies — only unused *imports* in source files are errors. Declaring
+them upfront avoids repeated `go get` churn across phases.
 
 ### Step 2: Config parsing
 

@@ -626,8 +626,8 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 ```
 
 This is the key behavioral change: logs are now available after a worker
-exits. Previously, `GET .../logs` returned 501 (or 404 in the Rust
-version) once the worker was gone.
+exits. Previously, `GET .../logs` returned 501 (or 404 in the prior
+implementation) once the worker was gone.
 
 `IsEnded` is a new trivial method on LogStore (check `e.ended` under
 lock).
