@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -15,6 +16,10 @@ func NewRouter(srv *server.Server) http.Handler {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
+
+	// Proxy routes — unauthenticated (end users access these)
+	r.Get("/app/{name}", proxy.RedirectTrailingSlash)
+	r.Handle("/app/{name}/*", proxy.Handler(srv))
 
 	// Authenticated API
 	r.Route("/api/v1", func(r chi.Router) {

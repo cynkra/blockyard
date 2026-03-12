@@ -14,8 +14,9 @@ import (
 type MockBackend struct {
 	mu           sync.RWMutex
 	workers      map[string]*mockWorker
-	HealthOK     atomic.Bool // configurable: default true
-	BuildSuccess atomic.Bool // configurable: default true
+	HealthOK     atomic.Bool         // configurable: default true
+	BuildSuccess atomic.Bool         // configurable: default true
+	wsHandler    http.HandlerFunc    // optional WS handler for mock workers
 }
 
 type mockWorker struct {
@@ -46,10 +47,34 @@ func (b *MockBackend) HasWorker(id string) bool {
 	return ok
 }
 
+// SetWSHandler configures a WebSocket handler for new mock workers.
+// When set, the handler is registered on each mock worker's httptest
+// server, allowing WebSocket integration tests.
+func (b *MockBackend) SetWSHandler(h http.HandlerFunc) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.wsHandler = h
+}
+
 func (b *MockBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	b.mu.Lock()
+	handler := b.wsHandler
+	b.mu.Unlock()
+
+	var srv *httptest.Server
+	if handler != nil {
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Upgrade") == "websocket" {
+				handler(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+	} else {
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -59,6 +84,17 @@ func (b *MockBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
 		server: srv,
 	}
 	return nil
+}
+
+// GetWorkerURL returns the httptest server URL for a worker (for testing).
+func (b *MockBackend) GetWorkerURL(id string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	w, ok := b.workers[id]
+	if !ok {
+		return ""
+	}
+	return w.server.URL
 }
 
 func (b *MockBackend) Stop(_ context.Context, id string) error {
