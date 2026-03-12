@@ -38,6 +38,9 @@ type Server struct {
 	// OpenBao — nil when [openbao] is not configured.
 	VaultClient     *integration.Client
 	VaultTokenCache *integration.VaultTokenCache
+
+	// Draining tracks app IDs currently being drained (graceful stop).
+	Draining *DrainSet
 }
 
 // NewServer creates a Server with all in-memory stores initialized.
@@ -51,6 +54,7 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 		Registry: registry.New(),
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
+		Draining: NewDrainSet(),
 	}
 }
 
@@ -141,4 +145,47 @@ func (m *WorkerMap) ForApp(appID string) []string {
 		}
 	}
 	return ids
+}
+
+// AppIDs returns a deduplicated list of app IDs that have active workers.
+func (m *WorkerMap) AppIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]bool)
+	var ids []string
+	for _, w := range m.workers {
+		if !seen[w.AppID] {
+			seen[w.AppID] = true
+			ids = append(ids, w.AppID)
+		}
+	}
+	return ids
+}
+
+// DrainSet tracks app IDs that are currently being drained (graceful stop).
+type DrainSet struct {
+	mu  sync.Mutex
+	set map[string]bool
+}
+
+func NewDrainSet() *DrainSet {
+	return &DrainSet{set: make(map[string]bool)}
+}
+
+func (d *DrainSet) Add(appID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.set[appID] = true
+}
+
+func (d *DrainSet) Remove(appID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.set, appID)
+}
+
+func (d *DrainSet) Contains(appID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.set[appID]
 }

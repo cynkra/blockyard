@@ -76,7 +76,7 @@ func TestInjectVaultToken_SetsHeader(t *testing.T) {
 	srv := vaultServer(t, client)
 
 	r := requestWithUser("user-1", "my-access-token")
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	got := r.Header.Get("X-Blockyard-Vault-Token")
 	if got != "s.scoped-token" {
@@ -90,7 +90,7 @@ func TestInjectVaultToken_StripsExistingHeader(t *testing.T) {
 	r := httptest.NewRequest("GET", "/app/test-app/", nil)
 	r.Header.Set("X-Blockyard-Vault-Token", "spoofed-token")
 
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	if got := r.Header.Get("X-Blockyard-Vault-Token"); got != "" {
 		t.Errorf("expected spoofed header to be stripped, got %q", got)
@@ -101,7 +101,7 @@ func TestInjectVaultToken_SkipsWhenNoVaultClient(t *testing.T) {
 	srv := &server.Server{Config: &config.Config{}}
 	r := requestWithUser("user-1", "token")
 
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	if got := r.Header.Get("X-Blockyard-Vault-Token"); got != "" {
 		t.Errorf("expected no header when VaultClient is nil, got %q", got)
@@ -113,7 +113,7 @@ func TestInjectVaultToken_SkipsWhenNoUser(t *testing.T) {
 	srv := vaultServer(t, client)
 
 	r := httptest.NewRequest("GET", "/app/test-app/", nil) // no user in context
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	if got := r.Header.Get("X-Blockyard-Vault-Token"); got != "" {
 		t.Errorf("expected no header when no user, got %q", got)
@@ -125,7 +125,7 @@ func TestInjectVaultToken_SkipsWhenNoAccessToken(t *testing.T) {
 	srv := vaultServer(t, client)
 
 	r := requestWithUser("user-1", "") // empty access token
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	if got := r.Header.Get("X-Blockyard-Vault-Token"); got != "" {
 		t.Errorf("expected no header when access token is empty, got %q", got)
@@ -141,7 +141,7 @@ func TestInjectVaultToken_UsesCachedToken(t *testing.T) {
 	srv.VaultTokenCache.Set("user-1", "s.cached-token", 1*time.Hour)
 
 	r := requestWithUser("user-1", "my-access-token")
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	got := r.Header.Get("X-Blockyard-Vault-Token")
 	if got != "s.cached-token" {
@@ -154,7 +154,7 @@ func TestInjectVaultToken_CacheMissFetchesToken(t *testing.T) {
 	srv := vaultServer(t, client)
 
 	r := requestWithUser("user-1", "my-access-token")
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	got := r.Header.Get("X-Blockyard-Vault-Token")
 	if got != "s.fresh-token" {
@@ -176,10 +176,22 @@ func TestInjectVaultToken_LoginErrorOmitsHeader(t *testing.T) {
 	srv := vaultServer(t, client)
 
 	r := requestWithUser("user-1", "bad-token")
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	if got := r.Header.Get("X-Blockyard-Vault-Token"); got != "" {
 		t.Errorf("expected no header on login error, got %q", got)
+	}
+}
+
+func TestInjectVaultToken_SkipsForSharedContainers(t *testing.T) {
+	client := mockJWTLogin(t, "s.should-not-appear", 3600)
+	srv := vaultServer(t, client)
+
+	r := requestWithUser("user-1", "my-access-token")
+	injectVaultToken(r, srv, 2) // max_sessions_per_worker > 1
+
+	if got := r.Header.Get("X-Blockyard-Vault-Token"); got != "" {
+		t.Errorf("expected no vault token for shared container, got %q", got)
 	}
 }
 
@@ -190,7 +202,7 @@ func TestInjectVaultToken_ZeroTTLFallsBackToConfig(t *testing.T) {
 	srv.Config.Openbao.TokenTTL = config.Duration{Duration: 30 * time.Minute}
 
 	r := requestWithUser("user-1", "my-access-token")
-	injectVaultToken(r, srv)
+	injectVaultToken(r, srv, 1)
 
 	got := r.Header.Get("X-Blockyard-Vault-Token")
 	if got != "s.zero-ttl-token" {

@@ -17,6 +17,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/ops"
+	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -138,6 +139,12 @@ func main() {
 	go func() {
 		defer bgWg.Done()
 		ops.SpawnLogRetentionCleaner(bgCtx, srv)
+	}()
+
+	bgWg.Add(1)
+	go func() {
+		defer bgWg.Done()
+		proxy.RunAutoscaler(bgCtx, srv)
 	}()
 
 	// Graceful shutdown on SIGTERM / SIGINT

@@ -14,6 +14,7 @@ import (
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/session"
 )
 
 // Handler returns an http.Handler that proxies requests to Shiny app
@@ -77,25 +78,43 @@ func Handler(srv *server.Server) http.Handler {
 			}
 		}
 
+		// Resolve caller identity (may be nil when OIDC is not configured).
+		caller := auth.CallerFromContext(r.Context())
+		callerSub := ""
+		if caller != nil {
+			callerSub = caller.Sub
+		}
+
 		// 2. Session resolution
 		sessionID := extractSessionID(r)
 		var workerID, addr string
 		isNewSession := false
 
 		if sessionID != "" {
-			// Existing session — look up pinned worker
-			wid, ok := srv.Sessions.Get(sessionID)
+			// Existing session — look up pinned worker and verify identity.
+			entry, ok := srv.Sessions.Get(sessionID)
 			if ok {
-				a, ok := srv.Registry.Get(wid)
-				if ok {
-					// Worker alive and addressable
-					workerID, addr = wid, a
+				// When OIDC is active, reject sessions owned by a different user.
+				if entry.UserSub != "" && callerSub != entry.UserSub {
+					slog.Warn("proxy: session owner mismatch",
+						"session_id", sessionID,
+						"session_owner", entry.UserSub,
+						"caller", callerSub)
+					// Fall through to create a new session for this user.
+					ok = false
+				}
+			}
+			if ok {
+				a, addrOk := srv.Registry.Get(entry.WorkerID)
+				if addrOk {
+					workerID, addr = entry.WorkerID, a
+					srv.Sessions.Touch(sessionID)
 				}
 			}
 		}
 
 		if workerID == "" {
-			// No valid session or stale worker — cold start
+			// No valid session or stale worker — assign via load balancer
 			isNewSession = true
 			sessionID = uuid.New().String()
 
@@ -104,6 +123,10 @@ func Handler(srv *server.Server) http.Handler {
 				switch err {
 				case errMaxWorkers:
 					http.Error(w, "server at capacity", http.StatusServiceUnavailable)
+				case errCapacityExhausted:
+					http.Error(w, "app at capacity", http.StatusServiceUnavailable)
+				case errAppDraining:
+					http.Error(w, "app is shutting down", http.StatusServiceUnavailable)
 				case errNoBundle:
 					http.Error(w, "app has no active bundle", http.StatusServiceUnavailable)
 				case errHealthTimeout:
@@ -116,12 +139,16 @@ func Handler(srv *server.Server) http.Handler {
 				return
 			}
 			workerID, addr = wid, a
-			srv.Sessions.Set(sessionID, workerID)
+			srv.Sessions.Set(sessionID, session.Entry{
+				WorkerID:   workerID,
+				UserSub:    callerSub,
+				LastAccess: time.Now(),
+			})
 		}
 
 		// 3. Set cookie on new sessions
 		if isNewSession {
-			http.SetCookie(w, sessionCookie(sessionID, appName))
+			http.SetCookie(w, sessionCookie(sessionID, appName, r))
 		}
 
 		// 4. Inject identity headers when caller is authenticated.
@@ -130,7 +157,7 @@ func Handler(srv *server.Server) http.Handler {
 		// unauthenticated clients, then re-add from verified identity.
 		r.Header.Del("X-Shiny-User")
 		r.Header.Del("X-Shiny-Groups")
-		if caller := auth.CallerFromContext(r.Context()); caller != nil {
+		if caller != nil {
 			r.Header.Set("X-Shiny-User", caller.Sub)
 			if len(caller.Groups) > 0 {
 				r.Header.Set("X-Shiny-Groups", strings.Join(caller.Groups, ","))
@@ -138,7 +165,10 @@ func Handler(srv *server.Server) http.Handler {
 		}
 
 		// 4b. Inject OpenBao credentials when configured.
-		injectVaultToken(r, srv)
+		// Disabled for shared containers (max_sessions > 1) — raw vault
+		// tokens could leak between sessions in the same R process.
+		// Phase 1-5 adds a credential exchange API for this case.
+		injectVaultToken(r, srv, app.MaxSessionsPerWorker)
 
 		// 5. Dispatch — WebSocket or HTTP
 		if isWebSocketUpgrade(r) {
@@ -151,11 +181,17 @@ func Handler(srv *server.Server) http.Handler {
 
 // injectVaultToken exchanges the user's access token for a scoped
 // OpenBao token and injects it as the X-Blockyard-Vault-Token header.
-// Skipped when [openbao] is not configured or the user is not authenticated.
-func injectVaultToken(r *http.Request, srv *server.Server) {
+// Skipped when [openbao] is not configured, the user is not authenticated,
+// or the app allows multiple sessions per worker (shared containers).
+func injectVaultToken(r *http.Request, srv *server.Server, maxSessionsPerWorker int) {
 	r.Header.Del("X-Blockyard-Vault-Token")
 
 	if srv.VaultClient == nil {
+		return
+	}
+	// In shared containers, raw vault tokens could leak between sessions.
+	// Phase 1-5 introduces a credential exchange API for this case.
+	if maxSessionsPerWorker > 1 {
 		return
 	}
 	user := auth.UserFromContext(r.Context())

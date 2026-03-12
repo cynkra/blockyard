@@ -19,12 +19,15 @@ func extractSessionID(r *http.Request) string {
 // sessionCookie builds a Set-Cookie header value for the given session
 // ID and app name. Path is scoped to /app/{name}/ so the cookie is not
 // sent to other apps or the API.
-func sessionCookie(sessionID, appName string) *http.Cookie {
+// The Secure flag is set when the request arrived over HTTPS.
+func sessionCookie(sessionID, appName string, r *http.Request) *http.Cookie {
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	return &http.Cookie{
 		Name:     cookieName,
 		Value:    sessionID,
 		Path:     "/app/" + appName + "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
 	}
 }

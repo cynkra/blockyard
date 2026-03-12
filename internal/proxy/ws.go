@@ -218,15 +218,17 @@ done:
 		cache.Cache(sessionID, br,
 			srv.Config.Proxy.WsCacheTTL.Duration, func() {
 				br.Close()
-				workerID, ok := srv.Sessions.Get(sessionID)
+				// TTL expired without reconnect — clean up session
+				entry, ok := srv.Sessions.Get(sessionID)
 				if !ok {
 					return
 				}
 				srv.Sessions.Delete(sessionID)
-				if srv.Sessions.CountForWorker(workerID) == 0 {
+				// If no other sessions reference this worker, it's idle — evict.
+				if srv.Sessions.CountForWorker(entry.WorkerID) == 0 {
 					slog.Info("ws cache expired, evicting idle worker",
-						"worker_id", workerID, "session_id", sessionID)
-					ops.EvictWorker(context.Background(), srv, workerID)
+						"worker_id", entry.WorkerID, "session_id", sessionID)
+					ops.EvictWorker(context.Background(), srv, entry.WorkerID)
 				}
 			})
 	} else {

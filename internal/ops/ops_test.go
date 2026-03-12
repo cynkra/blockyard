@@ -10,6 +10,7 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/session"
 )
 
 func testServer(t *testing.T) (*server.Server, *mock.MockBackend) {
@@ -54,7 +55,7 @@ func spawnWorker(t *testing.T, srv *server.Server, be *mock.MockBackend, workerI
 func TestEvictWorker(t *testing.T) {
 	srv, be := testServer(t)
 	spawnWorker(t, srv, be, "w1", "app1")
-	srv.Sessions.Set("sess1", "w1")
+	srv.Sessions.Set("sess1", session.Entry{WorkerID: "w1"})
 	srv.LogStore.Create("w1", "app1")
 
 	EvictWorker(context.Background(), srv, "w1")

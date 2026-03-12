@@ -55,6 +55,7 @@ type ProxyConfig struct {
 	WorkerStartTimeout Duration `toml:"worker_start_timeout"`
 	MaxWorkers         int      `toml:"max_workers"`
 	LogRetention       Duration `toml:"log_retention"`
+	SessionIdleTTL     Duration `toml:"session_idle_ttl"`
 }
 
 type OidcConfig struct {
@@ -150,6 +151,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Proxy.LogRetention.Duration == 0 {
 		cfg.Proxy.LogRetention.Duration = 1 * time.Hour
+	}
+	if cfg.Proxy.SessionIdleTTL.Duration == 0 {
+		cfg.Proxy.SessionIdleTTL.Duration = 1 * time.Hour
 	}
 	if cfg.OIDC != nil {
 		oidcDefaults(cfg.OIDC)

@@ -316,16 +316,33 @@ func TestUpdateApp(t *testing.T) {
 	}
 }
 
-func TestUpdateAppRejectsMultiSession(t *testing.T) {
+func TestUpdateAppRejectsInvalidSessionLimit(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
+	// max_sessions_per_worker = 0 is invalid
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
-		strings.NewReader(`{"max_sessions_per_worker":2}`))
+		strings.NewReader(`{"max_sessions_per_worker":0}`))
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", resp.StatusCode)
+		t.Errorf("expected 400 for max_sessions_per_worker=0, got %d", resp.StatusCode)
+	}
+
+	// max_sessions_per_worker = 2 is now allowed
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"max_sessions_per_worker":2}`))
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for max_sessions_per_worker=2, got %d", resp.StatusCode)
+	}
+
+	// max_workers_per_app = 0 is invalid
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"max_workers_per_app":0}`))
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for max_workers_per_app=0, got %d", resp.StatusCode)
 	}
 }
 

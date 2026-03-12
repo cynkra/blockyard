@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -257,9 +258,12 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// v0: max_sessions_per_worker is locked to 1
-		if body.MaxSessionsPerWorker != nil && *body.MaxSessionsPerWorker != 1 {
-			badRequest(w, "max_sessions_per_worker must be 1 in this version")
+		if body.MaxSessionsPerWorker != nil && *body.MaxSessionsPerWorker < 1 {
+			badRequest(w, "max_sessions_per_worker must be >= 1")
+			return
+		}
+		if body.MaxWorkersPerApp != nil && *body.MaxWorkersPerApp < 1 {
+			badRequest(w, "max_workers_per_app must be >= 1")
 			return
 		}
 
@@ -319,7 +323,7 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		// 1. Stop all workers for this app
-		stopAppWorkers(srv, app.ID)
+		stopAppGraceful(srv, app.ID)
 
 		// 2. Delete bundle files from disk
 		bundles, err := srv.DB.ListBundlesByApp(app.ID)
@@ -473,7 +477,7 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		stopped := stopAppWorkers(srv, app.ID)
+		stopped := stopAppGraceful(srv, app.ID)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -483,10 +487,33 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 	}
 }
 
-// stopAppWorkers stops all workers belonging to the given app. Returns
-// the count of workers stopped.
-func stopAppWorkers(srv *server.Server, appID string) int {
+// stopAppGraceful drains sessions before killing workers.
+// Marks the app as draining (stops new session routing), waits for
+// existing sessions to end (up to shutdown_timeout), then force-stops
+// remaining workers.
+func stopAppGraceful(srv *server.Server, appID string) int {
 	workerIDs := srv.Workers.ForApp(appID)
+	if len(workerIDs) == 0 {
+		return 0
+	}
+
+	// 1. Stop routing new sessions to this app.
+	srv.Draining.Add(appID)
+	defer srv.Draining.Remove(appID)
+
+	// 2. Wait for existing sessions to end (up to shutdown_timeout).
+	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
+	for {
+		remaining := srv.Sessions.CountForWorkers(srv.Workers.ForApp(appID))
+		if remaining == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	// 3. Force-stop remaining workers.
+	// Re-fetch in case workers changed during drain.
+	workerIDs = srv.Workers.ForApp(appID)
 	for _, wid := range workerIDs {
 		ops.EvictWorker(context.Background(), srv, wid)
 	}
