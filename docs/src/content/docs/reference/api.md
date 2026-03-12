@@ -118,6 +118,8 @@ Stop all workers for an app.
 
 ### `GET /api/v1/apps/{id}/logs`
 
+> **Not yet implemented.** This endpoint currently returns `501 Not Implemented`.
+
 Stream logs from a running worker. Returns chunked `text/plain`.
 
 **Query parameters:**
@@ -160,6 +162,21 @@ List all bundles for an app.
 ---
 
 ## Tasks
+
+### `GET /api/v1/tasks/{task_id}`
+
+Get the current status of a background task.
+
+**Response:** `200 OK`
+
+```json
+{
+  "id": "t5678...",
+  "status": "running"
+}
+```
+
+`status` is one of `"running"`, `"completed"`, or `"failed"`.
 
 ### `GET /api/v1/tasks/{task_id}/logs`
 
