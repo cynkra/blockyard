@@ -903,6 +903,85 @@ func TestResolveAppByUUIDAndName(t *testing.T) {
 	}
 }
 
+// --- UploadBundle error path tests ---
+
+func TestUploadBundleOversized(t *testing.T) {
+	// Create a server with a very small max bundle size
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{Token: "test-token"},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10, // 10 bytes — any real bundle will exceed this
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+	}
+	database, _ := db.Open(":memory:")
+	t.Cleanup(func() { database.Close() })
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req, _ := http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/bundles",
+		bytes.NewReader(testutil.MakeBundle(t)))
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", resp.StatusCode)
+	}
+}
+
+func TestUploadBundleMissingEntrypoint(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Create a tar.gz without app.R
+	req, _ := http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/bundles",
+		bytes.NewReader(testutil.MakeBundleWithoutEntrypoint(t)))
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing entrypoint, got %d", resp.StatusCode)
+	}
+}
+
+func TestListBundlesNonexistentApp(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("GET", ts.URL+"/api/v1/apps/nonexistent/bundles", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestStartAppNonexistent(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/start", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
 // --- Bundle endpoints use resolveApp ---
 
 func TestUploadBundleByName(t *testing.T) {

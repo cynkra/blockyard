@@ -135,6 +135,29 @@ func TestComplete(t *testing.T) {
 	}
 }
 
+func TestCreatedAt(t *testing.T) {
+	s := NewStore()
+	s.Create("task-1")
+
+	ts := s.CreatedAt("task-1")
+	if ts == "" {
+		t.Fatal("expected non-empty timestamp")
+	}
+
+	// Non-existent task
+	if got := s.CreatedAt("nonexistent"); got != "" {
+		t.Errorf("expected empty string for missing task, got %q", got)
+	}
+}
+
+func TestSubscribeMissing(t *testing.T) {
+	s := NewStore()
+	_, _, _, ok := s.Subscribe("nonexistent")
+	if ok {
+		t.Error("expected false for missing task")
+	}
+}
+
 func TestCompleteFailed(t *testing.T) {
 	s := NewStore()
 	sender := s.Create("task-1")

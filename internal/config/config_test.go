@@ -260,6 +260,21 @@ path = "/proc/nonexistent/db/blockyard.db"
 	}
 }
 
+func TestDurationUnmarshalText(t *testing.T) {
+	var d Duration
+	if err := d.UnmarshalText([]byte("5m")); err != nil {
+		t.Fatalf("UnmarshalText: %v", err)
+	}
+	if d.Duration != 5*60*1000000000 {
+		t.Errorf("expected 5m, got %v", d.Duration)
+	}
+
+	// Invalid duration
+	if err := d.UnmarshalText([]byte("not-a-duration")); err == nil {
+		t.Error("expected error for invalid duration")
+	}
+}
+
 func TestEnvVarNamesUnique(t *testing.T) {
 	names := collectEnvVarNames(reflect.TypeOf(Config{}), "BLOCKYARD")
 	seen := make(map[string]bool)
