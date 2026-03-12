@@ -13,7 +13,11 @@ env:
   SERVER_IMAGE: ghcr.io/cynkra/blockyard
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   server-image:
+    needs: ci
     strategy:
       matrix:
         include:
