@@ -51,9 +51,9 @@ shutdown_timeout = "30s"
 ```toml
 [docker]
 socket     = "/var/run/docker.sock"
-image      = "ghcr.io/rocker-org/r-ver:latest"
+image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838
-rv_version = "latest"
+rv_version = "v0.19.0"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -61,7 +61,7 @@ rv_version = "latest"
 | `socket` | `string` | `/var/run/docker.sock` | No | Path to Docker or Podman socket |
 | `image` | `string` | — | **Yes** | Base image for worker and build containers |
 | `shiny_port` | `integer` | `3838` | No | Port Shiny listens on inside containers |
-| `rv_version` | `string` | `latest` | No | [rv](https://github.com/a2-ai/rv) release tag (e.g. `v0.18.0`) |
+| `rv_version` | `string` | `v0.19.0` | No | [rv](https://github.com/a2-ai/rv) release tag (e.g. `v0.19.0`) |
 
 ## `[storage]`
 

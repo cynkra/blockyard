@@ -133,6 +133,8 @@ internal/
 │   └── store.go             # Container log storage
 ├── registry/
 │   └── registry.go          # Worker address caching
+├── rvcache/
+│   └── rvcache.go           # R package binary caching
 └── session/
     └── store.go             # Session store
 migrations/
@@ -150,9 +152,9 @@ shutdown_timeout = "30s"
 
 [docker]
 socket     = "/var/run/docker.sock"
-image      = "ghcr.io/rocker-org/r-ver:latest"
+image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838
-rv_version = "latest"
+rv_version = "v0.19.0"
 
 [storage]
 bundle_server_path = "/data/bundles"
