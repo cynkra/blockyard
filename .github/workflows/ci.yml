@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - run: docker pull alpine:latest
+      - run: docker pull alpine:latest && docker pull ghcr.io/rocker-org/r-ver:latest
       - run: sudo go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
       - uses: actions/upload-artifact@v4
         with:

@@ -381,39 +381,73 @@ func TestHealthCheckUnknownWorker(t *testing.T) {
 	}
 }
 
-func TestBuildSuccess(t *testing.T) {
+func testBundleDir(t *testing.T) (bundleDir, libDir string) {
+	t.Helper()
+	bundleDir = t.TempDir()
+	libDir = filepath.Join(bundleDir, "rv", "library")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	return bundleDir, libDir
+}
+
+func TestBuildFailsWithBadImage(t *testing.T) {
 	ctx := context.Background()
 	b, err := New(ctx, testConfig())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	bundleDir := t.TempDir()
-	// Create rv/library inside bundle so the read-only mount has the mountpoint
-	if err := os.MkdirAll(filepath.Join(bundleDir, "rv", "library"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	libDir := filepath.Join(bundleDir, "rv", "library")
+	bundleDir, libDir := testBundleDir(t)
 	spec := backend.BuildSpec{
-		AppID:     "test-app",
-		BundleID:  uuid.New().String()[:8],
-		Image:     "alpine:latest",
-		RvVersion: "latest",
+		AppID:       "test-app",
+		BundleID:    uuid.New().String()[:8],
+		Image:       "alpine:latest",
+		RvVersion:   "latest",
 		BundlePath:  bundleDir,
 		LibraryPath: libDir,
-		Labels:    map[string]string{},
+		Labels:      map[string]string{},
 	}
 
-	// Build will fail because rv download won't work, but it exercises
-	// the full create->start->wait->remove flow. We just check it
-	// returns a result with a non-zero exit code.
+	// alpine has no curl — build should run but fail with non-zero exit
 	result, err := b.Build(ctx, spec)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	// curl/rv won't be available in alpine, so expect failure
 	if result.Success {
 		t.Error("expected build to fail in bare alpine (no curl)")
+	}
+}
+
+func TestBuildWithProductionImage(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bundleDir, libDir := testBundleDir(t)
+	// Write a trivial app.R with no library dependencies so rv sync is a no-op
+	if err := os.WriteFile(filepath.Join(bundleDir, "app.R"), []byte("# empty\n"), 0o644); err != nil {
+		t.Fatalf("write app.R: %v", err)
+	}
+
+	spec := backend.BuildSpec{
+		AppID:       "test-app",
+		BundleID:    uuid.New().String()[:8],
+		Image:       "ghcr.io/rocker-org/r-ver:latest",
+		RvVersion:   "latest",
+		BundlePath:  bundleDir,
+		LibraryPath: libDir,
+		Labels:      map[string]string{},
+	}
+
+	result, err := b.Build(ctx, spec)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !result.Success {
+		t.Errorf("expected build to succeed, got exit code %d", result.ExitCode)
 	}
 }
 
