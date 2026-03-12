@@ -1,7 +1,7 @@
 # blockyard v1 Implementation Plan
 
 This document is the build plan for v1 — the MVP milestone. It covers new
-modules, dependency additions, build phases, key type definitions, schema
+packages, dependency additions, build phases, key type definitions, schema
 changes, and test strategy. The roadmap (`../roadmap.md`) is the source of
 truth for *what* v1 includes; this document describes *how* to build it.
 
@@ -11,94 +11,84 @@ real users: user authentication (OIDC), authorization (RBAC), per-user
 credential management (OpenBao), multi-worker scaling, content discovery,
 and operational observability.
 
-## New Modules
+## New Packages
 
-v1 adds the following modules to the existing crate layout. Existing modules
-(`api/`, `proxy/`, `backend/`, `bundle/`, `db/`, `config.rs`, `app.rs`,
-`task.rs`, `ops.rs`) are extended in place.
+v1 adds the following packages to the existing layout. Existing packages
+(`api/`, `proxy/`, `backend/`, `bundle/`, `db/`, `config/`, `server/`,
+`task/`, `ops/`, `session/`, `registry/`, `logstore/`) are extended in
+place.
 
 ```
-src/
+internal/
 ├── auth/
-│   ├── mod.rs              # shared JWT validation, token types
-│   ├── oidc.rs             # OIDC discovery, authorization code flow
-│   ├── session.rs          # signed session cookie (encode/decode/refresh)
-│   └── client_credentials.rs  # OAuth 2.0 client credentials (machine auth)
+│   ├── oidc.go              # OIDC discovery, authorization code flow
+│   ├── session.go           # signed session cookie (encode/decode), server-side store
+│   ├── jwt.go               # JWT validation against JWKS (control plane)
+│   └── middleware.go         # app-plane + control-plane auth middleware
 ├── authz/
-│   ├── mod.rs              # permission checks, role definitions
-│   └── acl.rs              # per-content access control lists
+│   ├── rbac.go              # role definitions, permission checks
+│   └── acl.go               # per-content access control lists
 ├── integration/
-│   ├── mod.rs              # OpenBao client, JWT auth setup
-│   └── enrollment.rs       # credential enrollment API handlers
-├── vanity.rs               # vanity URL resolution + collision detection
-├── catalog.rs              # content discovery: catalog, tags, search
-├── audit.rs                # append-only audit log writer
-├── telemetry.rs            # Prometheus metrics + OpenTelemetry tracing
+│   ├── openbao.go           # OpenBao client, JWT auth setup, bootstrap
+│   └── enrollment.go        # credential enrollment logic
+├── vanity/
+│   ├── vanity.go            # vanity URL resolution + collision detection
+│   └── reserved.go          # reserved prefix blocklist
+├── catalog/
+│   ├── catalog.go           # content listing, search, filtering
+│   └── tags.go              # tag CRUD, app-tag associations
+├── audit/
+│   └── audit.go             # append-only JSON Lines audit log writer
+├── telemetry/
+│   └── telemetry.go         # Prometheus metrics + OpenTelemetry tracing setup
 ├── api/
 │   ├── ... (existing)
-│   ├── users.rs            # /users/me, credential enrollment endpoints
-│   ├── catalog.rs          # catalog + tag endpoints
-│   └── vanity.rs           # vanity URL management endpoints
+│   ├── users.go             # /users/me, credential enrollment endpoints
+│   ├── catalog.go           # catalog + tag endpoints
+│   └── vanity.go            # vanity URL management endpoints
 ├── proxy/
 │   ├── ... (existing)
-│   ├── identity.rs         # X-Shiny-User / X-Shiny-Groups injection
-│   ├── load_balancer.rs    # sticky session assignment across workers
-│   └── autoscaler.rs       # connection-based auto-scaling
+│   ├── identity.go          # X-Shiny-User / X-Shiny-Groups injection
+│   ├── loadbalancer.go      # least-loaded worker assignment
+│   └── autoscaler.go        # connection-based auto-scaling loop
 └── db/
-    ├── ... (existing)
-    └── sqlite.rs           # extended: roles, ACLs, tags, vanity URLs, audit
+    └── ... (existing, extended with roles, ACLs, tags, vanity URLs)
 ```
 
 ## New Dependencies
 
-```toml
-[dependencies]
-# --- existing (unchanged) ---
-# tokio, axum, hyper, hyper-util, http-body-util, tower, bollard, sqlx,
-# serde, serde_json, toml, uuid, tracing, tracing-subscriber, thiserror,
-# tokio-util, bytes, dashmap, tempfile
+```go
+// go.mod additions — existing deps unchanged
+// (chi, docker/client, modernc.org/sqlite, coder/websocket, etc.)
 
-# --- v1 additions ---
-# OIDC / JWT
-openidconnect   = "4"           # OIDC discovery, authorization code flow
-jsonwebtoken    = "9"           # JWT decode + JWKS validation (phase 1-2)
+// OIDC / JWT
+require (
+    github.com/coreos/go-oidc/v3   v3.x  // OIDC discovery, ID token verification
+    golang.org/x/oauth2            v0.x  // OAuth 2.0 flows (authorization code, client credentials)
+    github.com/go-jose/go-jose/v4  v4.x  // JWKS fetching, JWT parsing (used by go-oidc internally)
+)
 
-# Session cookie signing
-hmac            = "0.12"
-sha2            = "0.10"
-base64          = "0.22"
-
-# OpenBao / Vault client
-reqwest         = { version = "0.12", features = ["json", "rustls-tls"] }
-# (reqwest already in dev-dependencies; promoted to regular dep for OpenBao client)
-
-# Telemetry
-metrics             = "0.24"
-metrics-exporter-prometheus = "0.16"
-tracing-opentelemetry       = "0.28"
-opentelemetry               = "0.27"
-opentelemetry-otlp          = "0.27"
-opentelemetry_sdk           = "0.27"
-
-# Audit logging
-tokio = { version = "1", features = ["full", "fs"] }  # fs for async file writes
+// Telemetry
+require (
+    github.com/prometheus/client_golang  v1.x  // Prometheus metrics + /metrics handler
+    go.opentelemetry.io/otel             v1.x  // OpenTelemetry API
+    go.opentelemetry.io/otel/sdk         v1.x  // OTel SDK (trace provider)
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc  v1.x  // OTLP gRPC exporter
+)
 ```
 
 **Dependency rationale:**
 
-- **openidconnect** — full OIDC Relying Party implementation. Handles
-  discovery, JWKS fetching, authorization URL generation, and token exchange.
-  Built on `oauth2` crate.
-- **jsonwebtoken** — lightweight JWT validation for the control plane (client
-  credentials flow, phase 1-2). Shares the JWKS fetched by `openidconnect`.
-- **hmac + sha2 + base64** — HMAC-SHA256 cookie signing and key derivation.
-- **reqwest** — HTTP client for OpenBao API calls. Already used in
-  dev-dependencies; promoted to regular dependency.
-- **metrics + prometheus exporter** — Prometheus-compatible metrics. The
-  `metrics` facade allows instrumentation without coupling to the exporter.
-- **tracing-opentelemetry + opentelemetry** — connects the existing `tracing`
-  instrumentation to an OTel collector. Zero-cost when no collector is
-  configured.
+- **go-oidc** — full OIDC Relying Party implementation. Handles discovery,
+  JWKS fetching, and ID token verification. Built on `golang.org/x/oauth2`.
+- **golang.org/x/oauth2** — OAuth 2.0 authorization code flow and client
+  credentials flow. Manages token exchange and refresh.
+- **go-jose** — low-level JWKS and JWT operations. Used by `go-oidc`
+  internally; exposed for control-plane JWT validation in phase 1-2.
+- **prometheus/client_golang** — Prometheus-compatible metrics registry and
+  HTTP handler. The standard Go metrics library.
+- **opentelemetry** — connects `log/slog` structured logging to an OTel
+  collector. Zero-cost when no collector is configured.
 
 ## Build Phases
 
@@ -115,8 +105,9 @@ and OpenBao integration all require a logged-in user.
    `POST /logout`
 3. Minimal signed session cookie — HMAC-SHA256 signed, carries only `sub` +
    `issued_at` (~100-150 bytes)
-4. Server-side session store — `DashMap<String, UserSession>` keyed by `sub`,
-   holds groups, access token, refresh token
+4. Server-side session store — `sync.RWMutex`-protected
+   `map[string]*UserSession` keyed by `sub`, holds groups, access token,
+   refresh token
 5. Transparent access token refresh — on each request, if access token is
    near expiry, exchange refresh token and update server-side session
 6. Auth middleware for the app plane — protect `/app/` routes; redirect
@@ -126,22 +117,19 @@ and OpenBao integration all require a logged-in user.
 
 **Config additions:**
 
-```rust
-#[derive(Debug, Deserialize)]
-pub struct OidcConfig {
-    pub issuer_url: String,          // OIDC issuer URL
-    pub client_id: String,           // registered client ID
-    pub client_secret: String,       // client secret (use env var)
-    #[serde(default = "default_groups_claim")]
-    pub groups_claim: String,        // default: "groups"
-    #[serde(default = "default_cookie_max_age")]
-    pub cookie_max_age: Duration,    // cookie max-age; default: 24h
+```go
+type OIDCConfig struct {
+    IssuerURL    string        `toml:"issuer_url"`
+    ClientID     string        `toml:"client_id"`
+    ClientSecret string        `toml:"client_secret"`
+    GroupsClaim  string        `toml:"groups_claim"`  // default: "groups"
+    CookieMaxAge time.Duration `toml:"cookie_max_age"` // default: 24h
 }
 ```
 
-**Note on cookie lifetime vs. session lifetime:** `cookie_max_age` controls how
+**Note on cookie lifetime vs. session lifetime:** `CookieMaxAge` controls how
 long the browser retains the session cookie. The *effective* session duration is
-`min(cookie_max_age, refresh_token_lifetime)` — if the IdP's refresh token
+`min(CookieMaxAge, refresh_token_lifetime)` — if the IdP's refresh token
 expires before the cookie, the session ends at refresh token expiry regardless
 of the cookie's max-age. Conversely, a long-lived refresh token is bounded by
 the cookie max-age. Operators should align both values.
@@ -150,25 +138,30 @@ the cookie max-age. Operators should align both values.
 
 The cookie carries only `sub` and `issued_at`, signed with HMAC-SHA256. All
 sensitive/bulky data (groups, access token, refresh token) lives server-side
-in a `DashMap<String, UserSession>`. This avoids cookie size issues (IdP
-JWTs can be 1-2KB, easily exceeding the 4KB browser limit), eliminates the
-need for refresh token encryption, and enables immediate session invalidation
-on logout.
+in a mutex-protected map. This avoids cookie size issues (IdP JWTs can be
+1-2KB, easily exceeding the 4KB browser limit), eliminates the need for
+refresh token encryption, and enables immediate session invalidation on logout.
 
-```rust
-/// Minimal payload in the session cookie.
-#[derive(Serialize, Deserialize)]
-pub struct CookiePayload {
-    pub sub: String,    // IdP subject identifier
-    pub issued_at: i64, // cookie issue time
+```go
+// CookiePayload is the minimal payload in the session cookie.
+type CookiePayload struct {
+    Sub      string `json:"sub"`
+    IssuedAt int64  `json:"iat"`
 }
 
-/// Server-side session data, keyed by sub.
-pub struct UserSession {
-    pub groups: Vec<String>,     // group memberships from groups_claim
-    pub access_token: String,    // short-lived IdP access token
-    pub refresh_token: String,   // long-lived refresh token (plaintext, never leaves server)
-    pub expires_at: i64,         // access token expiry (unix timestamp)
+// UserSession is server-side session data, keyed by sub.
+type UserSession struct {
+    Groups       []string
+    AccessToken  string
+    RefreshToken string
+    ExpiresAt    time.Time
+}
+
+// SessionStore holds all active user sessions.
+type SessionStore struct {
+    mu       sync.RWMutex
+    sessions map[string]*UserSession // keyed by sub
+    secret   []byte                   // HMAC-SHA256 signing key
 }
 ```
 
@@ -187,7 +180,7 @@ GET /login
 
 GET /callback?code=...&state=...
   → Exchange code for tokens at IdP token endpoint
-  → Validate ID token signature against JWKS
+  → Validate ID token signature against JWKS (via go-oidc verifier)
   → Extract sub + groups from ID token claims
   → Store UserSession server-side, set signed cookie (sub + issued_at)
   → 302 to return_url from state (default: /)
@@ -201,29 +194,37 @@ POST /logout
 
 The v0 proxy serves apps without authentication. v1 adds a middleware layer
 that verifies the signed session cookie, looks up the server-side session,
-and inserts `AuthenticatedUser` into request extensions. The control plane
+and stores the authenticated user in the request context. The control plane
 API continues to use bearer token auth (upgraded to JWT in phase 1-2).
 
-```rust
-/// App-plane auth middleware. Inserted into the proxy router.
-/// Redirects unauthenticated users to /login?return_url={current_path}.
-async fn app_auth_middleware(
-    State(state): State<AppState<B>>,
-    mut req: Request,
-    next: Next,
-) -> Result<Response, Response> {
-    let cookie = verify_session_cookie(&state, &req)?;
-    let session = state.user_sessions.get(&cookie.sub)?;
-    refresh_if_needed(&state, &cookie.sub).await?;
-    req.extensions_mut().insert(AuthenticatedUser { ... });
-    Ok(next.run(req).await)
+```go
+// AppAuthMiddleware protects /app/ proxy routes.
+// Redirects unauthenticated users to /login?return_url={current_path}.
+func AppAuthMiddleware(store *SessionStore) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            payload, err := store.VerifyCookie(r)
+            if err != nil {
+                http.Redirect(w, r, "/login?return_url="+r.URL.Path, http.StatusFound)
+                return
+            }
+            session := store.Get(payload.Sub)
+            if session == nil {
+                http.Redirect(w, r, "/login?return_url="+r.URL.Path, http.StatusFound)
+                return
+            }
+            store.RefreshIfNeeded(r.Context(), payload.Sub)
+            ctx := WithAuthenticatedUser(r.Context(), payload, session)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
 }
 ```
 
-### Phase 1-2: IdP Client Credentials + RBAC + Per-Content ACL
+### Phase 1-2: IdP Client Credentials + RBAC + Per-Content ACL ([detailed plan](phase-1-2.md))
 
 Replace the static bearer token with JWT-based machine auth. Add role-based
-access control and per-content permissions.
+access control, per-content permissions, and public (anonymous) app access.
 
 **Deliverables:**
 
@@ -234,25 +235,28 @@ access control and per-content permissions.
 3. Role system — three roles: `admin`, `publisher`, `viewer`
 4. Role assignment — mapped from IdP groups claim
 5. Per-content ACL — owners and explicit viewer/collaborator grants per app
-6. Authorization checks on all API and proxy endpoints
-7. Schema additions: roles and ACL tables
+6. Public (anonymous) access — apps with `access_type = 'public'` are
+   accessible without authentication; identity headers injected when the
+   user happens to be logged in, absent otherwise
+7. Authorization checks on all API and proxy endpoints
+8. Schema additions: roles, ACL tables, `access_type` column on apps
 
 **Roles and permissions:**
 
-| Permission | admin | publisher | viewer |
-|---|---|---|---|
-| Create apps | yes | yes | no |
-| Deploy bundles | yes | own apps | no |
-| Start/stop apps | yes | own apps | no |
-| Update app config | yes | own apps | no |
-| Delete apps | yes | own apps | no |
-| View all apps | yes | no | no |
-| View accessible apps | yes | yes | yes |
-| Access app (proxy) | yes | own + granted | granted only |
-| Manage users/roles | yes | no | no |
+| Permission | admin | publisher | viewer | anonymous |
+|---|---|---|---|---|
+| Create apps | yes | yes | no | no |
+| Deploy bundles | yes | own apps | no | no |
+| Start/stop apps | yes | own apps | no | no |
+| Update app config | yes | own apps | no | no |
+| Delete apps | yes | own apps | no | no |
+| View all apps | yes | no | no | no |
+| View accessible apps | yes | yes | yes | public only |
+| Access app (proxy) | yes | own + granted | granted only | public only |
+| Manage users/roles | yes | no | no | no |
 
 "Own apps" = apps where the user is the `owner` (set at creation time to the
-authenticated user's `sub`).
+authenticated user's `sub`). "Public only" = apps with `access_type = 'public'`.
 
 **Per-content ACL:**
 
@@ -268,15 +272,17 @@ CREATE TABLE app_access (
 );
 ```
 
-Access evaluation order: admin overrides all → owner has full access →
-explicit ACL grants → deny.
+Access evaluation order: public app + unauthenticated → anonymous access;
+admin overrides all → owner has full access → explicit ACL grants →
+public app + authenticated → anonymous access (with identity headers) →
+deny.
 
 **ACL conflict resolution:** a principal may have multiple grants for the same
 app (e.g., a direct `viewer` grant and a `collaborator` grant via group
 membership). The effective role is the highest-privilege grant across all
-matching entries. `Role` implements `Ord` in Rust (`collaborator > viewer`),
-and the access check collects all grants for the user's `sub` (kind=user)
-plus all their group names (kind=group), then takes the max.
+matching entries. The access check collects all grants for the user's `sub`
+(kind=user) plus all their group names (kind=group), then takes the max.
+Role ordering is defined as a simple constant mapping (`collaborator > viewer`).
 
 **ACL enforcement on active sessions:** ACL checks run on HTTP requests only,
 not on individual WebSocket frames. When a user's access is revoked, it takes
@@ -288,40 +294,43 @@ added as an optimization.
 
 **JWT validation for control plane:**
 
-```rust
-/// Replaces the v0 static bearer token check.
-/// Validates JWT signature against JWKS, checks expiry and issuer.
-/// Falls back to static token if [oidc] is not configured (dev mode).
-async fn api_auth_middleware<B: Backend>(
-    State(state): State<AppState<B>>,
-    req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let token = extract_bearer_token(&req)?;
+```go
+// APIAuthMiddleware replaces the v0 static bearer token check.
+// Validates JWT signature against JWKS, checks expiry and issuer.
+// Falls back to static token if [oidc] is not configured (dev mode).
+func APIAuthMiddleware(srv *server.Server) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            token := extractBearerToken(r)
 
-    if let Some(oidc) = &state.config.oidc {
-        let claims = validate_jwt(token, &state.jwks_cache, oidc)?;
-        // Insert claims into request extensions for downstream handlers
-        // Role is derived from groups claim
-    } else {
-        // Fallback: static token comparison (v0 compat / dev mode)
-        if token != state.config.server.token {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
+            if srv.Config.OIDC != nil {
+                claims, err := validateJWT(r.Context(), token, srv.JWKSKeySet, srv.Config.OIDC)
+                if err != nil {
+                    http.Error(w, "unauthorized", http.StatusUnauthorized)
+                    return
+                }
+                ctx := WithCallerIdentity(r.Context(), claims)
+                next.ServeHTTP(w, r.WithContext(ctx))
+            } else {
+                // Fallback: static token comparison (v0 compat / dev mode)
+                if token != srv.Config.Server.Token {
+                    http.Error(w, "unauthorized", http.StatusUnauthorized)
+                    return
+                }
+                next.ServeHTTP(w, r)
+            }
+        })
     }
-
-    Ok(next.run(req).await)
 }
 ```
 
 **Schema additions:**
 
 ```sql
--- Add owner to apps table (NOT NULL — no ownerless apps)
--- Uses table-rebuild pattern since SQLite doesn't support ADD COLUMN NOT NULL
--- without a default. Pre-release migration consolidation (see below) means
--- no existing rows need migration.
+-- Add owner and access_type to apps table.
+-- Pre-release migration consolidation means no existing rows need migration.
 ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL;
+ALTER TABLE apps ADD COLUMN access_type TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'public'));
 
 -- Per-content access grants
 CREATE TABLE app_access (
@@ -365,17 +374,14 @@ at runtime.
 
 **Identity injection (proxy middleware):**
 
-```rust
-/// Injected after auth middleware, before forwarding to the worker.
-/// Reads SessionPayload from request extensions (set by app_auth_middleware).
-fn inject_identity_headers(req: &mut Request, session: &SessionPayload) {
-    let headers = req.headers_mut();
-    headers.insert("X-Shiny-User", session.sub.parse().unwrap());
-    headers.insert(
-        "X-Shiny-Groups",
-        session.groups.join(",").parse().unwrap(),
-    );
-    // Remove any client-supplied values to prevent spoofing
+```go
+// InjectIdentityHeaders adds X-Shiny-User and X-Shiny-Groups to the
+// outgoing request. Strips any client-supplied values to prevent spoofing.
+func InjectIdentityHeaders(r *http.Request, user *AuthenticatedUser) {
+    r.Header.Del("X-Shiny-User")
+    r.Header.Del("X-Shiny-Groups")
+    r.Header.Set("X-Shiny-User", user.Sub)
+    r.Header.Set("X-Shiny-Groups", strings.Join(user.Groups, ","))
 }
 ```
 
@@ -393,8 +399,8 @@ user's request carries their own scoped token, even on shared workers.
 
 ```
 Per-request flow (on every proxied HTTP request):
-1. Auth middleware extracts SessionPayload from session cookie
-2. Look up cached OpenBao token for this user's `sub`
+1. Auth middleware extracts AuthenticatedUser from request context
+2. Look up cached OpenBao token for this user's sub
    - Cache hit (token not expired): use cached token
    - Cache miss: POST {openbao_addr}/v1/auth/jwt/login
      Body: { "role": "blockyard-user", "jwt": "{access_token}" }
@@ -408,16 +414,17 @@ Per-request flow (on every proxied HTTP request):
 
 **Token cache:**
 
-```rust
-/// In-memory cache of OpenBao tokens keyed by user sub.
-/// Avoids calling OpenBao's JWT login endpoint on every request.
-pub struct VaultTokenCache {
-    tokens: DashMap<String, CachedToken>,
+```go
+// VaultTokenCache caches OpenBao tokens keyed by user sub.
+// Avoids calling OpenBao's JWT login endpoint on every request.
+type VaultTokenCache struct {
+    mu     sync.RWMutex
+    tokens map[string]*cachedToken
 }
 
-struct CachedToken {
-    token: String,
-    expires_at: Instant,
+type cachedToken struct {
+    Token     string
+    ExpiresAt time.Time
 }
 ```
 
@@ -440,15 +447,12 @@ injected per-request via headers, not per-container via env vars.
 
 **Config additions:**
 
-```rust
-#[derive(Debug, Deserialize)]
-pub struct OpenbaoConfig {
-    pub address: String,             // e.g. https://bao.example.com
-    pub admin_token: String,         // use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
-    #[serde(default = "default_token_ttl")]
-    pub token_ttl: Duration,         // default: 1h
-    #[serde(default = "default_jwt_auth_path")]
-    pub jwt_auth_path: String,       // default: "jwt"
+```go
+type OpenbaoConfig struct {
+    Address     string        `toml:"address"`       // e.g. https://bao.example.com
+    AdminToken  Secret        `toml:"admin_token"`   // use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
+    TokenTTL    time.Duration `toml:"token_ttl"`     // default: 1h
+    JWTAuthPath string        `toml:"jwt_auth_path"` // default: "jwt"
 }
 ```
 
@@ -498,64 +502,63 @@ worker pool."
    session count
 6. Graceful drain on app stop — wait for sessions to end before killing
    workers
-7. Proxy concurrency model — per-worker `hyper::Client` if contention
-   appears
 
 **Load balancing strategy:**
 
-```rust
-/// Assigns a session to a worker. Called when a new session arrives
-/// and the app has max_workers_per_app > 1.
-pub struct LoadBalancer {
-    // No persistent state — decisions are based on current worker map
-}
+```go
+// LoadBalancer assigns sessions to workers. Stateless — decisions are
+// based on current worker and session state.
+type LoadBalancer struct{}
 
-impl LoadBalancer {
-    /// Pick a worker for a new session.
-    /// 1. Find workers with available capacity (sessions < max_sessions_per_worker)
-    /// 2. Among those, pick the one with fewest sessions (least-loaded)
-    /// 3. If none have capacity and max_workers_per_app not reached, return None
-    ///    (caller spawns a new worker)
-    /// 4. If none have capacity and at max_workers_per_app, return error (503)
-    pub fn assign(
-        &self,
-        app_id: &str,
-        workers: &DashMap<String, ActiveWorker<B::Handle>>,
-        sessions: &SessionStore,
-        max_sessions: u32,
-        max_workers: Option<u32>,
-    ) -> Result<Option<WorkerId>, LoadBalancerError>;
-}
+// Assign picks a worker for a new session.
+// 1. Find workers with available capacity (sessions < maxSessionsPerWorker)
+// 2. Among those, pick the one with fewest sessions (least-loaded)
+// 3. If none have capacity and maxWorkersPerApp not reached, return "",nil
+//    (caller spawns a new worker)
+// 4. If none have capacity and at maxWorkersPerApp, return ErrCapacityExhausted
+func (lb *LoadBalancer) Assign(
+    appID string,
+    workers *server.WorkerMap,
+    sessions *session.Store,
+    maxSessions int,
+    maxWorkers *int,
+) (string, error)
 ```
 
 Sticky sessions: once assigned, a session stays pinned to its worker via
-`SessionStore` (unchanged from v0). The load balancer only runs on new
+the session store (unchanged from v0). The load balancer only runs on new
 session creation.
 
 **Auto-scaling:**
 
-```rust
-/// Runs as a background loop alongside health polling.
-/// Checks each app's worker count against demand.
-pub async fn autoscale_loop<B: Backend>(state: AppState<B>) {
-    let mut interval = tokio::time::interval(state.config.proxy.health_interval);
-    loop {
-        interval.tick().await;
-        for app in list_running_apps(&state).await {
-            let worker_count = count_workers_for_app(&state, &app.id);
-            let session_count = count_sessions_for_app(&state, &app.id);
-            let max_sessions = app.max_sessions_per_worker;
+```go
+// RunAutoscaler runs as a background goroutine alongside health polling.
+// Checks each app's worker count against demand.
+func RunAutoscaler(ctx context.Context, srv *server.Server) {
+    ticker := time.NewTicker(srv.Config.Proxy.HealthInterval)
+    defer ticker.Stop()
 
-            // Scale up: if all workers are at capacity and below max_workers
-            if all_at_capacity(worker_count, session_count, max_sessions) {
-                if can_scale_up(&app, worker_count, &state) {
-                    spawn_worker_for_app(&state, &app).await;
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            for _, app := range listRunningApps(srv) {
+                workerCount := countWorkersForApp(srv, app.ID)
+                sessionCount := countSessionsForApp(srv, app.ID)
+                maxSessions := app.MaxSessionsPerWorker
+
+                // Scale up: if all workers are at capacity and below max_workers
+                if allAtCapacity(workerCount, sessionCount, maxSessions) {
+                    if canScaleUp(app, workerCount, srv) {
+                        spawnWorkerForApp(ctx, srv, app)
+                    }
                 }
-            }
 
-            // Scale down: if a worker has 0 sessions and others have capacity
-            if has_idle_workers(worker_count, session_count, max_sessions) {
-                drain_idle_worker(&state, &app).await;
+                // Scale down: if a worker has 0 sessions and others have capacity
+                if hasIdleWorkers(workerCount, sessionCount, maxSessions) {
+                    drainIdleWorker(ctx, srv, app)
+                }
             }
         }
     }
@@ -568,27 +571,28 @@ deferred to v2.
 
 **Graceful drain on stop:**
 
-```rust
-/// v0 kills workers immediately. v1 drains sessions first.
-async fn stop_app_graceful<B: Backend>(state: &AppState<B>, app_id: &str) {
-    let workers = get_workers_for_app(state, app_id);
+```go
+// stopAppGraceful drains sessions before killing workers.
+// v0 kills workers immediately; v1 waits for sessions to end.
+func stopAppGraceful(ctx context.Context, srv *server.Server, appID string) {
+    workers := getWorkersForApp(srv, appID)
 
     // 1. Stop routing new sessions to this app
-    mark_app_draining(state, app_id).await;
+    markAppDraining(srv, appID)
 
     // 2. Wait for existing sessions to end (up to shutdown_timeout)
-    let deadline = Instant::now() + state.config.server.shutdown_timeout;
-    loop {
-        let remaining = count_sessions_for_workers(state, &workers);
-        if remaining == 0 || Instant::now() >= deadline {
-            break;
+    deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout)
+    for {
+        remaining := countSessionsForWorkers(srv, workers)
+        if remaining == 0 || time.Now().After(deadline) {
+            break
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        time.Sleep(time.Second)
     }
 
     // 3. Force-stop remaining workers
-    for worker in workers {
-        evict_worker(state, &worker.id).await;
+    for _, w := range workers {
+        ops.EvictWorker(ctx, srv, w.ID)
     }
 }
 ```
@@ -610,39 +614,41 @@ User-facing features for navigating and accessing deployed content.
 
 **Vanity URL routing:**
 
-```rust
-/// Extended router. Vanity routes are checked before the /app/{name}/ routes.
-pub fn full_router<B: Backend + Clone>(state: AppState<B>) -> Router {
-    let api = api_router(state.clone());
+```go
+// Router setup. Vanity routes are checked before /app/{name}/ routes.
+func NewRouter(srv *server.Server) *chi.Mux {
+    r := chi.NewRouter()
 
-    Router::new()
-        .merge(api)
-        // Auth endpoints
-        .route("/login", get(login_handler))
-        .route("/callback", get(callback_handler))
-        .route("/logout", post(logout_handler))
-        // Vanity URL catch-all — checked before /app/{name}/
-        // The handler resolves the vanity path to an app and proxies.
-        // Returns 404 if no vanity URL matches (does not fall through
-        // to avoid shadowing legitimate 404s).
-        .route("/{vanity}", get(trailing_slash_redirect_vanity))
-        .route("/{vanity}/", any(vanity_proxy_handler_root::<B>))
-        .route("/{vanity}/{*rest}", any(vanity_proxy_handler::<B>))
-        // Standard app routes
-        .route("/app/{name}", get(trailing_slash_redirect))
-        .route("/app/{name}/", any(proxy_handler_root::<B>))
-        .route("/app/{name}/{*rest}", any(proxy_handler::<B>))
-        .with_state(state)
+    // API routes (existing)
+    r.Route("/api/v1", func(r chi.Router) { /* ... */ })
+
+    // Auth endpoints
+    r.Get("/login", loginHandler(srv))
+    r.Get("/callback", callbackHandler(srv))
+    r.Post("/logout", logoutHandler(srv))
+
+    // Vanity URL catch-all — checked before /app/{name}/
+    // Returns 404 if no vanity URL matches.
+    r.Get("/{vanity}", trailingSlashRedirectVanity)
+    r.HandleFunc("/{vanity}/", vanityProxyHandler(srv))
+    r.HandleFunc("/{vanity}/*", vanityProxyHandler(srv))
+
+    // Standard app routes
+    r.Get("/app/{name}", trailingSlashRedirect)
+    r.HandleFunc("/app/{name}/", proxyHandler(srv))
+    r.HandleFunc("/app/{name}/*", proxyHandler(srv))
+
+    return r
 }
 ```
 
 **Reserved prefix blocklist:**
 
-```rust
-const RESERVED_PREFIXES: &[&str] = &[
+```go
+var reservedPrefixes = []string{
     "api", "app", "login", "callback", "logout", "healthz", "readyz",
     "metrics", "static", "assets", "admin",
-];
+}
 ```
 
 Vanity URLs are validated against this list and against existing vanity URLs
@@ -733,57 +739,89 @@ Actions: `app.create`, `app.update`, `app.delete`, `app.start`, `app.stop`,
 
 **Audit log writer:**
 
-```rust
-/// Append-only audit log. Writes are buffered and flushed periodically
-/// or on shutdown. Thread-safe via an mpsc channel.
-pub struct AuditLog {
-    sender: mpsc::UnboundedSender<AuditEntry>,
+```go
+// AuditLog is an append-only audit log backed by a JSON Lines file.
+// Writes are buffered via a channel and flushed by a background goroutine.
+type AuditLog struct {
+    entries chan AuditEntry
 }
 
-impl AuditLog {
-    pub fn log(&self, entry: AuditEntry) {
-        let _ = self.sender.send(entry);
+// Log sends an entry to the background writer. Non-blocking.
+func (a *AuditLog) Log(entry AuditEntry) {
+    select {
+    case a.entries <- entry:
+    default:
+        slog.Warn("audit log buffer full, dropping entry", "action", entry.Action)
     }
 }
 
-/// Background task: receives entries and appends to the log file.
-async fn audit_writer(
-    mut receiver: mpsc::UnboundedReceiver<AuditEntry>,
-    path: PathBuf,
-) {
-    let mut file = OpenOptions::new()
-        .create(true).append(true).open(&path).await.unwrap();
-
-    while let Some(entry) = receiver.recv().await {
-        let line = serde_json::to_string(&entry).unwrap();
-        file.write_all(line.as_bytes()).await.ok();
-        file.write_all(b"\n").await.ok();
+// runWriter is the background goroutine that appends entries to the log file.
+func runWriter(ctx context.Context, entries <-chan AuditEntry, path string) {
+    f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+    if err != nil {
+        slog.Error("failed to open audit log", "path", path, "err", err)
+        return
     }
-    file.flush().await.ok();
+    defer f.Close()
+
+    enc := json.NewEncoder(f)
+    for {
+        select {
+        case <-ctx.Done():
+            // Drain remaining entries before exit
+            for {
+                select {
+                case entry := <-entries:
+                    enc.Encode(entry)
+                default:
+                    return
+                }
+            }
+        case entry := <-entries:
+            enc.Encode(entry)
+        }
+    }
 }
 ```
 
 **Prometheus metrics:**
 
-```rust
-/// Key metrics registered at startup.
-fn register_metrics() {
+```go
+// Registered at startup.
+var (
     // Gauges
-    describe_gauge!("blockyard_workers_active", "Currently running workers");
-    describe_gauge!("blockyard_sessions_active", "Active proxy sessions");
+    workersActive  = promauto.NewGauge(prometheus.GaugeOpts{
+        Name: "blockyard_workers_active", Help: "Currently running workers",
+    })
+    sessionsActive = promauto.NewGauge(prometheus.GaugeOpts{
+        Name: "blockyard_sessions_active", Help: "Active proxy sessions",
+    })
 
     // Counters
-    describe_counter!("blockyard_workers_spawned_total", "Total workers spawned");
-    describe_counter!("blockyard_workers_stopped_total", "Total workers stopped");
-    describe_counter!("blockyard_bundles_uploaded_total", "Total bundles uploaded");
-    describe_counter!("blockyard_restores_total", "Total dependency restores");
-    describe_counter!("blockyard_proxy_requests_total", "Total proxied requests");
-    describe_counter!("blockyard_health_checks_failed_total", "Failed health checks");
+    workersSpawned = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "blockyard_workers_spawned_total", Help: "Total workers spawned",
+    })
+    workersStopped = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "blockyard_workers_stopped_total", Help: "Total workers stopped",
+    })
+    bundlesUploaded = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "blockyard_bundles_uploaded_total", Help: "Total bundles uploaded",
+    })
+    proxyRequests = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "blockyard_proxy_requests_total", Help: "Total proxied requests",
+    })
+    healthChecksFailed = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "blockyard_health_checks_failed_total", Help: "Failed health checks",
+    })
 
     // Histograms
-    describe_histogram!("blockyard_cold_start_seconds", "Worker cold-start duration");
-    describe_histogram!("blockyard_proxy_request_seconds", "Proxy request duration");
-}
+    coldStartDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+        Name: "blockyard_cold_start_seconds", Help: "Worker cold-start duration",
+    })
+    proxyRequestDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+        Name: "blockyard_proxy_request_seconds", Help: "Proxy request duration",
+    })
+)
 ```
 
 The `/metrics` endpoint is unauthenticated (same as `/healthz`). Operators
@@ -791,60 +829,86 @@ can restrict access at the network level if needed.
 
 **`/readyz` endpoint:**
 
-```rust
-async fn readyz<B: Backend>(State(state): State<AppState<B>>) -> Response {
-    let mut checks = Vec::new();
+```go
+func readyzHandler(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        checks := make(map[string]string)
 
-    // Database
-    checks.push(("database", check_db(&state.db).await));
+        // Database
+        if err := srv.DB.Ping(r.Context()); err != nil {
+            checks["database"] = "fail"
+        } else {
+            checks["database"] = "pass"
+        }
 
-    // Docker socket
-    checks.push(("docker", state.backend.health_check_self().await));
+        // Docker socket
+        if _, err := srv.Backend.ListManaged(r.Context()); err != nil {
+            checks["docker"] = "fail"
+        } else {
+            checks["docker"] = "pass"
+        }
 
-    // IdP (OIDC discovery endpoint)
-    if let Some(oidc) = &state.config.oidc {
-        checks.push(("idp", check_idp(oidc).await));
+        // IdP (OIDC discovery endpoint)
+        if srv.Config.OIDC != nil {
+            if err := checkIDP(r.Context(), srv.Config.OIDC); err != nil {
+                checks["idp"] = "fail"
+            } else {
+                checks["idp"] = "pass"
+            }
+        }
+
+        // OpenBao
+        if srv.Config.Openbao != nil {
+            if err := checkOpenbao(r.Context(), srv.Config.Openbao); err != nil {
+                checks["openbao"] = "fail"
+            } else {
+                checks["openbao"] = "pass"
+            }
+        }
+
+        allOK := true
+        for _, v := range checks {
+            if v == "fail" {
+                allOK = false
+                break
+            }
+        }
+
+        status := "ready"
+        httpStatus := http.StatusOK
+        if !allOK {
+            status = "not_ready"
+            httpStatus = http.StatusServiceUnavailable
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(httpStatus)
+        json.NewEncoder(w).Encode(map[string]any{
+            "status": status,
+            "checks": checks,
+        })
     }
-
-    // OpenBao
-    if let Some(bao) = &state.config.openbao {
-        checks.push(("openbao", check_openbao(bao).await));
-    }
-
-    let all_ok = checks.iter().all(|(_, ok)| *ok);
-    let status = if all_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
-
-    let body = serde_json::json!({
-        "status": if all_ok { "ready" } else { "not_ready" },
-        "checks": checks.into_iter()
-            .map(|(name, ok)| (name, if ok { "pass" } else { "fail" }))
-            .collect::<HashMap<_, _>>()
-    });
-
-    (status, Json(body)).into_response()
 }
 ```
 
 **Config additions:**
 
-```rust
-#[derive(Debug, Deserialize)]
-pub struct TelemetryConfig {
-    #[serde(default)]
-    pub metrics_enabled: bool,           // default: false
-    #[serde(default)]
-    pub otlp_endpoint: Option<String>,   // e.g. http://otel-collector:4317
+```go
+type TelemetryConfig struct {
+    MetricsEnabled bool   `toml:"metrics_enabled"` // default: false
+    OTLPEndpoint   string `toml:"otlp_endpoint"`   // e.g. http://otel-collector:4317
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AuditConfig {
-    pub path: PathBuf,                   // e.g. /data/audit/blockyard.jsonl
+type AuditConfig struct {
+    Path string `toml:"path"` // e.g. /data/audit/blockyard.jsonl
 }
 ```
 
 ## Config Summary
 
-Full v1 config structure (v0 fields unchanged):
+v1 config additions alongside v0 fields (v0 fields shown for context;
+`log_retention`, `rv_version`, and `max_bundle_size` are omitted — see
+roadmap for the complete v0 config):
 
 ```toml
 [server]
@@ -904,8 +968,8 @@ metrics export, no audit log.
 **Environment variable mappings for v1 config fields:**
 
 The v0 env var overlay pattern (`BLOCKYARD_SECTION_FIELD`) extends to all
-new sections. Each field must be added to `supported_env_vars()` and
-`apply_env_overrides()` — the existing `env_var_coverage_complete` test
+new sections. Each field must be added to `supportedEnvVars()` and handled
+in `applyEnvOverrides()` — the existing `TestEnvVarCoverageComplete` test
 enforces this.
 
 ```
@@ -926,26 +990,25 @@ BLOCKYARD_AUDIT_PATH
 ```
 
 **Auto-construction of optional sections from env vars:** the v1 config
-sections are `Option<T>` (absent when not in the TOML file). Setting an env
-var like `BLOCKYARD_OIDC_CLIENT_ID` when no `[oidc]` section exists in the
-TOML would silently do nothing under the v0 overlay pattern (the
-`if let Some(oidc) = &mut self.oidc` guard fails). To support env-var-only
+sections are pointer types (`*OIDCConfig`, etc.) — nil when not in the TOML
+file. Setting an env var like `BLOCKYARD_OIDC_CLIENT_ID` when no `[oidc]`
+section exists in the TOML would silently do nothing under the v0 overlay
+pattern (the nil pointer check skips the section). To support env-var-only
 configuration (common in Docker Compose deployments where secrets come
-entirely from env vars), `apply_env_overrides()` should auto-construct a
+entirely from env vars), `applyEnvOverrides()` should auto-construct a
 default struct when any env var in the section's prefix is set:
 
-```rust
+```go
 // Before applying individual overrides:
-if self.oidc.is_none() && env_prefix_exists("BLOCKYARD_OIDC_") {
-    self.oidc = Some(OidcConfig::default());
+if cfg.OIDC == nil && envPrefixExists("BLOCKYARD_OIDC_") {
+    cfg.OIDC = &OIDCConfig{GroupsClaim: "groups", CookieMaxAge: 24 * time.Hour}
 }
-// Repeat for openbao, telemetry, audit
+// Repeat for Openbao, Telemetry, Audit
 ```
 
-Required fields without meaningful defaults (e.g. `issuer_url`,
-`client_secret`) start as empty strings and are caught by
-`config.validate()` — same error path as a TOML section with missing
-fields.
+Required fields without meaningful defaults (e.g. `IssuerURL`,
+`ClientSecret`) start as zero values and are caught by `config.Validate()`
+— same error path as a TOML section with missing fields.
 
 ## Schema Migrations
 
@@ -959,11 +1022,12 @@ will be assigned final numbers at implementation time.
 v1 adds three migrations:
 
 ```sql
--- 002_add_owner_and_vanity.sql
+-- 002_add_owner_vanity_access_type.sql
 -- owner is NOT NULL — table rebuild required for SQLite compatibility.
 -- Since v0 migrations are consolidated pre-release, no existing rows
 -- need migration.
 ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL;
+ALTER TABLE apps ADD COLUMN access_type TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'public'));
 ALTER TABLE apps ADD COLUMN vanity_url TEXT UNIQUE;
 ALTER TABLE apps ADD COLUMN title TEXT;
 
@@ -1053,7 +1117,7 @@ parallel. Phase 1-4 is independent of 1-5 and 1-6. The critical path is
   validation with known keys, expired token rejection, wrong issuer
   rejection.
 - **Session cookie tests:** sign/verify round-trip, tampered cookie
-  rejection, expired cookie handling, refresh token encryption/decryption.
+  rejection, expired cookie handling.
 - **RBAC tests:** role derivation from groups, permission checks for each
   role, ACL evaluation with user grants, group grants, owner override.
 - **Load balancer tests:** least-loaded assignment, capacity exhaustion
@@ -1084,21 +1148,22 @@ server):
 
 ### Mock IdP
 
-Tests require a mock identity provider. Implemented as a test helper:
+Tests require a mock identity provider. Implemented as a test helper using
+`net/http/httptest`:
 
-```rust
-/// Starts a minimal OIDC-compliant mock IdP for integration tests.
-/// Serves /.well-known/openid-configuration, /jwks, /token, /authorize.
-/// Issues JWTs signed with a test RSA key.
-struct MockIdp {
-    addr: SocketAddr,
-    signing_key: RsaPrivateKey,
+```go
+// MockIdP starts a minimal OIDC-compliant mock IdP for integration tests.
+// Serves /.well-known/openid-configuration, /jwks, /token, /authorize.
+// Issues JWTs signed with a test RSA key.
+type MockIdP struct {
+    Server     *httptest.Server
+    SigningKey  *rsa.PrivateKey
+    IssuerURL  string
 }
 
-impl MockIdp {
-    async fn start() -> Self;
-    fn issue_token(&self, sub: &str, groups: &[&str]) -> String;
-}
+func NewMockIdP() *MockIdP
+func (m *MockIdP) IssueToken(sub string, groups []string) string
+func (m *MockIdP) Close()
 ```
 
 ### Docker integration tests
@@ -1114,9 +1179,9 @@ Extended with:
 1. **Minimal cookie + server-side session store.** The signed cookie carries
    only `sub` and `issued_at` (~100-150 bytes). All sensitive/bulky data
    (groups, access token, refresh token) lives server-side in a
-   `DashMap<String, UserSession>` keyed by `sub`. This avoids cookie size
-   issues (IdP JWT access tokens are 1-2KB; combined with groups and
-   encrypted refresh tokens the cookie easily exceeds the 4KB browser
+   mutex-protected `map[string]*UserSession` keyed by `sub`. This avoids
+   cookie size issues (IdP JWT access tokens are 1-2KB; combined with groups
+   and encrypted refresh tokens the cookie easily exceeds the 4KB browser
    limit), removes the need for AES-GCM encryption, and enables immediate
    session invalidation on logout. Trade-off: sessions are lost on server
    restart, but this matches all other in-memory state in v1 (workers,
@@ -1146,7 +1211,7 @@ Extended with:
    SQLite's single writer lock. Operators ingest the file into their log
    aggregation system (ELK, Loki, etc.). The file is rotated by standard
    tools (logrotate). A future database-backed audit store can be added
-   behind a trait if needed.
+   behind an interface if needed.
 
 6. **OpenBao bootstrap is best-effort on startup.** The server does not fail
    to start if OpenBao is unreachable — it logs a warning and reports
@@ -1174,15 +1239,21 @@ Extended with:
    injection model.
 
 10. **Catalog `status` field is derived from local in-memory state.** The
-    catalog API's `status` field is computed from the workers DashMap, which
-    is node-local. This is accurate for v1 (single server). For v2
-    multi-node deployments, `status` will need to come from shared state
+    catalog API's `status` field is computed from the worker map, which is
+    node-local. This is accurate for v1 (single server). For v2 multi-node
+    deployments, `status` will need to come from shared state
     (PostgreSQL-backed worker registry) or be documented as approximate.
 
-11. **`SessionStore`, `WorkerRegistry`, and `TaskStore` remain concrete
-    structs, not traits.** The roadmap describes these as traits with
-    swappable implementations, but v0 implemented them as concrete
-    `DashMap`-backed structs (a deliberate simplification documented in
-    phase 0-5). v1 does not require distributed state, so trait extraction
-    is deferred to v2 when PostgreSQL-backed implementations are needed for
-    multi-node deployments. See `docs/design/v2/draft.md`.
+11. **Session store, worker registry, and task store remain concrete structs,
+    not interfaces.** The roadmap describes these as swappable, but v0
+    implemented them as concrete mutex-protected map structs (a deliberate
+    simplification). v1 does not require distributed state, so interface
+    extraction is deferred to v2 when PostgreSQL-backed implementations are
+    needed for multi-node deployments.
+
+12. **stdlib over external dependencies where possible.** Go's standard
+    library covers HMAC signing (`crypto/hmac`), HTTP clients (`net/http`),
+    JSON handling (`encoding/json`), and concurrent file I/O (goroutines +
+    `os`). External dependencies are added only where the stdlib has no
+    viable equivalent: OIDC discovery, Prometheus metrics, OpenTelemetry
+    tracing.

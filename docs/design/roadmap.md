@@ -92,11 +92,21 @@ log_retention           = "1h"    # how long to keep logs after a worker exits
 without the other):
 
 ```toml
+[server]
+# v1 additions to [server]:
+session_secret = "..."                              # HMAC key for cookie signing
+                                                    # use BLOCKYARD_SERVER_SESSION_SECRET env var
+                                                    # required when [oidc] is configured
+external_url   = "https://blockyard.example.com"    # public URL for OIDC redirect_uri and
+                                                    # cookie Secure flag; required behind a
+                                                    # reverse proxy
+
 [oidc]
 issuer_url    = "https://auth.example.com/realms/myrealm"
 client_id     = "blockyard"
 client_secret = "..."    # use BLOCKYARD_OIDC_CLIENT_SECRET env var
 groups_claim  = "groups" # optional, default: "groups"
+cookie_max_age = "24h"   # optional, default: 24h
 
 [openbao]
 address     = "https://bao.example.com"
@@ -444,24 +454,29 @@ infrastructure.
   in the database; token rotation, revocation, and expiry are handled by the
   IdP.
 
-- **User sessions.** After a successful OIDC callback, the server issues a
-  signed cookie containing the user's `sub`, groups, access token, and
-  encrypted refresh token. Access tokens have a short TTL (5–15 minutes,
-  configured on the IdP). On each request, if the access token is near expiry
-  the server transparently exchanges the refresh token for a new access token
-  and re-issues the cookie — the user never notices. The cookie carries
-  everything; no database lookup is required.
+- **User sessions.** After a successful OIDC callback, the server stores
+  the user's groups, access token, and refresh token in a server-side
+  session store (`sync.RWMutex`-protected `map[string]*UserSession` keyed
+  by `sub`). The browser receives a signed cookie carrying only the user's
+  `sub` and `issued_at` (~100-150 bytes, HMAC-SHA256 signed). Access tokens
+  have a short TTL (5–15 minutes, configured on the IdP). On each request,
+  if the access token is near expiry the server transparently exchanges the
+  refresh token for a new access token and updates the server-side session —
+  the cookie is unchanged and the user never notices.
 
   Runtime state (which container belongs to which session) is kept in-memory.
-  Logout deletes the cookie client-side; the access token remains valid until
-  its natural expiry. No server-side token revocation list is maintained — the
-  short TTL makes it unnecessary.
+  Logout deletes the server-side session entry and clears the cookie —
+  session invalidation is immediate. Sessions are lost on server restart;
+  users must re-authenticate. This matches all other in-memory state in v1
+  (workers, proxy sessions, task store).
 
-- **RBAC + per-content ACL.** Define roles (e.g. admin, developer, viewer)
-  with different permissions. Per-content ACLs so specific apps are visible
-  only to certain users/groups. Posit Connect's four-level model (Anonymous,
-  Viewer, Publisher, Administrator) with per-content Viewer / Collaborator
-  grants is the reference.
+- **RBAC + per-content ACL.** Three system roles (`admin`, `publisher`,
+  `viewer`) mapped from IdP groups. Per-content ACLs grant individual users
+  or groups `viewer` or `collaborator` access to specific apps. Apps have an
+  `access_type` (`acl` or `public`): public apps are accessible without
+  authentication (the Anonymous level in Posit Connect's four-level model).
+  Identity headers are injected when the user is authenticated, absent for
+  anonymous access.
 
 - **Identity injection.** On each proxied request, inject the authenticated
   user's identity into the Shiny process via HTTP headers (`X-Shiny-User`,
@@ -495,14 +510,19 @@ infrastructure.
 
   **Session flow:**
   1. User authenticates via IdP → server receives their OIDC JWT
-  2. At session start, the **server** (not the R process) presents the JWT to
-     OpenBao's `/auth/jwt/login` endpoint
+  2. On each proxied request, the **server** (not the R process) presents the
+     user's access token to OpenBao's `/auth/jwt/login` endpoint (with
+     in-memory caching keyed by `sub` to avoid per-request calls)
   3. OpenBao validates the JWT, maps the `sub` claim to a policy, and returns
      a short-lived token scoped to `secret/users/{sub}/*`
-  4. The scoped OpenBao token is injected into the Shiny process as an
-     environment variable
-  5. The R process calls OpenBao directly to read its credentials — it never
-     touches the server's DB or decryption keys
+  4. The scoped OpenBao token and OpenBao address are injected as HTTP headers
+     (`X-Blockyard-Vault-Token`, `X-Blockyard-Vault-Addr`) on the proxied
+     request — not as container env vars. This supports
+     `max_sessions_per_worker > 1`: each user's request carries their own
+     scoped token, even on shared workers.
+  5. The R process reads the token via `session$request` and calls OpenBao
+     directly to read its credentials — it never touches the server's DB or
+     decryption keys
   6. The server's OpenBao admin credentials (used for enrollment writes) never
      enter the process space
 
@@ -519,11 +539,15 @@ infrastructure.
   env var (`BLOCKYARD_OPENBAO_ADMIN_TOKEN`). AppRole auth is deferred.
 
   **R interface:** no companion R package. App developers query OpenBao
-  directly using `httr2` (or similar). The server injects two env vars into
-  every session container:
-  - `BLOCKYARD_VAULT_TOKEN` — the scoped OpenBao token for this session
-  - `BLOCKYARD_VAULT_ADDR` — the OpenBao address reachable from inside the
-    container
+  directly using `httr2` (or similar). The server injects two HTTP headers
+  on every proxied request:
+  - `X-Blockyard-Vault-Token` — the scoped OpenBao token for this user
+  - `X-Blockyard-Vault-Addr` — the OpenBao address reachable from inside
+    the container
+
+  The R app reads these via `session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN`
+  and `session$request$HTTP_X_BLOCKYARD_VAULT_ADDR` — the standard Shiny
+  mechanism for proxy-injected headers.
 
 - **Vanity URLs.** Allow publishers to assign a custom URL path (e.g.
   `/sales-dashboard`) to a content item, in addition to its base `/app/{name}/`
