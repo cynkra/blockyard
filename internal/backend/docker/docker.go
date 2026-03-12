@@ -565,7 +565,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 				spec.RvBinaryPath + ":/usr/local/bin/rv:ro",
 			},
 			Tmpfs: map[string]string{
-				"/tmp":            "",
+				"/tmp":            "exec",
 				"/root/.cache/rv": "",
 			},
 			CapDrop:     []string{"ALL"},
