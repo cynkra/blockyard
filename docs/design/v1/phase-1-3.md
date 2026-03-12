@@ -123,7 +123,7 @@ func (c *Client) Health(ctx context.Context) error
 func (c *Client) JWTLogin(ctx context.Context, mountPath, accessToken string) (token string, ttl time.Duration, err error)
 
 // KVWrite writes a secret to the KV v2 secrets engine.
-// PUT {addr}/v1/secret/data/{path}
+// POST {addr}/v1/secret/data/{path}
 // Used by credential enrollment (admin token auth).
 func (c *Client) KVWrite(ctx context.Context, path string, data map[string]any) error
 
@@ -251,28 +251,42 @@ In `proxy.go`, after identity header injection (step 4), add step 4b:
 
 ```go
 // 4b. Inject OpenBao credentials when configured.
-if srv.VaultClient != nil {
-    user := auth.UserFromContext(r.Context())
-    if user != nil && user.AccessToken != "" {
-        r.Header.Del("X-Blockyard-Vault-Token")
-        token, ok := srv.VaultTokenCache.Get(user.Sub)
-        if !ok {
-            var err error
-            token, ttl, err := srv.VaultClient.JWTLogin(
-                r.Context(),
-                srv.Config.Openbao.JWTAuthPath,
-                user.AccessToken,
-            )
-            if err != nil {
-                slog.Warn("vault JWT login failed", "sub", user.Sub, "error", err)
-            } else {
-                srv.VaultTokenCache.Set(user.Sub, token, ttl)
-            }
-        }
-        if token != "" {
-            r.Header.Set("X-Blockyard-Vault-Token", token)
-        }
+injectVaultToken(r, srv)
+```
+
+`injectVaultToken` is extracted as a named function:
+
+```go
+func injectVaultToken(r *http.Request, srv *server.Server) {
+    r.Header.Del("X-Blockyard-Vault-Token")
+
+    if srv.VaultClient == nil {
+        return
     }
+    user := auth.UserFromContext(r.Context())
+    if user == nil || user.AccessToken == "" {
+        return
+    }
+
+    token, ok := srv.VaultTokenCache.Get(user.Sub)
+    if !ok {
+        var ttl time.Duration
+        var err error
+        token, ttl, err = srv.VaultClient.JWTLogin(
+            r.Context(),
+            srv.Config.Openbao.JWTAuthPath,
+            user.AccessToken,
+        )
+        if err != nil {
+            slog.Warn("vault JWT login failed", "sub", user.Sub, "error", err)
+            return
+        }
+        if ttl == 0 {
+            ttl = srv.Config.Openbao.TokenTTL.Duration
+        }
+        srv.VaultTokenCache.Set(user.Sub, token, ttl)
+    }
+    r.Header.Set("X-Blockyard-Vault-Token", token)
 }
 ```
 
@@ -323,7 +337,7 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
         }
 
         service := chi.URLParam(r, "service")
-        // Validate service name (alphanumeric + hyphens, max 64 chars)
+        // Validate service name (alphanumeric + hyphens + underscores, max 64 chars)
 
         var body struct {
             APIKey string `json:"api_key"`

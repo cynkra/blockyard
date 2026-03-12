@@ -62,3 +62,19 @@ func (c *VaultTokenCache) Delete(sub string) {
 
 	delete(c.tokens, sub)
 }
+
+// Sweep removes all expired tokens from the cache.
+func (c *VaultTokenCache) Sweep() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	removed := 0
+	for sub, t := range c.tokens {
+		if now.After(t.ExpiresAt) {
+			delete(c.tokens, sub)
+			removed++
+		}
+	}
+	return removed
+}

@@ -129,6 +129,9 @@ func SpawnHealthPoller(ctx context.Context, srv *server.Server) {
 			return
 		case <-ticker.C:
 			pollOnce(ctx, srv, misses)
+			if srv.VaultTokenCache != nil {
+				srv.VaultTokenCache.Sweep()
+			}
 		}
 	}
 }

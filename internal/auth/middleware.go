@@ -29,6 +29,11 @@ func UserFromContext(ctx context.Context) *AuthenticatedUser {
 	return u
 }
 
+// ContextWithUser returns a new context carrying the given AuthenticatedUser.
+func ContextWithUser(ctx context.Context, u *AuthenticatedUser) context.Context {
+	return context.WithValue(ctx, userKey, u)
+}
+
 // AppAuthMiddleware authenticates if possible, but does not require it.
 // Public apps allow unauthenticated access; the proxy handler decides
 // whether to allow or deny based on the app's access_type.

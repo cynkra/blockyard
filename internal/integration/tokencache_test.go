@@ -67,6 +67,42 @@ func TestVaultTokenCache_Delete(t *testing.T) {
 	}
 }
 
+func TestVaultTokenCache_Sweep(t *testing.T) {
+	c := NewVaultTokenCache()
+
+	// One valid, two expired (TTL=0 means already expired).
+	c.Set("valid", "token-v", 1*time.Hour)
+	c.Set("expired-1", "token-e1", 0)
+	c.Set("expired-2", "token-e2", 0)
+
+	removed := c.Sweep()
+	if removed != 2 {
+		t.Errorf("Sweep removed %d, want 2", removed)
+	}
+
+	// Valid token should still be there.
+	if _, ok := c.Get("valid"); !ok {
+		t.Error("expected valid token to survive sweep")
+	}
+
+	// Expired tokens should be gone from the map (not just from Get).
+	c.mu.RLock()
+	if _, ok := c.tokens["expired-1"]; ok {
+		t.Error("expected expired-1 to be removed from map")
+	}
+	if _, ok := c.tokens["expired-2"]; ok {
+		t.Error("expected expired-2 to be removed from map")
+	}
+	c.mu.RUnlock()
+}
+
+func TestVaultTokenCache_SweepEmpty(t *testing.T) {
+	c := NewVaultTokenCache()
+	if removed := c.Sweep(); removed != 0 {
+		t.Errorf("Sweep on empty cache removed %d, want 0", removed)
+	}
+}
+
 func TestVaultTokenCache_Overwrite(t *testing.T) {
 	c := NewVaultTokenCache()
 

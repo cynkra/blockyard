@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strings"
 )
 
 // Bootstrap verifies OpenBao is configured correctly for blockyard.
@@ -14,6 +16,7 @@ import (
 //  2. JWT auth method is enabled at the configured path
 //  3. The "blockyard-user" role exists
 //  4. KV v2 secrets engine is mounted at "secret/"
+//  5. At least one attached policy uses per-user path scoping (warning only)
 //
 // Returns nil if all checks pass. Returns an error describing the
 // first failure. The caller decides whether to treat this as fatal.
@@ -37,6 +40,9 @@ func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string) error {
 	if err := checkKVMount(ctx, client); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
+
+	// 5. Warn if no attached policy uses per-user path scoping.
+	checkPolicyScoping(ctx, client, jwtAuthPath)
 
 	return nil
 }
@@ -74,27 +80,44 @@ func checkJWTAuth(ctx context.Context, client *Client, jwtAuthPath string) error
 }
 
 func checkRole(ctx context.Context, client *Client, jwtAuthPath string) error {
+	_, err := readRole(ctx, client, jwtAuthPath)
+	return err
+}
+
+// roleResponse is the subset of the role read response we care about.
+type roleResponse struct {
+	Data struct {
+		TokenPolicies []string `json:"token_policies"`
+	} `json:"data"`
+}
+
+func readRole(ctx context.Context, client *Client, jwtAuthPath string) (*roleResponse, error) {
 	url := fmt.Sprintf("%s/v1/auth/%s/role/blockyard-user", client.addr, jwtAuthPath)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("check role: %w", err)
+		return nil, fmt.Errorf("check role: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", client.adminToken)
 
 	resp, err := client.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("check role: %w", err)
+		return nil, fmt.Errorf("check role: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("blockyard-user role not found at auth/%s/role/blockyard-user", jwtAuthPath)
+		return nil, fmt.Errorf("blockyard-user role not found at auth/%s/role/blockyard-user", jwtAuthPath)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("check role: status %d", resp.StatusCode)
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("check role: status %d", resp.StatusCode)
 	}
-	return nil
+
+	var result roleResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("check role: decode: %w", err)
+	}
+	return &result, nil
 }
 
 func checkKVMount(ctx context.Context, client *Client) error {
@@ -125,4 +148,71 @@ func checkKVMount(ctx context.Context, client *Client) error {
 		return fmt.Errorf("KV v2 secrets engine not mounted at secret/")
 	}
 	return nil
+}
+
+// checkPolicyScoping reads the blockyard-user role's token_policies and
+// verifies at least one policy uses identity-templated paths (e.g.
+// {{identity.entity.aliases...}}). Without per-user scoping, all users
+// share the same secret namespace — a serious misconfiguration.
+//
+// This is a warning, not a hard error, because an operator may use a
+// custom scoping mechanism (e.g. Sentinel policies, external wrappers).
+func checkPolicyScoping(ctx context.Context, client *Client, jwtAuthPath string) {
+	role, err := readRole(ctx, client, jwtAuthPath)
+	if err != nil {
+		slog.Warn("bootstrap: cannot read role for policy scoping check", "error", err)
+		return
+	}
+
+	for _, policyName := range role.Data.TokenPolicies {
+		if policyName == "default" || policyName == "root" {
+			continue
+		}
+		body, err := readPolicy(ctx, client, policyName)
+		if err != nil {
+			slog.Warn("bootstrap: cannot read policy for scoping check",
+				"policy", policyName, "error", err)
+			continue
+		}
+		if strings.Contains(body, "{{identity.") {
+			return // found per-user scoping — all good
+		}
+	}
+
+	slog.Warn("bootstrap: no attached policy uses per-user path scoping " +
+		"(expected {{identity.entity.aliases...}} template in policy paths) — " +
+		"users may be able to read each other's secrets")
+}
+
+// policyResponse is the subset of the policy read response we need.
+type policyResponse struct {
+	Data struct {
+		Policy string `json:"policy"` // raw HCL/JSON policy text
+	} `json:"data"`
+}
+
+func readPolicy(ctx context.Context, client *Client, name string) (string, error) {
+	url := fmt.Sprintf("%s/v1/sys/policy/%s", client.addr, name)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("read policy %s: %w", name, err)
+	}
+	req.Header.Set("X-Vault-Token", client.adminToken)
+
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("read policy %s: %w", name, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("read policy %s: status %d", name, resp.StatusCode)
+	}
+
+	var result policyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("read policy %s: decode: %w", name, err)
+	}
+	return result.Data.Policy, nil
 }

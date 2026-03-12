@@ -9,8 +9,19 @@ import (
 	"testing"
 )
 
-// fullMockBao creates a mock that passes all bootstrap checks.
+// scopedPolicy is a policy with per-user identity templating.
+const scopedPolicy = `path "secret/data/users/{{identity.entity.aliases.auth_jwt_1234.name}}/*" { capabilities = ["read"] }`
+
+// unscopedPolicy is a policy missing identity templating.
+const unscopedPolicy = `path "secret/data/*" { capabilities = ["read"] }`
+
+// fullMockBao creates a mock that passes all bootstrap checks,
+// including a properly scoped policy.
 func fullMockBao(t *testing.T) *Client {
+	return fullMockBaoWithPolicy(t, scopedPolicy)
+}
+
+func fullMockBaoWithPolicy(t *testing.T, policy string) *Client {
 	t.Helper()
 	mux := http.NewServeMux()
 
@@ -26,13 +37,22 @@ func fullMockBao(t *testing.T) *Client {
 
 	mux.HandleFunc("GET /v1/auth/jwt/role/blockyard-user", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]any{"role_type": "jwt"},
+			"data": map[string]any{
+				"role_type":       "jwt",
+				"token_policies":  []string{"default", "blockyard-user"},
+			},
 		})
 	})
 
 	mux.HandleFunc("GET /v1/sys/mounts", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"secret/": map[string]any{"type": "kv", "options": map[string]any{"version": "2"}},
+		})
+	})
+
+	mux.HandleFunc("GET /v1/sys/policy/blockyard-user", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"policy": policy},
 		})
 	})
 
@@ -113,6 +133,43 @@ func TestBootstrap_RoleMissing(t *testing.T) {
 	if !strings.Contains(err.Error(), "blockyard-user role not found") {
 		t.Errorf("expected 'blockyard-user role not found' in error, got %v", err)
 	}
+}
+
+func TestCheckPolicyScoping_Scoped(t *testing.T) {
+	// Should not warn — policy contains identity templating.
+	client := fullMockBao(t)
+	// checkPolicyScoping only logs warnings, doesn't return errors.
+	// We verify it doesn't panic and completes.
+	checkPolicyScoping(context.Background(), client, "jwt")
+}
+
+func TestCheckPolicyScoping_Unscoped(t *testing.T) {
+	// Should log a warning — policy is missing identity templating.
+	client := fullMockBaoWithPolicy(t, unscopedPolicy)
+	// This will log a warning but not fail. We verify it doesn't panic.
+	checkPolicyScoping(context.Background(), client, "jwt")
+}
+
+func TestCheckPolicyScoping_PolicyReadFails(t *testing.T) {
+	// Role returns policies but the policy endpoint 404s.
+	// Should log a warning, not panic.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/auth/jwt/role/blockyard-user", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"token_policies": []string{"nonexistent-policy"},
+			},
+		})
+	})
+	mux.HandleFunc("GET /v1/sys/policy/nonexistent-policy", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client := NewClient(srv.URL, "admin-token")
+
+	checkPolicyScoping(context.Background(), client, "jwt")
 }
 
 func TestBootstrap_KVMountMissing(t *testing.T) {
