@@ -397,10 +397,7 @@ func TestHealthCheckUnknownWorker(t *testing.T) {
 func testBundleDir(t *testing.T) (bundleDir, libDir string) {
 	t.Helper()
 	bundleDir = t.TempDir()
-	libDir = filepath.Join(bundleDir, "rv", "library")
-	if err := os.MkdirAll(libDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
+	libDir = t.TempDir()
 	return bundleDir, libDir
 }
 
@@ -437,8 +434,13 @@ func TestBuildWithProductionImage(t *testing.T) {
 	}
 
 	bundleDir, libDir := testBundleDir(t)
-	if err := os.WriteFile(filepath.Join(bundleDir, "app.R"), []byte("# empty\n"), 0o644); err != nil {
-		t.Fatalf("write app.R: %v", err)
+	for name, content := range map[string]string{
+		"app.R":         "# empty\n",
+		"rproject.toml": "[project]\nname = \"test\"\nr_version = \"4.4\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bundleDir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 
 	rvBin := testRvBinary(t)
