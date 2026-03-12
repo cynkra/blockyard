@@ -552,7 +552,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 	// which is mounted separately from the read-only /app bundle.
 	cmd := []string{
 		"sh", "-c",
-		`cp /app/rproject.toml /tmp/rproject.toml && ` +
+		`sed '/^library\s*=/d' /app/rproject.toml > /tmp/rproject.toml && ` +
 			`echo 'library = "/rv-library"' >> /tmp/rproject.toml && ` +
 			`/usr/local/bin/rv sync -c /tmp/rproject.toml`,
 	}
