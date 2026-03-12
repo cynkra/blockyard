@@ -25,7 +25,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{Token: "test-token"},
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: "/dummy/rv"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -472,7 +472,7 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		Server: config.ServerConfig{Token: "test-token"},
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: "/dummy/rv"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -910,7 +910,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		Server: config.ServerConfig{Token: "test-token"},
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: "/dummy/rv"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",

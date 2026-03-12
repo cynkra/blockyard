@@ -46,13 +46,13 @@ type WorkerSpec struct {
 }
 
 type BuildSpec struct {
-	AppID       string
-	BundleID    string
-	Image       string
-	RvVersion   string            // rv release tag, e.g. "latest" or "v0.18.0"
-	BundlePath  string            // server-side path to unpacked bundle
-	LibraryPath string            // server-side output path for restored library
-	Labels      map[string]string
+	AppID        string
+	BundleID     string
+	Image        string
+	RvBinaryPath string            // server-side path to cached rv binary
+	BundlePath   string            // server-side path to unpacked bundle
+	LibraryPath  string            // server-side output path for restored library
+	Labels       map[string]string
 }
 
 type BuildResult struct {

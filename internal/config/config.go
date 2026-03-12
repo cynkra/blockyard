@@ -27,10 +27,11 @@ type ServerConfig struct {
 }
 
 type DockerConfig struct {
-	Socket    string `toml:"socket"`
-	Image     string `toml:"image"`
-	ShinyPort int    `toml:"shiny_port"`
-	RvVersion string `toml:"rv_version"`
+	Socket       string `toml:"socket"`
+	Image        string `toml:"image"`
+	ShinyPort    int    `toml:"shiny_port"`
+	RvVersion    string `toml:"rv_version"`
+	RvBinaryPath string `toml:"-"` // set at runtime; skips download if non-empty
 }
 
 type StorageConfig struct {
@@ -99,7 +100,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Docker.ShinyPort = 3838
 	}
 	if cfg.Docker.RvVersion == "" {
-		cfg.Docker.RvVersion = "latest"
+		cfg.Docker.RvVersion = "v0.19.0"
 	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"

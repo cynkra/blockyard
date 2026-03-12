@@ -20,8 +20,9 @@ func testColdstartServer(t *testing.T) *server.Server {
 	cfg := &config.Config{
 		Server: config.ServerConfig{Token: "test-token"},
 		Docker: config.DockerConfig{
-			Image:     "test-image",
-			ShinyPort: 3838,
+			Image:        "test-image",
+			ShinyPort:    3838,
+			RvBinaryPath: "/dummy/rv",
 		},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,

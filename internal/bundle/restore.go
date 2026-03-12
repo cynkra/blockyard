@@ -4,25 +4,28 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/rvcache"
 	"github.com/cynkra/blockyard/internal/task"
 )
 
 // RestoreParams holds everything the restore goroutine needs.
 type RestoreParams struct {
-	Backend   backend.Backend
-	DB        *db.DB
-	Tasks     *task.Store
-	Sender    task.Sender
-	AppID     string
-	BundleID  string
-	Paths     Paths
-	Image     string
-	RvVersion string
-	Retention int
-	BasePath  string // bundle_server_path for retention cleanup
+	Backend      backend.Backend
+	DB           *db.DB
+	Tasks        *task.Store
+	Sender       task.Sender
+	AppID        string
+	BundleID     string
+	Paths        Paths
+	Image        string
+	RvVersion    string
+	RvBinaryPath string // if set, skip download and use this path directly
+	Retention    int
+	BasePath     string // bundle_server_path for retention cleanup
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
@@ -69,7 +72,18 @@ func runRestore(p RestoreParams) error {
 	}
 	p.Sender.Write("Starting dependency restoration...")
 
-	// 2. Build the spec
+	// 2. Ensure rv binary is cached
+	rvBinaryPath := p.RvBinaryPath
+	if rvBinaryPath == "" {
+		cacheDir := filepath.Join(p.BasePath, ".rv-cache")
+		var rvErr error
+		rvBinaryPath, rvErr = rvcache.EnsureBinary(context.Background(), cacheDir, p.RvVersion)
+		if rvErr != nil {
+			return fmt.Errorf("ensure rv binary: %w", rvErr)
+		}
+	}
+
+	// 3. Build the spec
 	labels := map[string]string{
 		"dev.blockyard/managed":   "true",
 		"dev.blockyard/app-id":    p.AppID,
@@ -77,13 +91,13 @@ func runRestore(p RestoreParams) error {
 	}
 
 	spec := backend.BuildSpec{
-		AppID:       p.AppID,
-		BundleID:    p.BundleID,
-		Image:       p.Image,
-		RvVersion:   p.RvVersion,
-		BundlePath:  p.Paths.Unpacked,
-		LibraryPath: p.Paths.Library,
-		Labels:      labels,
+		AppID:        p.AppID,
+		BundleID:     p.BundleID,
+		Image:        p.Image,
+		RvBinaryPath: rvBinaryPath,
+		BundlePath:   p.Paths.Unpacked,
+		LibraryPath:  p.Paths.Library,
+		Labels:       labels,
 	}
 
 	// 3. Run the build

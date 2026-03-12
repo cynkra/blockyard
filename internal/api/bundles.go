@@ -83,17 +83,18 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 
 		// 10. Spawn async restore
 		bundle.SpawnRestore(bundle.RestoreParams{
-			Backend:   srv.Backend,
-			DB:        srv.DB,
-			Tasks:     srv.Tasks,
-			Sender:    sender,
-			AppID:     app.ID,
-			BundleID:  bundleID,
-			Paths:     paths,
-			Image:     srv.Config.Docker.Image,
-			RvVersion: srv.Config.Docker.RvVersion,
-			Retention: srv.Config.Storage.BundleRetention,
-			BasePath:  srv.Config.Storage.BundleServerPath,
+			Backend:      srv.Backend,
+			DB:           srv.DB,
+			Tasks:        srv.Tasks,
+			Sender:       sender,
+			AppID:        app.ID,
+			BundleID:     bundleID,
+			Paths:        paths,
+			Image:        srv.Config.Docker.Image,
+			RvVersion:    srv.Config.Docker.RvVersion,
+			RvBinaryPath: srv.Config.Docker.RvBinaryPath,
+			Retention:    srv.Config.Storage.BundleRetention,
+			BasePath:     srv.Config.Storage.BundleServerPath,
 		})
 
 		// 10. Return 202

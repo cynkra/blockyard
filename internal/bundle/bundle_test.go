@@ -268,7 +268,8 @@ func TestRunRestore_Success(t *testing.T) {
 		BundleID:  "b-1",
 		Paths:     paths,
 		Image:     "test-image",
-		RvVersion: "4.4.0",
+		RvVersion:    "4.4.0",
+		RvBinaryPath: "/dummy/rv",
 		Retention: 5,
 		BasePath:  tmp,
 	}
@@ -323,7 +324,8 @@ func TestRunRestore_BuildFailure(t *testing.T) {
 		BundleID:  "b-1",
 		Paths:     paths,
 		Image:     "test-image",
-		RvVersion: "4.4.0",
+		RvVersion:    "4.4.0",
+		RvBinaryPath: "/dummy/rv",
 		Retention: 5,
 		BasePath:  tmp,
 	}

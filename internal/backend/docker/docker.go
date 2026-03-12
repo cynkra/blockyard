@@ -548,18 +548,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	containerName := "blockyard-build-" + spec.BundleID
 
-	// Download rv and run sync in one shot
-	rvURL := fmt.Sprintf(
-		"https://github.com/a2-ai/rv/releases/download/%s/rv-x86_64-unknown-linux-gnu",
-		spec.RvVersion,
-	)
-	cmd := []string{
-		"sh", "-c",
-		fmt.Sprintf(
-			"curl -sSL %s -o /usr/local/bin/rv && chmod +x /usr/local/bin/rv && rv sync",
-			rvURL,
-		),
-	}
+	cmd := []string{"/usr/local/bin/rv", "sync"}
 
 	// 2. Create container
 	resp, err := d.client.ContainerCreate(ctx,
@@ -573,14 +562,15 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 			Binds: []string{
 				spec.BundlePath + ":/app:ro",
 				spec.LibraryPath + ":/app/rv/library:rw",
+				spec.RvBinaryPath + ":/usr/local/bin/rv:ro",
 			},
 			Tmpfs: map[string]string{
 				"/tmp":            "",
 				"/root/.cache/rv": "",
 			},
-			CapDrop:     []string{"ALL"},
-			SecurityOpt: []string{"no-new-privileges"},
-			// Rootfs NOT read-only — needs to install rv binary to /usr/local/bin
+			ReadonlyRootfs: true,
+			CapDrop:        []string{"ALL"},
+			SecurityOpt:    []string{"no-new-privileges"},
 		},
 		nil, nil,
 		containerName,

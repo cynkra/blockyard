@@ -23,8 +23,20 @@ func testConfig() *config.DockerConfig {
 		Socket:    "/var/run/docker.sock",
 		Image:     "alpine:latest",
 		ShinyPort: 8080,
-		RvVersion: "latest",
+		RvVersion: "v0.19.0",
 	}
+}
+
+// testRvBinary creates a dummy rv executable for build tests.
+func testRvBinary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "rv")
+	// Minimal shell script that acts as a no-op rv sync.
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write dummy rv: %v", err)
+	}
+	return bin
 }
 
 func TestSpawnAndStop(t *testing.T) {
@@ -400,30 +412,23 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 
 	bundleDir, libDir := testBundleDir(t)
 	spec := backend.BuildSpec{
-		AppID:       "test-app",
-		BundleID:    uuid.New().String()[:8],
-		Image:       "alpine:latest",
-		RvVersion:   "latest",
-		BundlePath:  bundleDir,
-		LibraryPath: libDir,
-		Labels:      map[string]string{},
+		AppID:        "test-app",
+		BundleID:     uuid.New().String()[:8],
+		Image:        "alpine:latest",
+		RvBinaryPath: "/nonexistent/rv",
+		BundlePath:   bundleDir,
+		LibraryPath:  libDir,
+		Labels:       map[string]string{},
 	}
 
-	// alpine has no curl — build should run but fail with non-zero exit
-	result, err := b.Build(ctx, spec)
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if result.Success {
-		t.Error("expected build to fail in bare alpine (no curl)")
+	// rv binary doesn't exist — container creation should fail
+	_, err = b.Build(ctx, spec)
+	if err == nil {
+		t.Error("expected build to fail with nonexistent rv binary")
 	}
 }
 
 func TestBuildWithProductionImage(t *testing.T) {
-	// The rocker r-ver image doesn't include curl, so the rv download
-	// fails. This test verifies the full Build lifecycle (create, start,
-	// wait, remove) still completes cleanly and reports the failure.
-	// TODO: Build() should install curl or use wget as a fallback.
 	ctx := context.Background()
 	b, err := New(ctx, testConfig())
 	if err != nil {
@@ -435,28 +440,24 @@ func TestBuildWithProductionImage(t *testing.T) {
 		t.Fatalf("write app.R: %v", err)
 	}
 
+	rvBin := testRvBinary(t)
 	spec := backend.BuildSpec{
-		AppID:       "test-app",
-		BundleID:    uuid.New().String()[:8],
-		Image:       "ghcr.io/rocker-org/r-ver:latest",
-		RvVersion:   "v0.19.0",
-		BundlePath:  bundleDir,
-		LibraryPath: libDir,
-		Labels:      map[string]string{},
+		AppID:        "test-app",
+		BundleID:     uuid.New().String()[:8],
+		Image:        "ghcr.io/rocker-org/r-ver:latest",
+		RvBinaryPath: rvBin,
+		BundlePath:   bundleDir,
+		LibraryPath:  libDir,
+		Labels:       map[string]string{},
 	}
 
 	result, err := b.Build(ctx, spec)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	// Build fails because r-ver lacks curl; verify lifecycle completes
-	if result.Success {
-		t.Log("build succeeded — curl is now available in r-ver, update this test")
+	if !result.Success {
+		t.Errorf("expected build to succeed with mounted rv binary, got exit code %d", result.ExitCode)
 	}
-	if result.ExitCode == 0 {
-		return
-	}
-	t.Logf("build failed as expected (exit code %d, r-ver lacks curl)", result.ExitCode)
 }
 
 func TestAddrUnknownWorker(t *testing.T) {
