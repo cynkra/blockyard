@@ -83,7 +83,12 @@ func runRestore(p RestoreParams) error {
 		}
 	}
 
-	// 3. Build the spec
+	// 3. Set library path in rproject.toml so rv writes to the mounted volume.
+	if err := SetLibraryPath(p.Paths, BuildContainerLibPath); err != nil {
+		return fmt.Errorf("set library path: %w", err)
+	}
+
+	// 4. Build the spec
 	labels := map[string]string{
 		"dev.blockyard/managed":   "true",
 		"dev.blockyard/app-id":    p.AppID,

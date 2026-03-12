@@ -10,8 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/cynkra/blockyard/internal/db"
 )
+
+// BuildContainerLibPath is the container-side mount point for the library
+// volume in build containers. This must match the bind mount in the Docker
+// backend. It is kept outside /app so that the bundle can be mounted
+// read-only.
+const BuildContainerLibPath = "/rv-library"
 
 // Paths holds the filesystem locations for a bundle.
 type Paths struct {
@@ -144,6 +151,36 @@ func ValidateEntrypoint(paths Paths) error {
 // CreateLibraryDir creates the output directory for dependency restoration.
 func CreateLibraryDir(paths Paths) error {
 	return os.MkdirAll(paths.Library, 0o755)
+}
+
+// SetLibraryPath sets the library key in the bundle's rproject.toml to the
+// given container-side path. This is called after unpacking so the build
+// container writes restored packages to the mounted library volume rather
+// than to a path relative to the read-only /app mount.
+func SetLibraryPath(paths Paths, containerLibPath string) error {
+	configPath := filepath.Join(paths.Unpacked, "rproject.toml")
+
+	var cfg map[string]any
+	if _, err := toml.DecodeFile(configPath, &cfg); err != nil {
+		if os.IsNotExist(err) {
+			return nil // no config file, nothing to do
+		}
+		return fmt.Errorf("parse rproject.toml: %w", err)
+	}
+
+	cfg["library"] = containerLibPath
+
+	f, err := os.Create(configPath)
+	if err != nil {
+		return fmt.Errorf("write rproject.toml: %w", err)
+	}
+	defer f.Close()
+
+	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+		return fmt.Errorf("encode rproject.toml: %w", err)
+	}
+
+	return nil
 }
 
 // DeleteFiles removes a bundle's archive, unpacked dir, and library dir.

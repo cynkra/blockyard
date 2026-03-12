@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
 )
 
@@ -548,14 +549,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	containerName := "blockyard-build-" + spec.BundleID
 
-	// Build a config that redirects rv's library output to /rv-library,
-	// which is mounted separately from the read-only /app bundle.
-	cmd := []string{
-		"sh", "-c",
-		`sed '/^library\s*=/d' /app/rproject.toml > /tmp/rproject.toml && ` +
-			`echo 'library = "/rv-library"' >> /tmp/rproject.toml && ` +
-			`/usr/local/bin/rv sync -c /tmp/rproject.toml`,
-	}
+	cmd := []string{"/usr/local/bin/rv", "sync"}
 
 	// 2. Create container
 	resp, err := d.client.ContainerCreate(ctx,
@@ -568,7 +562,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		&container.HostConfig{
 			Binds: []string{
 				spec.BundlePath + ":/app:ro",
-				spec.LibraryPath + ":/rv-library",
+				spec.LibraryPath + ":" + bundle.BuildContainerLibPath,
 				spec.RvBinaryPath + ":/usr/local/bin/rv:ro",
 			},
 			Tmpfs: map[string]string{

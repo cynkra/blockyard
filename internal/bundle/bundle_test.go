@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +51,71 @@ func TestDeleteFiles(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be deleted", p)
 		}
+	}
+}
+
+func TestSetLibraryPath(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	data := testutil.MakeBundle(t)
+	WriteArchive(paths, bytes.NewReader(data))
+	UnpackArchive(paths)
+
+	// Write a realistic rproject.toml.
+	config := "[project]\nname = \"test\"\nr_version = \"4.4\"\ndependencies = [\"shiny\"]\n"
+	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte(config), 0o644)
+
+	if err := SetLibraryPath(paths, "/rv-library"); err != nil {
+		t.Fatalf("SetLibraryPath: %v", err)
+	}
+
+	// Read back and verify.
+	content, _ := os.ReadFile(paths.Unpacked + "/rproject.toml")
+	if !strings.Contains(string(content), `library = "/rv-library"`) {
+		t.Errorf("expected library directive, got:\n%s", content)
+	}
+	// Original fields should be preserved.
+	if !strings.Contains(string(content), `name = "test"`) {
+		t.Errorf("original config lost, got:\n%s", content)
+	}
+}
+
+func TestSetLibraryPath_OverridesExisting(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	data := testutil.MakeBundle(t)
+	WriteArchive(paths, bytes.NewReader(data))
+	UnpackArchive(paths)
+
+	config := "library = \"/old/path\"\n[project]\nname = \"test\"\nr_version = \"4.4\"\n"
+	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte(config), 0o644)
+
+	if err := SetLibraryPath(paths, "/rv-library"); err != nil {
+		t.Fatalf("SetLibraryPath: %v", err)
+	}
+
+	content, _ := os.ReadFile(paths.Unpacked + "/rproject.toml")
+	if !strings.Contains(string(content), `library = "/rv-library"`) {
+		t.Errorf("expected new library directive, got:\n%s", content)
+	}
+	if strings.Contains(string(content), "/old/path") {
+		t.Errorf("old library path should be replaced, got:\n%s", content)
+	}
+}
+
+func TestSetLibraryPath_NoConfig(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	data := testutil.MakeBundle(t)
+	WriteArchive(paths, bytes.NewReader(data))
+	UnpackArchive(paths)
+
+	// No rproject.toml — should be a no-op.
+	if err := SetLibraryPath(paths, "/rv-library"); err != nil {
+		t.Fatalf("SetLibraryPath: %v", err)
 	}
 }
 
