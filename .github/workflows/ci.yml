@@ -22,15 +22,13 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    env:
-      BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
       - run: docker pull alpine:latest
-      - run: go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
+      - run: sudo go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-docker

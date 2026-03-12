@@ -5,7 +5,6 @@ package docker
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,17 +17,12 @@ import (
 )
 
 func testConfig() *config.DockerConfig {
-	cfg := &config.DockerConfig{
+	return &config.DockerConfig{
 		Socket:    "/var/run/docker.sock",
 		Image:     "alpine:latest",
 		ShinyPort: 8080,
 		RvVersion: "latest",
 	}
-	if os.Getenv("BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA") == "false" {
-		f := false
-		cfg.BlockCloudMetadata = &f
-	}
-	return cfg
 }
 
 func TestSpawnAndStop(t *testing.T) {
@@ -237,12 +231,8 @@ func TestNetworkIsolation(t *testing.T) {
 }
 
 func TestMetadataEndpointBlocked(t *testing.T) {
-	cfg := testConfig()
-	if cfg.BlockCloudMetadata != nil && !*cfg.BlockCloudMetadata {
-		t.Skip("metadata blocking disabled via BLOCKYARD_DOCKER_BLOCK_CLOUD_METADATA")
-	}
 	ctx := context.Background()
-	b, err := New(ctx, cfg)
+	b, err := New(ctx, testConfig())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
