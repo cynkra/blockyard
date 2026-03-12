@@ -48,4 +48,5 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
+        # TODO: bump to v5 once released with node24 support
         uses: actions/deploy-pages@v4

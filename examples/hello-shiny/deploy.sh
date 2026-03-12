@@ -57,7 +57,7 @@ fi
 
 # --- Bundle the app as tar.gz ---
 echo "==> Bundling app..."
-BUNDLE_FILE=$(mktemp /tmp/hello-shiny-XXXXXX.tar.gz)
+BUNDLE_FILE="$(mktemp /tmp/hello-shiny-XXXXXX).tar.gz"
 tar -czf "${BUNDLE_FILE}" -C "${SCRIPT_DIR}/app" .
 echo "    ${BUNDLE_FILE} ($(wc -c < "${BUNDLE_FILE}" | tr -d ' ') bytes)"
 
