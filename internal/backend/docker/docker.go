@@ -612,7 +612,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		ShowStderr: true,
 	})
 	if logErr == nil {
-		raw, _ := io.ReadAll(logReader)
+		raw, _ := io.ReadAll(demuxReader(logReader))
 		logReader.Close()
 		buildLogs = string(raw)
 	}

@@ -131,6 +131,9 @@ func runRestore(p RestoreParams) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
+	if result.Logs != "" {
+		p.Sender.Write(result.Logs)
+	}
 	if !result.Success {
 		return fmt.Errorf("build failed with exit code %d", result.ExitCode)
 	}
