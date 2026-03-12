@@ -124,15 +124,13 @@ func runRestore(p RestoreParams) error {
 		BundlePath:   p.toHostPath(p.Paths.Unpacked),
 		LibraryPath:  p.toHostPath(p.Paths.Library),
 		Labels:       labels,
+		LogWriter:    p.Sender.Write,
 	}
 
 	// 3. Run the build
 	result, err := p.Backend.Build(context.Background(), spec)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
-	}
-	if result.Logs != "" {
-		p.Sender.Write(result.Logs)
 	}
 	if !result.Success {
 		return fmt.Errorf("build failed with exit code %d", result.ExitCode)

@@ -53,6 +53,7 @@ type BuildSpec struct {
 	BundlePath   string            // server-side path to unpacked bundle
 	LibraryPath  string            // server-side output path for restored library
 	Labels       map[string]string
+	LogWriter    func(string)       // called with each log line during the build; may be nil
 }
 
 type BuildResult struct {

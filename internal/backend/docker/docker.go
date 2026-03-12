@@ -588,7 +588,26 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		return backend.BuildResult{}, fmt.Errorf("build: start container: %w", err)
 	}
 
-	// 4. Wait for exit
+	// 4. Stream logs in real-time while the build runs.
+	var buildLogs strings.Builder
+	if logReader, logErr := d.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+	}); logErr == nil {
+		scanner := bufio.NewScanner(demuxReader(logReader))
+		for scanner.Scan() {
+			line := scanner.Text()
+			buildLogs.WriteString(line)
+			buildLogs.WriteByte('\n')
+			if spec.LogWriter != nil {
+				spec.LogWriter(line)
+			}
+		}
+		logReader.Close()
+	}
+
+	// 5. Wait for exit (container has already stopped since log follow ended).
 	waitCh, errCh := d.client.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
 
 	var exitCode int
@@ -605,25 +624,13 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	success := exitCode == 0
 
-	// 5. Capture build container logs before removal.
-	var buildLogs string
-	logReader, logErr := d.client.ContainerLogs(ctx, containerID, container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-	})
-	if logErr == nil {
-		raw, _ := io.ReadAll(demuxReader(logReader))
-		logReader.Close()
-		buildLogs = string(raw)
-	}
-
 	// 6. Remove the build container
 	_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 
 	return backend.BuildResult{
 		Success:  success,
 		ExitCode: exitCode,
-		Logs:     buildLogs,
+		Logs:     buildLogs.String(),
 	}, nil
 }
 
