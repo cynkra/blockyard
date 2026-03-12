@@ -103,6 +103,95 @@ func TestListApps(t *testing.T) {
 	}
 }
 
+func TestCreateAndGetBundle(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app")
+
+	b, err := db.CreateBundle("b-1", app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "pending" {
+		t.Errorf("expected pending, got %q", b.Status)
+	}
+	if b.AppID != app.ID {
+		t.Errorf("expected app ID %q, got %q", app.ID, b.AppID)
+	}
+
+	fetched, err := db.GetBundle("b-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched.ID != "b-1" {
+		t.Errorf("expected b-1, got %q", fetched.ID)
+	}
+}
+
+func TestListBundlesByApp(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app")
+
+	db.CreateBundle("b-1", app.ID)
+	db.CreateBundle("b-2", app.ID)
+
+	bundles, err := db.ListBundlesByApp(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundles) != 2 {
+		t.Errorf("expected 2 bundles, got %d", len(bundles))
+	}
+}
+
+func TestUpdateBundleStatus(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app")
+	db.CreateBundle("b-1", app.ID)
+
+	if err := db.UpdateBundleStatus("b-1", "building"); err != nil {
+		t.Fatal(err)
+	}
+
+	b, _ := db.GetBundle("b-1")
+	if b.Status != "building" {
+		t.Errorf("expected building, got %q", b.Status)
+	}
+}
+
+func TestSetActiveBundle(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app")
+	db.CreateBundle("b-1", app.ID)
+
+	if err := db.SetActiveBundle(app.ID, "b-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	fetched, _ := db.GetApp(app.ID)
+	if fetched.ActiveBundle == nil || *fetched.ActiveBundle != "b-1" {
+		t.Errorf("expected active bundle b-1, got %v", fetched.ActiveBundle)
+	}
+}
+
+func TestDeleteBundle(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app")
+	db.CreateBundle("b-1", app.ID)
+
+	deleted, err := db.DeleteBundle("b-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Error("expected deletion")
+	}
+
+	fetched, _ := db.GetBundle("b-1")
+	if fetched != nil {
+		t.Error("expected nil after deletion")
+	}
+}
+
 func TestFailStaleBuilds(t *testing.T) {
 	db := testDB(t)
 
@@ -110,8 +199,8 @@ func TestFailStaleBuilds(t *testing.T) {
 
 	// Insert a bundle in "building" state
 	_, err := db.Exec(
-		`INSERT INTO bundles (id, app_id, status, path, uploaded_at)
-		 VALUES ('b1', ?, 'building', '/tmp/b1.tar.gz', '2024-01-01T00:00:00Z')`,
+		`INSERT INTO bundles (id, app_id, status, uploaded_at)
+		 VALUES ('b1', ?, 'building', '2024-01-01T00:00:00Z')`,
 		app.ID,
 	)
 	if err != nil {

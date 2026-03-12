@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS bundles (
     id          TEXT PRIMARY KEY,
     app_id      TEXT NOT NULL REFERENCES apps(id),
     status      TEXT NOT NULL DEFAULT 'pending',
-    path        TEXT NOT NULL,
     uploaded_at TEXT NOT NULL
 );
 
@@ -80,7 +79,6 @@ type BundleRow struct {
 	ID         string
 	AppID      string
 	Status     string
-	Path       string
 	UploadedAt string
 }
 
@@ -139,6 +137,81 @@ func (db *DB) ListApps() ([]AppRow, error) {
 
 func (db *DB) DeleteApp(id string) (bool, error) {
 	result, err := db.Exec(`DELETE FROM apps WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+func (db *DB) CreateBundle(id, appID string) (*BundleRow, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`INSERT INTO bundles (id, app_id, status, uploaded_at)
+		 VALUES (?, ?, 'pending', ?)`,
+		id, appID, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert bundle: %w", err)
+	}
+	return db.GetBundle(id)
+}
+
+func (db *DB) GetBundle(id string) (*BundleRow, error) {
+	row := db.QueryRow(
+		`SELECT id, app_id, status, uploaded_at FROM bundles WHERE id = ?`, id,
+	)
+	var b BundleRow
+	err := row.Scan(&b.ID, &b.AppID, &b.Status, &b.UploadedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (db *DB) ListBundlesByApp(appID string) ([]BundleRow, error) {
+	rows, err := db.Query(
+		`SELECT id, app_id, status, uploaded_at
+		 FROM bundles WHERE app_id = ?
+		 ORDER BY uploaded_at DESC`, appID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	bundles := make([]BundleRow, 0)
+	for rows.Next() {
+		var b BundleRow
+		if err := rows.Scan(&b.ID, &b.AppID, &b.Status, &b.UploadedAt); err != nil {
+			return nil, err
+		}
+		bundles = append(bundles, b)
+	}
+	return bundles, rows.Err()
+}
+
+func (db *DB) UpdateBundleStatus(id, status string) error {
+	_, err := db.Exec(
+		`UPDATE bundles SET status = ? WHERE id = ?`, status, id,
+	)
+	return err
+}
+
+func (db *DB) SetActiveBundle(appID, bundleID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?`,
+		bundleID, now, appID,
+	)
+	return err
+}
+
+func (db *DB) DeleteBundle(id string) (bool, error) {
+	result, err := db.Exec(`DELETE FROM bundles WHERE id = ?`, id)
 	if err != nil {
 		return false, err
 	}

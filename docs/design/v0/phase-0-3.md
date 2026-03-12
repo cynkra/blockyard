@@ -608,6 +608,7 @@ package api
 
 import (
     "encoding/json"
+    "errors"
     "log/slog"
     "net/http"
 
@@ -649,7 +650,8 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
         paths := bundle.NewBundlePaths(srv.Config.Storage.BundleServerPath, app.ID, bundleID)
         if err := bundle.WriteArchive(paths, r.Body); err != nil {
             // Check if this was a size limit error
-            if err.Error() == "http: request body too large" {
+            var maxBytesErr *http.MaxBytesError
+            if errors.As(err, &maxBytesErr) {
                 writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
                     "bundle exceeds max_bundle_size")
                 return
@@ -717,7 +719,20 @@ func ListBundles(srv *server.Server) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         appID := chi.URLParam(r, "id")
 
-        bundles, err := srv.DB.ListBundlesByApp(appID)
+        // Verify app exists — return 404, not an empty array, for unknown apps
+        app, err := srv.DB.GetApp(appID)
+        if err != nil {
+            writeError(w, http.StatusInternalServerError, "internal_error",
+                "db error: "+err.Error())
+            return
+        }
+        if app == nil {
+            writeError(w, http.StatusNotFound, "not_found",
+                "app "+appID+" not found")
+            return
+        }
+
+        bundles, err := srv.DB.ListBundlesByApp(app.ID)
         if err != nil {
             writeError(w, http.StatusInternalServerError, "internal_error",
                 "db error: "+err.Error())
@@ -824,18 +839,9 @@ func TaskLogs(srv *server.Server) http.HandlerFunc {
             return
         }
 
-        // Drain any overlap between snapshot and live channel
-        drained := 0
-        for drained < len(snapshot) {
-            select {
-            case <-live:
-                drained++
-            default:
-                drained = len(snapshot)
-            }
-        }
-
-        // Follow live output until task completes or client disconnects
+        // Follow live output until task completes or client disconnects.
+        // Subscribe guarantees the live channel only delivers lines after
+        // the snapshot — no dedup needed on the consumer side.
         ctx := r.Context()
         for {
             select {
@@ -873,6 +879,11 @@ Buffered lines are written first, flushed, then the handler loops on the
 live channel. The loop exits when the task completes (done channel
 closes), the client disconnects (`r.Context().Done()`), or the live
 channel is closed.
+
+**Subscribe dedup guarantee:** `task.Store.Subscribe` must ensure the
+live channel only delivers lines written *after* the snapshot was taken.
+The dedup logic belongs in `Subscribe`, not in the consumer. See
+phase 0-4 notes for the fix to the current implementation.
 
 ### Step 9: Shared error response helper
 

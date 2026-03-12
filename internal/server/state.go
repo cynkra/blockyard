@@ -25,6 +25,20 @@ type Server struct {
 	LogStore *logstore.Store
 }
 
+// NewServer creates a Server with all in-memory stores initialized.
+func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server {
+	return &Server{
+		Config:   cfg,
+		Backend:  be,
+		DB:       database,
+		Workers:  NewWorkerMap(),
+		Sessions: session.NewStore(),
+		Registry: registry.New(),
+		Tasks:    task.NewStore(),
+		LogStore: logstore.NewStore(),
+	}
+}
+
 // ActiveWorker represents a running worker tracked by the server.
 // The worker ID is the map key in WorkerMap, not stored here.
 type ActiveWorker struct {

@@ -12,7 +12,7 @@ v0 API surface: app CRUD, app lifecycle (start/stop), and log streaming.
 2. App CRUD endpoints — create, list, get, update, delete
 3. App name validation — URL-safe slugs only
 4. App lifecycle endpoints — start and stop
-5. App log streaming endpoint
+5. App log streaming endpoint — 501 stub (deferred to phase 0-6)
 6. DB additions — `UpdateApp`, `ClearActiveBundle`
 7. `resolveApp` helper — resolve `{id}` by UUID first, then by name
 8. Shared error response helpers — extract from `bundles.go`, add
@@ -313,7 +313,13 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
             return
         }
 
-        app, err = srv.DB.UpdateApp(app.ID, body)
+        update := db.AppUpdate{
+            MaxWorkersPerApp:     body.MaxWorkersPerApp,
+            MaxSessionsPerWorker: body.MaxSessionsPerWorker,
+            MemoryLimit:          body.MemoryLimit,
+            CPULimit:             body.CPULimit,
+        }
+        app, err = srv.DB.UpdateApp(app.ID, update)
         if err != nil {
             serverError(w, "update app: "+err.Error())
             return
@@ -357,7 +363,7 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
             return
         }
         for _, b := range bundles {
-            paths := bundle.NewPaths(srv.Config.Storage.BundleServerPath, app.ID, b.ID)
+            paths := bundle.NewBundlePaths(srv.Config.Storage.BundleServerPath, app.ID, b.ID)
             bundle.DeleteFiles(paths)
         }
 
@@ -564,7 +570,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 
         // Build WorkerSpec
         workerID := uuid.New().String()
-        paths := bundle.NewPaths(
+        paths := bundle.NewBundlePaths(
             srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
         )
 
@@ -579,6 +585,9 @@ func StartApp(srv *server.Server) http.HandlerFunc {
             AppID:       app.ID,
             WorkerID:    workerID,
             Image:       srv.Config.Docker.Image,
+            Cmd: []string{"R", "-e",
+                fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
+                    srv.Config.Storage.BundleWorkerPath)},
             BundlePath:  paths.Unpacked,
             LibraryPath: paths.Library,
             WorkerMount: srv.Config.Storage.BundleWorkerPath,
@@ -698,90 +707,14 @@ workers from the `WorkerMap` first, then stops them via the backend.
 This ordering means that concurrent requests won't try to route to a
 worker that is being torn down.
 
-### Step 9: App log streaming
+### Step 9: App log streaming — deferred to phase 0-6
 
-`GET /api/v1/apps/{id}/logs` — stream logs from a running worker.
-
-Query parameters:
-- `worker_id` (optional) — stream logs from a specific worker. If
-  omitted, pick the first worker found for this app.
-
-```go
-func AppLogs(srv *server.Server) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        id := chi.URLParam(r, "id")
-
-        app, err := resolveApp(srv.DB, id)
-        if err != nil {
-            serverError(w, "db error: "+err.Error())
-            return
-        }
-        if app == nil {
-            notFound(w, "app "+id+" not found")
-            return
-        }
-
-        // Find the worker
-        workerID := r.URL.Query().Get("worker_id")
-        if workerID == "" {
-            workerIDs := srv.Workers.ForApp(app.ID)
-            if len(workerIDs) == 0 {
-                notFound(w, "no running workers for this app")
-                return
-            }
-            workerID = workerIDs[0]
-        } else {
-            // Verify the worker exists and belongs to this app
-            worker, ok := srv.Workers.Get(workerID)
-            if !ok {
-                notFound(w, "worker "+workerID+" not found")
-                return
-            }
-            if worker.AppID != app.ID {
-                notFound(w, fmt.Sprintf(
-                    "worker %s does not belong to app %s", workerID, id))
-                return
-            }
-        }
-
-        // Get log stream from backend
-        logStream, err := srv.Backend.Logs(r.Context(), workerID)
-        if err != nil {
-            serverError(w, "log stream: "+err.Error())
-            return
-        }
-        defer logStream.Close()
-
-        w.Header().Set("Content-Type", "text/plain")
-        w.Header().Set("Transfer-Encoding", "chunked")
-        w.Header().Set("X-Content-Type-Options", "nosniff")
-
-        flusher, canFlush := w.(http.Flusher)
-
-        ctx := r.Context()
-        for {
-            select {
-            case <-ctx.Done():
-                return
-            case line, ok := <-logStream.Lines:
-                if !ok {
-                    return
-                }
-                fmt.Fprintf(w, "%s\n", line)
-                if canFlush {
-                    flusher.Flush()
-                }
-            }
-        }
-    }
-}
-```
-
-The handler streams lines from `backend.Logs()`, which returns a
-`LogStream` with a channel of lines. The stream stays open as long as
-the backend produces output. The loop exits when the backend closes
-the channel (container exited) or the client disconnects
-(`r.Context().Done()`).
+`GET /api/v1/apps/{id}/logs` is deferred to phase 0-6. The endpoint
+needs to read from `LogStore` (which is fed by per-worker log capture
+goroutines), not from `backend.Logs()` directly. Implementing it here
+would mean building against the raw backend log stream, only to rewrite
+it in phase 0-6 when `LogStore` is wired up. The route is registered in
+the router but returns 501 until phase 0-6.
 
 ### Step 10: Update bundle endpoints to use `resolveApp`
 
@@ -817,7 +750,10 @@ func NewRouter(srv *server.Server) http.Handler {
 
         r.Post("/apps/{id}/start", StartApp(srv))
         r.Post("/apps/{id}/stop", StopApp(srv))
-        r.Get("/apps/{id}/logs", AppLogs(srv))
+        r.Get("/apps/{id}/logs", func(w http.ResponseWriter, _ *http.Request) {
+            writeError(w, http.StatusNotImplemented, "not_implemented",
+                "app log streaming is implemented in phase 0-6")
+        })
 
         r.Get("/tasks/{taskID}", GetTaskStatus(srv))
         r.Get("/tasks/{taskID}/logs", TaskLogs(srv))
@@ -1060,7 +996,7 @@ func TestStartAndStopApp(t *testing.T) {
 
     // Upload bundle and wait for restore
     req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
-        bytes.NewReader(makeTestBundle(t)))
+        bytes.NewReader(testutil.MakeBundle(t)))
     req.Header.Set("Authorization", "Bearer test-token")
     http.DefaultClient.Do(req)
     time.Sleep(200 * time.Millisecond)
@@ -1126,7 +1062,7 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
     id := created["id"].(string)
 
     req, _ = http.NewRequest("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
-        bytes.NewReader(makeTestBundle(t)))
+        bytes.NewReader(testutil.MakeBundle(t)))
     req.Header.Set("Authorization", "Bearer test-token")
     http.DefaultClient.Do(req)
     time.Sleep(200 * time.Millisecond)
@@ -1164,7 +1100,7 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 | `/api/v1/apps/{id}/bundles` | GET | 0-3 | List bundles. |
 | `/api/v1/apps/{id}/start` | POST | **new** | Start app. Spawns worker. No-op if running. |
 | `/api/v1/apps/{id}/stop` | POST | **new** | Stop app. Stops all workers. |
-| `/api/v1/apps/{id}/logs` | GET | **new** | Stream worker logs. Chunked text/plain. |
+| `/api/v1/apps/{id}/logs` | GET | **stub** | Returns 501. Implemented in phase 0-6 (needs LogStore). |
 | `/api/v1/tasks/{taskID}` | GET | 0-3 | Task status. |
 | `/api/v1/tasks/{taskID}/logs` | GET | 0-3 | Stream task logs. |
 | `/healthz` | GET | 0-3 | Returns 200. No auth. |
@@ -1212,14 +1148,30 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
   and returns immediately. The proxy layer (phase 0-5) handles cold-start
   holding.
 
-- **Log streaming uses `backend.Logs()`.** The handler streams lines
-  from the backend's log channel until the container exits or the client
-  disconnects. The Docker backend always follows; there is no non-follow
-  mode in v0.
+- **App log streaming deferred to phase 0-6.** The endpoint needs
+  `LogStore` (fed by per-worker log capture goroutines), not raw
+  `backend.Logs()`. Registered as a 501 stub until phase 0-6.
 
 - **`resolveApp` enables name-based URLs.** All `{id}` params resolve
   UUID first, name second. No collision risk because names must start
   with `[a-z]` and UUIDs start with `[0-9a-f]`.
+
+## Deferred to later phases
+
+- **Phase 0-6: Replace `stopAppWorkers` with `evictWorker`.** The
+  `stopAppWorkers` helper introduced here does not call
+  `LogStore.MarkEnded`. Phase 0-6 introduces `evictWorker` as the
+  single codepath for worker teardown (including log cleanup). At that
+  point, `StopApp` and `DeleteApp` should call `evictWorker` instead.
+
+- **Phase 0-6: Implement `GET /apps/{id}/logs`.** Replace the 501 stub
+  with the real handler that reads from `LogStore.Subscribe()`.
+
+- **Fix `task.Store.Subscribe` dedup.** The current `Subscribe`
+  implementation requires the consumer to drain overlap between the
+  snapshot and live channel. This is fragile. `Subscribe` should
+  internally ensure the live channel only delivers lines written after
+  the snapshot was taken. Simplify the `TaskLogs` handler accordingly.
 
 ## Exit criteria
 
@@ -1232,9 +1184,11 @@ Phase 0-4 is done when:
 - `GET /api/v1/apps/{id}` returns app details, resolves by UUID or name
 - `PATCH /api/v1/apps/{id}` updates resource limits, returns updated app
 - `DELETE /api/v1/apps/{id}` stops workers, cleans up files, returns 204
-- `POST /api/v1/apps/{id}/start` spawns a worker, returns worker_id
+- `POST /api/v1/apps/{id}/start` spawns a worker with hardcoded Shiny
+  command, returns worker_id
 - `POST /api/v1/apps/{id}/stop` stops all workers, returns count
-- `GET /api/v1/apps/{id}/logs` streams worker logs as chunked text
+- `GET /api/v1/apps/{id}/logs` returns 501 (implemented in phase 0-6)
+- `task.Store.Subscribe` dedup is handled internally (no consumer-side drain)
 - Invalid app names are rejected with 400
 - Duplicate app names are rejected with 409
 - Starting without an active bundle returns 409

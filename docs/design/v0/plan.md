@@ -582,20 +582,24 @@ func NewBundlePaths(base, appID, bundleID string) BundlePaths { ... }
 
 ### Phase 4: REST API + Auth ([detailed plan](phase-0-4.md))
 
-The control plane HTTP API. All endpoints under `/api/v1/`. Protected by
-static bearer token.
+App CRUD, lifecycle (start/stop), and remaining control plane endpoints.
+Phase 3 delivered the router, auth middleware, healthz, bundle, and task
+endpoints; this phase expands to the full v0 API surface.
 
 **Deliverables:**
 
-1. chi router with all v0 endpoints
-2. Bearer token middleware (from `Config.Server.Token`)
-3. `/healthz` endpoint (unauthenticated)
-4. App CRUD endpoints
-5. App lifecycle endpoints (start/stop)
-6. App log streaming endpoint
-7. Bundle endpoints (upload, list)
-8. Task endpoints (status, log streaming)
-9. App name validation
+1. App CRUD endpoints (create, list, get, update, delete)
+2. App lifecycle endpoints (start/stop)
+3. App log streaming endpoint — 501 stub (deferred to phase 6, needs LogStore)
+4. App name validation
+5. `resolveApp` helper (UUID-then-name resolution)
+6. DB additions (`UpdateApp`, `ClearActiveBundle`)
+7. Fix `task.Store.Subscribe` dedup — handle internally, not in consumer
+8. Router expansion with all new endpoints
+
+**Phase 6 follow-ups:**
+- Replace `stopAppWorkers` with `evictWorker` (adds `LogStore.MarkEnded`)
+- Implement `GET /apps/{id}/logs` using `LogStore.Subscribe()`
 
 **Router assembly:**
 
@@ -619,7 +623,7 @@ func NewRouter(srv *server.Server) http.Handler {
 
         r.Post("/apps/{id}/start", startApp(srv))
         r.Post("/apps/{id}/stop", stopApp(srv))
-        r.Get("/apps/{id}/logs", appLogs(srv))
+        r.Get("/apps/{id}/logs", appLogs(srv)) // 501 stub until phase 6
 
         r.Get("/tasks/{taskID}", getTask(srv))
         r.Get("/tasks/{taskID}/logs", taskLogs(srv))
@@ -660,7 +664,7 @@ func bearerAuth(token string) func(http.Handler) http.Handler {
 | `/api/v1/apps/{id}/bundles` | GET | List bundles for app, newest first. |
 | `/api/v1/apps/{id}/start` | POST | Start app. Spawns worker. No-op if already running. Requires active bundle. |
 | `/api/v1/apps/{id}/stop` | POST | Stop app. Stops all workers (best-effort). Returns count. |
-| `/api/v1/apps/{id}/logs` | GET | Stream worker logs. Optional `worker_id` query param. |
+| `/api/v1/apps/{id}/logs` | GET | Stream worker logs via LogStore. 501 stub in phase 4, implemented in phase 6. |
 | `/api/v1/tasks/{taskID}` | GET | Get task status (running/completed/failed). |
 | `/api/v1/tasks/{taskID}/logs` | GET | Stream restore output. Chunked text/plain. |
 
