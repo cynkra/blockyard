@@ -44,7 +44,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 
 | Field | Default | Description |
 |---|---|---|
-| `bundle_server_path` | *(required)* | Directory for uploaded bundles |
+| `bundle_server_path` | `/data/bundles` | Directory for uploaded bundles |
 | `bundle_worker_path` | `/app` | Mount point inside worker containers |
 | `bundle_retention` | `50` | Max bundles to keep per app before cleanup |
 | `max_bundle_size` | `104857600` | Maximum upload size in bytes (default 100 MB) |
@@ -53,7 +53,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 
 | Field | Default | Description |
 |---|---|---|
-| `path` | *(required)* | Path to the SQLite database file |
+| `path` | `/data/db/blockyard.db` | Path to the SQLite database file |
 
 ### `[proxy]`
 
@@ -89,6 +89,23 @@ Enable OpenBao credential management. Requires `[oidc]` to be configured.
 | `admin_token` | *(required)* | Admin token for OpenBao |
 | `token_ttl` | `1h` | TTL for issued tokens |
 | `jwt_auth_path` | `jwt` | Auth method path in OpenBao |
+
+#### `[[openbao.services]]`
+
+Define third-party services whose API keys users can enroll via OpenBao.
+
+```toml
+[[openbao.services]]
+id    = "openai"
+label = "OpenAI"
+path  = "openai"
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `id` | *(required)* | Unique identifier for the service |
+| `label` | *(required)* | Human-readable label |
+| `path` | *(required)* | KV store path prefix for credentials |
 
 ### `[audit]` *(optional)*
 
@@ -153,6 +170,11 @@ idle_worker_timeout  = "5m"
 # admin_token   = "vault-admin-token"
 # token_ttl     = "1h"
 # jwt_auth_path = "jwt"
+#
+# [[openbao.services]]
+# id    = "openai"
+# label = "OpenAI"
+# path  = "openai"
 
 # Optional: Audit logging
 # [audit]

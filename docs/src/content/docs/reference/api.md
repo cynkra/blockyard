@@ -33,7 +33,10 @@ optionally IdP and OpenBao). No authentication required.
 }
 ```
 
-When OIDC and/or OpenBao are configured, their health is included in the checks.
+When not all checks pass, `status` is `"not_ready"` and the HTTP status is `503`.
+
+When OIDC and/or OpenBao are configured, their health is included in the checks
+(as `"idp"` and `"openbao"` respectively).
 
 ### `GET /metrics`
 
@@ -103,20 +106,30 @@ Get a single app by ID.
 
 ### `PATCH /api/v1/apps/{id}`
 
-Update app configuration. Only resource-limit fields are mutable:
+Update app configuration. All fields are optional — only provided fields are
+updated.
 
 ```json
 {
   "max_workers_per_app": 4,
+  "max_sessions_per_worker": 1,
   "memory_limit": "512m",
-  "cpu_limit": 0.5
+  "cpu_limit": 0.5,
+  "access_type": "acl",
+  "title": "My Dashboard",
+  "description": "A sales analytics dashboard"
 }
 ```
 
-All fields are optional — only provided fields are updated.
-
-`max_sessions_per_worker` is accepted but must be `1` in the current version
-(session sharing is not yet supported).
+| Field | Type | Description |
+|---|---|---|
+| `max_workers_per_app` | `integer` | Max concurrent workers (must be >= 1) |
+| `max_sessions_per_worker` | `integer` | Sessions per worker (must be >= 1) |
+| `memory_limit` | `string` | Container memory limit (e.g. `"512m"`) |
+| `cpu_limit` | `float` | CPU limit (e.g. `0.5` for half a core) |
+| `access_type` | `string` | `"acl"` or `"public"` (requires owner or admin) |
+| `title` | `string` | Human-readable title for the catalog |
+| `description` | `string` | Description for the catalog |
 
 **Response:** `200 OK` — updated app object.
 
@@ -147,16 +160,27 @@ The app must have an active bundle.
 
 ### `POST /api/v1/apps/{id}/stop`
 
-Stop all workers for an app.
+Stop all workers for an app. Workers are drained asynchronously — active
+sessions are allowed to finish before containers are removed.
 
-**Response:** `200 OK`
+If no workers are running, returns `200 OK`:
 
 ```json
 {
-  "status": "stopped",
-  "workers_stopped": 1
+  "stopped_workers": 0
 }
 ```
+
+Otherwise, returns `202 Accepted` with a task ID for tracking the drain:
+
+```json
+{
+  "task_id": "t1234...",
+  "worker_count": 2
+}
+```
+
+Use `GET /api/v1/tasks/{task_id}/logs` to follow drain progress.
 
 ### `GET /api/v1/apps/{id}/logs`
 
@@ -477,8 +501,10 @@ All error responses use a consistent JSON shape:
 |---|---|
 | `400` | Bad request (e.g. empty bundle body, invalid app name) |
 | `401` | Missing or invalid bearer token |
+| `403` | Insufficient permissions for the requested action |
 | `404` | Resource not found |
 | `409` | Conflict (e.g. duplicate app name) |
 | `413` | Bundle exceeds `max_bundle_size` |
 | `500` | Internal server error |
+| `502` | Upstream service error (e.g. OpenBao login failure) |
 | `503` | Service unavailable (e.g. max workers reached, worker start timeout) |

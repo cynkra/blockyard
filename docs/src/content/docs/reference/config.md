@@ -79,7 +79,7 @@ max_bundle_size    = 104857600
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `bundle_server_path` | `path` | — | **Yes** | Directory for storing uploaded bundles |
+| `bundle_server_path` | `path` | `/data/bundles` | No | Directory for storing uploaded bundles |
 | `bundle_worker_path` | `path` | `/app` | No | Mount point inside worker containers |
 | `bundle_retention` | `integer` | `50` | No | Max bundles kept per app (oldest pruned first) |
 | `max_bundle_size` | `integer` | `104857600` | No | Maximum bundle upload size in bytes (default 100 MB) |
@@ -93,7 +93,7 @@ path = "/data/db/blockyard.db"
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `path` | `path` | — | **Yes** | Path to the SQLite database file (created if missing) |
+| `path` | `path` | `/data/db/blockyard.db` | No | Path to the SQLite database file (created if missing) |
 
 ## `[proxy]`
 
@@ -162,6 +162,24 @@ jwt_auth_path = "jwt"
 | `admin_token` | `string` | — | **Yes** | Admin token for OpenBao API access |
 | `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in OpenBao |
+
+### `[[openbao.services]]`
+
+Define third-party services whose API keys users can enroll via OpenBao. Each
+entry must have `id`, `label`, and `path`. Service IDs must be unique.
+
+```toml
+[[openbao.services]]
+id    = "openai"
+label = "OpenAI"
+path  = "openai"
+```
+
+| Field | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `id` | `string` | — | **Yes** | Unique identifier for the service |
+| `label` | `string` | — | **Yes** | Human-readable label shown to users |
+| `path` | `string` | — | **Yes** | KV store path prefix for user credentials |
 
 ## `[audit]` *(optional)*
 
