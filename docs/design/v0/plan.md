@@ -170,7 +170,7 @@ type DockerConfig struct {
     Socket    string // default: "/var/run/docker.sock"
     Image     string // required, e.g. "ghcr.io/rocker-org/r-ver:4.4.3"
     ShinyPort int    // default: 3838
-    RvVersion string // default: "latest"
+    RvVersion string // default: "v0.19.0"
 }
 
 type StorageConfig struct {

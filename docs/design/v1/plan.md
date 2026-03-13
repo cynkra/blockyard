@@ -70,6 +70,7 @@ require (
     github.com/coreos/go-oidc/v3   v3.x  // OIDC discovery, ID token verification
     golang.org/x/oauth2            v0.x  // OAuth 2.0 flows (authorization code, client credentials)
     github.com/go-jose/go-jose/v4  v4.x  // JWKS fetching, JWT parsing (used by go-oidc internally)
+    github.com/golang-jwt/jwt/v5   v5.x  // Control-plane JWT validation (phase 1-2)
 )
 
 // Telemetry
@@ -125,7 +126,7 @@ and OpenBao integration all require a logged-in user.
 type OIDCConfig struct {
     IssuerURL    string        `toml:"issuer_url"`
     ClientID     string        `toml:"client_id"`
-    ClientSecret string        `toml:"client_secret"`
+    ClientSecret Secret        `toml:"client_secret"`
     GroupsClaim  string        `toml:"groups_claim"`  // default: "groups"
     CookieMaxAge time.Duration `toml:"cookie_max_age"` // default: 24h
 }
