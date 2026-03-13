@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/server"
 )
@@ -74,6 +75,11 @@ func SetRoleMapping(srv *server.Server) http.HandlerFunc {
 
 		srv.RoleCache.Set(groupName, role)
 
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionRoleMappingSet, groupName,
+				map[string]any{"role": body.Role}))
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -100,6 +106,11 @@ func DeleteRoleMapping(srv *server.Server) http.HandlerFunc {
 		}
 
 		srv.RoleCache.Remove(groupName)
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionRoleMappingDelete, groupName, nil))
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

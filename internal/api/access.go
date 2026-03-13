@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/server"
@@ -71,6 +72,11 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		); err != nil {
 			serverError(w, err.Error())
 			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAccessGrant, appID,
+				map[string]any{"principal": body.Principal, "role": body.Role}))
 		}
 
 		w.WriteHeader(http.StatusNoContent)
@@ -139,6 +145,11 @@ func RevokeAccess(srv *server.Server) http.HandlerFunc {
 		if !removed {
 			notFound(w, "grant not found")
 			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAccessRevoke, appID,
+				map[string]any{"principal": principal}))
 		}
 
 		w.WriteHeader(http.StatusNoContent)

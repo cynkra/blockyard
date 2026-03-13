@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -127,6 +128,12 @@ type BundleRow struct {
 	AppID      string `json:"app_id"`
 	Status     string `json:"status"`
 	UploadedAt string `json:"uploaded_at"`
+}
+
+// Ping verifies the database connection is alive.
+func (db *DB) Ping(ctx context.Context) error {
+	_, err := db.ExecContext(ctx, "SELECT 1")
+	return err
 }
 
 func (db *DB) CreateApp(name, owner string) (*AppRow, error) {

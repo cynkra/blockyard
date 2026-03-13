@@ -9,6 +9,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // EvictWorker is the single codepath for decommissioning a worker.
@@ -21,10 +22,14 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 			slog.Warn("evict: failed to stop worker",
 				"worker_id", workerID, "error", err)
 		}
+		telemetry.WorkersStopped.Inc()
+		telemetry.WorkersActive.Dec()
 	}
+	sessionCount := srv.Sessions.CountForWorkers([]string{workerID})
 	srv.Registry.Delete(workerID)
 	srv.Sessions.DeleteByWorker(workerID)
 	srv.LogStore.MarkEnded(workerID)
+	telemetry.SessionsActive.Sub(float64(sessionCount))
 }
 
 // StartupCleanup removes orphaned resources and fails stale builds.
@@ -102,6 +107,7 @@ func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
 			slog.Warn("health poller: evicting unhealthy worker",
 				"worker_id", r.workerID,
 				"consecutive_misses", misses[r.workerID])
+			telemetry.HealthChecksFailed.Inc()
 			EvictWorker(ctx, srv, r.workerID)
 			delete(misses, r.workerID)
 		}

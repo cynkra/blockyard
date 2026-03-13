@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
@@ -175,6 +176,10 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 				"sub", caller.Sub, "service", service, "error", err)
 			serverError(w, "failed to store credential")
 			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionCredentialEnroll, service, nil))
 		}
 
 		w.WriteHeader(http.StatusNoContent)

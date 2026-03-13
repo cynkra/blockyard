@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/cynkra/blockyard/internal/api"
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
@@ -19,6 +20,7 @@ import (
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 func main() {
@@ -113,6 +115,22 @@ func main() {
 		}
 	}
 
+	// Initialize audit log if configured.
+	if cfg.Audit != nil {
+		srv.AuditLog = audit.New(cfg.Audit.Path)
+	}
+
+	// Initialize OpenTelemetry tracing if configured.
+	var tracingShutdown func(context.Context) error
+	if cfg.Telemetry != nil && cfg.Telemetry.OTLPEndpoint != "" {
+		shutdown, err := telemetry.InitTracing(context.Background(), cfg.Telemetry.OTLPEndpoint)
+		if err != nil {
+			slog.Error("failed to init tracing", "error", err)
+			os.Exit(1)
+		}
+		tracingShutdown = shutdown
+	}
+
 	// Startup cleanup — must complete before accepting traffic.
 	if err := ops.StartupCleanup(context.Background(), srv); err != nil {
 		slog.Error("startup cleanup failed", "error", err)
@@ -148,6 +166,15 @@ func main() {
 		proxy.RunAutoscaler(bgCtx, srv)
 	}()
 
+	// Start audit log background writer.
+	if srv.AuditLog != nil {
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			srv.AuditLog.Run(bgCtx, cfg.Audit.Path)
+		}()
+	}
+
 	// Graceful shutdown on SIGTERM / SIGINT
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGTERM, syscall.SIGINT)
@@ -179,6 +206,11 @@ func main() {
 
 	// 3. Stop all workers and clean up
 	ops.GracefulShutdown(context.Background(), srv)
+
+	// 4. Flush tracing spans
+	if tracingShutdown != nil {
+		tracingShutdown(context.Background())
+	}
 
 	slog.Info("shutdown complete")
 }

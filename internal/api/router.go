@@ -4,14 +4,21 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 func NewRouter(srv *server.Server) http.Handler {
 	r := chi.NewRouter()
+
+	// OpenTelemetry tracing middleware (only when configured).
+	if srv.Config.Telemetry != nil && srv.Config.Telemetry.OTLPEndpoint != "" {
+		r.Use(telemetry.TracingMiddleware())
+	}
 
 	authDeps := srv.AuthDeps()
 
@@ -19,6 +26,12 @@ func NewRouter(srv *server.Server) http.Handler {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
+	r.Get("/readyz", readyzHandler(srv))
+
+	// Prometheus metrics endpoint (only when enabled).
+	if srv.Config.Telemetry != nil && srv.Config.Telemetry.MetricsEnabled {
+		r.Handle("/metrics", promhttp.Handler())
+	}
 
 	// Auth endpoints (outside app-plane auth layer).
 	r.Get("/login", auth.LoginHandler(authDeps))

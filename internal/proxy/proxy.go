@@ -15,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // Handler returns an http.Handler that proxies requests to Shiny app
@@ -31,6 +32,7 @@ func Handler(srv *server.Server) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		telemetry.ProxyRequests.Inc()
 		appName := chi.URLParam(r, "name")
 
 		// 1. Look up app by ID (UUID) first, then by name.
@@ -154,6 +156,7 @@ func Handler(srv *server.Server) http.Handler {
 				UserSub:    callerSub,
 				LastAccess: time.Now(),
 			})
+			telemetry.SessionsActive.Inc()
 		}
 
 		// 3. Set cookie on new sessions
@@ -181,11 +184,13 @@ func Handler(srv *server.Server) http.Handler {
 		injectCredentials(r, srv, app.ID, workerID, app.MaxSessionsPerWorker)
 
 		// 5. Dispatch — WebSocket or HTTP
+		forwardStart := time.Now()
 		if isWebSocketUpgrade(r) {
 			shuttleWS(w, r, addr, appName, sessionID, cache, srv)
 		} else {
 			forwardHTTP(w, r, addr, appName, transport)
 		}
+		telemetry.ProxyRequestDuration.Observe(time.Since(forwardStart).Seconds())
 	})
 }
 

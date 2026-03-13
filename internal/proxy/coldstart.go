@@ -15,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 var (
@@ -138,7 +139,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 // spawnWorker creates a new worker for the app, waits for it to become
 // healthy, and registers it. Used by both the proxy cold-start path and
 // the autoscaler.
-func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (workerID, addr string, err error) {
+func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (string, string, error) {
 	// Check global worker limit.
 	if srv.Workers.Count() >= srv.Config.Proxy.MaxWorkers {
 		return "", "", errMaxWorkers
@@ -205,12 +206,16 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (worke
 	// 6. Start log capture before health polling so startup output is captured.
 	ops.SpawnLogCapture(context.Background(), srv, wid, app.ID)
 
+	coldStartBegin := time.Now()
 	if err := pollHealthy(ctx, srv, wid); err != nil {
 		srv.Workers.Delete(wid)
 		srv.Registry.Delete(wid)
 		srv.Backend.Stop(context.Background(), wid)
 		return "", "", err
 	}
+	telemetry.ColdStartDuration.Observe(time.Since(coldStartBegin).Seconds())
+	telemetry.WorkersSpawned.Inc()
+	telemetry.WorkersActive.Inc()
 
 	slog.Info("worker ready",
 		"worker_id", wid, "app_id", app.ID, "addr", a)

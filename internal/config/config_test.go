@@ -644,3 +644,153 @@ func TestEnvVarOverrideOpenbaoTokenTTL(t *testing.T) {
 		t.Errorf("token_ttl = %v, want 30m", cfg.Openbao.TokenTTL.Duration)
 	}
 }
+
+// --- Audit config tests ---
+
+func auditTOML(t *testing.T) string {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	return fmt.Sprintf(`
+[server]
+token = "test-token"
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[proxy]
+
+[audit]
+path = %q
+`, bundlePath, dbPath, auditPath)
+}
+
+func TestParseAuditConfig(t *testing.T) {
+	cfg := loadFromString(t, auditTOML(t))
+	if cfg.Audit == nil {
+		t.Fatal("expected Audit config to be parsed")
+	}
+	if cfg.Audit.Path == "" {
+		t.Error("expected non-empty audit path")
+	}
+}
+
+func TestParseConfigWithoutAudit(t *testing.T) {
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Audit != nil {
+		t.Error("expected Audit config to be nil when section is absent")
+	}
+}
+
+func TestValidationRejectsAuditEmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	toml := fmt.Sprintf(`
+[server]
+token = "test-token"
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[audit]
+path = ""
+`, bundlePath, dbPath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "audit.path") {
+		t.Errorf("expected audit.path error, got: %v", err)
+	}
+}
+
+func TestAuditAutoConstructFromEnvVars(t *testing.T) {
+	t.Setenv("BLOCKYARD_AUDIT_PATH", "/tmp/audit.jsonl")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Audit == nil {
+		t.Fatal("expected Audit section to be auto-constructed from env vars")
+	}
+	if cfg.Audit.Path != "/tmp/audit.jsonl" {
+		t.Errorf("path = %q", cfg.Audit.Path)
+	}
+}
+
+// --- Telemetry config tests ---
+
+func telemetryTOML(t *testing.T) string {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	return fmt.Sprintf(`
+[server]
+token = "test-token"
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[proxy]
+
+[telemetry]
+metrics_enabled = true
+otlp_endpoint = "localhost:4317"
+`, bundlePath, dbPath)
+}
+
+func TestParseTelemetryConfig(t *testing.T) {
+	cfg := loadFromString(t, telemetryTOML(t))
+	if cfg.Telemetry == nil {
+		t.Fatal("expected Telemetry config to be parsed")
+	}
+	if !cfg.Telemetry.MetricsEnabled {
+		t.Error("expected metrics_enabled = true")
+	}
+	if cfg.Telemetry.OTLPEndpoint != "localhost:4317" {
+		t.Errorf("otlp_endpoint = %q", cfg.Telemetry.OTLPEndpoint)
+	}
+}
+
+func TestParseConfigWithoutTelemetry(t *testing.T) {
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Telemetry != nil {
+		t.Error("expected Telemetry config to be nil when section is absent")
+	}
+}
+
+func TestTelemetryAutoConstructFromEnvVars(t *testing.T) {
+	t.Setenv("BLOCKYARD_TELEMETRY_METRICS_ENABLED", "true")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Telemetry == nil {
+		t.Fatal("expected Telemetry section to be auto-constructed from env vars")
+	}
+	if !cfg.Telemetry.MetricsEnabled {
+		t.Error("expected metrics_enabled = true")
+	}
+}
+
+func TestEnvVarOverrideTelemetryOTLPEndpoint(t *testing.T) {
+	t.Setenv("BLOCKYARD_TELEMETRY_OTLP_ENDPOINT", "collector:4317")
+	cfg := loadFromString(t, telemetryTOML(t))
+	if cfg.Telemetry.OTLPEndpoint != "collector:4317" {
+		t.Errorf("otlp_endpoint = %q, want collector:4317", cfg.Telemetry.OTLPEndpoint)
+	}
+}

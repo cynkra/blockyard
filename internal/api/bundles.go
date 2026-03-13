@@ -9,9 +9,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 func UploadBundle(srv *server.Server) http.HandlerFunc {
@@ -82,6 +84,10 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 		sender := srv.Tasks.Create(taskID)
 
 		// Spawn async restore
+		actorSub := "anonymous"
+		if caller != nil {
+			actorSub = caller.Sub
+		}
 		bundle.SpawnRestore(bundle.RestoreParams{
 			Backend:      srv.Backend,
 			DB:           srv.DB,
@@ -95,7 +101,15 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			RvBinaryPath: srv.Config.Docker.RvBinaryPath,
 			Retention:    srv.Config.Storage.BundleRetention,
 			BasePath:     srv.Config.Storage.BundleServerPath,
+			AuditLog:     srv.AuditLog,
+			AuditActor:   actorSub,
 		})
+
+		telemetry.BundlesUploaded.Inc()
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionBundleUpload, app.ID,
+				map[string]any{"bundle_id": bundleID}))
+		}
 
 		slog.Info("bundle upload accepted, restore spawned",
 			"app_id", appID, "bundle_id", bundleID, "task_id", taskID)

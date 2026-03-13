@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/config"
 )
 
@@ -34,6 +35,7 @@ type Deps struct {
 	OIDCClient   *OIDCClient
 	SigningKey    *SigningKey
 	UserSessions *UserSessionStore
+	AuditLog     *audit.Log
 }
 
 // secureFlag returns "; Secure" if external_url is HTTPS, empty
@@ -231,7 +233,17 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			"blockyard_oidc_state=; Path=/; HttpOnly%s; Max-Age=0", secure,
 		)
 
-		// 8. Redirect to return_url.
+		// 8. Emit audit event.
+		if deps.AuditLog != nil {
+			deps.AuditLog.Emit(audit.Entry{
+				Action:   audit.ActionUserLogin,
+				Actor:    subClaim,
+				SourceIP: r.RemoteAddr,
+				Detail:   map[string]any{"sub": subClaim},
+			})
+		}
+
+		// 9. Redirect to return_url.
 		w.Header().Add("Set-Cookie", sessionCookie)
 		w.Header().Add("Set-Cookie", clearState)
 		http.Redirect(w, r, statePayload.ReturnURL, http.StatusFound)
@@ -243,12 +255,23 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 // available).
 func LogoutHandler(deps *Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var logoutSub string
 		if deps.SigningKey != nil && deps.UserSessions != nil {
 			if cookieValue := extractSessionCookie(r); cookieValue != "" {
 				if payload, err := DecodeCookie(cookieValue, deps.SigningKey); err == nil {
+					logoutSub = payload.Sub
 					deps.UserSessions.Delete(payload.Sub)
 				}
 			}
+		}
+
+		if deps.AuditLog != nil && logoutSub != "" {
+			deps.AuditLog.Emit(audit.Entry{
+				Action:   audit.ActionUserLogout,
+				Actor:    logoutSub,
+				SourceIP: r.RemoteAddr,
+				Detail:   map[string]any{"sub": logoutSub},
+			})
 		}
 
 		secure := secureFlag(deps.Config)

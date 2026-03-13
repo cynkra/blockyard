@@ -13,13 +13,24 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `toml:"server"`
-	Docker   DockerConfig   `toml:"docker"`
-	Storage  StorageConfig  `toml:"storage"`
-	Database DatabaseConfig `toml:"database"`
-	Proxy    ProxyConfig    `toml:"proxy"`
-	OIDC     *OidcConfig    `toml:"oidc"`     // nil when not configured
-	Openbao  *OpenbaoConfig `toml:"openbao"`  // nil when not configured
+	Server    ServerConfig     `toml:"server"`
+	Docker    DockerConfig     `toml:"docker"`
+	Storage   StorageConfig    `toml:"storage"`
+	Database  DatabaseConfig   `toml:"database"`
+	Proxy     ProxyConfig      `toml:"proxy"`
+	OIDC      *OidcConfig      `toml:"oidc"`       // nil when not configured
+	Openbao   *OpenbaoConfig   `toml:"openbao"`     // nil when not configured
+	Audit     *AuditConfig     `toml:"audit"`       // nil when not configured
+	Telemetry *TelemetryConfig `toml:"telemetry"`   // nil when not configured
+}
+
+type AuditConfig struct {
+	Path string `toml:"path"` // e.g. /data/audit/blockyard.jsonl
+}
+
+type TelemetryConfig struct {
+	MetricsEnabled bool   `toml:"metrics_enabled"` // default: false
+	OTLPEndpoint   string `toml:"otlp_endpoint"`   // e.g. http://otel-collector:4317
 }
 
 type ServerConfig struct {
@@ -201,6 +212,16 @@ func applyEnvOverrides(cfg *Config) {
 		openbaoDefaults(cfg.Openbao)
 	}
 
+	// Auto-construct [audit] section if any BLOCKYARD_AUDIT_* env var is set.
+	if cfg.Audit == nil && envPrefixExists("BLOCKYARD_AUDIT_") {
+		cfg.Audit = &AuditConfig{}
+	}
+
+	// Auto-construct [telemetry] section if any BLOCKYARD_TELEMETRY_* env var is set.
+	if cfg.Telemetry == nil && envPrefixExists("BLOCKYARD_TELEMETRY_") {
+		cfg.Telemetry = &TelemetryConfig{}
+	}
+
 	applyEnvToStruct(reflect.ValueOf(cfg).Elem(), "BLOCKYARD")
 }
 
@@ -216,11 +237,13 @@ func envPrefixExists(prefix string) bool {
 }
 
 var (
-	durationType      = reflect.TypeOf(Duration{})
-	secretType        = reflect.TypeOf(Secret{})
-	secretPtrType     = reflect.TypeOf((*Secret)(nil))
-	oidcCfgPtrType    = reflect.TypeOf((*OidcConfig)(nil))
-	openbaoCfgPtrType = reflect.TypeOf((*OpenbaoConfig)(nil))
+	durationType         = reflect.TypeOf(Duration{})
+	secretType           = reflect.TypeOf(Secret{})
+	secretPtrType        = reflect.TypeOf((*Secret)(nil))
+	oidcCfgPtrType       = reflect.TypeOf((*OidcConfig)(nil))
+	openbaoCfgPtrType    = reflect.TypeOf((*OpenbaoConfig)(nil))
+	auditCfgPtrType      = reflect.TypeOf((*AuditConfig)(nil))
+	telemetryCfgPtrType  = reflect.TypeOf((*TelemetryConfig)(nil))
 )
 
 func applyEnvToStruct(v reflect.Value, prefix string) {
@@ -325,6 +348,12 @@ func validate(cfg *Config) error {
 		}
 		if cfg.OIDC == nil {
 			return fmt.Errorf("config: [oidc] is required when [openbao] is configured")
+		}
+	}
+
+	if cfg.Audit != nil {
+		if cfg.Audit.Path == "" {
+			return fmt.Errorf("config: audit.path must not be empty")
 		}
 	}
 

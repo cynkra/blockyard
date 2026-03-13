@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/backend"
@@ -21,6 +22,7 @@ import (
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // AppResponse wraps an AppRow with a derived runtime status.
@@ -196,6 +198,11 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppCreate, app.ID,
+				map[string]any{"name": app.Name}))
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
@@ -311,6 +318,10 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppUpdate, app.ID, nil))
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
 	}
@@ -368,6 +379,11 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 		// 6. Remove app directory from disk (best-effort)
 		appDir := filepath.Join(srv.Config.Storage.BundleServerPath, app.ID)
 		os.RemoveAll(appDir)
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppDelete, app.ID,
+				map[string]any{"name": app.Name}))
+		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -462,6 +478,12 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		ops.SpawnLogCapture(context.Background(), srv, workerID, app.ID)
+		telemetry.WorkersSpawned.Inc()
+		telemetry.WorkersActive.Inc()
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppStart, app.ID, nil))
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(startResponse{
@@ -503,6 +525,11 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 
 		// Drain in background — caller polls GET /tasks/{taskID}/logs.
 		go drainWorkers(srv, app.ID, workerIDs, sender)
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppStop, app.ID,
+				map[string]any{"worker_count": len(workerIDs)}))
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)

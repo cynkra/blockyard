@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
@@ -43,6 +44,9 @@ type Server struct {
 	// OpenBao — nil when [openbao] is not configured.
 	VaultClient     *integration.Client
 	VaultTokenCache *integration.VaultTokenCache
+
+	// Audit log — nil when [audit] is not configured.
+	AuditLog *audit.Log
 }
 
 // NewServer creates a Server with all in-memory stores initialized.
@@ -68,6 +72,7 @@ func (s *Server) AuthDeps() *auth.Deps {
 		OIDCClient:   s.OIDCClient,
 		SigningKey:    s.SigningKey,
 		UserSessions: s.UserSessions,
+		AuditLog:     s.AuditLog,
 	}
 }
 
