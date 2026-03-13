@@ -19,11 +19,11 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/cynkra/blockyard/internal/backend"
-	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
 )
 
@@ -53,6 +53,7 @@ type DockerBackend struct {
 	client   *client.Client
 	serverID string // own container ID; empty = native mode
 	config   *config.DockerConfig
+	mountCfg MountConfig
 
 	mu      sync.Mutex
 	workers map[string]*workerState // keyed by worker ID
@@ -63,7 +64,7 @@ type DockerBackend struct {
 
 // New creates a DockerBackend, verifying Docker connectivity and detecting
 // whether the server is running inside a container.
-func New(ctx context.Context, cfg *config.DockerConfig) (*DockerBackend, error) {
+func New(ctx context.Context, cfg *config.DockerConfig, mountCfg MountConfig) (*DockerBackend, error) {
 	cli, err := client.NewClientWithOpts(
 		client.WithHost("unix://"+cfg.Socket),
 		client.WithAPIVersionNegotiation(),
@@ -83,10 +84,22 @@ func New(ctx context.Context, cfg *config.DockerConfig) (*DockerBackend, error) 
 		slog.Info("running in native mode (no server container ID detected)")
 	}
 
+	// In volume mode, ensure the named volume exists.
+	if mountCfg.UseVolume() {
+		if _, err := cli.VolumeCreate(ctx, volume.CreateOptions{
+			Name:   mountCfg.VolumeName,
+			Labels: map[string]string{"dev.blockyard/managed": "true"},
+		}); err != nil {
+			return nil, fmt.Errorf("create volume %s: %w", mountCfg.VolumeName, err)
+		}
+		slog.Info("bundle volume ready", "volume", mountCfg.VolumeName)
+	}
+
 	return &DockerBackend{
 		client:   cli,
 		serverID: serverID,
 		config:   cfg,
+		mountCfg: mountCfg,
 		workers:  make(map[string]*workerState),
 	}, nil
 }
@@ -284,12 +297,7 @@ func (d *DockerBackend) createWorkerContainer(
 ) (string, error) {
 	containerName := "blockyard-worker-" + spec.WorkerID
 
-	binds := []string{
-		spec.BundlePath + ":" + spec.WorkerMount + ":ro",
-	}
-	if spec.LibraryPath != "" {
-		binds = append(binds, spec.LibraryPath+":/blockyard-lib:ro")
-	}
+	binds, mounts := d.mountCfg.WorkerMounts(spec.BundlePath, spec.LibraryPath, spec.WorkerMount)
 
 	env := []string{
 		fmt.Sprintf("SHINY_PORT=%d", spec.ShinyPort),
@@ -316,6 +324,7 @@ func (d *DockerBackend) createWorkerContainer(
 		&container.HostConfig{
 			NetworkMode:    container.NetworkMode(networkName),
 			Binds:          binds,
+			Mounts:         mounts,
 			Tmpfs:          map[string]string{"/tmp": ""},
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges"},
@@ -552,6 +561,8 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 	cmd := []string{"/usr/local/bin/rv", "sync"}
 
 	// 2. Create container
+	binds, mounts := d.mountCfg.BuildMounts(spec.BundlePath, spec.LibraryPath, spec.RvBinaryPath)
+
 	resp, err := d.client.ContainerCreate(ctx,
 		&container.Config{
 			Image:      spec.Image,
@@ -560,11 +571,8 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 			Labels:     buildLabels(spec),
 		},
 		&container.HostConfig{
-			Binds: []string{
-				spec.BundlePath + ":/app:ro",
-				spec.LibraryPath + ":" + bundle.BuildContainerLibPath,
-				spec.RvBinaryPath + ":/usr/local/bin/rv:ro",
-			},
+			Binds:  binds,
+			Mounts: mounts,
 			Tmpfs: map[string]string{
 				"/tmp":            "exec",
 				"/root/.cache/rv": "",

@@ -4,9 +4,9 @@ r_version = "4.4"
 
 # A list of repositories to fetch packages from. Order matters: we will try to get a package from each repository in order.
 # The alias is only used in this file if you want to specifically require a dependency to come from a certain repository.
-# Example: { alias = "PPM", url = "https://packagemanager.posit.co/cran/latest" },
+# Using P3M to get pre-compiled Linux binaries (avoids needing system dev libraries).
 repositories = [
-    {alias = "CRAN", url = "https://cloud.r-project.org/"},
+    {alias = "P3M", url = "https://p3m.dev/cran/__linux__/noble/latest"},
 ]
 
 # A list of packages to install and any additional configuration

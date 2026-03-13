@@ -6,28 +6,28 @@ r_version = "4.4"
 [[packages]]
 name = "R6"
 version = "2.6.1"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "Rcpp"
 version = "1.1.1"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "base64enc"
 version = "0.1-6"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "bslib"
 version = "0.10.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     "base64enc",
@@ -46,7 +46,7 @@ dependencies = [
 [[packages]]
 name = "cachem"
 version = "1.1.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     "rlang",
@@ -56,35 +56,35 @@ dependencies = [
 [[packages]]
 name = "cli"
 version = "3.6.5"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "commonmark"
 version = "2.0.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "digest"
 version = "0.6.39"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "fastmap"
 version = "1.2.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "fontawesome"
 version = "0.5.3"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "rlang", requirement = "(>= 1.0.6)" },
@@ -94,21 +94,21 @@ dependencies = [
 [[packages]]
 name = "fs"
 version = "1.6.7"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "glue"
 version = "1.8.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "htmltools"
 version = "0.5.9"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     "base64enc",
@@ -120,7 +120,7 @@ dependencies = [
 [[packages]]
 name = "httpuv"
 version = "1.6.16"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "later", requirement = "(>= 0.8.0)" },
@@ -132,7 +132,7 @@ dependencies = [
 [[packages]]
 name = "jquerylib"
 version = "0.1.4"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     "htmltools",
@@ -141,14 +141,14 @@ dependencies = [
 [[packages]]
 name = "jsonlite"
 version = "2.0.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "later"
 version = "1.4.8"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "Rcpp", requirement = "(>= 1.0.10)" },
@@ -158,7 +158,7 @@ dependencies = [
 [[packages]]
 name = "lifecycle"
 version = "1.0.5"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "cli", requirement = "(>= 3.4.0)" },
@@ -168,14 +168,14 @@ dependencies = [
 [[packages]]
 name = "magrittr"
 version = "2.0.4"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "memoise"
 version = "2.0.1"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "rlang", requirement = "(>= 0.4.10)" },
@@ -185,21 +185,21 @@ dependencies = [
 [[packages]]
 name = "mime"
 version = "0.13"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "otel"
 version = "0.2.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "promises"
 version = "1.5.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "fastmap", requirement = "(>= 1.1.0)" },
@@ -214,21 +214,21 @@ dependencies = [
 [[packages]]
 name = "rappdirs"
 version = "0.3.4"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "rlang"
 version = "1.1.7"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "sass"
 version = "0.4.10"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "fs", requirement = "(>= 1.2.4)" },
@@ -241,7 +241,7 @@ dependencies = [
 [[packages]]
 name = "shiny"
 version = "1.13.0"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = [
     { name = "bslib", requirement = "(>= 0.6.0)" },
@@ -269,20 +269,20 @@ dependencies = [
 [[packages]]
 name = "sourcetools"
 version = "0.1.7-1"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "withr"
 version = "3.0.2"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []
 
 [[packages]]
 name = "xtable"
 version = "1.8-8"
-source = { repository = "https://cloud.r-project.org/" }
+source = { repository = "https://p3m.dev/cran/__linux__/noble/latest" }
 force_source = false
 dependencies = []

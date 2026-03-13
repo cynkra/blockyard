@@ -57,7 +57,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 	// 4. Build WorkerSpec and spawn
 	wid := uuid.New().String()
 	hostPaths := bundle.NewBundlePaths(
-		srv.Config.Storage.BundleHostPath, app.ID, *app.ActiveBundle,
+		srv.Config.Storage.DockerBasePath(), app.ID, *app.ActiveBundle,
 	)
 
 	labels := map[string]string{

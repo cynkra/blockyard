@@ -47,7 +47,7 @@ func testRvBinary(t *testing.T) string {
 
 func TestSpawnAndStop(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestSpawnAndStop(t *testing.T) {
 
 func TestHealthCheckNoListener(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestHealthCheckNoListener(t *testing.T) {
 
 func TestOrphanCleanup(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestOrphanCleanup(t *testing.T) {
 
 func TestNetworkIsolation(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestNetworkIsolation(t *testing.T) {
 
 func TestMetadataEndpointBlocked(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -329,7 +329,7 @@ func testSpawn(t *testing.T, b *DockerBackend, cmd []string) (string, backend.Wo
 
 func TestLogs(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestLogs(t *testing.T) {
 
 func TestLogsUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestLogsUnknownWorker(t *testing.T) {
 
 func TestStopUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestStopUnknownWorker(t *testing.T) {
 
 func TestHealthCheckUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -408,7 +408,7 @@ func testBundleDir(t *testing.T) (bundleDir, libDir string) {
 
 func TestBuildFailsWithBadImage(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 
 func TestBuildWithProductionImage(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestBuildWithProductionImage(t *testing.T) {
 
 func TestAddrUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestBuildE2E_RvSync(t *testing.T) {
 	const image = "ghcr.io/rocker-org/r-ver:4.4.3"
 
 	ctx := context.Background()
-	b, err := New(ctx, testConfig())
+	b, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -583,7 +583,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 	const image = "ghcr.io/rocker-org/r-ver:4.4.3"
 
 	ctx := context.Background()
-	be, err := New(ctx, testConfig())
+	be, err := New(ctx, testConfig(), MountConfig{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

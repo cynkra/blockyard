@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,8 +39,24 @@ type StorageConfig struct {
 	BundleServerPath string `toml:"bundle_server_path"`
 	BundleHostPath   string `toml:"bundle_host_path"`
 	BundleWorkerPath string `toml:"bundle_worker_path"`
+	BundleVolumeName string `toml:"bundle_volume_name"`
 	BundleRetention  int    `toml:"bundle_retention"`
 	MaxBundleSize    int64  `toml:"max_bundle_size"`
+}
+
+// UseVolume reports whether named Docker volume mode is configured.
+func (s StorageConfig) UseVolume() bool {
+	return s.BundleVolumeName != ""
+}
+
+// DockerBasePath returns the base path to use when constructing paths for
+// Docker bind mounts. In volume mode it returns BundleServerPath (the host
+// path concept does not apply); in bind mode it returns BundleHostPath.
+func (s StorageConfig) DockerBasePath() string {
+	if s.UseVolume() {
+		return s.BundleServerPath
+	}
+	return s.BundleHostPath
 }
 
 type DatabaseConfig struct {
@@ -105,6 +122,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Storage.BundleHostPath == "" {
 		cfg.Storage.BundleHostPath = cfg.Storage.BundleServerPath
+	}
+	if cfg.Storage.BundleVolumeName != "" && cfg.Storage.BundleHostPath != cfg.Storage.BundleServerPath {
+		slog.Warn("storage.bundle_volume_name is set; bundle_host_path will be ignored")
 	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"
