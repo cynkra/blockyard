@@ -2,6 +2,7 @@ package server
 
 import (
 	"sync"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
@@ -42,9 +43,6 @@ type Server struct {
 	// OpenBao — nil when [openbao] is not configured.
 	VaultClient     *integration.Client
 	VaultTokenCache *integration.VaultTokenCache
-
-	// Draining tracks app IDs currently being drained (graceful stop).
-	Draining *DrainSet
 }
 
 // NewServer creates a Server with all in-memory stores initialized.
@@ -58,7 +56,6 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 		Registry: registry.New(),
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
-		Draining: NewDrainSet(),
 	}
 }
 
@@ -77,7 +74,9 @@ func (s *Server) AuthDeps() *auth.Deps {
 // ActiveWorker represents a running worker tracked by the server.
 // The worker ID is the map key in WorkerMap, not stored here.
 type ActiveWorker struct {
-	AppID string
+	AppID    string
+	Draining bool      // set by graceful drain; no new sessions routed
+	IdleSince time.Time // zero value = not idle; set when session count hits 0
 }
 
 // WorkerMap is a concurrent map of worker ID → ActiveWorker.
@@ -138,7 +137,7 @@ func (m *WorkerMap) All() []string {
 	return ids
 }
 
-// ForApp returns all worker IDs for a given app.
+// ForApp returns all worker IDs for a given app (including draining).
 func (m *WorkerMap) ForApp(appID string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,6 +148,90 @@ func (m *WorkerMap) ForApp(appID string) []string {
 		}
 	}
 	return ids
+}
+
+// ForAppAvailable returns worker IDs for an app that are not draining.
+func (m *WorkerMap) ForAppAvailable(appID string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for id, w := range m.workers {
+		if w.AppID == appID && !w.Draining {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// MarkDraining sets the draining flag on all workers for an app.
+// Returns the list of affected worker IDs.
+func (m *WorkerMap) MarkDraining(appID string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for id, w := range m.workers {
+		if w.AppID == appID {
+			w.Draining = true
+			m.workers[id] = w
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// SetIdleSince marks when a worker became idle (zero sessions).
+// Called when the last session for a worker is removed.
+func (m *WorkerMap) SetIdleSince(workerID string, t time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.workers[workerID]; ok {
+		w.IdleSince = t
+		m.workers[workerID] = w
+	}
+}
+
+// ClearIdleSince resets the idle timer (a new session was assigned).
+func (m *WorkerMap) ClearIdleSince(workerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.workers[workerID]; ok {
+		w.IdleSince = time.Time{}
+		m.workers[workerID] = w
+	}
+}
+
+// IdleWorkers returns workers that have been idle longer than the
+// given timeout, excluding the last worker for each app (don't scale
+// to zero) and excluding draining workers (they have their own lifecycle).
+func (m *WorkerMap) IdleWorkers(timeout time.Duration) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+
+	// Count non-draining workers per app.
+	appWorkerCount := make(map[string]int)
+	for _, w := range m.workers {
+		if !w.Draining {
+			appWorkerCount[w.AppID]++
+		}
+	}
+
+	var idle []string
+	for id, w := range m.workers {
+		if w.IdleSince.IsZero() || w.Draining {
+			continue
+		}
+		if now.Sub(w.IdleSince) < timeout {
+			continue
+		}
+		// Don't remove the last worker for an app (no scale-to-zero).
+		if appWorkerCount[w.AppID] <= 1 {
+			continue
+		}
+		idle = append(idle, id)
+	}
+	return idle
 }
 
 // AppIDs returns a deduplicated list of app IDs that have active workers.
@@ -166,30 +249,14 @@ func (m *WorkerMap) AppIDs() []string {
 	return ids
 }
 
-// DrainSet tracks app IDs that are currently being drained (graceful stop).
-type DrainSet struct {
-	mu  sync.Mutex
-	set map[string]bool
-}
-
-func NewDrainSet() *DrainSet {
-	return &DrainSet{set: make(map[string]bool)}
-}
-
-func (d *DrainSet) Add(appID string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.set[appID] = true
-}
-
-func (d *DrainSet) Remove(appID string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	delete(d.set, appID)
-}
-
-func (d *DrainSet) Contains(appID string) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.set[appID]
+// IsDraining returns true if any worker for the given app is draining.
+func (m *WorkerMap) IsDraining(appID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, w := range m.workers {
+		if w.AppID == appID && w.Draining {
+			return true
+		}
+	}
+	return false
 }

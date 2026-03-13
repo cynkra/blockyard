@@ -45,6 +45,11 @@ const (
 	RelationAdmin                                  // System admin
 )
 
+// CanViewDetails reports whether this relation allows viewing app details.
+func (r AppRelation) CanViewDetails() bool {
+	return r > RelationNone
+}
+
 // CanAccessProxy reports whether this relation allows using the app via proxy.
 func (r AppRelation) CanAccessProxy() bool {
 	return r > RelationNone

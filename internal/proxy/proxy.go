@@ -148,6 +148,7 @@ func Handler(srv *server.Server) http.Handler {
 				return
 			}
 			workerID, addr = wid, a
+			srv.Workers.ClearIdleSince(workerID)
 			srv.Sessions.Set(sessionID, session.Entry{
 				WorkerID:   workerID,
 				UserSub:    callerSub,

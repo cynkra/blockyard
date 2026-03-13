@@ -20,6 +20,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/task"
 )
 
 // AppResponse wraps an AppRow with a derived runtime status.
@@ -330,8 +331,8 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// 1. Stop all workers for this app
-		stopAppGraceful(srv, app.ID)
+		// 1. Stop all workers for this app (synchronous for delete).
+		stopAppSync(srv, app.ID)
 
 		// 2. Delete bundle files from disk
 		bundles, err := srv.DB.ListBundlesByApp(app.ID)
@@ -485,47 +486,83 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		stopped := stopAppGraceful(srv, app.ID)
+		// Mark draining so no new sessions are routed.
+		workerIDs := srv.Workers.MarkDraining(app.ID)
+		if len(workerIDs) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"stopped_workers": 0,
+			})
+			return
+		}
+
+		// Create task for drain tracking.
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID)
+		sender.Write(fmt.Sprintf("draining %d workers", len(workerIDs)))
+
+		// Drain in background — caller polls GET /tasks/{taskID}/logs.
+		go drainWorkers(srv, app.ID, workerIDs, sender)
 
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":          "stopped",
-			"workers_stopped": stopped,
+			"task_id":      taskID,
+			"worker_count": len(workerIDs),
 		})
 	}
 }
 
-// stopAppGraceful drains sessions before killing workers.
-// Marks the app as draining (stops new session routing), waits for
-// existing sessions to end (up to shutdown_timeout), then force-stops
-// remaining workers.
-func stopAppGraceful(srv *server.Server, appID string) int {
-	workerIDs := srv.Workers.ForApp(appID)
-	if len(workerIDs) == 0 {
-		return 0
+// drainWorkers waits for sessions to end, then evicts workers.
+// Writes progress to the task sender so operators can stream it
+// via GET /tasks/{taskID}/logs.
+func drainWorkers(srv *server.Server, appID string, workerIDs []string, sender task.Sender) {
+	defer sender.Complete(task.Completed)
+
+	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
+
+	for {
+		remaining := srv.Sessions.CountForWorkers(workerIDs)
+		if remaining == 0 {
+			sender.Write("all sessions ended")
+			break
+		}
+		if time.Now().After(deadline) {
+			sender.Write(fmt.Sprintf("drain timeout reached, %d sessions remaining — forcing stop", remaining))
+			break
+		}
+		time.Sleep(time.Second)
 	}
 
-	// 1. Stop routing new sessions to this app.
-	srv.Draining.Add(appID)
-	defer srv.Draining.Remove(appID)
+	for _, wid := range workerIDs {
+		ops.EvictWorker(context.Background(), srv, wid)
+		sender.Write(fmt.Sprintf("stopped worker %s", wid))
+	}
+	sender.Write(fmt.Sprintf("stopped %d workers", len(workerIDs)))
+}
 
-	// 2. Wait for existing sessions to end (up to shutdown_timeout).
+// stopAppSync stops all workers for an app synchronously.
+// Used by DeleteApp where we must wait for workers to stop before
+// deleting the app row. Not suitable for the stop endpoint (use
+// the async drainWorkers path instead).
+func stopAppSync(srv *server.Server, appID string) {
+	workerIDs := srv.Workers.MarkDraining(appID)
+	if len(workerIDs) == 0 {
+		return
+	}
+
 	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
 	for {
-		remaining := srv.Sessions.CountForWorkers(srv.Workers.ForApp(appID))
+		remaining := srv.Sessions.CountForWorkers(workerIDs)
 		if remaining == 0 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(time.Second)
 	}
 
-	// 3. Force-stop remaining workers.
-	// Re-fetch in case workers changed during drain.
-	workerIDs = srv.Workers.ForApp(appID)
 	for _, wid := range workerIDs {
 		ops.EvictWorker(context.Background(), srv, wid)
 	}
-	return len(workerIDs)
 }
 
 // AppLogs streams logs from the LogStore for a specific worker.

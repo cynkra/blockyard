@@ -28,7 +28,7 @@ func (lb *LoadBalancer) Assign(
 	maxSessionsPerWorker int,
 	maxWorkersPerApp *int,
 ) (string, error) {
-	workerIDs := workers.ForApp(appID)
+	workerIDs := workers.ForAppAvailable(appID)
 	if len(workerIDs) == 0 {
 		return "", nil // no workers yet — caller spawns
 	}

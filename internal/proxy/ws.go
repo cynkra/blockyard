@@ -4,10 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/coder/websocket"
 
-	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -225,11 +225,11 @@ done:
 					return
 				}
 				srv.Sessions.Delete(sessionID)
-				// If no other sessions reference this worker, it's idle — evict.
+				// If no other sessions reference this worker, mark idle.
+				// The idle worker reaper will evict it after idle_worker_timeout
+				// if no new sessions arrive (and it's not the last worker for the app).
 				if srv.Sessions.CountForWorker(entry.WorkerID) == 0 {
-					slog.Info("ws cache expired, evicting idle worker",
-						"worker_id", entry.WorkerID, "session_id", sessionID)
-					ops.EvictWorker(context.Background(), srv, entry.WorkerID)
+					srv.Workers.SetIdleSince(entry.WorkerID, time.Now())
 				}
 			})
 	} else {

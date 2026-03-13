@@ -45,10 +45,19 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 		}
 	}
 
+	// Evict workers that have been idle beyond the configured timeout.
+	idleWorkerTimeout := srv.Config.Proxy.IdleWorkerTimeout.Duration
+	idle := srv.Workers.IdleWorkers(idleWorkerTimeout)
+	for _, wid := range idle {
+		slog.Info("autoscaler: evicting idle worker",
+			"worker_id", wid, "idle_for", idleWorkerTimeout)
+		ops.EvictWorker(ctx, srv, wid)
+	}
+
 	appIDs := srv.Workers.AppIDs()
 
 	for _, appID := range appIDs {
-		if srv.Draining.Contains(appID) {
+		if srv.Workers.IsDraining(appID) {
 			continue
 		}
 
@@ -57,7 +66,7 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 			continue
 		}
 
-		workerIDs := srv.Workers.ForApp(appID)
+		workerIDs := srv.Workers.ForAppAvailable(appID)
 		if len(workerIDs) == 0 {
 			continue
 		}
@@ -69,7 +78,6 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 		}
 
 		tryScaleUp(ctx, srv, app, workerIDs)
-		tryScaleDown(ctx, srv, app, workerIDs)
 	}
 }
 
@@ -119,19 +127,3 @@ func tryScaleUp(ctx context.Context, srv *server.Server, app *db.AppRow, workerI
 	}
 }
 
-// tryScaleDown evicts a worker that has zero sessions when at least one
-// other worker for the same app exists.
-func tryScaleDown(ctx context.Context, srv *server.Server, app *db.AppRow, workerIDs []string) {
-	if len(workerIDs) <= 1 {
-		return // keep at least one worker
-	}
-
-	for _, wid := range workerIDs {
-		if srv.Sessions.CountForWorker(wid) == 0 {
-			slog.Info("autoscaler: scaling down idle worker",
-				"app_id", app.ID, "worker_id", wid)
-			ops.EvictWorker(ctx, srv, wid)
-			return // remove at most one per tick
-		}
-	}
-}

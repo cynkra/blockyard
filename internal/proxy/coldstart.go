@@ -78,7 +78,7 @@ func (g *spawnSingleFlight) do(key string, fn func() (string, string, error)) (s
 // runs at a time per app.
 func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (workerID, addr string, err error) {
 	// Reject new sessions for apps being drained.
-	if srv.Draining.Contains(app.ID) {
+	if srv.Workers.IsDraining(app.ID) {
 		return "", "", errAppDraining
 	}
 
@@ -163,9 +163,15 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (worke
 
 	var extraEnv map[string]string
 	if srv.Config.Openbao != nil {
+		apiURL := srv.Config.Server.ExternalURL
+		if apiURL == "" {
+			// Dev mode fallback: containers can reach the host via
+			// host.docker.internal on Docker Desktop, or the bind address.
+			apiURL = "http://host.docker.internal" + srv.Config.Server.Bind
+		}
 		extraEnv = map[string]string{
 			"VAULT_ADDR":        srv.Config.Openbao.Address,
-			"BLOCKYARD_API_URL": srv.Config.Server.ExternalURL,
+			"BLOCKYARD_API_URL": apiURL,
 		}
 	}
 

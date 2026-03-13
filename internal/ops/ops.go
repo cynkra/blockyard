@@ -162,16 +162,33 @@ func SpawnLogCapture(
 	}()
 }
 
-// GracefulShutdown stops all workers, removes managed resources, and
-// fails in-progress builds. Called after HTTP server drain and background
-// goroutine cancellation.
-func GracefulShutdown(ctx context.Context, srv *server.Server) {
-	workerIDs := srv.Workers.All()
-	if len(workerIDs) > 0 {
-		slog.Info("shutdown: stopping workers",
-			"count", len(workerIDs))
+// drainAndEvictAll marks workers as draining, waits for sessions to end,
+// then force-evicts all workers. Used during server shutdown.
+func drainAndEvictAll(ctx context.Context, srv *server.Server, workerIDs []string) {
+	slog.Info("shutdown: draining workers", "count", len(workerIDs))
+
+	// Mark all workers as draining so no new sessions are routed.
+	appsSeen := make(map[string]bool)
+	for _, wid := range workerIDs {
+		w, ok := srv.Workers.Get(wid)
+		if ok && !appsSeen[w.AppID] {
+			appsSeen[w.AppID] = true
+			srv.Workers.MarkDraining(w.AppID)
+		}
 	}
 
+	// Wait for sessions to end (up to half of shutdown timeout).
+	drainTimeout := srv.Config.Server.ShutdownTimeout.Duration / 2
+	deadline := time.Now().Add(drainTimeout)
+	for time.Now().Before(deadline) {
+		total := srv.Sessions.CountForWorkers(workerIDs)
+		if total == 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	// Force-evict all remaining workers.
 	var wg sync.WaitGroup
 	for _, wid := range workerIDs {
 		wg.Add(1)
@@ -183,6 +200,16 @@ func GracefulShutdown(ctx context.Context, srv *server.Server) {
 		}(wid)
 	}
 	wg.Wait()
+}
+
+// GracefulShutdown stops all workers, removes managed resources, and
+// fails in-progress builds. Called after HTTP server drain and background
+// goroutine cancellation.
+func GracefulShutdown(ctx context.Context, srv *server.Server) {
+	workerIDs := srv.Workers.All()
+	if len(workerIDs) > 0 {
+		drainAndEvictAll(ctx, srv, workerIDs)
+	}
 
 	// Remove remaining managed resources (build containers, networks)
 	resources, err := srv.Backend.ListManaged(ctx)

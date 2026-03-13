@@ -149,6 +149,7 @@ func (c *Client) KVRead(ctx context.Context, path string, token string) (map[str
 // 2. JWT auth method is enabled at the configured path
 // 3. The "blockyard-user" role exists
 // 4. KV v2 secrets engine is mounted at "secret/"
+// 5. At least one attached policy uses per-user path scoping (warning only)
 //
 // Returns nil if all checks pass. Returns an error describing the
 // first failure. The caller decides whether to treat this as fatal.
@@ -180,6 +181,10 @@ func (c *VaultTokenCache) Set(sub string, token string, ttl time.Duration)
 
 // Delete removes a cached token (e.g. on logout).
 func (c *VaultTokenCache) Delete(sub string)
+
+// Sweep removes all expired tokens from the cache.
+// Called periodically by the health poller.
+func (c *VaultTokenCache) Sweep() int
 ```
 
 ### enrollment.go — Credential enrollment logic

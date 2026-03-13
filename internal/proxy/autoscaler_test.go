@@ -80,7 +80,10 @@ func TestAutoscaleScaleDown(t *testing.T) {
 	}
 
 	setSession(srv, "s1", wid1)
-	// wid2 has 0 sessions — idle
+	// wid2 has 0 sessions — mark as idle long enough to be reaped.
+	srv.Workers.SetIdleSince(wid2, time.Now().Add(-10*time.Minute))
+	// Set a short idle worker timeout so the test triggers eviction.
+	srv.Config.Proxy.IdleWorkerTimeout.Duration = 1 * time.Second
 
 	workerIDs := srv.Workers.ForApp(app.ID)
 	if len(workerIDs) != 2 {
@@ -173,7 +176,7 @@ func TestAutoscaleSkipsDrainingApps(t *testing.T) {
 	setSession(srv, "s1", wid)
 
 	// Mark as draining — autoscaler should skip.
-	srv.Draining.Add(app.ID)
+	srv.Workers.MarkDraining(app.ID)
 
 	autoscaleTick(context.Background(), srv)
 

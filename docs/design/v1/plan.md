@@ -31,10 +31,10 @@ internal/
 ├── integration/
 │   ├── openbao.go           # OpenBao client, JWT auth setup, bootstrap
 │   └── enrollment.go        # credential enrollment logic
-├── catalog/
+├── catalog/                 # (inlined into api/ and db/ — no separate package)
 │   ├── catalog.go           # content listing, search, filtering
 │   └── tags.go              # tag CRUD, app-tag associations
-├── audit/
+├── audit/                   # (inlined into db/ — no separate package)
 │   └── audit.go             # append-only JSON Lines audit log writer
 ├── telemetry/
 │   └── telemetry.go         # Prometheus metrics + OpenTelemetry tracing setup
