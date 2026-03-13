@@ -1,193 +1,234 @@
-# v1 Security Review Wrap-Up
+# v1 Wrap-Up
 
-Security review of the v1 codebase. Findings are ordered by severity.
-Each finding includes a **Disposition** indicating whether it was fixed,
-deferred, or accepted.
+One item remains before v1 can ship: the API authentication model is
+incomplete and the hello-auth example is broken.
 
----
-
-## 1. Static Token Comparison Is Timing-Vulnerable
-
-**Disposition: FIXED**
-
-### Problem
-
-The static API token is compared using Go's `==` operator, which is not
-constant-time. An attacker with network access to the API can measure
-response time differences to progressively guess the token byte-by-byte.
-
-**Affected locations:**
-
-- `internal/api/auth.go` — static token fallback path
-- `internal/api/users.go` — `identifyFromBearerToken`
-
-The HMAC cookie verification correctly uses `hmac.Equal()` (constant-time),
-but the static token path did not.
-
-### Fix
-
-Both locations now use `crypto/subtle.ConstantTimeCompare`.
-
-### Severity
-
-**High** when OIDC is not configured (static token is the only
-authentication mechanism). **Medium** when OIDC is configured.
+The v1 security review found only minor issues (timing-vulnerable token
+comparison, cookie Secure flag inconsistency). Both were fixed in-tree.
+Remaining accepted findings (rate limiting, body size limits, error
+detail leakage) are deferred to infrastructure or production hardening.
 
 ---
 
-## 2. Build Containers Lack Network Isolation
-
-**Disposition: ACCEPTED**
+## 1. API Authentication Strategy
 
 ### Problem
 
-Build containers run on the default Docker bridge network without
-metadata endpoint blocking. Worker containers get per-worker bridge
-networks and iptables rules blocking `169.254.169.254`.
+v1 added OIDC for browser-based authentication but left the
+control-plane API (`/api/v1/*`) in a broken state when both OIDC and a
+static token are configured — exactly the setup the hello-auth example
+uses.
 
-### Why accepted
+Three concrete issues:
 
-No user-supplied code runs during builds. The build container executes
-only the server-controlled `rv sync` binary, which reads `rproject.toml`
-and `rv.lock` to install R packages. Even if a malicious repo URL
-pointed at the metadata endpoint, `rv` would fail to parse the response
-as package data and discard it — there is no exfiltration channel back
-to the attacker. Additionally, only authenticated users can upload
-bundles.
+**A. `APIAuth` middleware is either/or.** When OIDC is configured,
+`APIAuth` (`internal/api/auth.go:37`) takes the JWT-only path. The
+static token fallback is in an `else` branch that is unreachable. A
+`Bearer my-secret-token` request fails JWT parsing and returns 401. The
+`authenticateFromBearer` helper in `internal/api/users.go:106` already
+implements the correct fallthrough (try JWT, then static token), but
+`APIAuth` does not use it.
 
-The build container already has strong hardening: read-only root
-filesystem, all capabilities dropped, and `no-new-privileges`.
+**B. No path for human API access.** A user who authenticates via OIDC
+in the browser has a session cookie, but no way to obtain a token for
+CLI or script use. There is no Personal Access Token (PAT) mechanism,
+no device authorization flow, and no way to export a bearer token from
+the web UI.
 
-### Severity
+**C. No path for machine API access once the static token is removed.**
+The static token was a bootstrap measure. With OIDC in place, CI/CD
+pipelines need a proper machine-to-machine credential. Without one,
+every deployment that uses OIDC must also configure a static shared
+secret with no expiry, no per-client identity, and no revocation.
 
-**High** in cloud environments per original assessment, but practical
-exploitability is very low given the constraints above.
+### Callers and their needs
 
----
+| Caller | Example | Needs |
+|---|---|---|
+| Admin script | `deploy.sh` | Pre-shared credential, no browser |
+| CI/CD pipeline | GitHub Actions | Machine identity, revocable, auditable |
+| Human via CLI | Interactive `curl` / future CLI tool | User identity, scoped permissions |
+| Human via browser | Web UI | Already works (OIDC session cookie) |
 
-## 3. Internal Error Details Leaked to Clients
+### Bundle ownership
 
-**Disposition: DEFERRED (development phase)**
+Who uploads a bundle determines who owns it. This matters for access
+control and audit. Three caller types produce different ownership
+semantics:
 
-### Problem
+- **Human upload** — bundle owned by the authenticated user. Natural.
+- **CI upload with user token** — bundle owned by the user whose token
+  CI uses. Fragile: token tied to an individual who may leave.
+- **CI upload with machine credential** — bundle owned by... what?
 
-Several API handlers pass raw Go error messages to `serverError()`,
-which returns them verbatim in the JSON response body. SQLite error
-messages can reveal table names, column names, and query structure.
+The cleanest model: **ownership lives on the app, not the bundle.** An
+app has an owner (set at creation, transferable). Bundles record the
+uploader identity as metadata for audit, but the app owner is what
+governs access control. A CI job uploading as `ci-deploy` produces a
+bundle with `uploaded_by: ci-deploy` on an app owned by `team-x`. This
+decouples access control from deployment automation.
 
-### Why deferred
+### Design
 
-Detailed error messages are useful during active development. This
-should be revisited before production hardening — log full errors
-server-side and return generic messages to clients.
+The fix has three parts: an immediate bug fix, a short-term bridge, and
+a medium-term solution.
 
-### Severity
+#### Part 1: Fix `APIAuth` fallthrough (immediate)
 
-**Medium** — information disclosure that aids further attacks.
+Make `APIAuth` try JWT first, then fall through to static token — the
+same pattern `authenticateFromBearer` in `users.go` already uses. This
+unblocks the hello-auth example and any deployment combining OIDC with a
+static admin token.
 
----
+```go
+// Try JWT when OIDC is configured.
+if srv.Config.OIDC != nil && srv.JWKSCache != nil {
+    claims, err := srv.JWKSCache.Validate(token, ...)
+    if err == nil {
+        // JWT valid — use JWT identity.
+        identity = jwtIdentity(claims, srv)
+        goto authenticated
+    }
+    slog.Debug("JWT validation failed, trying static token", "error", err)
+}
 
-## 4. No Rate Limiting on Authentication Endpoints
+// Static token fallback (works with or without OIDC).
+if srv.Config.Server.Token.Expose() != "" {
+    if subtle.ConstantTimeCompare(...) == 1 {
+        identity = staticAdminIdentity()
+        goto authenticated
+    }
+}
 
-**Disposition: ACCEPTED (reverse proxy responsibility)**
+writeError(w, 401, "unauthorized", "invalid token")
+return
 
-### Problem
+authenticated:
+    ctx := auth.ContextWithCaller(r.Context(), identity)
+    next.ServeHTTP(w, r.WithContext(ctx))
+```
 
-No rate limiting exists on any endpoint, including static token
-authentication, OIDC callback, and credential exchange.
+Alternatively, refactor `APIAuth` to call `authenticateFromBearer`
+directly, eliminating the duplicated logic.
 
-### Why accepted
+#### Part 2: OAuth2 Client Credentials (short-term, machine auth)
 
-Rate limiting is expected to be handled by the reverse proxy (nginx,
-Caddy, Traefik) that most deployments already use for TLS termination.
-The timing vulnerability (#1) that made brute-force practical has been
-fixed.
+Add support for machine-to-machine authentication via the standard
+OAuth2 Client Credentials flow (RFC 6749 §4.4). This requires no new
+infrastructure in blockyard — the IdP issues tokens, blockyard validates
+them with its existing JWKS path.
 
-### Severity
+**How it works:**
 
-**Medium** — exploitability depends on network exposure.
+1. Admin registers a service client in the IdP (e.g.,
+   `blockyard-ci` with a client secret).
+2. CI/CD calls the IdP's token endpoint:
+   ```
+   POST /token
+   grant_type=client_credentials
+   client_id=blockyard-ci&client_secret=...
+   ```
+3. IdP returns a short-lived JWT.
+4. CI/CD sends it as `Authorization: Bearer <jwt>` to blockyard.
+5. Blockyard validates it via the existing JWKS cache.
 
----
+**What changes in blockyard:**
 
-## 5. `X-Forwarded-Proto` Trusted Unconditionally
+- **Audience validation.** Currently `JWKSCache.Validate` checks
+  `aud == oidc.client_id` ("blockyard"). A client-credentials token may
+  carry a different audience. Either: accept multiple audiences via a
+  config list, or require the IdP to issue tokens with `aud: blockyard`
+  (Keycloak and Authentik support this; Dex requires the client to
+  request it).
 
-**Disposition: FIXED**
+- **Role assignment for service accounts.** Rich IdPs (Keycloak,
+  Authentik, Auth0) can embed roles/groups in client-credentials tokens
+  via service account roles or property mappings. For these, the
+  existing group→role mapping works unchanged. Minimal IdPs (Dex) do
+  not. For Dex, we need a config-level mapping from service-account
+  `sub` to role — a small addition to the existing `RoleMappingCache`.
 
-### Problem
+**IdP compatibility:**
 
-The proxy session cookie set its `Secure` flag based on the
-client-supplied `X-Forwarded-Proto` header. Auth cookies already derived
-this from `external_url`, but the proxy session cookie did not, creating
-an inconsistency.
+| IdP | Client Credentials | Roles in token | Notes |
+|---|---|---|---|
+| Dex | Yes | No | Bare JWT; needs blockyard-side role mapping |
+| Keycloak | Yes | Yes | Service account roles in claims |
+| Authentik | Yes | Yes | Property mappings on provider |
+| Auth0 / Okta | Yes | Yes | Custom claims via rules/actions |
+| Entra ID | Yes | Yes | App roles in token |
 
-### Fix
+#### Part 3: Personal Access Tokens (medium-term, human API auth)
 
-The proxy session cookie now derives `Secure` solely from `external_url`,
-matching the auth cookie behavior. The `X-Forwarded-Proto` header is no
-longer consulted for this purpose.
+For human CLI/script access, add a PAT mechanism. This is
+application-level — blockyard issues and manages tokens, not the IdP.
+This is the pattern used by GitHub, GitLab, and Posit Connect.
 
-### Severity
+**User flow:**
 
-**Medium** — enabled cookie downgrade in certain deployment topologies.
+1. User logs into the web UI via OIDC.
+2. User navigates to settings → "Access Tokens".
+3. User creates a PAT with a name, optional expiry, and optional scope.
+4. Blockyard generates a token, stores a hash (not the plaintext), and
+   shows the token once.
+5. User copies the token into their script / `.env` / CI config.
 
----
+**Validation flow:**
 
-## 6. `/metrics` and `/readyz` Expose Information Without Authentication
+1. `APIAuth` receives `Bearer <pat>`.
+2. JWT parsing fails (PATs are opaque, not JWTs).
+3. Static token check fails (different format).
+4. New step: hash the token, look up in the PAT store.
+5. If found and not expired/revoked → authenticate as the owning user.
 
-**Disposition: ACCEPTED (by design)**
+**Storage:** OpenBao's token auth method (`/v1/auth/token/create`,
+`token/lookup`, `token/revoke`) provides issuance, validation,
+revocation, and TTL out of the box. However, it has significant
+drawbacks as a PAT backend: every API request requires a network
+round-trip for token/lookup (vs. a local hash comparison), OpenBao
+downtime would break all PAT-based API auth (currently OpenBao is
+only needed for the optional credential/secrets flow), there is no
+list-by-user API (we'd need a SQLite index anyway to power the UI),
+and it creates confusion with the existing vault tokens used for
+secret-reading in the proxy layer.
 
-### Problem
+SQLite is the better fit. Store a `(hash, sub, name, created_at,
+expires_at, last_used_at, revoked)` row, look up by hash on the auth
+hot path. No external dependency, microsecond validation, and the
+listing/revocation UI queries are trivial. OpenBao stays focused on
+what it's good at: secret storage and JWT→token exchange for app
+credentials.
 
-`/metrics` and `/readyz` are outside auth middleware, exposing
-operational details.
+**Scope:** Initially, PATs can be unscoped (full permissions of the
+owning user). Scoped PATs (read-only, single-app, etc.) are a future
+refinement.
 
-### Why accepted
+**Revocation:** Deleting the hash from the store. A "revoke all" button
+covers the credential compromise case.
 
-Unauthenticated health and metrics endpoints are standard practice.
-Kubernetes probes and Prometheus scrapers expect unauthenticated access.
-Access control is handled at the infrastructure layer (reverse proxy
-rules, network policies, or binding to an internal interface).
+### Implementation Plan
 
-### Severity
+1. **Fix `APIAuth` fallthrough** — Refactor to use
+   `authenticateFromBearer` or replicate its try-JWT-then-static
+   pattern. Add test coverage for the combined OIDC + static token
+   case. Fix the hello-auth example to work end-to-end.
 
-**Low** — information disclosure, no direct exploitation path.
+2. **Client Credentials support** — Extend audience validation to
+   accept a configurable list. Add service-account-to-role mapping in
+   config. Update hello-auth example with a `blockyard-ci` Dex client.
+   Document IdP-specific setup for Keycloak and Authentik.
 
----
+3. **PAT infrastructure** — Schema migration for PAT table (hash,
+   user sub, name, created, expires, revoked). API endpoints:
+   `POST /api/v1/users/me/tokens` (create),
+   `GET /api/v1/users/me/tokens` (list),
+   `DELETE /api/v1/users/me/tokens/{id}` (revoke).
+   PAT validation step in `APIAuth`. Web UI: token management page
+   under user settings (generate with name/expiry, list active tokens
+   with created/last-used dates, revoke individual or all). The
+   generate flow must show the plaintext token exactly once and
+   require the user to copy it before dismissing.
 
-## 7. No Request Body Size Limits on API Endpoints
-
-**Disposition: ACCEPTED (reverse proxy responsibility)**
-
-### Problem
-
-Only the bundle upload endpoint uses `http.MaxBytesReader`. Other JSON
-endpoints read the full request body without limits.
-
-### Why accepted
-
-Body size limits are typically enforced by the reverse proxy
-(`client_max_body_size`). All API endpoints require authentication,
-limiting the attack surface to authenticated users.
-
-### Severity
-
-**Low** — denial of service via memory exhaustion.
-
----
-
-## 8. Logout Endpoint Lacks CSRF Protection
-
-**Disposition: ACCEPTED**
-
-### Problem
-
-`POST /logout` clears the session without verifying a CSRF token.
-
-### Why accepted
-
-`SameSite=Lax` blocks cross-site POSTs in modern browsers. The impact
-is limited to forced logout — no data loss or privilege escalation.
-
-### Severity
-
-**Low** — forced logout with no security impact.
+4. **Bundle ownership** — Add `uploaded_by` field to bundles table.
+   Ensure app-level ownership is the access control boundary.
+   CI uploads record the service account identity.
