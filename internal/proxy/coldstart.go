@@ -96,7 +96,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 	srv.Registry.Set(wid, a)
 
 	// 6. Start log capture before health polling so startup output is captured.
-	ops.SpawnLogCapture(ctx, srv, wid, app.ID)
+	ops.SpawnLogCapture(context.Background(), srv, wid, app.ID)
 
 	// 7. Cold-start hold — poll health with exponential backoff
 	if err := pollHealthy(ctx, srv, wid); err != nil {

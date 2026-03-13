@@ -358,7 +358,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			srv.Registry.Set(workerID, addr)
 		}
 
-		ops.SpawnLogCapture(r.Context(), srv, workerID, app.ID)
+		ops.SpawnLogCapture(context.Background(), srv, workerID, app.ID)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(startResponse{
