@@ -1,0 +1,113 @@
+{{template "base" .}}
+
+{{define "title"}}Dashboard — blockyard{{end}}
+
+{{define "content"}}
+<header>
+    <h1>blockyard</h1>
+    <nav>
+        <span class="user-identity">{{.UserSub}}</span>
+        <form method="POST" action="/logout" class="inline">
+            <button type="submit" class="btn btn-link">Sign out</button>
+        </form>
+    </nav>
+</header>
+<main>
+    <section class="search-filter">
+        <form method="GET" action="/">
+            <input type="text" name="search" value="{{.Search}}"
+                   placeholder="Search apps..." aria-label="Search apps">
+            {{if .AllTags}}
+            <select name="tag" aria-label="Filter by tag">
+                <option value="">All tags</option>
+                {{range .AllTags}}
+                <option value="{{.Name}}" {{if eq .Name $.ActiveTag}}selected{{end}}>
+                    {{.Name}}
+                </option>
+                {{end}}
+            </select>
+            {{end}}
+            <button type="submit" class="btn">Search</button>
+        </form>
+    </section>
+
+    {{if .Apps}}
+    <section class="app-grid">
+        {{range .Apps}}
+        <a href="/app/{{.Name}}/" class="app-card">
+            <span class="app-name">{{.Name}}</span>
+            {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
+            {{if .Description}}<span class="app-desc">{{deref .Description}}</span>{{end}}
+            <span class="app-status app-status--{{.Status}}">{{.Status}}</span>
+            {{if .Tags}}
+            <span class="app-tags">
+                {{range .Tags}}<span class="tag">{{.}}</span>{{end}}
+            </span>
+            {{end}}
+        </a>
+        {{end}}
+    </section>
+    {{else}}
+    <section class="empty-state">
+        {{if eq .UserRole "publisher"}}
+        <p>No apps yet. Deploy your first app using the API.</p>
+        {{else if eq .UserRole "admin"}}
+        <p>No apps deployed.</p>
+        {{else}}
+        <p>No apps shared with you.</p>
+        {{end}}
+    </section>
+    {{end}}
+
+    {{if .CredentialError}}<p class="flash flash--error">{{.CredentialError}}</p>{{end}}
+    {{if .CredentialSuccess}}<p class="flash flash--success">Credential saved.</p>{{end}}
+
+    {{if .Services}}
+    <section class="credentials">
+        <h2>Your API Keys</h2>
+        {{range .Services}}
+        <div class="credential-row">
+            <span class="credential-label">{{.Label}}</span>
+            <span class="credential-status credential-status--{{.Status}}">
+                {{if eq .Status "configured"}}configured{{else}}not set{{end}}
+            </span>
+            <form class="credential-form" data-service="{{.ID}}">
+                <input type="text" name="api_key" placeholder="Paste API key"
+                       aria-label="{{.Label}} API key" required>
+                <button type="submit" class="btn btn-sm">Save</button>
+            </form>
+        </div>
+        {{end}}
+    </section>
+    {{end}}
+
+    <script>
+    document.querySelectorAll('.credential-form').forEach(form => {
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const service = form.dataset.service;
+            const input = form.querySelector('input[name="api_key"]');
+            const btn = form.querySelector('button');
+            btn.disabled = true;
+            btn.textContent = 'Saving...';
+            try {
+                const resp = await fetch('/api/v1/users/me/credentials/' + encodeURIComponent(service), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({api_key: input.value}),
+                });
+                if (resp.ok) {
+                    window.location.replace('/?credential_saved=1');
+                } else {
+                    const body = await resp.json().catch(() => null);
+                    const msg = body && body.message ? body.message : 'Failed to save credential';
+                    window.location.replace('/?credential_error=' + encodeURIComponent(msg));
+                }
+            } catch {
+                window.location.replace('/?credential_error=Network+error');
+            }
+        });
+    });
+    </script>
+</main>
+{{end}}

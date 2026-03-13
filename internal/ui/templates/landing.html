@@ -1,0 +1,29 @@
+{{template "base" .}}
+
+{{define "title"}}Sign in — blockyard{{end}}
+
+{{define "content"}}
+<header>
+    <h1>blockyard</h1>
+</header>
+<main>
+    <section class="sign-in">
+        <a href="/login" class="btn btn-primary">Sign in</a>
+    </section>
+
+    {{if .PublicApps}}
+    <section class="public-apps">
+        <h2>Public apps</h2>
+        <div class="app-grid">
+            {{range .PublicApps}}
+            <a href="/app/{{.Name}}/" class="app-card">
+                <span class="app-name">{{.Name}}</span>
+                {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
+                <span class="app-status app-status--{{.Status}}">{{.Status}}</span>
+            </a>
+            {{end}}
+        </div>
+    </section>
+    {{end}}
+</main>
+{{end}}

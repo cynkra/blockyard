@@ -79,10 +79,19 @@ type OidcConfig struct {
 }
 
 type OpenbaoConfig struct {
-	Address     string   `toml:"address"`
-	AdminToken  Secret   `toml:"admin_token"`
-	TokenTTL    Duration `toml:"token_ttl"`      // default: 1h
-	JWTAuthPath string   `toml:"jwt_auth_path"`  // default: "jwt"
+	Address     string          `toml:"address"`
+	AdminToken  Secret          `toml:"admin_token"`
+	TokenTTL    Duration        `toml:"token_ttl"`      // default: 1h
+	JWTAuthPath string          `toml:"jwt_auth_path"`  // default: "jwt"
+	Services    []ServiceConfig `toml:"services"`
+}
+
+// ServiceConfig describes a third-party service whose API key users
+// can enroll via OpenBao (e.g. OpenAI, Posit Connect).
+type ServiceConfig struct {
+	ID    string `toml:"id"`
+	Label string `toml:"label"`
+	Path  string `toml:"path"`
 }
 
 // Duration wraps time.Duration for TOML deserialization from strings
@@ -348,6 +357,16 @@ func validate(cfg *Config) error {
 		}
 		if cfg.OIDC == nil {
 			return fmt.Errorf("config: [oidc] is required when [openbao] is configured")
+		}
+		seen := make(map[string]bool)
+		for _, svc := range cfg.Openbao.Services {
+			if svc.ID == "" || svc.Label == "" || svc.Path == "" {
+				return fmt.Errorf("config: openbao.services entries must have id, label, and path")
+			}
+			if seen[svc.ID] {
+				return fmt.Errorf("config: duplicate openbao.services id %q", svc.ID)
+			}
+			seen[svc.ID] = true
 		}
 	}
 

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -173,6 +174,14 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		extraEnv = map[string]string{
 			"VAULT_ADDR":        srv.Config.Openbao.Address,
 			"BLOCKYARD_API_URL": apiURL,
+		}
+		if len(srv.Config.Openbao.Services) > 0 {
+			svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
+			for _, svc := range srv.Config.Openbao.Services {
+				svcMap[svc.ID] = svc.Path
+			}
+			svcJSON, _ := json.Marshal(svcMap)
+			extraEnv["BLOCKYARD_VAULT_SERVICES"] = string(svcJSON)
 		}
 	}
 

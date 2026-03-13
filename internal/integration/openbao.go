@@ -131,6 +131,37 @@ func (c *Client) KVWrite(ctx context.Context, path string, data map[string]any) 
 	return nil
 }
 
+// SecretExists checks whether a secret exists at the given KV v2 data
+// path without reading its value. It queries the metadata endpoint
+// (secret/metadata/...) which requires only metadata-read permission.
+// GET {addr}/v1/secret/metadata/{path}
+func (c *Client) SecretExists(ctx context.Context, path string) (bool, error) {
+	// Convert data path to metadata path for existence check.
+	metaPath := strings.Replace(path, "secret/data/", "secret/metadata/", 1)
+
+	url := fmt.Sprintf("%s/v1/%s", c.addr, metaPath)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false, fmt.Errorf("openbao secret exists: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", c.adminToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("openbao secret exists: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("openbao secret exists: status %d", resp.StatusCode)
+	}
+	return true, nil
+}
+
 // kvReadResponse is the relevant subset of OpenBao's KV v2 read response.
 type kvReadResponse struct {
 	Data struct {

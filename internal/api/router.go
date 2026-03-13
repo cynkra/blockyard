@@ -10,6 +10,7 @@ import (
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
+	"github.com/cynkra/blockyard/internal/ui"
 )
 
 func NewRouter(srv *server.Server) http.Handler {
@@ -32,6 +33,13 @@ func NewRouter(srv *server.Server) http.Handler {
 	if srv.Config.Telemetry != nil && srv.Config.Telemetry.MetricsEnabled {
 		r.Handle("/metrics", promhttp.Handler())
 	}
+
+	// UI routes — soft auth populates session context if available.
+	uiHandler := ui.New()
+	r.Group(func(r chi.Router) {
+		r.Use(auth.AppAuthMiddleware(authDeps, srv.RoleCache))
+		uiHandler.RegisterRoutes(r, srv)
+	})
 
 	// Auth endpoints (outside app-plane auth layer).
 	r.Get("/login", auth.LoginHandler(authDeps))
