@@ -16,6 +16,48 @@ curl -H "Authorization: Bearer $TOKEN" ...
 
 Returns `200 OK` with body `ok`. No authentication required.
 
+### `GET /readyz`
+
+Readiness probe that checks backend dependencies (database, Docker socket, and
+optionally IdP and OpenBao). No authentication required.
+
+**Response:** `200 OK` when all checks pass, `503 Service Unavailable` otherwise.
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "database": "pass",
+    "docker": "pass"
+  }
+}
+```
+
+When OIDC and/or OpenBao are configured, their health is included in the checks.
+
+### `GET /metrics`
+
+Prometheus metrics endpoint. Only available when `telemetry.metrics_enabled` is
+`true`. No authentication required.
+
+---
+
+## Authentication
+
+These endpoints are available when OIDC is configured.
+
+### `GET /login`
+
+Redirects the user to the configured OIDC provider for authentication.
+
+### `GET /callback`
+
+OIDC callback endpoint. Completes the login flow and sets a session cookie.
+
+### `POST /logout`
+
+Clears the session cookie and logs the user out.
+
 ---
 
 ## Apps
@@ -192,10 +234,217 @@ by live lines. If the task is complete, the full log is returned.
 
 ---
 
+## Access Control (ACL)
+
+Manage per-app access grants. Requires owner or admin permissions on the app.
+
+### `POST /api/v1/apps/{id}/access`
+
+Grant a user or group access to an app.
+
+**Request body:**
+
+```json
+{
+  "principal": "user-sub-or-group-name",
+  "kind": "user",
+  "role": "viewer"
+}
+```
+
+- `kind` must be `"user"` or `"group"`
+- `role` must be `"viewer"` or `"collaborator"`
+
+**Response:** `204 No Content`
+
+### `GET /api/v1/apps/{id}/access`
+
+List all access grants for an app.
+
+**Response:** `200 OK` — array of grant objects.
+
+```json
+[
+  {
+    "principal": "jane",
+    "kind": "user",
+    "role": "viewer",
+    "granted_by": "admin-sub",
+    "granted_at": "2025-01-15T09:30:00Z"
+  }
+]
+```
+
+### `DELETE /api/v1/apps/{id}/access/{kind}/{principal}`
+
+Revoke a specific access grant.
+
+**Response:** `204 No Content`
+
+---
+
+## Role Mappings
+
+Map OIDC groups to platform roles. Admin only.
+
+### `GET /api/v1/role-mappings`
+
+List all group-to-role mappings.
+
+**Response:** `200 OK`
+
+```json
+[
+  { "group_name": "data-team", "role": "publisher" }
+]
+```
+
+### `PUT /api/v1/role-mappings/{group_name}`
+
+Create or update a role mapping.
+
+**Request body:**
+
+```json
+{ "role": "publisher" }
+```
+
+Valid roles: `admin`, `publisher`, `viewer`.
+
+**Response:** `204 No Content`
+
+### `DELETE /api/v1/role-mappings/{group_name}`
+
+Delete a role mapping.
+
+**Response:** `204 No Content`
+
+---
+
+## Tags
+
+### `GET /api/v1/tags`
+
+List all tags.
+
+**Response:** `200 OK` — array of tag objects.
+
+### `POST /api/v1/tags`
+
+Create a new tag. Admin only. Tag names follow the same rules as app names
+(lowercase slugs, 1–63 characters).
+
+**Request body:**
+
+```json
+{ "name": "production" }
+```
+
+**Response:** `201 Created`
+
+### `DELETE /api/v1/tags/{tagID}`
+
+Delete a tag. Admin only. Cascades to all app–tag associations.
+
+**Response:** `204 No Content`
+
+### `POST /api/v1/apps/{id}/tags`
+
+Attach a tag to an app. Requires deploy permissions (owner, collaborator, or admin).
+
+**Request body:**
+
+```json
+{ "tag_id": "tag-uuid" }
+```
+
+**Response:** `204 No Content`
+
+### `DELETE /api/v1/apps/{id}/tags/{tagID}`
+
+Remove a tag from an app. Requires deploy permissions.
+
+**Response:** `204 No Content`
+
+---
+
+## Catalog
+
+### `GET /api/v1/catalog`
+
+Paginated, RBAC-filtered listing of apps with metadata and tags.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `tag` | `string` | — | Filter by tag name |
+| `search` | `string` | — | Search by app name, title, or description |
+| `page` | `integer` | `1` | Page number |
+| `per_page` | `integer` | `20` | Items per page (max 100) |
+
+**Response:** `200 OK`
+
+```json
+{
+  "items": [
+    {
+      "id": "a1b2c3...",
+      "name": "my-dashboard",
+      "title": "My Dashboard",
+      "description": "A Shiny dashboard",
+      "owner": "jane",
+      "tags": ["production"],
+      "status": "running",
+      "url": "/app/my-dashboard/",
+      "updated_at": "2025-01-15T09:30:00Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "per_page": 20
+}
+```
+
+---
+
+## Credentials
+
+### `POST /api/v1/credentials/vault`
+
+Exchange a session reference token for a scoped OpenBao token. This endpoint
+uses session token authentication (not the API bearer token). Only available
+when OpenBao is configured.
+
+**Response:** `200 OK`
+
+```json
+{
+  "token": "hvs.CAESIxyz...",
+  "ttl": 3600
+}
+```
+
+### `POST /api/v1/users/me/credentials/{service}`
+
+Store a user credential in OpenBao's KV store. Authenticated via session cookie
+or JWT bearer token. Only available when OpenBao is configured.
+
+**Request body:**
+
+```json
+{ "api_key": "sk-..." }
+```
+
+**Response:** `204 No Content`
+
+---
+
 ## Proxy (Data Plane)
 
-These routes do **not** require authentication. Session affinity is managed
-via cookies.
+When OIDC is configured, proxy routes enforce authentication — users must be
+logged in to access apps. Without OIDC, proxy routes are unauthenticated.
+Session affinity is managed via cookies.
 
 ### `GET /app/{name}/`
 

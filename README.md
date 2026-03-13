@@ -22,15 +22,15 @@ Blockyard acts as a container-orchestrated reverse proxy and application server.
 Client Request
       │
       ▼
-  ┌────────┐     ┌──────────┐     ┌──────────────────┐
-  │  Chi   │────▶│  Reverse │────▶│  Shiny Container │
-  │ Router │     │  Proxy   │     │  (per session)   │
-  └────────┘     └──────────┘     └──────────────────┘
-      │
-      ▼
-  ┌────────┐
-  │ SQLite │  (app & bundle metadata)
-  └────────┘
+  ┌────────┐     ┌──────┐     ┌──────────┐     ┌──────────────────┐
+  │  Chi   │────▶│ Auth │────▶│  Reverse │────▶│  Shiny Container │
+  │ Router │     │(OIDC)│     │  Proxy   │     │  (per session)   │
+  └────────┘     └──────┘     └──────────┘     └──────────────────┘
+      │                                               │
+      ▼                                               ▼
+  ┌────────┐                                    ┌──────────┐
+  │ SQLite │  (app & bundle metadata)           │ OpenBao  │ (credentials)
+  └────────┘                                    └──────────┘
 ```
 
 The server is generic over a `Backend` interface, allowing the Docker runtime to be swapped for a mock backend during testing.
@@ -41,6 +41,10 @@ The server is generic over a `Backend` interface, allowing the Docker runtime to
 - **Chi** — HTTP router with middleware support
 - **Docker SDK** — Docker API client (`github.com/docker/docker`)
 - **modernc.org/sqlite** — pure-Go SQLite driver
+- **OIDC** — OpenID Connect authentication (`coreos/go-oidc/v3`)
+- **OpenBao** — credential management (Vault-compatible)
+- **Prometheus** — metrics (`prometheus/client_golang`)
+- **OpenTelemetry** — distributed tracing
 - **log/slog** — structured JSON logging
 
 ## Getting Started
@@ -97,7 +101,8 @@ cmd/
     └── main.go              # Entry point
 internal/
 ├── config/
-│   └── config.go            # TOML + env var configuration
+│   ├── config.go            # TOML + env var configuration
+│   └── secret.go            # Secret type (redacted in logs)
 ├── server/
 │   └── state.go             # Shared application state
 ├── task/
@@ -108,11 +113,32 @@ internal/
 │   ├── apps.go              # App CRUD & lifecycle endpoints
 │   ├── bundles.go           # Bundle upload & list endpoints
 │   ├── tasks.go             # Task log streaming endpoint
+│   ├── access.go            # ACL management endpoints
+│   ├── roles.go             # Role mapping endpoints
+│   ├── tags.go              # Tag management endpoints
+│   ├── catalog.go           # Content discovery endpoint
+│   ├── credentials.go       # Vault credential exchange
+│   ├── users.go             # User-facing API (credential enrollment)
+│   ├── readyz.go            # Readiness probe
 │   └── error.go             # Shared error response helpers
+├── auth/
+│   ├── handlers.go          # OIDC login/callback/logout handlers
+│   ├── middleware.go         # App-plane auth middleware
+│   ├── oidc.go              # OIDC provider setup
+│   ├── session.go           # Session cookie encode/decode
+│   ├── identity.go          # CallerIdentity type & context helpers
+│   ├── jwt.go               # JWT/JWKS validation
+│   ├── rolecache.go         # Group-to-role mapping cache
+│   └── sessiontoken.go      # Worker session reference tokens
+├── authz/
+│   ├── rbac.go              # Role-based access control
+│   └── acl.go               # Per-app access control lists
 ├── backend/
 │   ├── backend.go           # Backend interface definition
 │   ├── docker/
-│   │   └── docker.go        # Docker/Podman implementation
+│   │   ├── docker.go        # Docker/Podman implementation
+│   │   ├── detect.go        # Runtime detection (Docker vs Podman)
+│   │   └── mounts.go        # Container mount configuration
 │   └── mock/
 │       └── mock.go          # In-memory mock for tests
 ├── bundle/
@@ -123,12 +149,24 @@ internal/
 │   ├── forward.go           # HTTP and WebSocket forwarding
 │   ├── coldstart.go         # On-demand worker startup
 │   ├── session.go           # Session-to-worker mapping
+│   ├── loadbalancer.go      # Multi-worker load balancing
+│   ├── autoscaler.go        # Automatic worker scaling
 │   ├── ws.go                # WebSocket proxying
 │   └── wscache.go           # WebSocket connection caching
 ├── ops/
 │   └── ops.go               # Health polling, log capture, orphan cleanup
 ├── db/
 │   └── db.go                # Pool creation, migrations & CRUD queries
+├── integration/
+│   ├── openbao.go           # OpenBao (Vault) client
+│   ├── bootstrap.go         # OpenBao policy/role bootstrapping
+│   ├── enrollment.go        # Credential enrollment in KV store
+│   └── tokencache.go        # Vault token cache
+├── audit/
+│   └── audit.go             # Append-only JSONL audit logging
+├── telemetry/
+│   ├── metrics.go           # Prometheus metrics
+│   └── tracing.go           # OpenTelemetry tracing middleware
 ├── logstore/
 │   └── store.go             # Container log storage
 ├── registry/
@@ -149,6 +187,8 @@ migrations/
 bind             = "0.0.0.0:8080"
 token            = "change-me-in-production"
 shutdown_timeout = "30s"
+# session_secret = "random-secret"   # required when [oidc] is configured
+# external_url   = "https://blockyard.example.com"
 
 [docker]
 socket     = "/var/run/docker.sock"
@@ -171,6 +211,32 @@ health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 log_retention        = "1h"
+session_idle_ttl     = "1h"
+idle_worker_timeout  = "5m"
+
+# Optional: OIDC authentication
+# [oidc]
+# issuer_url    = "https://idp.example.com/realms/myapp"
+# client_id     = "blockyard"
+# client_secret = "oidc-client-secret"
+# groups_claim  = "groups"       # default: "groups"
+# cookie_max_age = "24h"         # default: "24h"
+
+# Optional: OpenBao credential management (requires [oidc])
+# [openbao]
+# address     = "http://openbao:8200"
+# admin_token = "vault-admin-token"
+# token_ttl   = "1h"             # default: "1h"
+# jwt_auth_path = "jwt"          # default: "jwt"
+
+# Optional: Audit logging
+# [audit]
+# path = "/data/audit/blockyard.jsonl"
+
+# Optional: Telemetry
+# [telemetry]
+# metrics_enabled = true
+# otlp_endpoint   = "http://otel-collector:4317"
 ```
 
 ## Status

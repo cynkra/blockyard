@@ -24,3 +24,30 @@ health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 log_retention        = "1h"
+session_idle_ttl     = "1h"
+idle_worker_timeout  = "5m"
+
+# Optional: OIDC authentication
+# When enabled, server.session_secret is required.
+# [oidc]
+# issuer_url    = "https://idp.example.com/realms/myapp"
+# client_id     = "blockyard"
+# client_secret = "oidc-client-secret"
+# groups_claim  = "groups"
+# cookie_max_age = "24h"
+
+# Optional: OpenBao credential management (requires [oidc])
+# [openbao]
+# address     = "http://openbao:8200"
+# admin_token = "vault-admin-token"
+# token_ttl   = "1h"
+# jwt_auth_path = "jwt"
+
+# Optional: Append-only audit logging
+# [audit]
+# path = "/data/audit/blockyard.jsonl"
+
+# Optional: Prometheus metrics and OpenTelemetry tracing
+# [telemetry]
+# metrics_enabled = true
+# otlp_endpoint   = "http://otel-collector:4317"

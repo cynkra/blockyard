@@ -28,6 +28,8 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `bind` | `0.0.0.0:8080` | Address and port the server listens on |
 | `token` | *(required)* | Bearer token for the control plane API |
 | `shutdown_timeout` | `30s` | Time to drain in-flight requests on shutdown |
+| `session_secret` | — | Secret for encrypting session cookies (required when `[oidc]` is configured) |
+| `external_url` | — | Public-facing URL of the server (used for OIDC redirect URIs) |
 
 ### `[docker]`
 
@@ -62,6 +64,48 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `worker_start_timeout` | `60s` | Max time to wait for a worker to become healthy |
 | `max_workers` | `100` | Maximum number of concurrent worker containers |
 | `log_retention` | `1h` | How long to keep worker log entries before cleanup |
+| `session_idle_ttl` | `1h` | Time before an idle session is cleaned up |
+| `idle_worker_timeout` | `5m` | Time before an idle worker container is stopped |
+
+### `[oidc]` *(optional)*
+
+Enable OIDC authentication. When configured, `server.session_secret` is required.
+
+| Field | Default | Description |
+|---|---|---|
+| `issuer_url` | *(required)* | OIDC provider issuer URL |
+| `client_id` | *(required)* | OIDC client ID |
+| `client_secret` | *(required)* | OIDC client secret |
+| `groups_claim` | `groups` | JWT claim containing group memberships |
+| `cookie_max_age` | `24h` | Max lifetime of session cookies |
+
+### `[openbao]` *(optional)*
+
+Enable OpenBao credential management. Requires `[oidc]` to be configured.
+
+| Field | Default | Description |
+|---|---|---|
+| `address` | *(required)* | OpenBao server address |
+| `admin_token` | *(required)* | Admin token for OpenBao |
+| `token_ttl` | `1h` | TTL for issued tokens |
+| `jwt_auth_path` | `jwt` | Auth method path in OpenBao |
+
+### `[audit]` *(optional)*
+
+Enable append-only audit logging.
+
+| Field | Default | Description |
+|---|---|---|
+| `path` | *(required)* | Path to the JSONL audit log file |
+
+### `[telemetry]` *(optional)*
+
+Enable Prometheus metrics and OpenTelemetry tracing.
+
+| Field | Default | Description |
+|---|---|---|
+| `metrics_enabled` | `false` | Expose a `/metrics` endpoint for Prometheus |
+| `otlp_endpoint` | — | OpenTelemetry collector endpoint (e.g. `http://otel-collector:4317`) |
 
 ## Example
 
@@ -92,4 +136,30 @@ health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 log_retention        = "1h"
+session_idle_ttl     = "1h"
+idle_worker_timeout  = "5m"
+
+# Optional: OIDC authentication (requires server.session_secret)
+# [oidc]
+# issuer_url     = "https://idp.example.com/realms/myapp"
+# client_id      = "blockyard"
+# client_secret  = "oidc-client-secret"
+# groups_claim   = "groups"
+# cookie_max_age = "24h"
+
+# Optional: OpenBao credential management (requires [oidc])
+# [openbao]
+# address       = "http://openbao:8200"
+# admin_token   = "vault-admin-token"
+# token_ttl     = "1h"
+# jwt_auth_path = "jwt"
+
+# Optional: Audit logging
+# [audit]
+# path = "/data/audit/blockyard.jsonl"
+
+# Optional: Telemetry
+# [telemetry]
+# metrics_enabled = true
+# otlp_endpoint   = "http://otel-collector:4317"
 ```

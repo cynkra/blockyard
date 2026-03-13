@@ -23,6 +23,17 @@ Workers are isolated from each other via per-container bridge networks.
 Containers run with a read-only filesystem, all Linux capabilities dropped,
 and `no-new-privileges` set.
 
+## Authentication & Authorization
+
+Blockyard supports OIDC-based authentication. When configured, users must
+log in before accessing apps. Platform roles (admin, publisher, viewer) are
+derived from OIDC group claims via configurable role mappings. Per-app access
+control lists (ACLs) provide fine-grained authorization.
+
+Optionally, Blockyard integrates with [OpenBao](https://openbao.org/) (a
+Vault-compatible secrets manager) for credential management, allowing Shiny
+apps to securely access external services.
+
 ## Key concepts
 
 **App**
