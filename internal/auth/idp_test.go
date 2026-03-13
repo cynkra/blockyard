@@ -133,6 +133,15 @@ func TestMain(m *testing.M) {
 	}
 	if !ready {
 		fmt.Fprintf(os.Stderr, "keycloak did not become ready within 120s\n")
+		// Dump container logs for debugging.
+		if logReader, logErr := cli.ContainerLogs(ctx, containerID, container.LogsOptions{
+			ShowStdout: true, ShowStderr: true,
+		}); logErr == nil {
+			fmt.Fprintf(os.Stderr, "--- keycloak container logs ---\n")
+			io.Copy(os.Stderr, logReader)
+			logReader.Close()
+			fmt.Fprintf(os.Stderr, "--- end keycloak logs ---\n")
+		}
 		cleanup(ctx, cli)
 		os.Exit(1)
 	}
