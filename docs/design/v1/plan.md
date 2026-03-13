@@ -367,9 +367,12 @@ at runtime.
 2. OpenBao client — HTTP client for OpenBao's KV v2 and auth APIs
 3. OpenBao JWT auth setup — on server startup, configure OpenBao's JWT auth
    method with the IdP's JWKS URI
-4. Per-request credential injection — exchange user's JWT for a scoped
-   OpenBao token, inject as `X-Blockyard-Vault-Token` and
-   `X-Blockyard-Vault-Addr` headers on every proxied request
+4. Per-request credential injection (single-tenant mode) — exchange user's
+   JWT for a scoped OpenBao token, inject as `X-Blockyard-Vault-Token`
+   header on every proxied request. `VAULT_ADDR` is set as an env var at
+   container startup (not per-request). The two-phase exchange pattern for
+   shared containers (`max_sessions_per_worker > 1`) is delivered in
+   phase 1-5.
 5. Token cache — in-memory cache keyed by user `sub` to avoid per-request
    OpenBao calls
 6. Credential enrollment API — `POST /api/v1/users/me/credentials/{service}`
@@ -393,13 +396,13 @@ Headers are injected by the proxy, never by the client. The proxy strips
 any client-supplied `X-Shiny-User` or `X-Shiny-Groups` headers before
 forwarding.
 
-**Per-request credential injection via HTTP headers:**
+**Per-request credential injection (single-tenant mode):**
 
-OpenBao credentials are injected per-request as HTTP headers, not per-container
-as env vars. This is the same model Posit Connect uses for OAuth Integrations
-— per-user credentials are part of the Shiny session context, not the process
-environment. This design supports `max_sessions_per_worker > 1` safely: each
-user's request carries their own scoped token, even on shared workers.
+This phase implements the single-tenant flow (`max_sessions_per_worker = 1`).
+The proxy injects the user's scoped OpenBao token directly as an HTTP header.
+`VAULT_ADDR` is set as a container env var at spawn time (recognized natively
+by Vault/OpenBao client libraries), not as a per-request header. The two-phase
+exchange pattern for shared containers is delivered in phase 1-5.
 
 ```
 Per-request flow (on every proxied HTTP request):
@@ -410,9 +413,7 @@ Per-request flow (on every proxied HTTP request):
      Body: { "role": "blockyard-user", "jwt": "{access_token}" }
      OpenBao validates JWT against IdP JWKS, returns scoped token
      Cache the token (keyed by sub, TTL = token_ttl)
-3. Inject headers:
-   - X-Blockyard-Vault-Token: {scoped_token}
-   - X-Blockyard-Vault-Addr: {openbao_address}
+3. Inject header: X-Blockyard-Vault-Token: {scoped_token}
 4. R app reads via session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN
 ```
 
@@ -434,11 +435,18 @@ type cachedToken struct {
 
 The cache TTL matches `[openbao] token_ttl` (default 1h). On cache miss, the
 proxy exchanges the user's access token for a scoped OpenBao token and caches
-the result. No `WorkerSpec` changes are needed — credentials never enter the
-container environment.
+the result.
 
-**Note:** `WorkerSpec` does not carry `vault_token` or `vault_addr`. These are
-injected per-request via headers, not per-container via env vars.
+**WorkerSpec additions:** when `[openbao]` is configured, `WorkerSpec` gains
+two env vars injected at container startup:
+- `VAULT_ADDR` — the OpenBao address reachable from inside the container
+  (recognized natively by Vault/OpenBao client libraries)
+- `BLOCKYARD_API_URL` — the server's internal URL for the credential exchange
+  endpoint (used by the two-phase exchange pattern in phase 1-5)
+
+The vault *token* is never set as an env var — it is injected per-request via
+HTTP headers (raw token in single-tenant mode, session reference token in
+shared containers).
 
 > **Open research item:** Investigate how Posit Connect and ShinyProxy handle
 > per-user credentials on long-lived WebSocket connections. Headers are only
@@ -969,19 +977,21 @@ or shows what's available after login.
    authenticated users see the app dashboard
 2. App dashboard — server-rendered HTML of the catalog (RBAC-filtered),
    with search and tag filtering
-3. Template engine setup — Go `html/template` with `embed.FS`
-4. Minimal static assets — CSS only, no JavaScript framework
-5. v0-compatible fallback — when OIDC is not configured, `/` shows all
+3. Credential enrollment section on the dashboard — for each service in the
+   operator-defined `[[openbao.services]]` catalog, a row showing the
+   service label, enrollment status (configured / not configured), and a
+   form to save or update the API key
+4. Template engine setup — Go `html/template` with `embed.FS`
+5. Minimal static assets — CSS only, no JavaScript framework
+6. v0-compatible fallback — when OIDC is not configured, `/` shows all
    deployed apps without auth (matches v0's open app-plane model)
-6. Router integration — `GET /` and `/static/*` registered before vanity
-   catch-all
+7. Router integration — `GET /` and `/static/*` registered alongside app
+   routes
 
 **What this phase does NOT include:**
 
 - In-app navigation chrome (navbar, app switcher) — deferred to v2
 - Admin UI for app management — operators use the REST API or CLI (v2)
-- Credential enrollment UI — users enroll via the API (phase 1-3) or
-  OpenBao web UI (v1a stopgap)
 - User settings or profile pages
 
 **Page behaviors:**
@@ -1006,7 +1016,15 @@ or shows what's available after login.
    - Tag filter (if tags exist)
    - Empty state: "No apps available" with role-appropriate messaging
      (publisher: "Deploy your first app", viewer: "No apps shared with you")
-3. Each app card links to /app/{name}/ (or vanity URL if set)
+3. Each app card links to /app/{name}/
+4. If [[openbao.services]] is configured, render "Your API Keys" section:
+   - One row per service: label, status indicator (✓ configured / not set)
+   - Each row has an inline form: text input + "Save" button
+   - Form POSTs to /api/v1/users/me/credentials/{service} (phase 1-3 API)
+   - On success, page reloads showing updated status
+   - Status check: server queries OpenBao for existence of the secret at
+     the service's path for the current user (read, not reveal the value)
+   - Section is hidden when [openbao] is not configured or has no services
 ```
 
 `GET /` (v0 mode, no OIDC):
@@ -1027,7 +1045,7 @@ type UI struct {
     static    http.Handler
 }
 
-func New(srv *server.Server) *UI {
+func New() *UI {
     tmpl := template.Must(template.ParseFS(content, "templates/*.html"))
     static := http.FileServer(http.FS(content))
     return &UI{templates: tmpl, static: static}
@@ -1042,10 +1060,90 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 **Dashboard data flow:**
 
 The dashboard does NOT call the catalog REST API over HTTP. It calls the
-same internal Go functions that the catalog API handler uses — the
-`catalog` package's query functions accept the authenticated user's
-context and return RBAC-filtered results. This avoids a loopback HTTP
-call and keeps the UI server-rendered in a single request.
+same internal Go functions that the catalog API handler uses —
+`DB.ListCatalog()` and `DB.ListAppTags()` — with the authenticated
+user's context to return RBAC-filtered results. This avoids a loopback
+HTTP call and keeps the UI server-rendered in a single request.
+
+**Credential enrollment — backend additions:**
+
+Phase 1-3 delivered the generic enrollment API
+(`POST /api/v1/users/me/credentials/{service}`). This phase extends it
+with three new pieces:
+
+*1. Operator-defined service catalog config:*
+
+```go
+type ServiceConfig struct {
+    ID    string `toml:"id"`    // stable identifier, e.g. "openai"
+    Label string `toml:"label"` // display name, e.g. "OpenAI API Key"
+    Path  string `toml:"path"`  // OpenBao path relative to secret/data/users/{sub}/
+}
+```
+
+```toml
+[[openbao.services]]
+id    = "openai"
+label = "OpenAI API Key"
+path  = "apikeys/openai"
+
+[[openbao.services]]
+id    = "anthropic"
+label = "Anthropic API Key"
+path  = "apikeys/anthropic"
+```
+
+The service catalog is immutable at runtime — changes require a server
+restart. The `id` is used in API paths and the `BLOCKYARD_VAULT_SERVICES`
+env var. The `path` is relative to `secret/data/users/{sub}/` in OpenBao.
+The enrollment API (phase 1-3) is extended to validate `{service}` against
+this catalog and use the configured `path` instead of a hardcoded prefix.
+
+*2. OpenBao operational model for user secrets:*
+
+User-provided secrets (API keys) must not be readable by the blockyard
+server or any single operator. The following token/policy model enforces
+this:
+
+- **Enrollment token** (used by blockyard server): policy grants `create`
+  and `update` on `secret/data/users/*`, but **no `read`**. The server can
+  store secrets but never retrieve them.
+- **User token** (from JWT auth, per-session): policy grants `read` on
+  `secret/data/users/{{identity.entity.aliases.jwt.name}}/*` only. Each
+  user can read only their own secrets.
+- **Admin token** (for operational tasks): policy explicitly excludes
+  `read` on `secret/data/users/*`.
+- **Root token**: revoked after initial bootstrap. Regeneration requires a
+  quorum of unseal key holders (Shamir's secret sharing).
+
+This means no token that exists in steady state can read another user's
+secrets. Extracting secrets requires regenerating a root token, which
+requires collusion among multiple unseal key holders.
+
+*3. Storage credential auto-provisioning:*
+
+Every user needs a per-user key to access their storage slice (e.g. an S3
+bucket). This credential is generated server-side and stored in OpenBao at
+`secret/data/users/{sub}/storage` — the user never sees or enters it.
+
+Provisioning is lazy: on the first authenticated request where no storage
+credential exists for the user's `sub`, the server generates the key and
+writes it to OpenBao. This check runs in the auth middleware (or proxy
+layer) and is invisible to the user.
+
+*4. Service catalog injection into containers:*
+
+When `[openbao]` is configured with services, the `WorkerSpec` gains an
+additional env var at container startup:
+
+```
+BLOCKYARD_VAULT_SERVICES={"openai":"apikeys/openai","anthropic":"apikeys/anthropic"}
+```
+
+This is a JSON object mapping service `id` to OpenBao `path` (relative to
+`secret/data/users/{sub}/`). R apps parse this env var once at startup,
+then fetch individual secrets using the scoped token from
+`session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN` and `VAULT_ADDR`.
 
 **Styling approach:**
 
@@ -1055,14 +1153,14 @@ app cards. The goal is "clean and functional," not "polished." Total CSS
 should stay under 200 lines. The design language should be neutral enough
 that operators don't feel compelled to customize immediately.
 
-**Router integration (updates phase 1-5 router):**
+**Router integration:**
 
 ```go
 func NewRouter(srv *server.Server) *chi.Mux {
     r := chi.NewRouter()
 
-    // Phase 1-7: UI routes (must be before vanity catch-all)
-    uiHandler := ui.New(srv)
+    // Phase 1-7: UI routes
+    uiHandler := ui.New()
     uiHandler.RegisterRoutes(r, srv)
 
     // API routes (existing)
@@ -1073,22 +1171,14 @@ func NewRouter(srv *server.Server) *chi.Mux {
     r.Get("/callback", callbackHandler(srv))
     r.Post("/logout", logoutHandler(srv))
 
-    // Vanity URL catch-all
-    r.Get("/{vanity}", trailingSlashRedirectVanity)
-    r.HandleFunc("/{vanity}/", vanityProxyHandler(srv))
-    r.HandleFunc("/{vanity}/*", vanityProxyHandler(srv))
-
-    // Standard app routes
-    r.Get("/app/{name}", trailingSlashRedirect)
-    r.HandleFunc("/app/{name}/", proxyHandler(srv))
-    r.HandleFunc("/app/{name}/*", proxyHandler(srv))
+    // App routes (name and UUID resolution)
+    r.Get("/app/{ref}", trailingSlashRedirect)
+    r.HandleFunc("/app/{ref}/", proxyHandler(srv))
+    r.HandleFunc("/app/{ref}/*", proxyHandler(srv))
 
     return r
 }
 ```
-
-`GET /` is a specific route and takes priority over `/{vanity}` in chi's
-routing — no conflict.
 
 ## Config Summary
 
@@ -1137,6 +1227,16 @@ cookie_max_age = "24h"
 address     = "https://bao.example.com"
 admin_token = "..."                    # use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
 token_ttl   = "1h"
+
+[[openbao.services]]
+id    = "openai"
+label = "OpenAI API Key"
+path  = "apikeys/openai"
+
+[[openbao.services]]
+id    = "anthropic"
+label = "Anthropic API Key"
+path  = "apikeys/anthropic"
 
 [telemetry]
 metrics_enabled = true
@@ -1298,7 +1398,7 @@ Phase 1-7: User-Facing Web UI
   ├── Server-rendered Go templates (embed.FS)
   ├── v0-compatible fallback (no OIDC)
   └── depends on: Phase 1-1 (auth middleware), Phase 1-2 (RBAC),
-      Phase 1-5 (catalog queries, router structure)
+      Phase 1-5 (catalog queries)
 ```
 
 Phases 1-5, 1-6, and 1-7 are independent of each other in terms of

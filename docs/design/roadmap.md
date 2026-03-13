@@ -603,9 +603,10 @@ infrastructure.
   dashboard at `/` listing all apps the user has access to (consuming the
   same catalog queries as the content discovery API, filtered by RBAC).
   Rendered with Go's `html/template` and embedded via `embed.FS` — no
-  JavaScript framework, no build step. In v0 mode (no OIDC), the root
-  page shows all deployed apps without auth. In-app navigation chrome
-  (navbar, app switcher) is deferred to v2.
+  JavaScript framework, no build step. Credential enrollment forms for
+  operator-defined services (OpenBao) are inline on the dashboard. In v0
+  mode (no OIDC), the root page shows all deployed apps without auth.
+  In-app navigation chrome (navbar, app switcher) is deferred to v2.
 
 ### v2
 
@@ -624,8 +625,7 @@ infrastructure.
   apps, list content, tail logs, manage settings. Communicates via the REST
   API.
 
-- **Web UI.** Admin dashboard, content browser, log viewer; credential
-  enrollment UI.
+- **Web UI.** Admin dashboard, content browser, log viewer.
 
 - **Multiple execution environment images.** Per-app image selection; operators
   or app developers specify which image to use per deployment.
