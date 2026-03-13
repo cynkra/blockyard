@@ -6,11 +6,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/rvcache"
 	"github.com/cynkra/blockyard/internal/task"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // RestoreParams holds everything the restore goroutine needs.
@@ -27,6 +30,8 @@ type RestoreParams struct {
 	RvBinaryPath string // if set, skip download and use this path directly
 	Retention    int
 	BasePath     string // bundle_server_path for retention cleanup
+	AuditLog     *audit.Log
+	AuditActor   string // sub of the user who triggered the upload
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
@@ -41,21 +46,50 @@ func SpawnRestore(params RestoreParams) {
 					"panic", r)
 				params.Sender.Write(fmt.Sprintf("FATAL: restore task panicked: %v", r))
 				params.Sender.Complete(task.Failed)
+				telemetry.BundleRestoresFailed.Inc()
+				if params.AuditLog != nil {
+					params.AuditLog.Emit(audit.Entry{
+						Action: audit.ActionBundleRestoreFail,
+						Actor:  params.AuditActor,
+						Target: params.AppID,
+						Detail: map[string]any{"bundle_id": params.BundleID},
+					})
+				}
 				if err := params.DB.UpdateBundleStatus(params.BundleID, "failed"); err != nil {
 					slog.Error("restore: update status to failed after panic",
 						"bundle_id", params.BundleID, "error", err)
 				}
 			}
 		}()
+		buildStart := time.Now()
 		err := runRestore(params)
 		if err != nil {
 			params.Sender.Write(fmt.Sprintf("ERROR: %s", err))
 			params.Sender.Complete(task.Failed)
+			telemetry.BundleRestoresFailed.Inc()
+			if params.AuditLog != nil {
+				params.AuditLog.Emit(audit.Entry{
+					Action: audit.ActionBundleRestoreFail,
+					Actor:  params.AuditActor,
+					Target: params.AppID,
+					Detail: map[string]any{"bundle_id": params.BundleID},
+				})
+			}
 			if err := params.DB.UpdateBundleStatus(params.BundleID, "failed"); err != nil {
 				slog.Error("restore: update status to failed",
 					"bundle_id", params.BundleID, "error", err)
 			}
 			return
+		}
+		telemetry.BuildDuration.Observe(time.Since(buildStart).Seconds())
+		telemetry.BundleRestoresSucceeded.Inc()
+		if params.AuditLog != nil {
+			params.AuditLog.Emit(audit.Entry{
+				Action: audit.ActionBundleRestoreOK,
+				Actor:  params.AuditActor,
+				Target: params.AppID,
+				Detail: map[string]any{"bundle_id": params.BundleID},
+			})
 		}
 		params.Sender.Complete(task.Completed)
 		// Enforce retention after successful deploy

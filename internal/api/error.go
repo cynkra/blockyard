@@ -35,3 +35,7 @@ func serviceUnavailable(w http.ResponseWriter, msg string) {
 func serverError(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusInternalServerError, "internal_error", msg)
 }
+
+func forbidden(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusForbidden, "forbidden", msg)
+}

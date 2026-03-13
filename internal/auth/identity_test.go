@@ -1,0 +1,165 @@
+package auth_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/cynkra/blockyard/internal/auth"
+)
+
+func TestRoleOrdering(t *testing.T) {
+	if !(auth.RoleNone < auth.RoleViewer) {
+		t.Error("RoleNone should be less than RoleViewer")
+	}
+	if !(auth.RoleViewer < auth.RolePublisher) {
+		t.Error("RoleViewer should be less than RolePublisher")
+	}
+	if !(auth.RolePublisher < auth.RoleAdmin) {
+		t.Error("RolePublisher should be less than RoleAdmin")
+	}
+}
+
+func TestRoleString(t *testing.T) {
+	tests := []struct {
+		role auth.Role
+		want string
+	}{
+		{auth.RoleNone, "none"},
+		{auth.RoleViewer, "viewer"},
+		{auth.RolePublisher, "publisher"},
+		{auth.RoleAdmin, "admin"},
+	}
+	for _, tt := range tests {
+		if got := tt.role.String(); got != tt.want {
+			t.Errorf("Role(%d).String() = %q, want %q", tt.role, got, tt.want)
+		}
+	}
+}
+
+func TestParseRole(t *testing.T) {
+	tests := []struct {
+		input string
+		want  auth.Role
+	}{
+		{"admin", auth.RoleAdmin},
+		{"publisher", auth.RolePublisher},
+		{"viewer", auth.RoleViewer},
+		{"none", auth.RoleNone},
+		{"unknown", auth.RoleNone},
+		{"", auth.RoleNone},
+	}
+	for _, tt := range tests {
+		if got := auth.ParseRole(tt.input); got != tt.want {
+			t.Errorf("ParseRole(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCanCreateApp(t *testing.T) {
+	if auth.RoleNone.CanCreateApp() {
+		t.Error("RoleNone should not be able to create apps")
+	}
+	if auth.RoleViewer.CanCreateApp() {
+		t.Error("RoleViewer should not be able to create apps")
+	}
+	if !auth.RolePublisher.CanCreateApp() {
+		t.Error("RolePublisher should be able to create apps")
+	}
+	if !auth.RoleAdmin.CanCreateApp() {
+		t.Error("RoleAdmin should be able to create apps")
+	}
+}
+
+func TestCanViewAllApps(t *testing.T) {
+	if auth.RoleNone.CanViewAllApps() {
+		t.Error("RoleNone should not view all apps")
+	}
+	if auth.RoleViewer.CanViewAllApps() {
+		t.Error("RoleViewer should not view all apps")
+	}
+	if auth.RolePublisher.CanViewAllApps() {
+		t.Error("RolePublisher should not view all apps")
+	}
+	if !auth.RoleAdmin.CanViewAllApps() {
+		t.Error("RoleAdmin should view all apps")
+	}
+}
+
+func TestCanManageRoles(t *testing.T) {
+	if auth.RolePublisher.CanManageRoles() {
+		t.Error("RolePublisher should not manage roles")
+	}
+	if !auth.RoleAdmin.CanManageRoles() {
+		t.Error("RoleAdmin should manage roles")
+	}
+}
+
+func TestCallerContextRoundTrip(t *testing.T) {
+	caller := &auth.CallerIdentity{
+		Sub:    "user-1",
+		Groups: []string{"developers"},
+		Role:   auth.RolePublisher,
+		Source: auth.AuthSourceJWT,
+	}
+
+	ctx := auth.ContextWithCaller(context.Background(), caller)
+	got := auth.CallerFromContext(ctx)
+	if got == nil {
+		t.Fatal("CallerFromContext returned nil")
+	}
+	if got.Sub != "user-1" {
+		t.Errorf("Sub = %q, want %q", got.Sub, "user-1")
+	}
+	if got.Role != auth.RolePublisher {
+		t.Errorf("Role = %v, want %v", got.Role, auth.RolePublisher)
+	}
+}
+
+func TestCallerFromContextNil(t *testing.T) {
+	got := auth.CallerFromContext(context.Background())
+	if got != nil {
+		t.Errorf("CallerFromContext on empty context = %v, want nil", got)
+	}
+}
+
+func TestDeriveRoleNoMatches(t *testing.T) {
+	cache := auth.NewRoleMappingCache()
+	cache.Set("admins", auth.RoleAdmin)
+
+	role := auth.DeriveRole([]string{"developers"}, cache)
+	if role != auth.RoleNone {
+		t.Errorf("DeriveRole with no matches = %v, want RoleNone", role)
+	}
+}
+
+func TestDeriveRoleSingleMatch(t *testing.T) {
+	cache := auth.NewRoleMappingCache()
+	cache.Set("developers", auth.RolePublisher)
+
+	role := auth.DeriveRole([]string{"developers"}, cache)
+	if role != auth.RolePublisher {
+		t.Errorf("DeriveRole = %v, want RolePublisher", role)
+	}
+}
+
+func TestDeriveRoleHighestWins(t *testing.T) {
+	cache := auth.NewRoleMappingCache()
+	cache.Set("viewers", auth.RoleViewer)
+	cache.Set("admins", auth.RoleAdmin)
+	cache.Set("developers", auth.RolePublisher)
+
+	role := auth.DeriveRole([]string{"viewers", "developers", "admins"}, cache)
+	if role != auth.RoleAdmin {
+		t.Errorf("DeriveRole with multiple matches = %v, want RoleAdmin", role)
+	}
+}
+
+func TestDeriveRoleEmptyGroups(t *testing.T) {
+	cache := auth.NewRoleMappingCache()
+	cache.Set("admins", auth.RoleAdmin)
+
+	role := auth.DeriveRole(nil, cache)
+	if role != auth.RoleNone {
+		t.Errorf("DeriveRole with nil groups = %v, want RoleNone", role)
+	}
+}

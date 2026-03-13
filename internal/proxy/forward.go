@@ -25,7 +25,14 @@ func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName string, t
 		req.URL.Path = stripAppPrefix(req.URL.Path, appName)
 		req.URL.RawPath = ""
 		req.Host = addr
-		req.Header.Set("X-Forwarded-Proto", "http")
+
+		// Preserve the original protocol so Shiny apps behind a
+		// TLS-terminating reverse proxy see the correct scheme.
+		proto := req.Header.Get("X-Forwarded-Proto")
+		if proto == "" {
+			proto = "http"
+		}
+		req.Header.Set("X-Forwarded-Proto", proto)
 	}
 
 	proxy.ServeHTTP(w, r)

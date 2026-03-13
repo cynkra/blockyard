@@ -4,10 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/coder/websocket"
 
-	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -27,6 +27,10 @@ func forwardClientHeaders(r *http.Request) http.Header {
 		"Sec-WebSocket-Protocol",
 		"Sec-WebSocket-Extensions",
 		"User-Agent",
+		"X-Shiny-User",
+		"X-Shiny-Groups",
+		"X-Blockyard-Vault-Token",
+		"X-Blockyard-Session-Token",
 	} {
 		if v := r.Header.Get(key); v != "" {
 			h.Set(key, v)
@@ -215,15 +219,17 @@ done:
 		cache.Cache(sessionID, br,
 			srv.Config.Proxy.WsCacheTTL.Duration, func() {
 				br.Close()
-				workerID, ok := srv.Sessions.Get(sessionID)
+				// TTL expired without reconnect — clean up session
+				entry, ok := srv.Sessions.Get(sessionID)
 				if !ok {
 					return
 				}
 				srv.Sessions.Delete(sessionID)
-				if srv.Sessions.CountForWorker(workerID) == 0 {
-					slog.Info("ws cache expired, evicting idle worker",
-						"worker_id", workerID, "session_id", sessionID)
-					ops.EvictWorker(context.Background(), srv, workerID)
+				// If no other sessions reference this worker, mark idle.
+				// The idle worker reaper will evict it after idle_worker_timeout
+				// if no new sessions arrive (and it's not the last worker for the app).
+				if srv.Sessions.CountForWorker(entry.WorkerID) == 0 {
+					srv.Workers.SetIdleSince(entry.WorkerID, time.Now())
 				}
 			})
 	} else {

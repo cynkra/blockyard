@@ -23,6 +23,7 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    needs: [check]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -35,9 +36,39 @@ jobs:
           name: coverage-docker
           path: coverage-docker.out
 
+  idp:
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - run: docker pull quay.io/keycloak/keycloak:26.0
+      - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./... ./internal/auth/...
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-idp
+          path: coverage-idp.out
+
+  openbao:
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+      - run: docker pull ghcr.io/openbao/openbao:latest
+      - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./... ./internal/integration/...
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-openbao
+          path: coverage-openbao.out
+
   coverage:
     runs-on: ubuntu-latest
-    needs: [check, docker]
+    needs: [check, docker, idp, openbao]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
@@ -46,6 +77,6 @@ jobs:
           merge-multiple: true
       - uses: codecov/codecov-action@v5
         with:
-          files: coverage-check.out,coverage-docker.out
-          flags: unit,docker
+          files: coverage-check.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out
+          flags: unit,docker,idp,openbao
           fail_ci_if_error: true

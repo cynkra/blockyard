@@ -20,7 +20,7 @@ func testColdstartServer(t *testing.T) *server.Server {
 
 	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,
@@ -51,7 +51,7 @@ func testColdstartServer(t *testing.T) *server.Server {
 
 func createTestApp(t *testing.T, srv *server.Server, name string, withBundle bool) *db.AppRow {
 	t.Helper()
-	app, err := srv.DB.CreateApp(name)
+	app, err := srv.DB.CreateApp(name, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -297,6 +297,9 @@ func (d *DockerBackend) createWorkerContainer(
 		fmt.Sprintf("SHINY_PORT=%d", spec.ShinyPort),
 		"R_LIBS=/blockyard-lib",
 	}
+	for k, v := range spec.Env {
+		env = append(env, k+"="+v)
+	}
 
 	var resources container.Resources
 	if spec.MemoryLimit != "" {

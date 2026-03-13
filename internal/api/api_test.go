@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
@@ -24,7 +25,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -43,6 +44,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
+	srv.RoleCache = auth.NewRoleMappingCache()
 	handler := NewRouter(srv)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -314,16 +316,33 @@ func TestUpdateApp(t *testing.T) {
 	}
 }
 
-func TestUpdateAppRejectsMultiSession(t *testing.T) {
+func TestUpdateAppRejectsInvalidSessionLimit(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
+	// max_sessions_per_worker = 0 is invalid
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
-		strings.NewReader(`{"max_sessions_per_worker":2}`))
+		strings.NewReader(`{"max_sessions_per_worker":0}`))
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", resp.StatusCode)
+		t.Errorf("expected 400 for max_sessions_per_worker=0, got %d", resp.StatusCode)
+	}
+
+	// max_sessions_per_worker = 2 is now allowed
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"max_sessions_per_worker":2}`))
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for max_sessions_per_worker=2, got %d", resp.StatusCode)
+	}
+
+	// max_workers_per_app = 0 is invalid
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"max_workers_per_app":0}`))
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for max_workers_per_app=0, got %d", resp.StatusCode)
 	}
 }
 
@@ -412,16 +431,29 @@ func TestStartAndStopApp(t *testing.T) {
 		t.Errorf("expected still 1 worker, got %d", srv.Workers.Count())
 	}
 
-	// Stop
+	// Stop — returns 202 with task_id for async drain
 	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
 	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != 200 {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if resp.StatusCode != 202 {
+		t.Errorf("expected 202, got %d", resp.StatusCode)
 	}
 	var stopBody map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&stopBody)
-	if stopBody["workers_stopped"] != float64(1) {
-		t.Errorf("expected workers_stopped=1, got %v", stopBody["workers_stopped"])
+	if stopBody["task_id"] == nil || stopBody["task_id"] == "" {
+		t.Error("expected non-empty task_id")
+	}
+	if stopBody["worker_count"] != float64(1) {
+		t.Errorf("expected worker_count=1, got %v", stopBody["worker_count"])
+	}
+
+	// Wait for async drain to complete.
+	taskID := stopBody["task_id"].(string)
+	for i := 0; i < 50; i++ {
+		st, ok := srv.Tasks.Status(taskID)
+		if ok && st != task.Running {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	if srv.Workers.Count() != 0 {
@@ -471,7 +503,7 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -847,11 +879,8 @@ func TestStopAppNoRunningWorkers(t *testing.T) {
 	}
 	var body map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body["workers_stopped"] != float64(0) {
-		t.Errorf("expected workers_stopped=0, got %v", body["workers_stopped"])
-	}
-	if body["status"] != "stopped" {
-		t.Errorf("expected status=stopped, got %v", body["status"])
+	if body["stopped_workers"] != float64(0) {
+		t.Errorf("expected stopped_workers=0, got %v", body["stopped_workers"])
 	}
 }
 
@@ -909,7 +938,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	// Create a server with a very small max bundle size
 	tmp := t.TempDir()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
