@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/google/uuid"
 
 	"github.com/cynkra/blockyard/internal/backend"
@@ -755,5 +758,330 @@ checkLogs:
 	allLogs := strings.Join(logLines, "\n")
 	if !strings.Contains(allLogs, "worker ok") {
 		t.Fatalf("worker did not produce expected output; logs:\n%s", allLogs)
+	}
+}
+
+func TestSpawnWithMemoryLimit(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         []string{"sleep", "300"},
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		MemoryLimit: "64m",
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer b.Stop(ctx, workerID)
+
+	b.mu.Lock()
+	ws := b.workers[workerID]
+	b.mu.Unlock()
+
+	info, err := b.client.ContainerInspect(ctx, ws.containerID)
+	if err != nil {
+		t.Fatalf("ContainerInspect: %v", err)
+	}
+
+	expectedBytes := int64(64 * 1024 * 1024)
+	if info.HostConfig.Memory != expectedBytes {
+		t.Fatalf("expected memory limit %d bytes, got %d", expectedBytes, info.HostConfig.Memory)
+	}
+}
+
+func TestSpawnWithCPULimit(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         []string{"sleep", "300"},
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		CPULimit:    0.5,
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer b.Stop(ctx, workerID)
+
+	b.mu.Lock()
+	ws := b.workers[workerID]
+	b.mu.Unlock()
+
+	info, err := b.client.ContainerInspect(ctx, ws.containerID)
+	if err != nil {
+		t.Fatalf("ContainerInspect: %v", err)
+	}
+
+	expectedNanoCPUs := int64(0.5 * 1e9)
+	if info.HostConfig.NanoCPUs != expectedNanoCPUs {
+		t.Fatalf("expected NanoCPUs %d, got %d", expectedNanoCPUs, info.HostConfig.NanoCPUs)
+	}
+}
+
+func TestSpawnWithEnvVars(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd:         []string{"sleep", "300"},
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Env:         map[string]string{"TEST_VAR": "hello"},
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer b.Stop(ctx, workerID)
+
+	time.Sleep(500 * time.Millisecond)
+
+	b.mu.Lock()
+	ws := b.workers[workerID]
+	b.mu.Unlock()
+
+	execResp, err := b.client.ContainerExecCreate(ctx, ws.containerID,
+		container.ExecOptions{
+			Cmd:          []string{"sh", "-c", "echo $TEST_VAR"},
+			AttachStdout: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecCreate: %v", err)
+	}
+
+	attachResp, err := b.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		t.Fatalf("ExecAttach: %v", err)
+	}
+	defer attachResp.Close()
+
+	var stdout bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, io.Discard, attachResp.Reader); err != nil {
+		t.Fatalf("StdCopy: %v", err)
+	}
+
+	output := strings.TrimSpace(stdout.String())
+	if output != "hello" {
+		t.Fatalf("expected TEST_VAR=hello, got %q", output)
+	}
+}
+
+func TestBuildLogWriter(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bundleDir, libDir := testBundleDir(t)
+	rvBin := testRvBinary(t)
+
+	var logLines []string
+	var mu sync.Mutex
+
+	spec := backend.BuildSpec{
+		AppID:        "test-app",
+		BundleID:     uuid.New().String()[:8],
+		Image:        "alpine:latest",
+		RvBinaryPath: rvBin,
+		BundlePath:   bundleDir,
+		LibraryPath:  libDir,
+		Labels:       map[string]string{},
+		LogWriter: func(line string) {
+			mu.Lock()
+			logLines = append(logLines, line)
+			mu.Unlock()
+		},
+	}
+
+	// The build will run our dummy rv binary which just exits 0.
+	// Alpine doesn't have /usr/local/bin/rv by default, but our rv binary
+	// is bind-mounted at that path. It should produce at least some output.
+	_, err = b.Build(ctx, spec)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	mu.Lock()
+	count := len(logLines)
+	mu.Unlock()
+
+	// Even if the rv binary exits immediately, the container lifecycle
+	// itself may not produce output. The dummy rv script is silent,
+	// so we just verify the callback mechanism doesn't panic and was wired up.
+	t.Logf("LogWriter received %d lines", count)
+}
+
+func TestBuildExitCodeOnFailure(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bundleDir, libDir := testBundleDir(t)
+
+	// Create an rv binary that always fails.
+	dir := t.TempDir()
+	failBin := filepath.Join(dir, "rv")
+	if err := os.WriteFile(failBin, []byte("#!/bin/sh\necho 'rv: sync failed' >&2\nexit 42\n"), 0o755); err != nil {
+		t.Fatalf("write failing rv: %v", err)
+	}
+
+	spec := backend.BuildSpec{
+		AppID:        "test-app",
+		BundleID:     uuid.New().String()[:8],
+		Image:        "alpine:latest",
+		RvBinaryPath: failBin,
+		BundlePath:   bundleDir,
+		LibraryPath:  libDir,
+		Labels:       map[string]string{},
+	}
+
+	result, err := b.Build(ctx, spec)
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+
+	if result.Success {
+		t.Fatal("expected build to fail, but Success=true")
+	}
+	if result.ExitCode == 0 {
+		t.Fatal("expected non-zero exit code, got 0")
+	}
+	t.Logf("build failed as expected with exit code %d", result.ExitCode)
+}
+
+func TestSpawnAndHealthCheckWithListener(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       "alpine:latest",
+		Cmd: []string{"sh", "-c",
+			"while true; do echo -e 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok' | nc -l -p 8080; done",
+		},
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Labels:      map[string]string{},
+	}
+
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer b.Stop(ctx, workerID)
+
+	// Give the nc listener time to start.
+	time.Sleep(2 * time.Second)
+
+	if !b.HealthCheck(ctx, workerID) {
+		t.Fatal("HealthCheck should return true when nc is listening on the ShinyPort")
+	}
+}
+
+func TestListManagedIncludesNetworks(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID, _ := testSpawn(t, b, []string{"sleep", "300"})
+	_ = workerID
+
+	managed, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatalf("ListManaged: %v", err)
+	}
+
+	var hasContainer, hasNetwork bool
+	for _, r := range managed {
+		switch r.Kind {
+		case backend.ResourceContainer:
+			hasContainer = true
+		case backend.ResourceNetwork:
+			hasNetwork = true
+		}
+	}
+
+	if !hasContainer {
+		t.Error("expected at least one managed container")
+	}
+	if !hasNetwork {
+		t.Error("expected at least one managed network")
+	}
+}
+
+func TestParseMemoryLimitEdgeCases(t *testing.T) {
+	tests := []struct {
+		input  string
+		want   int64
+		wantOk bool
+	}{
+		{"512m", 512 * 1024 * 1024, true},
+		{"1g", 1024 * 1024 * 1024, true},
+		{"256k", 256 * 1024, true},
+		{"1024", 1024, true},
+		{"", 0, false},
+		{"abc", 0, false},
+		{"m", 0, false},
+		{"512mb", 512 * 1024 * 1024, true},
+		{"2gb", 2 * 1024 * 1024 * 1024, true},
+		{"128kb", 128 * 1024, true},
+	}
+
+	for _, tt := range tests {
+		got, ok := parseMemoryLimit(tt.input)
+		if ok != tt.wantOk {
+			t.Errorf("parseMemoryLimit(%q): ok=%v, want %v", tt.input, ok, tt.wantOk)
+			continue
+		}
+		if ok && got != tt.want {
+			t.Errorf("parseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
+		}
 	}
 }

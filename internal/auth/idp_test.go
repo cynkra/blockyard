@@ -518,3 +518,191 @@ func TestIDPTokenRefresh(t *testing.T) {
 		t.Error("expected refreshed token expiry to be in the future")
 	}
 }
+
+func TestIDPJWKSURI(t *testing.T) {
+	_, deps := setupIDPTestServer(t)
+
+	jwksURI := deps.OIDCClient.JWKSURI()
+	if jwksURI == "" {
+		t.Fatal("expected non-empty JWKS URI from Keycloak")
+	}
+	if !strings.Contains(jwksURI, "certs") && !strings.Contains(jwksURI, "jwks") {
+		t.Errorf("expected JWKS URI to contain 'certs' or 'jwks', got %s", jwksURI)
+	}
+	if !strings.Contains(jwksURI, keycloakURL) {
+		t.Errorf("expected JWKS URI to point to Keycloak (%s), got %s", keycloakURL, jwksURI)
+	}
+}
+
+func TestIDPExtractGroupsFromRealToken(t *testing.T) {
+	_, deps := setupIDPTestServer(t)
+
+	sessionCookie, _ := simulateLogin(t, deps.Config.Server.ExternalURL)
+	payload, err := auth.DecodeCookie(sessionCookie.Value, deps.SigningKey)
+	if err != nil {
+		t.Fatalf("decode session cookie: %v", err)
+	}
+
+	session := deps.UserSessions.Get(payload.Sub)
+	if session == nil {
+		t.Fatal("expected server-side session to exist")
+	}
+
+	// The session groups come from ExtractGroups during the callback.
+	// Verify ExtractGroups produced the correct result by checking the
+	// stored groups contain the expected "testers" group from the realm.
+	if len(session.Groups) == 0 {
+		t.Fatal("expected ExtractGroups to return non-empty groups from real token")
+	}
+
+	found := false
+	for _, g := range session.Groups {
+		if g == "testers" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected groups to contain 'testers', got %v", session.Groups)
+	}
+
+	// Verify all groups are non-empty strings.
+	for i, g := range session.Groups {
+		if g == "" {
+			t.Errorf("group[%d] is empty", i)
+		}
+	}
+}
+
+func TestIDPExtractGroupsMissingClaim(t *testing.T) {
+	ts := httptest.NewUnstartedServer(nil)
+	ts.Start()
+
+	issuerURL := keycloakURL + "/realms/blockyard-test"
+	redirectURL := ts.URL + "/callback"
+
+	// Create an OIDCClient with a non-existent groups claim name.
+	oidcClient, err := auth.Discover(
+		context.Background(),
+		issuerURL,
+		keycloakClientID,
+		keycloakSecret,
+		redirectURL,
+		"nonexistent_claim",
+	)
+	if err != nil {
+		ts.Close()
+		t.Fatalf("auth.Discover: %v", err)
+	}
+
+	secret := config.NewSecret("idp-test-session-secret-2")
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Token:         config.NewSecret("test-token"),
+			SessionSecret: &secret,
+			ExternalURL:   ts.URL,
+		},
+		OIDC: &config.OidcConfig{
+			IssuerURL:    issuerURL,
+			ClientID:     keycloakClientID,
+			ClientSecret: config.NewSecret(keycloakSecret),
+			GroupsClaim:  "nonexistent_claim",
+			CookieMaxAge: config.Duration{Duration: 24 * time.Hour},
+		},
+	}
+
+	deps := &auth.Deps{
+		Config:       cfg,
+		OIDCClient:   oidcClient,
+		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose()),
+		UserSessions: auth.NewUserSessionStore(),
+	}
+
+	router := buildTestRouter(deps)
+	ts.Config.Handler = router
+	t.Cleanup(ts.Close)
+
+	sessionCookie, _ := simulateLogin(t, ts.URL)
+	payload, err := auth.DecodeCookie(sessionCookie.Value, deps.SigningKey)
+	if err != nil {
+		t.Fatalf("decode session cookie: %v", err)
+	}
+
+	session := deps.UserSessions.Get(payload.Sub)
+	if session == nil {
+		t.Fatal("expected server-side session to exist")
+	}
+
+	// With a non-existent claim, ExtractGroups should have returned nil,
+	// so the session should have no groups.
+	if len(session.Groups) != 0 {
+		t.Errorf("expected no groups when claim is missing, got %v", session.Groups)
+	}
+}
+
+func TestIDPAuthCodeURL(t *testing.T) {
+	_, deps := setupIDPTestServer(t)
+
+	state := "test-state-value"
+	nonce := "test-nonce-value"
+	authURL := deps.OIDCClient.AuthCodeURL(state, nonce)
+
+	if authURL == "" {
+		t.Fatal("expected non-empty auth code URL")
+	}
+
+	parsed, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatalf("failed to parse auth code URL: %v", err)
+	}
+
+	query := parsed.Query()
+
+	if got := query.Get("state"); got != state {
+		t.Errorf("expected state=%q, got %q", state, got)
+	}
+	if got := query.Get("nonce"); got != nonce {
+		t.Errorf("expected nonce=%q, got %q", nonce, got)
+	}
+	if got := query.Get("client_id"); got != keycloakClientID {
+		t.Errorf("expected client_id=%q, got %q", keycloakClientID, got)
+	}
+	if got := query.Get("response_type"); got != "code" {
+		t.Errorf("expected response_type=code, got %q", got)
+	}
+	if got := query.Get("redirect_uri"); got == "" {
+		t.Error("expected non-empty redirect_uri in auth code URL")
+	}
+
+	// Verify the URL points to the Keycloak realm.
+	if !strings.Contains(authURL, keycloakURL) {
+		t.Errorf("expected auth URL to contain Keycloak URL %s, got %s", keycloakURL, authURL)
+	}
+}
+
+func TestIDPEndSessionEndpoint(t *testing.T) {
+	_, deps := setupIDPTestServer(t)
+
+	endpoint := deps.OIDCClient.EndSessionEndpoint()
+	if endpoint == "" {
+		t.Fatal("expected non-empty end_session_endpoint from Keycloak")
+	}
+
+	// Verify it points to the correct Keycloak realm.
+	if !strings.Contains(endpoint, keycloakURL) {
+		t.Errorf("expected end_session_endpoint to contain Keycloak URL %s, got %s", keycloakURL, endpoint)
+	}
+	expectedRealmPath := "/realms/blockyard-test/"
+	if !strings.Contains(endpoint, expectedRealmPath) {
+		t.Errorf("expected end_session_endpoint to contain realm path %s, got %s", expectedRealmPath, endpoint)
+	}
+
+	// Verify it's a valid URL.
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("failed to parse end_session_endpoint: %v", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		t.Errorf("expected http(s) scheme, got %q", parsed.Scheme)
+	}
+}
