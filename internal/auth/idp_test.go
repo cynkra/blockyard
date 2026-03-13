@@ -117,11 +117,14 @@ func TestMain(m *testing.M) {
 	keycloakURL = fmt.Sprintf("http://127.0.0.1:%s", hostPort)
 
 	// Wait for Keycloak to be ready (up to 120s).
-	healthURL := keycloakURL + "/health/ready"
+	// Keycloak 26+ serves /health on the management port (9000), not the
+	// application port (8080). Use the OIDC discovery endpoint as the
+	// readiness signal instead.
+	readyURL := keycloakURL + "/realms/master/.well-known/openid-configuration"
 	deadline := time.Now().Add(120 * time.Second)
 	ready := false
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(healthURL)
+		resp, err := http.Get(readyURL)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
