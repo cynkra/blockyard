@@ -16,7 +16,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/testutil"
@@ -59,22 +58,20 @@ func TestMain(m *testing.M) {
 	rootToken = "root-test-token"
 
 	// Create OpenBao dev server container.
-	baoPort := nat.Port("8200/tcp")
+	// Use host networking so OpenBao can reach the mock IdP on 127.0.0.1.
+	baoPort := "8200"
 	resp, err := cli.ContainerCreate(ctx,
 		&container.Config{
 			Image: openbaoImage,
-			Cmd:   []string{"server", "-dev", "-dev-root-token-id=" + rootToken, "-dev-listen-address=0.0.0.0:8200"},
+			Cmd:   []string{"server", "-dev", "-dev-root-token-id=" + rootToken, "-dev-listen-address=0.0.0.0:" + baoPort},
 			Env: []string{
 				"BAO_DEV_ROOT_TOKEN_ID=" + rootToken,
 			},
-			ExposedPorts: nat.PortSet{baoPort: struct{}{}},
-			Labels:       map[string]string{"blockyard-test": "openbao"},
+			Labels: map[string]string{"blockyard-test": "openbao"},
 		},
 		&container.HostConfig{
-			PortBindings: nat.PortMap{
-				baoPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "0"}},
-			},
-			CapAdd: []string{"IPC_LOCK"},
+			NetworkMode: "host",
+			CapAdd:      []string{"IPC_LOCK"},
 		},
 		nil, nil, "blockyard-openbao-test",
 	)
@@ -90,20 +87,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Get mapped port.
-	inspect, err := cli.ContainerInspect(ctx, containerID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "container inspect: %v\n", err)
-		cleanup(ctx, cli)
-		os.Exit(1)
-	}
-	bindings := inspect.NetworkSettings.Ports[baoPort]
-	if len(bindings) == 0 {
-		fmt.Fprintf(os.Stderr, "no port bindings for %s\n", baoPort)
-		cleanup(ctx, cli)
-		os.Exit(1)
-	}
-	openbaoURL = fmt.Sprintf("http://127.0.0.1:%s", bindings[0].HostPort)
+	openbaoURL = fmt.Sprintf("http://127.0.0.1:%s", baoPort)
 
 	// Wait for OpenBao to be ready.
 	deadline := time.Now().Add(30 * time.Second)
@@ -204,11 +188,12 @@ func vaultPost(httpClient *http.Client, path string, data map[string]any) error 
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("status %d for %s", resp.StatusCode, path)
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status %d for %s: %s", resp.StatusCode, path, respBody)
 	}
+	io.Copy(io.Discard, resp.Body)
 	return nil
 }
 

@@ -598,7 +598,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 
 	basePath := t.TempDir()
 
-	app, err := database.CreateApp("e2e-app")
+	app, err := database.CreateApp("e2e-app", "")
 	if err != nil {
 		t.Fatal(err)
 	}
