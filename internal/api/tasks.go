@@ -58,7 +58,6 @@ func TaskLogs(srv *server.Server) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 
 		flusher, canFlush := w.(http.Flusher)
 

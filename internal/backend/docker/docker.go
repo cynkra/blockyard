@@ -837,14 +837,18 @@ func (d *DockerBackend) unblockMetadataForWorker(workerID string) {
 
 // deleteIptablesRulesByComment uses `iptables -S DOCKER-USER` to find rules
 // containing the given comment string, then deletes them with `iptables -D`.
+// The comment must match as a complete --comment argument (quoted in the -S
+// output), not as an arbitrary substring.
 func deleteIptablesRulesByComment(comment string) {
 	out, err := exec.Command("iptables", "-S", "DOCKER-USER").Output()
 	if err != nil {
 		return
 	}
 
+	// Match the exact comment flag as it appears in iptables -S output.
+	needle := `--comment "` + comment + `"`
 	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, comment) {
+		if !strings.Contains(line, needle) {
 			continue
 		}
 		rule := strings.TrimPrefix(line, "-A DOCKER-USER ")
@@ -852,7 +856,9 @@ func deleteIptablesRulesByComment(comment string) {
 			continue // didn't have the expected prefix
 		}
 		args := append([]string{"-D", "DOCKER-USER"}, strings.Fields(rule)...)
-		_ = exec.Command("iptables", args...).Run()
+		if err := exec.Command("iptables", args...).Run(); err != nil {
+			slog.Warn("failed to delete iptables rule", "comment", comment, "error", err)
+		}
 	}
 }
 

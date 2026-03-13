@@ -352,6 +352,9 @@ func validate(cfg *Config) error {
 		if cfg.Openbao.Address == "" {
 			return fmt.Errorf("config: openbao.address must not be empty")
 		}
+		if !strings.HasPrefix(cfg.Openbao.Address, "http://") && !strings.HasPrefix(cfg.Openbao.Address, "https://") {
+			return fmt.Errorf("config: openbao.address must start with http:// or https://")
+		}
 		if cfg.Openbao.AdminToken.IsEmpty() {
 			return fmt.Errorf("config: openbao.admin_token must not be empty")
 		}

@@ -86,8 +86,8 @@ func (c *Client) JWTLogin(ctx context.Context, mountPath, accessToken string) (t
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", 0, fmt.Errorf("openbao jwt login: status %d: %s", resp.StatusCode, string(respBody))
+		io.Copy(io.Discard, resp.Body)
+		return "", 0, fmt.Errorf("openbao jwt login: status %d", resp.StatusCode)
 	}
 
 	var result jwtLoginResponse

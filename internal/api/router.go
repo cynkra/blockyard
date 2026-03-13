@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/cynkra/blockyard/internal/auth"
@@ -13,8 +15,21 @@ import (
 	"github.com/cynkra/blockyard/internal/ui"
 )
 
+// securityHeaders is a middleware that sets common security response headers.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func NewRouter(srv *server.Server) http.Handler {
 	r := chi.NewRouter()
+
+	// Global security headers.
+	r.Use(securityHeaders)
 
 	// OpenTelemetry tracing middleware (only when configured).
 	if srv.Config.Telemetry != nil && srv.Config.Telemetry.OTLPEndpoint != "" {
@@ -41,13 +56,19 @@ func NewRouter(srv *server.Server) http.Handler {
 		uiHandler.RegisterRoutes(r, srv)
 	})
 
-	// Auth endpoints (outside app-plane auth layer).
-	r.Get("/login", auth.LoginHandler(authDeps))
-	r.Get("/callback", auth.CallbackHandler(authDeps))
-	r.Post("/logout", auth.LogoutHandler(authDeps))
+	// Auth endpoints — strict rate limit to prevent brute-force.
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.LimitByIP(10, time.Minute))
+		r.Get("/login", auth.LoginHandler(authDeps))
+		r.Get("/callback", auth.CallbackHandler(authDeps))
+		r.Post("/logout", auth.LogoutHandler(authDeps))
+	})
 
-	// Credential exchange — session token auth (not API bearer token).
-	r.Post("/api/v1/credentials/vault", ExchangeVaultCredential(srv))
+	// Credential exchange — moderate rate limit.
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.LimitByIP(20, time.Minute))
+		r.Post("/api/v1/credentials/vault", ExchangeVaultCredential(srv))
+	})
 
 	// Proxy routes with app-plane auth middleware (authenticate if possible).
 	r.Route("/app", func(sub chi.Router) {
@@ -58,12 +79,14 @@ func NewRouter(srv *server.Server) http.Handler {
 
 	// User-facing API with dual auth (session cookie or JWT bearer).
 	r.Route("/api/v1/users/me", func(r chi.Router) {
+		r.Use(httprate.LimitByIP(20, time.Minute))
 		r.Use(UserAuth(srv))
 		r.Post("/credentials/{service}", EnrollCredential(srv))
 	})
 
-	// Authenticated API
+	// Authenticated API — general rate limit.
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Use(httprate.LimitByIP(120, time.Minute))
 		r.Use(APIAuth(srv))
 
 		r.Post("/apps", CreateApp(srv))

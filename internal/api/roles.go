@@ -19,7 +19,7 @@ type roleMappingResponse struct {
 func ListRoleMappings(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if !caller.Role.CanManageRoles() {
+		if caller == nil || !caller.Role.CanManageRoles() {
 			forbidden(w, "admin only")
 			return
 		}
@@ -49,7 +49,7 @@ type setRoleMappingRequest struct {
 func SetRoleMapping(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if !caller.Role.CanManageRoles() {
+		if caller == nil || !caller.Role.CanManageRoles() {
 			forbidden(w, "admin only")
 			return
 		}
@@ -87,7 +87,7 @@ func SetRoleMapping(srv *server.Server) http.HandlerFunc {
 func DeleteRoleMapping(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if !caller.Role.CanManageRoles() {
+		if caller == nil || !caller.Role.CanManageRoles() {
 			forbidden(w, "admin only")
 			return
 		}

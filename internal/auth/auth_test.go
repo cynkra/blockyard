@@ -152,7 +152,9 @@ func TestLoginOpenRedirectPrevention(t *testing.T) {
 			if stateCookie == nil {
 				t.Fatal("missing state cookie")
 			}
-			csrfToken := extractStateParam(w.Header().Get("Location"))
+			location := w.Header().Get("Location")
+			csrfToken := extractStateParam(location)
+			idp.Nonce = extractNonceParam(location)
 
 			// 2. Callback with correct CSRF.
 			req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
@@ -220,9 +222,10 @@ func TestFullAuthFlow(t *testing.T) {
 		t.Fatal("missing state cookie after login")
 	}
 
-	// Extract CSRF token from the redirect URL's state parameter.
+	// Extract CSRF token and nonce from the redirect URL.
 	location := w.Header().Get("Location")
 	csrfToken := extractStateParam(location)
+	idp.Nonce = extractNonceParam(location)
 
 	// 2. GET /callback with code + correct state.
 	req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
@@ -450,12 +453,19 @@ func nowUnix() int64 {
 }
 
 func extractStateParam(url string) string {
-	// Find state= in the URL.
-	idx := strings.Index(url, "state=")
+	return extractURLParam(url, "state=")
+}
+
+func extractNonceParam(url string) string {
+	return extractURLParam(url, "nonce=")
+}
+
+func extractURLParam(url, key string) string {
+	idx := strings.Index(url, key)
 	if idx == -1 {
 		return ""
 	}
-	rest := url[idx+6:]
+	rest := url[idx+len(key):]
 	if end := strings.IndexByte(rest, '&'); end != -1 {
 		rest = rest[:end]
 	}

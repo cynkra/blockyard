@@ -123,23 +123,27 @@ func shuttleWS(
 	cache *WsCache,
 	srv *server.Server,
 ) {
-	// Accept client WebSocket. InsecureSkipVerify disables the
-	// library's origin check — origin policy is the backend's
-	// responsibility, not the reverse proxy's.
+	// Accept client WebSocket. Shiny apps may be embedded cross-origin
+	// (iframes), so we allow all origins via OriginPatterns rather than
+	// InsecureSkipVerify. Auth is enforced at the session/cookie layer.
 	clientConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
 		slog.Warn("ws accept failed", "error", err)
 		return
 	}
-	// Remove the default 32KB read limit. A proxy should forward
-	// whatever the endpoints exchange (e.g. base64 plot PNGs).
-	clientConn.SetReadLimit(-1)
+	// Raise the default 32KB read limit. A proxy must forward larger
+	// payloads (e.g. base64 plot PNGs) but we cap at 128 MiB to
+	// prevent memory-exhaustion DoS.
+	const maxWSMessageSize = 128 << 20 // 128 MiB
+	clientConn.SetReadLimit(maxWSMessageSize)
 
 	// Obtain or create a backend reader.
 	br := cache.Take(sessionID)
 	if br == nil {
+		// Backend workers are local containers on the Docker network;
+		// they don't serve TLS, so ws:// is correct for internal traffic.
 		backendURL := "ws://" + addr + stripAppPrefix(r.URL.Path, appName)
 		backendConn, _, dialErr := websocket.Dial(context.Background(), backendURL, &websocket.DialOptions{
 			HTTPHeader: forwardClientHeaders(r),
@@ -151,7 +155,7 @@ func shuttleWS(
 				"backend connect failed")
 			return
 		}
-		backendConn.SetReadLimit(-1)
+		backendConn.SetReadLimit(maxWSMessageSize)
 		br = newBackendReader(backendConn)
 	}
 

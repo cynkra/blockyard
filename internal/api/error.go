@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 )
 
@@ -32,8 +33,9 @@ func serviceUnavailable(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusServiceUnavailable, "service_unavailable", msg)
 }
 
-func serverError(w http.ResponseWriter, msg string) {
-	writeError(w, http.StatusInternalServerError, "internal_error", msg)
+func serverError(w http.ResponseWriter, detail string) {
+	slog.Error("internal server error", "detail", detail)
+	writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
 func forbidden(w http.ResponseWriter, msg string) {

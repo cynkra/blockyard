@@ -216,6 +216,10 @@ func ListApps(srv *server.Server) http.HandlerFunc {
 		var apps []db.AppRow
 		var err error
 
+		if caller == nil {
+			forbidden(w, "insufficient permissions")
+			return
+		}
 		if caller.Role.CanViewAllApps() {
 			apps, err = srv.DB.ListApps()
 		} else {
@@ -618,7 +622,6 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 
 		flusher, canFlush := w.(http.Flusher)
 

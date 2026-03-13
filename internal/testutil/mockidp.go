@@ -26,6 +26,10 @@ type MockIdP struct {
 	// Sub and Groups to include in issued ID tokens.
 	Sub    string
 	Groups []string
+
+	// Nonce to embed in the next ID token. Tests should set this to the
+	// nonce extracted from the login redirect URL before calling /callback.
+	Nonce string
 }
 
 // NewMockIdP starts a mock IdP on a random port. The default sub is
@@ -92,7 +96,7 @@ func (m *MockIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 		clientID, _, _ = r.BasicAuth()
 	}
 
-	idToken, err := m.issueIDToken(clientID, "")
+	idToken, err := m.issueIDToken(clientID, m.Nonce)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

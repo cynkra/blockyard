@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -127,8 +128,12 @@ func LoginHandler(deps *Deps) http.HandlerFunc {
 		authURL := deps.OIDCClient.AuthCodeURL(state, nonce)
 
 		// Validate return_url to prevent open redirect attacks.
+		// Validate return_url to prevent open redirect attacks.
+		// Must be a path-only relative URL starting with "/" but not "//".
 		returnURL := r.URL.Query().Get("return_url")
-		if !strings.HasPrefix(returnURL, "/") || strings.HasPrefix(returnURL, "//") {
+		parsed, err := url.Parse(returnURL)
+		if err != nil || parsed.Host != "" || parsed.Scheme != "" ||
+			!strings.HasPrefix(returnURL, "/") || strings.HasPrefix(returnURL, "//") {
 			returnURL = "/"
 		}
 
@@ -167,16 +172,23 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 
 		// 2. Verify CSRF token matches.
 		if r.URL.Query().Get("state") != statePayload.CSRFToken {
-			http.Error(w, "CSRF token mismatch", http.StatusBadRequest)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 
 		// 3. Exchange authorization code for tokens.
 		code := r.URL.Query().Get("code")
-		oauth2Token, _, allClaims, err := deps.OIDCClient.Exchange(r.Context(), code)
+		oauth2Token, idToken, allClaims, err := deps.OIDCClient.Exchange(r.Context(), code)
 		if err != nil {
 			slog.Error("token exchange failed", "error", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+
+		// 3b. Verify the nonce in the ID token matches what we sent.
+		if idToken.Nonce != statePayload.Nonce {
+			slog.Error("nonce mismatch in ID token")
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 

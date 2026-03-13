@@ -731,9 +731,13 @@ func TestProxyWebSocketForwardsHeaders(t *testing.T) {
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
 		"/app/hdr-app/"
 
+	// Use same-origin (matching the test server's host) so the
+	// proxy's origin check accepts the connection.
+	sameOrigin := ts.URL // e.g. "http://127.0.0.1:<port>"
+
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
-			"Origin":     []string{"http://my-origin.example.com"},
+			"Origin":     []string{sameOrigin},
 			"Cookie":     []string{"foo=bar"},
 			"User-Agent": []string{"TestAgent/1.0"},
 		},
@@ -752,8 +756,8 @@ func TestProxyWebSocketForwardsHeaders(t *testing.T) {
 	if backendHeaders == nil {
 		t.Fatal("backend never received the upgrade request")
 	}
-	if got := backendHeaders.Get("Origin"); got != "http://my-origin.example.com" {
-		t.Errorf("Origin: expected 'http://my-origin.example.com', got %q", got)
+	if got := backendHeaders.Get("Origin"); got != sameOrigin {
+		t.Errorf("Origin: expected %q, got %q", sameOrigin, got)
 	}
 	if got := backendHeaders.Get("Cookie"); got != "foo=bar" {
 		t.Errorf("Cookie: expected 'foo=bar', got %q", got)
