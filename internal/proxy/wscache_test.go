@@ -11,9 +11,9 @@ import (
 	"github.com/coder/websocket"
 )
 
-// dialTestWS creates a test WebSocket server and dials it, returning the
-// client-side connection. The server-side connection is closed on cleanup.
-func dialTestWS(t *testing.T) *websocket.Conn {
+// testBackendReader creates a test WebSocket server, dials it, and
+// returns a backendReader wrapping the client-side connection.
+func testBackendReader(t *testing.T) *backendReader {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, nil)
@@ -30,25 +30,26 @@ func dialTestWS(t *testing.T) *websocket.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.CloseNow() })
-	return conn
+	br := newBackendReader(conn)
+	t.Cleanup(func() { br.Close() })
+	return br
 }
 
 func TestCacheTakeBeforeExpiry(t *testing.T) {
 	cache := NewWsCache()
-	conn := dialTestWS(t)
+	br := testBackendReader(t)
 
 	var expired atomic.Bool
-	cache.Cache("sess-1", conn, 5*time.Second, func() {
+	cache.Cache("sess-1", br, 5*time.Second, func() {
 		expired.Store(true)
 	})
 
 	got := cache.Take("sess-1")
 	if got == nil {
-		t.Fatal("expected non-nil connection from Take")
+		t.Fatal("expected non-nil reader from Take")
 	}
-	if got != conn {
-		t.Error("expected same connection back")
+	if got != br {
+		t.Error("expected same reader back")
 	}
 
 	// Ensure onExpire was not called
@@ -60,10 +61,10 @@ func TestCacheTakeBeforeExpiry(t *testing.T) {
 
 func TestCacheExpiry(t *testing.T) {
 	cache := NewWsCache()
-	conn := dialTestWS(t)
+	br := testBackendReader(t)
 
 	var expired atomic.Bool
-	cache.Cache("sess-1", conn, 10*time.Millisecond, func() {
+	cache.Cache("sess-1", br, 10*time.Millisecond, func() {
 		expired.Store(true)
 	})
 
@@ -81,15 +82,15 @@ func TestCacheExpiry(t *testing.T) {
 
 func TestCacheEvictsExisting(t *testing.T) {
 	cache := NewWsCache()
-	conn1 := dialTestWS(t)
-	conn2 := dialTestWS(t)
+	br1 := testBackendReader(t)
+	br2 := testBackendReader(t)
 
-	cache.Cache("sess-1", conn1, 5*time.Second, func() {})
-	cache.Cache("sess-1", conn2, 5*time.Second, func() {})
+	cache.Cache("sess-1", br1, 5*time.Second, func() {})
+	cache.Cache("sess-1", br2, 5*time.Second, func() {})
 
 	got := cache.Take("sess-1")
-	if got != conn2 {
-		t.Error("expected second connection")
+	if got != br2 {
+		t.Error("expected second reader")
 	}
 }
 

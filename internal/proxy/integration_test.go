@@ -309,16 +309,16 @@ func TestProxyColdStartSpawnsWorker(t *testing.T) {
 	}
 }
 
-func TestProxyWebSocketEcho(t *testing.T) {
-	srv, ts := testProxyServer(t)
-
-	be := srv.Backend.(*mock.MockBackend)
-	be.SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+// wsEchoHandler returns a WebSocket handler that echoes messages back.
+// The backend also removes its own read limit so large messages work.
+func wsEchoHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
 		defer c.CloseNow()
+		c.SetReadLimit(-1)
 		for {
 			typ, data, err := c.Read(context.Background())
 			if err != nil {
@@ -326,8 +326,12 @@ func TestProxyWebSocketEcho(t *testing.T) {
 			}
 			c.Write(context.Background(), typ, data)
 		}
-	})
+	}
+}
 
+func TestProxyWebSocketEcho(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
 	createAndStartApp(t, ts, "echo-app")
 
 	ctx := context.Background()
@@ -348,5 +352,143 @@ func TestProxyWebSocketEcho(t *testing.T) {
 	}
 	if typ != websocket.MessageText || string(data) != "hello" {
 		t.Errorf("expected text 'hello', got %v %q", typ, data)
+	}
+}
+
+// TestProxyWebSocketLargeMessage verifies that messages larger than the
+// default 32KB read limit are forwarded correctly (Bug 1 fix).
+func TestProxyWebSocketLargeMessage(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
+	createAndStartApp(t, ts, "large-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/large-app/"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	conn.SetReadLimit(-1)
+
+	// 100KB message — well over the default 32KB limit.
+	// This simulates a Shiny renderPlot base64 PNG response.
+	bigMsg := make([]byte, 100*1024)
+	for i := range bigMsg {
+		bigMsg[i] = byte('A' + i%26)
+	}
+
+	if err := conn.Write(ctx, websocket.MessageBinary, bigMsg); err != nil {
+		t.Fatal(err)
+	}
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read failed (message too big?): %v", err)
+	}
+	if typ != websocket.MessageBinary {
+		t.Errorf("expected binary message, got %v", typ)
+	}
+	if len(data) != len(bigMsg) {
+		t.Errorf("expected %d bytes, got %d", len(bigMsg), len(data))
+	}
+}
+
+// TestProxyWebSocketCacheReconnect verifies that when a client
+// disconnects and reconnects within the TTL, the backend WebSocket
+// connection is reused (Bug 3 fix — context lifecycle).
+func TestProxyWebSocketCacheReconnect(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	// Track how many times the backend accepts a WebSocket connection
+	var backendAccepts int32
+	srv.Backend.(*mock.MockBackend).SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		backendAccepts++
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		c.SetReadLimit(-1)
+		for {
+			typ, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			c.Write(context.Background(), typ, data)
+		}
+	})
+
+	createAndStartApp(t, ts, "reconn-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/reconn-app/"
+
+	// First connection — get session cookie
+	conn1, resp1, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Extract session cookie
+	var sessCookie *http.Cookie
+	for _, c := range resp1.Cookies() {
+		if c.Name == "blockyard_session" {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("no session cookie on WebSocket response")
+	}
+
+	// Send and receive a message to confirm it works
+	if err := conn1.Write(ctx, websocket.MessageText, []byte("msg1")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn1.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "msg1" {
+		t.Fatalf("expected 'msg1', got %q", data)
+	}
+
+	if backendAccepts != 1 {
+		t.Fatalf("expected 1 backend accept, got %d", backendAccepts)
+	}
+
+	// Close client connection — backend should be cached
+	conn1.Close(websocket.StatusNormalClosure, "bye")
+	// Give the proxy a moment to detect the close and cache the backend
+	time.Sleep(100 * time.Millisecond)
+
+	// Reconnect with same session cookie — should reuse cached backend
+	hdr := http.Header{}
+	hdr.Set("Cookie", sessCookie.String())
+	conn2, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: hdr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.CloseNow()
+
+	// Send and receive to confirm the reconnected path works
+	if err := conn2.Write(ctx, websocket.MessageText, []byte("msg2")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err = conn2.Read(ctx)
+	if err != nil {
+		t.Fatalf("read after reconnect failed: %v", err)
+	}
+	if string(data) != "msg2" {
+		t.Fatalf("expected 'msg2', got %q", data)
+	}
+
+	// The backend should NOT have accepted a second connection —
+	// the cached one should have been reused.
+	if backendAccepts != 1 {
+		t.Errorf("expected 1 backend accept (cached reuse), got %d", backendAccepts)
 	}
 }
