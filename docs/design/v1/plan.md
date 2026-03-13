@@ -9,7 +9,7 @@ v1 builds on v0's infrastructure (Docker backend, proxy layer, bundle
 pipeline, REST API) and adds everything needed to host a real blockr app for
 real users: user authentication (OIDC), authorization (RBAC), per-user
 credential management (OpenBao), multi-worker scaling, content discovery,
-and operational observability.
+operational observability, and a minimal user-facing web UI.
 
 ## New Packages
 
@@ -41,6 +41,14 @@ internal/
 │   └── audit.go             # append-only JSON Lines audit log writer
 ├── telemetry/
 │   └── telemetry.go         # Prometheus metrics + OpenTelemetry tracing setup
+├── ui/
+│   ├── ui.go               # route registration, template rendering
+│   ├── templates/           # html/template files (embedded via embed.FS)
+│   │   ├── base.html        # shared layout (head, body wrapper, minimal CSS)
+│   │   ├── landing.html     # unauthenticated: sign-in prompt + public apps
+│   │   └── dashboard.html   # authenticated: RBAC-filtered app listing
+│   └── static/              # static assets (embedded via embed.FS)
+│       └── style.css        # minimal stylesheet
 ├── api/
 │   ├── ... (existing)
 │   ├── users.go             # /users/me, credential enrollment endpoints
@@ -904,6 +912,141 @@ type AuditConfig struct {
 }
 ```
 
+### Phase 1-7: User-Facing Web UI
+
+Server-rendered HTML pages for browser users. Without this phase, v1 has
+no answer for "what happens when a user opens the site in a browser" —
+the catalog API exists but nothing renders it. The OIDC flow redirects
+users to the IdP and back, but there is no page that initiates that flow
+or shows what's available after login.
+
+**Deliverables:**
+
+1. Landing page at `GET /` — unauthenticated users see a sign-in prompt;
+   authenticated users see the app dashboard
+2. App dashboard — server-rendered HTML of the catalog (RBAC-filtered),
+   with search and tag filtering
+3. Template engine setup — Go `html/template` with `embed.FS`
+4. Minimal static assets — CSS only, no JavaScript framework
+5. v0-compatible fallback — when OIDC is not configured, `/` shows all
+   deployed apps without auth (matches v0's open app-plane model)
+6. Router integration — `GET /` and `/static/*` registered before vanity
+   catch-all
+
+**What this phase does NOT include:**
+
+- In-app navigation chrome (navbar, app switcher) — deferred to v2
+- Admin UI for app management — operators use the REST API or CLI (v2)
+- Credential enrollment UI — users enroll via the API (phase 1-3) or
+  OpenBao web UI (v1a stopgap)
+- User settings or profile pages
+
+**Page behaviors:**
+
+`GET /` (unauthenticated, OIDC configured):
+
+```
+1. No session cookie (or invalid) → render landing page
+2. Landing page content:
+   - "Sign in" button → /login
+   - If public apps exist: list them below the sign-in prompt
+```
+
+`GET /` (authenticated):
+
+```
+1. Valid session cookie → query catalog (RBAC-filtered)
+2. Render dashboard:
+   - User identity (sub or display name from groups) + "Sign out" link
+   - App cards: name, title (if set), status indicator, direct link
+   - Search box (server-side filtering via query param — no JS needed)
+   - Tag filter (if tags exist)
+   - Empty state: "No apps available" with role-appropriate messaging
+     (publisher: "Deploy your first app", viewer: "No apps shared with you")
+3. Each app card links to /app/{name}/ (or vanity URL if set)
+```
+
+`GET /` (v0 mode, no OIDC):
+
+```
+1. Render a minimal page listing all deployed apps with status and links
+2. No auth required (matches v0's no-auth-on-app-plane model)
+```
+
+**Template architecture:**
+
+```go
+//go:embed templates/*.html static/*
+var content embed.FS
+
+type UI struct {
+    templates *template.Template
+    static    http.Handler
+}
+
+func New(srv *server.Server) *UI {
+    tmpl := template.Must(template.ParseFS(content, "templates/*.html"))
+    static := http.FileServer(http.FS(content))
+    return &UI{templates: tmpl, static: static}
+}
+
+func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
+    r.Get("/", ui.root(srv))
+    r.Handle("/static/*", http.StripPrefix("/static/", ui.static))
+}
+```
+
+**Dashboard data flow:**
+
+The dashboard does NOT call the catalog REST API over HTTP. It calls the
+same internal Go functions that the catalog API handler uses — the
+`catalog` package's query functions accept the authenticated user's
+context and return RBAC-filtered results. This avoids a loopback HTTP
+call and keeps the UI server-rendered in a single request.
+
+**Styling approach:**
+
+Minimal, self-contained CSS embedded alongside templates. No external CSS
+framework — a single `style.css` with rules for layout, typography, and
+app cards. The goal is "clean and functional," not "polished." Total CSS
+should stay under 200 lines. The design language should be neutral enough
+that operators don't feel compelled to customize immediately.
+
+**Router integration (updates phase 1-5 router):**
+
+```go
+func NewRouter(srv *server.Server) *chi.Mux {
+    r := chi.NewRouter()
+
+    // Phase 1-7: UI routes (must be before vanity catch-all)
+    uiHandler := ui.New(srv)
+    uiHandler.RegisterRoutes(r, srv)
+
+    // API routes (existing)
+    r.Route("/api/v1", func(r chi.Router) { /* ... */ })
+
+    // Auth endpoints
+    r.Get("/login", loginHandler(srv))
+    r.Get("/callback", callbackHandler(srv))
+    r.Post("/logout", logoutHandler(srv))
+
+    // Vanity URL catch-all
+    r.Get("/{vanity}", trailingSlashRedirectVanity)
+    r.HandleFunc("/{vanity}/", vanityProxyHandler(srv))
+    r.HandleFunc("/{vanity}/*", vanityProxyHandler(srv))
+
+    // Standard app routes
+    r.Get("/app/{name}", trailingSlashRedirect)
+    r.HandleFunc("/app/{name}/", proxyHandler(srv))
+    r.HandleFunc("/app/{name}/*", proxyHandler(srv))
+
+    return r
+}
+```
+
+`GET /` is a specific route and takes priority over `/{vanity}` in chi's
+routing — no conflict.
+
 ## Config Summary
 
 v1 config additions alongside v0 fields (v0 fields shown for context;
@@ -1103,11 +1246,20 @@ Phase 1-6: Audit Logging + Telemetry + /readyz
   ├── OpenTelemetry tracing
   ├── /readyz endpoint
   └── depends on: Phase 1-3 (OpenBao health check)
+
+Phase 1-7: User-Facing Web UI
+  ├── Landing page (unauthenticated)
+  ├── App dashboard (authenticated, RBAC-filtered)
+  ├── Server-rendered Go templates (embed.FS)
+  ├── v0-compatible fallback (no OIDC)
+  └── depends on: Phase 1-1 (auth middleware), Phase 1-2 (RBAC),
+      Phase 1-5 (catalog queries, router structure)
 ```
 
-Phases 1-5 and 1-6 are independent of each other and can be developed in
-parallel. Phase 1-4 is independent of 1-5 and 1-6. The critical path is
-1-1 → 1-2 → 1-3 → 1-4.
+Phases 1-5, 1-6, and 1-7 are independent of each other in terms of
+backend code, but 1-7 consumes 1-5's catalog queries and 1-2's RBAC
+checks, so it must be built after those. Phase 1-4 is independent of
+1-5, 1-6, and 1-7. The critical path is 1-1 → 1-2 → 1-3 → 1-4.
 
 ## Test Strategy
 
@@ -1125,6 +1277,9 @@ parallel. Phase 1-4 is independent of 1-5 and 1-6. The critical path is
 - **Vanity URL tests:** collision detection against reserved prefixes,
   duplicate rejection, resolution to correct app.
 - **Audit log tests:** entry serialization, write ordering.
+- **UI template tests:** render landing page, render dashboard with mock
+  catalog data, verify correct links and status indicators, verify empty
+  state messaging per role.
 
 ### Integration tests
 
@@ -1145,6 +1300,11 @@ server):
   proxied to correct app.
 - **Catalog tests:** create apps with tags, query catalog with filters,
   verify RBAC-filtered results.
+- **UI tests:** `GET /` returns landing page HTML for unauthenticated
+  requests (with sign-in link), dashboard HTML for authenticated requests
+  (with app list matching RBAC), and v0 fallback page when OIDC is not
+  configured. Verify public apps appear on the unauthenticated landing
+  page.
 
 ### Mock IdP
 
@@ -1257,3 +1417,23 @@ Extended with:
     `os`). External dependencies are added only where the stdlib has no
     viable equivalent: OIDC discovery, Prometheus metrics, OpenTelemetry
     tracing.
+
+13. **Server-rendered Go templates, not a JavaScript SPA.** The user-facing
+    web UI uses Go's `html/template` with `embed.FS`. No JavaScript
+    framework, no build step, no node_modules. The UI has two pages
+    (landing + dashboard) with trivial interactivity (search filtering via
+    query params, not client-side JS). A SPA would add a build pipeline,
+    a bundler, API client code, and client-side routing for no benefit at
+    this complexity level. The dashboard calls internal Go functions
+    directly (same as the catalog API handler), avoiding a loopback HTTP
+    call. If the UI grows significantly in v2+ (admin panels, real-time
+    updates, credential enrollment forms), a frontend framework can be
+    evaluated then.
+
+14. **No in-app navigation chrome in v1.** Injecting a navbar or app
+    switcher into proxied Shiny app responses (as Posit Connect does)
+    requires HTML rewriting or iframe wrapping, CSS isolation to avoid
+    conflicts with app styles, z-index management, viewport adjustments,
+    and a full-screen toggle mechanism. This is meaningful frontend
+    complexity for a feature that is not strictly required — users can
+    navigate back to the dashboard via browser navigation. Deferred to v2.

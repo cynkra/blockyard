@@ -5,12 +5,9 @@ services:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - bundle-data:/data/bundles
+      - ./data:/data/bundles
     environment:
       BLOCKYARD_SERVER_TOKEN: my-secret-token
-      # Named volume mode: the server and sibling containers share the
-      # "bundle-data" volume. No host-path translation needed.
-      BLOCKYARD_STORAGE_BUNDLE_VOLUME_NAME: bundle-data
     # iptables metadata-endpoint blocking needs NET_ADMIN
     cap_add:
       - NET_ADMIN
@@ -20,5 +17,3 @@ services:
       timeout: 3s
       retries: 10
 
-volumes:
-  bundle-data:

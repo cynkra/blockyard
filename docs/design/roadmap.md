@@ -573,6 +573,16 @@ infrastructure.
   runtime dependencies are reachable — DB, Docker socket, IdP, OpenBao.
   Returns `503` with a JSON body listing which checks failed.
 
+- **User-facing web UI (minimal).** Server-rendered HTML pages for browser
+  users who navigate to the site directly. An unauthenticated landing page
+  with a sign-in button (redirecting to `/login`), and an authenticated
+  dashboard at `/` listing all apps the user has access to (consuming the
+  same catalog queries as the content discovery API, filtered by RBAC).
+  Rendered with Go's `html/template` and embedded via `embed.FS` — no
+  JavaScript framework, no build step. In v0 mode (no OIDC), the root
+  page shows all deployed apps without auth. In-app navigation chrome
+  (navbar, app switcher) is deferred to v2.
+
 ### v2
 
 - **Kubernetes backend.** Implement the `Backend` interface using
