@@ -157,6 +157,35 @@ path = "/tmp/blockyard-test/db/blockyard.db"
 func TestDefaultBundleServerPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	tomlContent := `
+[server]
+token = "test-token"
+
+[docker]
+image = "some-image"
+
+[database]
+path = "` + dbPath + `"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Storage.BundleServerPath != bundlePath {
+		t.Errorf("expected bundle_server_path %q, got %q", bundlePath, cfg.Storage.BundleServerPath)
+	}
+}
+
+func TestDefaultBundleServerPathUsesDataBundles(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
 	tomlContent := `
 [server]
 token = "test-token"
@@ -170,17 +199,49 @@ path = "` + dbPath + `"
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(tomlContent), 0o644)
-	// This will fail on validation (non-writable /data/bundles) but shows the default was set.
-	_, err := Load(path)
+	// Load may fail if /data/bundles is not writable, but we can
+	// verify the default was applied by checking the error message.
+	cfg, err := Load(path)
 	if err == nil {
-		t.Error("expected error for non-writable default path")
-	}
-	if err != nil && !strings.Contains(err.Error(), "bundle_server_path") {
+		// /data/bundles happened to be writable (e.g. running as root)
+		if cfg.Storage.BundleServerPath != "/data/bundles" {
+			t.Errorf("expected default /data/bundles, got %q", cfg.Storage.BundleServerPath)
+		}
+	} else if !strings.Contains(err.Error(), "bundle_server_path") {
 		t.Errorf("expected error about bundle_server_path, got: %v", err)
 	}
 }
 
 func TestDefaultDatabasePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	tomlContent := `
+[server]
+token = "test-token"
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "` + dbPath + `"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Database.Path != dbPath {
+		t.Errorf("expected database.path %q, got %q", dbPath, cfg.Database.Path)
+	}
+}
+
+func TestDefaultDatabasePathUsesDataDb(t *testing.T) {
 	tmpDir := t.TempDir()
 	bundlePath := filepath.Join(tmpDir, "bundles")
 	tomlContent := `
@@ -196,12 +257,12 @@ bundle_server_path = "` + bundlePath + `"
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(tomlContent), 0o644)
-	// This will fail on validation (non-writable /data/db) but shows the default was set.
-	_, err := Load(path)
+	cfg, err := Load(path)
 	if err == nil {
-		t.Error("expected error for non-writable default db path")
-	}
-	if err != nil && !strings.Contains(err.Error(), "database.path") {
+		if cfg.Database.Path != "/data/db/blockyard.db" {
+			t.Errorf("expected default /data/db/blockyard.db, got %q", cfg.Database.Path)
+		}
+	} else if !strings.Contains(err.Error(), "database.path") {
 		t.Errorf("expected error about database.path, got: %v", err)
 	}
 }
