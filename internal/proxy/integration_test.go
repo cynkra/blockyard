@@ -309,11 +309,37 @@ func TestProxyColdStartSpawnsWorker(t *testing.T) {
 	}
 }
 
+// wsHeaderCapture returns a WebSocket handler that captures the
+// request headers, then echoes messages. The captured headers are
+// written to *captured after the upgrade succeeds.
+func wsHeaderCapture(captured *http.Header) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		*captured = r.Header.Clone()
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		c.SetReadLimit(-1)
+		for {
+			typ, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			c.Write(context.Background(), typ, data)
+		}
+	}
+}
+
 // wsEchoHandler returns a WebSocket handler that echoes messages back.
 // The backend also removes its own read limit so large messages work.
 func wsEchoHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, nil)
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
 		if err != nil {
 			return
 		}
@@ -490,5 +516,87 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	// the cached one should have been reused.
 	if backendAccepts != 1 {
 		t.Errorf("expected 1 backend accept (cached reuse), got %d", backendAccepts)
+	}
+}
+
+// TestProxyWebSocketCrossOrigin verifies that cross-origin WebSocket
+// upgrades are accepted (Bug 2 fix — origin checking). Browsers always
+// send an Origin header on WebSocket upgrades; the proxy must not
+// reject requests where Origin differs from Host.
+func TestProxyWebSocketCrossOrigin(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
+	createAndStartApp(t, ts, "origin-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/origin-app/"
+
+	// Dial with an explicit cross-origin Origin header.
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Origin": []string{"http://different-host.example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("cross-origin WebSocket dial failed: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Confirm the connection actually works end-to-end.
+	if err := conn.Write(ctx, websocket.MessageText, []byte("xorigin")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read after cross-origin upgrade failed: %v", err)
+	}
+	if string(data) != "xorigin" {
+		t.Errorf("expected 'xorigin', got %q", data)
+	}
+}
+
+// TestProxyWebSocketForwardsHeaders verifies that the proxy forwards
+// relevant client headers to the backend (Bug 4 fix — lost headers).
+func TestProxyWebSocketForwardsHeaders(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	var backendHeaders http.Header
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsHeaderCapture(&backendHeaders))
+	createAndStartApp(t, ts, "hdr-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/hdr-app/"
+
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Origin":     []string{"http://my-origin.example.com"},
+			"Cookie":     []string{"foo=bar"},
+			"User-Agent": []string{"TestAgent/1.0"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("WebSocket dial failed: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Exchange a message so the connection is fully established.
+	if err := conn.Write(ctx, websocket.MessageText, []byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	conn.Read(ctx)
+
+	if backendHeaders == nil {
+		t.Fatal("backend never received the upgrade request")
+	}
+	if got := backendHeaders.Get("Origin"); got != "http://my-origin.example.com" {
+		t.Errorf("Origin: expected 'http://my-origin.example.com', got %q", got)
+	}
+	if got := backendHeaders.Get("Cookie"); got != "foo=bar" {
+		t.Errorf("Cookie: expected 'foo=bar', got %q", got)
+	}
+	if got := backendHeaders.Get("User-Agent"); got != "TestAgent/1.0" {
+		t.Errorf("User-Agent: expected 'TestAgent/1.0', got %q", got)
 	}
 }
