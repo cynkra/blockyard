@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
@@ -801,6 +804,135 @@ func TestNonAdminCannotRevokeAccess(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for viewer revoking access, got %d", resp.StatusCode)
+	}
+}
+
+// testServerWithOIDCAndAudit creates a test server with both OIDC and audit log configured.
+func testServerWithOIDCAndAudit(t *testing.T, idp *testutil.MockIdP) (*server.Server, *httptest.Server, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	auditPath := tmp + "/audit.jsonl"
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+		OIDC: &config.OidcConfig{
+			IssuerURL:    idp.IssuerURL(),
+			ClientID:     "blockyard",
+			ClientSecret: config.NewSecret("test-secret"),
+			GroupsClaim:  "groups",
+		},
+		Audit: &config.AuditConfig{Path: auditPath},
+	}
+
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	srv.RoleCache = auth.NewRoleMappingCache()
+
+	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.JWKSCache = jwksCache
+
+	auditLog := audit.New(auditPath)
+	srv.AuditLog = auditLog
+	ctx, cancel := context.WithCancel(context.Background())
+	go auditLog.Run(ctx, auditPath)
+	t.Cleanup(cancel)
+
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return srv, ts, auditPath
+}
+
+func TestRoleMappingCRUDWithAudit(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts, auditPath := testServerWithOIDCAndAudit(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	// Create mapping
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/developers", adminToken,
+			strings.NewReader(`{"role":"publisher"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("create mapping: expected 204, got %d", resp.StatusCode)
+	}
+
+	// Update mapping
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/developers", adminToken,
+			strings.NewReader(`{"role":"admin"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("update mapping: expected 204, got %d", resp.StatusCode)
+	}
+
+	// Delete mapping
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("DELETE", ts.URL+"/api/v1/role-mappings/developers", adminToken, nil))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete mapping: expected 204, got %d", resp.StatusCode)
+	}
+
+	// Give the background writer time to flush.
+	time.Sleep(100 * time.Millisecond)
+
+	// Read audit log and verify role_mapping.set and role_mapping.delete entries.
+	data, err := io.ReadAll(openFile(t, auditPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	actions := make([]string, len(lines))
+	for i, line := range lines {
+		var entry map[string]any
+		json.Unmarshal([]byte(line), &entry)
+		if a, ok := entry["action"].(string); ok {
+			actions[i] = a
+		}
+	}
+
+	found := map[string]bool{}
+	for _, a := range actions {
+		found[a] = true
+	}
+	for _, expected := range []string{"role_mapping.set", "role_mapping.delete"} {
+		if !found[expected] {
+			t.Errorf("missing audit action %q in %v", expected, actions)
+		}
+	}
+
+	// Verify role_mapping.set appears at least twice (create + update).
+	setCount := 0
+	for _, a := range actions {
+		if a == "role_mapping.set" {
+			setCount++
+		}
+	}
+	if setCount < 2 {
+		t.Errorf("expected at least 2 role_mapping.set entries, got %d", setCount)
 	}
 }
 

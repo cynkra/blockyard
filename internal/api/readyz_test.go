@@ -12,6 +12,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -233,5 +234,116 @@ func TestReadyzDockerFail(t *testing.T) {
 	}
 	if checks["docker"] != "fail" {
 		t.Errorf("docker = %v, want fail", checks["docker"])
+	}
+}
+
+func TestReadyzWithVaultPass(t *testing.T) {
+	// Mock OpenBao server that returns 200 for /v1/sys/health.
+	baoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sys/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(baoSrv.Close)
+
+	srv := testServerForReadyz(t)
+	srv.VaultClient = integration.NewClient(baoSrv.URL, "test-token")
+
+	handler := readyzHandler(srv)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "ready" {
+		t.Errorf("expected ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map")
+	}
+	if checks["openbao"] != "pass" {
+		t.Errorf("openbao = %v, want pass", checks["openbao"])
+	}
+}
+
+func TestReadyzWithVaultFail(t *testing.T) {
+	// Mock OpenBao server that returns 503 for /v1/sys/health.
+	baoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(baoSrv.Close)
+
+	srv := testServerForReadyz(t)
+	srv.VaultClient = integration.NewClient(baoSrv.URL, "test-token")
+
+	handler := readyzHandler(srv)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "not_ready" {
+		t.Errorf("expected not_ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map")
+	}
+	if checks["openbao"] != "fail" {
+		t.Errorf("openbao = %v, want fail", checks["openbao"])
+	}
+}
+
+func TestReadyzWithOIDCNon200(t *testing.T) {
+	// Mock IdP that returns 500 for the discovery endpoint.
+	idpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(idpSrv.Close)
+
+	srv := testServerForReadyz(t)
+	srv.Config.OIDC = &config.OidcConfig{
+		IssuerURL: idpSrv.URL,
+	}
+
+	handler := readyzHandler(srv)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "not_ready" {
+		t.Errorf("expected not_ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map")
+	}
+	if checks["idp"] != "fail" {
+		t.Errorf("idp = %v, want fail", checks["idp"])
 	}
 }
