@@ -84,6 +84,7 @@ func main() {
 
 		srv.OIDCClient = oidcClient
 		srv.SigningKey = auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose())
+		srv.SessionTokenKey = auth.DeriveSessionTokenKey(cfg.Server.SessionSecret.Expose())
 		srv.UserSessions = auth.NewUserSessionStore()
 
 		// Initialize JWKS cache for control-plane JWT validation.

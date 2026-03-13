@@ -33,6 +33,8 @@ type AppResponse struct {
 	MaxSessionsPerWorker int      `json:"max_sessions_per_worker"`
 	MemoryLimit          *string  `json:"memory_limit"`
 	CPULimit             *float64 `json:"cpu_limit"`
+	Title                *string  `json:"title"`
+	Description          *string  `json:"description"`
 	CreatedAt            string   `json:"created_at"`
 	UpdatedAt            string   `json:"updated_at"`
 	Status               string   `json:"status"`
@@ -58,6 +60,8 @@ func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
 		MaxSessionsPerWorker: app.MaxSessionsPerWorker,
 		MemoryLimit:          app.MemoryLimit,
 		CPULimit:             app.CPULimit,
+		Title:                app.Title,
+		Description:          app.Description,
 		CreatedAt:            app.CreatedAt,
 		UpdatedAt:            app.UpdatedAt,
 		Status:               status,
@@ -245,6 +249,8 @@ type updateAppRequest struct {
 	MemoryLimit          *string  `json:"memory_limit"`
 	CPULimit             *float64 `json:"cpu_limit"`
 	AccessType           *string  `json:"access_type"`
+	Title                *string  `json:"title"`
+	Description          *string  `json:"description"`
 }
 
 func UpdateApp(srv *server.Server) http.HandlerFunc {
@@ -295,6 +301,8 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			MemoryLimit:          body.MemoryLimit,
 			CPULimit:             body.CPULimit,
 			AccessType:           body.AccessType,
+			Title:                body.Title,
+			Description:          body.Description,
 		}
 		app, err := srv.DB.UpdateApp(app.ID, update)
 		if err != nil {

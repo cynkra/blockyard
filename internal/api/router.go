@@ -25,6 +25,9 @@ func NewRouter(srv *server.Server) http.Handler {
 	r.Get("/callback", auth.CallbackHandler(authDeps))
 	r.Post("/logout", auth.LogoutHandler(authDeps))
 
+	// Credential exchange — session token auth (not API bearer token).
+	r.Post("/api/v1/credentials/vault", ExchangeVaultCredential(srv))
+
 	// Proxy routes with app-plane auth middleware (authenticate if possible).
 	r.Route("/app", func(sub chi.Router) {
 		sub.Use(auth.AppAuthMiddleware(authDeps, srv.RoleCache))
@@ -67,6 +70,18 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Get("/role-mappings", ListRoleMappings(srv))
 		r.Put("/role-mappings/{group_name}", SetRoleMapping(srv))
 		r.Delete("/role-mappings/{group_name}", DeleteRoleMapping(srv))
+
+		// Tag management
+		r.Get("/tags", ListTags(srv))
+		r.Post("/tags", CreateTag(srv))
+		r.Delete("/tags/{tagID}", DeleteTag(srv))
+
+		// App tag management
+		r.Post("/apps/{id}/tags", AddAppTag(srv))
+		r.Delete("/apps/{id}/tags/{tagID}", RemoveAppTag(srv))
+
+		// Content discovery
+		r.Get("/catalog", CatalogHandler(srv))
 	})
 
 	return r

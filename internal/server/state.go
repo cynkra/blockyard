@@ -35,6 +35,10 @@ type Server struct {
 	RoleCache *auth.RoleMappingCache
 	JWKSCache *auth.JWKSCache // nil when OIDC is not configured
 
+	// Session token signing key — for credential exchange tokens.
+	// Derived from session_secret with a different domain string.
+	SessionTokenKey *auth.SigningKey
+
 	// OpenBao — nil when [openbao] is not configured.
 	VaultClient     *integration.Client
 	VaultTokenCache *integration.VaultTokenCache

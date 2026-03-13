@@ -164,7 +164,8 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (worke
 	var extraEnv map[string]string
 	if srv.Config.Openbao != nil {
 		extraEnv = map[string]string{
-			"VAULT_ADDR": srv.Config.Openbao.Address,
+			"VAULT_ADDR":        srv.Config.Openbao.Address,
+			"BLOCKYARD_API_URL": srv.Config.Server.ExternalURL,
 		}
 	}
 

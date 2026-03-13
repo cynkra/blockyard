@@ -30,6 +30,7 @@ func forwardClientHeaders(r *http.Request) http.Header {
 		"X-Shiny-User",
 		"X-Shiny-Groups",
 		"X-Blockyard-Vault-Token",
+		"X-Blockyard-Session-Token",
 	} {
 		if v := r.Header.Get(key); v != "" {
 			h.Set(key, v)

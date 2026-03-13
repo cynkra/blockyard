@@ -20,8 +20,16 @@ server behaves as before.
 OpenBao tokens are injected per-request as the `X-Blockyard-Vault-Token`
 header. This matches Posit Connect's model for OAuth Integrations: R
 code reads `session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN` at session
-init. This design supports `max_sessions_per_worker > 1` safely — each
-user's request carries their own scoped token, even on shared workers.
+init.
+
+**Note (updated in phase 1-5):** raw vault tokens in headers are safe
+for single-tenant containers (`max_sessions_per_worker = 1`) but not
+for shared containers — they could leak between co-tenant sessions if
+the app logs request headers or stores them in a shared variable.
+Phase 1-5 introduces a two-phase exchange pattern for shared
+containers: the proxy injects a signed session reference token
+(`X-Blockyard-Session-Token`) instead, and the app exchanges it for
+the real vault credential via `POST /api/v1/credentials/vault`.
 
 ### VAULT_ADDR as container environment variable
 

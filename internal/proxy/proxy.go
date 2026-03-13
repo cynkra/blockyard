@@ -33,12 +33,21 @@ func Handler(srv *server.Server) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		appName := chi.URLParam(r, "name")
 
-		// 1. Look up app by name
-		app, err := srv.DB.GetAppByName(appName)
+		// 1. Look up app by ID (UUID) first, then by name.
+		// UUID lookup gives stable URLs that survive app renames.
+		app, err := srv.DB.GetApp(appName)
 		if err != nil {
 			slog.Error("proxy: db error", "app", appName, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		if app == nil {
+			app, err = srv.DB.GetAppByName(appName)
+			if err != nil {
+				slog.Error("proxy: db error", "app", appName, "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
 		}
 		if app == nil {
 			http.Error(w, "app not found", http.StatusNotFound)
@@ -164,11 +173,11 @@ func Handler(srv *server.Server) http.Handler {
 			}
 		}
 
-		// 4b. Inject OpenBao credentials when configured.
-		// Disabled for shared containers (max_sessions > 1) — raw vault
-		// tokens could leak between sessions in the same R process.
-		// Phase 1-5 adds a credential exchange API for this case.
-		injectVaultToken(r, srv, app.MaxSessionsPerWorker)
+			// 4b. Inject credentials when configured.
+		// Single-tenant: injects raw vault token (X-Blockyard-Vault-Token).
+		// Shared: injects session reference token (X-Blockyard-Session-Token)
+		// that the app exchanges for real credentials via the exchange API.
+		injectCredentials(r, srv, app.ID, workerID, app.MaxSessionsPerWorker)
 
 		// 5. Dispatch — WebSocket or HTTP
 		if isWebSocketUpgrade(r) {
@@ -179,26 +188,45 @@ func Handler(srv *server.Server) http.Handler {
 	})
 }
 
-// injectVaultToken exchanges the user's access token for a scoped
-// OpenBao token and injects it as the X-Blockyard-Vault-Token header.
-// Skipped when [openbao] is not configured, the user is not authenticated,
-// or the app allows multiple sessions per worker (shared containers).
-func injectVaultToken(r *http.Request, srv *server.Server, maxSessionsPerWorker int) {
+// injectCredentials handles per-request credential injection.
+// For single-tenant containers: injects raw vault token (backwards compat).
+// For shared containers: injects a signed session reference token that
+// the app exchanges for vault credentials via the credential exchange API.
+func injectCredentials(r *http.Request, srv *server.Server, appID, workerID string, maxSessionsPerWorker int) {
 	r.Header.Del("X-Blockyard-Vault-Token")
+	r.Header.Del("X-Blockyard-Session-Token")
 
 	if srv.VaultClient == nil {
 		return
 	}
-	// In shared containers, raw vault tokens could leak between sessions.
-	// Phase 1-5 introduces a credential exchange API for this case.
-	if maxSessionsPerWorker > 1 {
-		return
-	}
+
 	user := auth.UserFromContext(r.Context())
 	if user == nil || user.AccessToken == "" {
 		return
 	}
 
+	if maxSessionsPerWorker > 1 {
+		// Shared container — inject session reference token.
+		// The app exchanges this for real credentials.
+		now := time.Now().Unix()
+		claims := &auth.SessionTokenClaims{
+			Sub: user.Sub,
+			App: appID,
+			Wid: workerID,
+			Iat: now,
+			Exp: now + int64(auth.SessionTokenTTL.Seconds()),
+		}
+		token, err := auth.EncodeSessionToken(claims, srv.SessionTokenKey)
+		if err != nil {
+			slog.Warn("failed to encode session token",
+				"sub", user.Sub, "error", err)
+			return
+		}
+		r.Header.Set("X-Blockyard-Session-Token", token)
+		return
+	}
+
+	// Single-tenant container — inject raw vault token (backwards compat).
 	token, ok := srv.VaultTokenCache.Get(user.Sub)
 	if !ok {
 		var err error

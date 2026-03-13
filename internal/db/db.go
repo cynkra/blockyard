@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS apps (
     max_sessions_per_worker INTEGER DEFAULT 1,
     memory_limit            TEXT,
     cpu_limit               REAL,
+    title                   TEXT,
+    description             TEXT,
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL
 );
@@ -51,10 +53,28 @@ CREATE TABLE IF NOT EXISTS role_mappings (
     role        TEXT NOT NULL CHECK (role IN ('admin', 'publisher', 'viewer')),
     PRIMARY KEY (group_name)
 );
+
+CREATE TABLE IF NOT EXISTS tags (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_tags (
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (app_id, tag_id)
+);
 `
 
 type DB struct {
 	*sql.DB
+}
+
+// IsUniqueConstraintError reports whether err is a SQLite UNIQUE
+// constraint violation.
+func IsUniqueConstraintError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 func Open(path string) (*DB, error) {
@@ -96,6 +116,8 @@ type AppRow struct {
 	MaxSessionsPerWorker int
 	MemoryLimit          *string
 	CPULimit             *float64
+	Title                *string
+	Description          *string
 	CreatedAt            string
 	UpdatedAt            string
 }
@@ -124,7 +146,7 @@ func (db *DB) CreateApp(name, owner string) (*AppRow, error) {
 }
 
 const appColumns = `id, name, owner, access_type, active_bundle, max_workers_per_app,
-		max_sessions_per_worker, memory_limit, cpu_limit, created_at, updated_at`
+		max_sessions_per_worker, memory_limit, cpu_limit, title, description, created_at, updated_at`
 
 func (db *DB) GetApp(id string) (*AppRow, error) {
 	row := db.QueryRow(`SELECT `+appColumns+` FROM apps WHERE id = ?`, id)
@@ -276,6 +298,8 @@ type AppUpdate struct {
 	MemoryLimit          *string
 	CPULimit             *float64
 	AccessType           *string
+	Title                *string
+	Description          *string
 }
 
 // UpdateApp applies partial updates to an app's configuration.
@@ -304,6 +328,12 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	if u.AccessType != nil {
 		app.AccessType = *u.AccessType
 	}
+	if u.Title != nil {
+		app.Title = u.Title
+	}
+	if u.Description != nil {
+		app.Description = u.Description
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(
@@ -313,11 +343,14 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 			memory_limit = ?,
 			cpu_limit = ?,
 			access_type = ?,
+			title = ?,
+			description = ?,
 			updated_at = ?
 		WHERE id = ?`,
 		app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
 		app.MemoryLimit, app.CPULimit,
 		app.AccessType,
+		app.Title, app.Description,
 		now, id,
 	)
 	if err != nil {
@@ -352,6 +385,7 @@ func scanApp(row *sql.Row) (*AppRow, error) {
 	err := row.Scan(&app.ID, &app.Name, &app.Owner, &app.AccessType,
 		&app.ActiveBundle, &app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
 		&app.MemoryLimit, &app.CPULimit,
+		&app.Title, &app.Description,
 		&app.CreatedAt, &app.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -369,6 +403,7 @@ func scanApps(rows *sql.Rows) ([]AppRow, error) {
 		if err := rows.Scan(&app.ID, &app.Name, &app.Owner, &app.AccessType,
 			&app.ActiveBundle, &app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
 			&app.MemoryLimit, &app.CPULimit,
+			&app.Title, &app.Description,
 			&app.CreatedAt, &app.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -480,4 +515,214 @@ func (db *DB) RevokeAppAccess(appID, principal, kind string) (bool, error) {
 	}
 	n, _ := result.RowsAffected()
 	return n > 0, nil
+}
+
+// --- Tags ---
+
+// TagRow represents a row from the tags table.
+type TagRow struct {
+	ID        string
+	Name      string
+	CreatedAt string
+}
+
+func (db *DB) CreateTag(name string) (*TagRow, error) {
+	id := uuid.New().String()
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		"INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)",
+		id, name, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &TagRow{ID: id, Name: name, CreatedAt: now}, nil
+}
+
+func (db *DB) GetTag(id string) (*TagRow, error) {
+	var t TagRow
+	err := db.QueryRow("SELECT id, name, created_at FROM tags WHERE id = ?", id).
+		Scan(&t.ID, &t.Name, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (db *DB) ListTags() ([]TagRow, error) {
+	rows, err := db.Query("SELECT id, name, created_at FROM tags ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []TagRow
+	for rows.Next() {
+		var t TagRow
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, rows.Err()
+}
+
+func (db *DB) DeleteTag(id string) (bool, error) {
+	result, err := db.Exec("DELETE FROM tags WHERE id = ?", id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+func (db *DB) AddAppTag(appID, tagID string) error {
+	_, err := db.Exec(
+		"INSERT OR IGNORE INTO app_tags (app_id, tag_id) VALUES (?, ?)",
+		appID, tagID,
+	)
+	return err
+}
+
+func (db *DB) RemoveAppTag(appID, tagID string) (bool, error) {
+	result, err := db.Exec(
+		"DELETE FROM app_tags WHERE app_id = ? AND tag_id = ?",
+		appID, tagID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+func (db *DB) ListAppTags(appID string) ([]TagRow, error) {
+	rows, err := db.Query(
+		`SELECT t.id, t.name, t.created_at
+		 FROM tags t
+		 JOIN app_tags at ON t.id = at.tag_id
+		 WHERE at.app_id = ?
+		 ORDER BY t.name`,
+		appID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []TagRow
+	for rows.Next() {
+		var t TagRow
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, rows.Err()
+}
+
+// --- Catalog ---
+
+// CatalogParams holds query parameters for the catalog listing.
+type CatalogParams struct {
+	CallerSub    string
+	CallerGroups []string
+	CallerRole   string // "admin", "publisher", "viewer", or ""
+	Tag          string
+	Search       string
+	Page         int
+	PerPage      int
+}
+
+// ListCatalog returns apps visible to the caller with access control,
+// tag filtering, search, and pagination.
+func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
+	var conditions []string
+	var args []any
+
+	// Access control filter
+	if params.CallerRole == "admin" {
+		// Admin sees everything — no filter
+	} else if params.CallerSub != "" {
+		groupPlaceholders := "''" // no groups — will never match
+		if len(params.CallerGroups) > 0 {
+			ph := make([]string, len(params.CallerGroups))
+			for i := range ph {
+				ph[i] = "?"
+			}
+			groupPlaceholders = strings.Join(ph, ", ")
+		}
+		accessFilter := fmt.Sprintf(`(
+			apps.owner = ?
+			OR apps.access_type = 'public'
+			OR EXISTS (
+				SELECT 1 FROM app_access
+				WHERE app_access.app_id = apps.id
+				AND (
+					(app_access.kind = 'user' AND app_access.principal = ?)
+					OR (app_access.kind = 'group' AND app_access.principal IN (%s))
+				)
+			)
+		)`, groupPlaceholders)
+
+		conditions = append(conditions, accessFilter)
+		args = append(args, params.CallerSub, params.CallerSub)
+		for _, g := range params.CallerGroups {
+			args = append(args, g)
+		}
+	} else {
+		// Unauthenticated — public apps only
+		conditions = append(conditions, "apps.access_type = 'public'")
+	}
+
+	// Tag filter
+	if params.Tag != "" {
+		conditions = append(conditions,
+			`EXISTS (
+				SELECT 1 FROM app_tags
+				JOIN tags ON tags.id = app_tags.tag_id
+				WHERE app_tags.app_id = apps.id AND tags.name = ?
+			)`)
+		args = append(args, params.Tag)
+	}
+
+	// Search filter
+	if params.Search != "" {
+		conditions = append(conditions,
+			"(apps.name LIKE ? OR apps.title LIKE ? OR apps.description LIKE ?)")
+		like := "%" + params.Search + "%"
+		args = append(args, like, like, like)
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Count total
+	var total int
+	countQuery := "SELECT COUNT(*) FROM apps " + where
+	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Fetch page
+	query := fmt.Sprintf(
+		`SELECT %s FROM apps %s ORDER BY apps.updated_at DESC LIMIT ? OFFSET ?`,
+		appColumns, where,
+	)
+	pageArgs := append(append([]any{}, args...), params.PerPage, (params.Page-1)*params.PerPage)
+
+	rows, err := db.Query(query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	apps, err := scanApps(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return apps, total, nil
 }

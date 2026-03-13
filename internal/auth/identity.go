@@ -57,6 +57,11 @@ func (r Role) CanManageRoles() bool {
 	return r >= RoleAdmin
 }
 
+// CanManageTags reports whether this role can create or delete tags.
+func (r Role) CanManageTags() bool {
+	return r >= RoleAdmin
+}
+
 // AuthSource describes how the caller authenticated.
 type AuthSource int
 

@@ -1,87 +1,645 @@
-# Phase 1-5: Vanity URLs + Content Discovery
+# Phase 1-5: Credential Exchange API + Content Discovery
 
-User-facing features for navigating and accessing deployed content. This
-phase adds two capabilities:
+This phase covers two independent work streams:
 
-1. **Vanity URLs** — user-friendly paths like `/sales-dashboard/` instead
-   of `/app/sales-dashboard/`. Operators or app owners assign vanity URLs
-   via the API.
+1. **Credential exchange API** — secure vault token delivery for shared
+   containers (`max_sessions_per_worker > 1`). Phase 1-4 introduced
+   session sharing, exposing a gap in the current credential injection
+   model.
 2. **Content discovery** — a catalog API listing accessible apps with
-   metadata, tags, and search/filter support. The foundation for a
-   future browse UI.
+   metadata, tags, and search/filter support. Includes proxy-level UUID
+   resolution so apps can be accessed via stable `/app/{uuid}/` paths
+   in addition to `/app/{name}/`.
 
-This phase depends on phase 1-2 (RBAC — the catalog must respect access
-control, and vanity URL assignment requires permission checks).
+This phase depends on phase 1-2 (RBAC), phase 1-3 (OpenBao integration),
+and phase 1-4 (session sharing).
 
-## Design decision: vanity URLs as path aliases, not DNS
+**Vanity URLs** (top-level path aliases like `/sales-dashboard/`) were
+considered and dropped. App names are already human-readable, so the
+marginal improvement didn't justify the routing complexity (catch-all
+routes competing with `/healthz`, `/login`, etc.) and auth middleware
+concerns. If top-level vanity URLs become important later, they can be
+added as a standalone feature.
 
-Vanity URLs are path-based (`/sales-dashboard/`), not subdomain-based
-(`sales-dashboard.blockyard.example.com`). Path-based routing:
+---
 
-- **Works without wildcard DNS or TLS certs.** Subdomain routing requires
-  `*.blockyard.example.com` DNS records and a wildcard TLS certificate
-  (or per-subdomain certs via ACME). Path routing works with a single
-  domain and a single certificate.
-- **Simpler reverse proxy config.** All traffic goes to the same host;
-  blockyard routes internally. Subdomain routing requires the upstream
-  reverse proxy to forward all subdomains.
-- **Matches the existing `/app/{name}/` pattern.** Vanity URLs are a
-  convenience layer on top of the same proxy infrastructure.
+## Part A: Credential Exchange API
 
-**Trade-off:** path-based vanity URLs must not collide with reserved
-paths (`/api/`, `/login`, `/healthz`, etc.). A blocklist prevents this.
-Subdomain routing would avoid the collision problem entirely, but the
-operational overhead is not justified for v1.
+### Problem
 
-## Design decision: vanity routes checked before standard routes
+Phase 1-3 introduced per-request credential injection: the proxy
+exchanges the user's IdP access token for a scoped OpenBao token and
+injects it as the `X-Blockyard-Vault-Token` HTTP header. This is safe
+when `max_sessions_per_worker = 1` — each container is single-tenant,
+so the R process only ever sees one user's token.
 
-The chi router evaluates routes in registration order. Vanity URL routes
-are registered before the `/app/{name}/` catch-all so they take
-precedence. If a vanity URL matches, the request is proxied to the
-target app. If no vanity URL matches, the request falls through to the
-standard `/app/{name}/` handler (or returns 404 if that doesn't match
-either).
+Phase 1-4 introduced `max_sessions_per_worker > 1`, which means
+multiple users' requests are proxied to the same R process. The raw
+vault token in a header could leak between co-tenant sessions — e.g.
+if the app logs request headers or stores them in a shared global
+variable. The current code (in `proxy.go:injectVaultToken`) already
+skips injection for shared containers with a comment deferring to this
+phase.
 
-**Resolution flow for `GET /foo/`:**
+### Solution: two-phase exchange pattern
 
-1. Check vanity URL table: is there an app with `vanity_url = 'foo'`?
-2. If yes → proxy to that app (same handler as `/app/{name}/`).
-3. If no → chi tries the next route (`/app/{name}/`). Since `foo` is
-   not under `/app/`, this returns 404.
+Posit Connect solves an analogous problem (per-user OAuth tokens in
+shared R processes) with a two-phase exchange pattern: the proxy
+injects a signed, short-lived, scoped *session reference token*, and
+the app exchanges it for the real credential by calling back to the
+server's API. The actual secret never crosses the proxy layer.
 
-**Caching:** vanity URL resolution uses an in-memory cache
-(`VanityCache`) loaded at startup and updated on writes. The cache maps
-slug → app ID. Non-vanity requests (`/favicon.ico`, `/robots.txt`,
-mistyped URLs) are rejected at the cache level without hitting the
-database. Only cache hits proceed to a DB lookup for the full app row.
+blockyard adopts the same pattern:
 
-The cache is small (hundreds of entries at most) and rarely mutated
-(only on `PATCH /apps/{id}` with a `vanity_url` field or app deletion).
-A `sync.RWMutex` + `map[string]string` is sufficient.
+1. **Proxy injects `X-Blockyard-Session-Token`** — a signed,
+   short-lived token containing the user's identity and the worker ID.
+   This replaces `X-Blockyard-Vault-Token` for shared containers.
+2. **App calls `POST /api/v1/credentials/vault`** — presenting the
+   session token as a bearer credential. The server validates the
+   token, exchanges the user's identity for a scoped OpenBao token,
+   and returns it.
+3. **Single-tenant fallback** — when `max_sessions_per_worker = 1`,
+   the proxy continues injecting `X-Blockyard-Vault-Token` directly
+   for backwards compatibility (zero code changes in the app).
 
-## Design decision: reserved prefix blocklist
+### Design decision: session token format
 
-Vanity URLs are validated against a static blocklist of reserved prefixes.
-Any vanity URL that matches a reserved prefix is rejected.
+The session reference token uses the same `base64url(json).base64url(hmac)`
+format as the existing `auth.CookiePayload`. This avoids adding a JWT
+library dependency — the token is server-issued and server-validated, so
+interoperability with external JWT consumers is not needed.
+
+**Domain separation.** The session token is signed with a key derived
+from the same `session_secret` but with a different domain string
+(`"blockyard-session-token"` vs `"blockyard-cookie-signing"`). This
+prevents a session cookie from being accepted as a session token or
+vice versa.
+
+**Claims:**
+
+| Claim | Type   | Description |
+|-------|--------|-------------|
+| `sub` | string | Authenticated user's subject identifier |
+| `app` | string | App ID (scopes the token to one app) |
+| `wid` | string | Worker ID (scopes the token to one process) |
+| `iat` | int64  | Issued-at timestamp (Unix seconds) |
+| `exp` | int64  | Expiry timestamp (Unix seconds) |
+
+**Expiry:** 5 minutes. Refreshed on every proxied request (the proxy
+generates a fresh token per request). The short expiry limits the
+window for token replay.
+
+**Why `wid`?** Without the worker ID claim, a session token obtained
+from worker A could be replayed against the exchange endpoint by code
+running in worker B — a different container with potentially different
+tenants. The `wid` claim lets the exchange endpoint verify that the
+caller is running in the same container that the proxy routed the
+request to.
+
+### Design decision: exchange endpoint auth model
+
+The `POST /api/v1/credentials/vault` endpoint uses the session
+reference token itself as its authentication — presented as a standard
+`Authorization: Bearer <token>` header. It does NOT require the
+control-plane API bearer token (the R process in a worker container
+does not have it).
+
+**Validation checks:**
+
+1. Signature — HMAC verification with the session token signing key
+2. Expiry — reject tokens past their `exp` claim
+3. Worker existence — `wid` must be in the active worker map
+4. App match — `app` must match the worker's app ID (prevents a token
+   for app A from being used to obtain credentials scoped to app B)
+
+### Design decision: BLOCKYARD_API_URL environment variable
+
+Worker containers need to know where to call the exchange endpoint.
+The server injects `BLOCKYARD_API_URL` as an environment variable at
+spawn time (alongside the existing `VAULT_ADDR`). The value is
+derived from the server's `external_url` config. When `external_url`
+is not set (dev mode), it falls back to `http://host.docker.internal:{port}`
+or the container gateway address.
+
+### What's already done
+
+Phase 1-3 delivered:
+
+- `injectVaultToken()` in `proxy.go` — already skips when
+  `maxSessionsPerWorker > 1` with a comment pointing to this phase
+- `VaultTokenCache` — caches scoped tokens by user sub
+- `VaultClient.JWTLogin()` — exchanges IdP access token for OpenBao token
+- `VAULT_ADDR` env var injection in `coldstart.go:spawnWorker()`
+- `X-Blockyard-Vault-Token` header forwarding in `ws.go:shuttleWS()`
+
+Phase 1-4 delivered:
+
+- `max_sessions_per_worker > 1` support
+- Load balancing, session sharing, auto-scaling
+
+Auth infrastructure (from phase 1-1):
+
+- `auth.SigningKey` — HMAC-SHA256 signing with domain separation
+- `auth.DeriveSigningKey(secret)` — derives a key from the session secret
+- `auth.CookiePayload` — `base64url(json).base64url(hmac)` encode/decode
+- `auth.UserFromContext()` — extracts authenticated user from context
+- `auth.CallerFromContext()` — extracts caller identity from context
+
+### Step 1: Session reference token
+
+New file: `internal/auth/sessiontoken.go` — encode and decode session
+reference tokens for the credential exchange flow.
 
 ```go
-var reservedPrefixes = []string{
-    "api", "app", "login", "callback", "logout",
-    "healthz", "readyz", "metrics",
-    "static", "assets", "admin",
+package auth
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// SessionTokenClaims is the payload of a session reference token.
+// Issued by the proxy on each request to shared containers. The app
+// exchanges this for real credentials via the credential exchange API.
+type SessionTokenClaims struct {
+	Sub string `json:"sub"` // user subject
+	App string `json:"app"` // app ID
+	Wid string `json:"wid"` // worker ID
+	Iat int64  `json:"iat"` // issued at (unix seconds)
+	Exp int64  `json:"exp"` // expiry (unix seconds)
+}
+
+// SessionTokenTTL is the validity window for session reference tokens.
+const SessionTokenTTL = 5 * time.Minute
+
+// DeriveSessionTokenKey derives a signing key for session tokens.
+// Uses a different domain string than cookie signing to prevent
+// cross-protocol token confusion.
+func DeriveSessionTokenKey(secret string) *SigningKey {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte("blockyard-session-token"))
+	return &SigningKey{key: mac.Sum(nil)}
+}
+
+// EncodeSessionToken serializes and signs a session reference token.
+// Format: base64url(json) + "." + base64url(hmac)
+func EncodeSessionToken(claims *SessionTokenClaims, key *SigningKey) (string, error) {
+	jsonBytes, err := json.Marshal(claims)
+	if err != nil {
+		return "", fmt.Errorf("marshal session token: %w", err)
+	}
+
+	mac := hmac.New(sha256.New, key.key)
+	mac.Write(jsonBytes)
+	sig := mac.Sum(nil)
+
+	payload := base64.RawURLEncoding.EncodeToString(jsonBytes)
+	signature := base64.RawURLEncoding.EncodeToString(sig)
+	return payload + "." + signature, nil
+}
+
+// DecodeSessionToken verifies the HMAC signature and deserializes the
+// claims. Returns an error if the signature is invalid or the token
+// has expired.
+func DecodeSessionToken(token string, key *SigningKey) (*SessionTokenClaims, error) {
+	parts := strings.SplitN(token, ".", 2)
+	if len(parts) != 2 {
+		return nil, errors.New("malformed session token: missing separator")
+	}
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("decode session token payload: %w", err)
+	}
+
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("decode session token signature: %w", err)
+	}
+
+	mac := hmac.New(sha256.New, key.key)
+	mac.Write(payloadBytes)
+	expected := mac.Sum(nil)
+	if !hmac.Equal(sigBytes, expected) {
+		return nil, errors.New("invalid session token signature")
+	}
+
+	var claims SessionTokenClaims
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return nil, fmt.Errorf("unmarshal session token: %w", err)
+	}
+
+	if time.Now().Unix() > claims.Exp {
+		return nil, errors.New("session token expired")
+	}
+
+	return &claims, nil
 }
 ```
 
-The list is intentionally conservative — it includes prefixes that are
-not yet used (like `admin`, `static`, `assets`) to prevent future
-collisions. Adding a prefix to the blocklist after apps have claimed it
-as a vanity URL would require a migration.
+**Server struct addition:**
 
-**Validation rule:** a vanity URL is rejected if it equals any reserved
-prefix (case-insensitive). No partial matching — `api-docs` is allowed
-even though `api` is reserved.
+```go
+type Server struct {
+    // ... existing fields ...
+    SessionTokenKey *auth.SigningKey // for credential exchange tokens
+}
+```
 
-## Design decision: catalog visibility respects RBAC
+Initialized in `cmd/blockyard/main.go` alongside the existing
+`SigningKey`:
+
+```go
+srv.SessionTokenKey = auth.DeriveSessionTokenKey(
+    cfg.Server.SessionSecret.Expose(),
+)
+```
+
+**Tests:**
+
+- `TestSessionTokenRoundTrip` — encode and decode, verify all claims
+- `TestSessionTokenExpired` — set exp in the past, decode returns error
+- `TestSessionTokenTampered` — modify payload after encoding, decode
+  returns signature error
+- `TestSessionTokenWrongKey` — sign with key A, decode with key B,
+  returns error
+- `TestSessionTokenKeyDomainSeparation` — a cookie payload encoded
+  with `DeriveSigningKey` must not decode with `DeriveSessionTokenKey`
+  and vice versa
+
+### Step 2: Proxy — inject session token for shared containers
+
+Modify `injectVaultToken()` in `internal/proxy/proxy.go` to inject
+`X-Blockyard-Session-Token` instead of skipping entirely when
+`maxSessionsPerWorker > 1`.
+
+**Current behavior (phase 1-3):**
+
+```
+max_sessions_per_worker = 1  → inject X-Blockyard-Vault-Token
+max_sessions_per_worker > 1  → skip (no credential injection)
+```
+
+**New behavior:**
+
+```
+max_sessions_per_worker = 1  → inject X-Blockyard-Vault-Token (unchanged)
+max_sessions_per_worker > 1  → inject X-Blockyard-Session-Token
+```
+
+```go
+// injectCredentials handles per-request credential injection.
+// For single-tenant containers: injects raw vault token (backwards compat).
+// For shared containers: injects a signed session reference token that
+// the app exchanges for vault credentials via the credential exchange API.
+func injectCredentials(r *http.Request, srv *server.Server, appID, workerID string, maxSessionsPerWorker int) {
+	r.Header.Del("X-Blockyard-Vault-Token")
+	r.Header.Del("X-Blockyard-Session-Token")
+
+	if srv.VaultClient == nil {
+		return
+	}
+
+	user := auth.UserFromContext(r.Context())
+	if user == nil || user.AccessToken == "" {
+		return
+	}
+
+	if maxSessionsPerWorker > 1 {
+		// Shared container — inject session reference token.
+		// The app exchanges this for real credentials.
+		now := time.Now().Unix()
+		claims := &auth.SessionTokenClaims{
+			Sub: user.Sub,
+			App: appID,
+			Wid: workerID,
+			Iat: now,
+			Exp: now + int64(auth.SessionTokenTTL.Seconds()),
+		}
+		token, err := auth.EncodeSessionToken(claims, srv.SessionTokenKey)
+		if err != nil {
+			slog.Warn("failed to encode session token",
+				"sub", user.Sub, "error", err)
+			return
+		}
+		r.Header.Set("X-Blockyard-Session-Token", token)
+		return
+	}
+
+	// Single-tenant container — inject raw vault token (backwards compat).
+	token, ok := srv.VaultTokenCache.Get(user.Sub)
+	if !ok {
+		var err error
+		var ttl time.Duration
+		token, ttl, err = srv.VaultClient.JWTLogin(
+			r.Context(),
+			srv.Config.Openbao.JWTAuthPath,
+			user.AccessToken,
+		)
+		if err != nil {
+			slog.Warn("vault JWT login failed",
+				"sub", user.Sub, "error", err)
+			return
+		}
+		if ttl == 0 {
+			ttl = srv.Config.Openbao.TokenTTL.Duration
+		}
+		srv.VaultTokenCache.Set(user.Sub, token, ttl)
+	}
+	r.Header.Set("X-Blockyard-Vault-Token", token)
+}
+```
+
+**Call site change in `Handler()`:** the function now needs `appID`
+and `workerID` (previously it only needed `maxSessionsPerWorker`):
+
+```go
+// Before:
+injectVaultToken(r, srv, app.MaxSessionsPerWorker)
+
+// After:
+injectCredentials(r, srv, app.ID, workerID, app.MaxSessionsPerWorker)
+```
+
+**WebSocket header forwarding.** `shuttleWS` in `ws.go` already
+forwards `X-Blockyard-Vault-Token` to the backend on the WebSocket
+dial. Add `X-Blockyard-Session-Token` to the same forwarding block:
+
+```go
+if v := r.Header.Get("X-Blockyard-Session-Token"); v != "" {
+    dialHeaders.Set("X-Blockyard-Session-Token", v)
+}
+```
+
+**Tests:**
+
+- `TestInjectCredentialsSingleTenant` — `maxSessionsPerWorker = 1`,
+  verify `X-Blockyard-Vault-Token` is set and
+  `X-Blockyard-Session-Token` is absent
+- `TestInjectCredentialsSharedContainer` — `maxSessionsPerWorker > 1`,
+  verify `X-Blockyard-Session-Token` is set and
+  `X-Blockyard-Vault-Token` is absent. Decode the token and verify
+  claims match (sub, app, wid, exp within expected range)
+- `TestInjectCredentialsNoVault` — `VaultClient == nil`, verify both
+  headers are absent
+- `TestInjectCredentialsNoUser` — no authenticated user, verify both
+  headers are absent
+- `TestInjectCredentialsStripsExisting` — set spoofed
+  `X-Blockyard-Session-Token` on incoming request, verify it is
+  replaced (not passed through)
+
+### Step 3: BLOCKYARD_API_URL environment variable
+
+Worker containers need to call back to the server's credential
+exchange endpoint. Add `BLOCKYARD_API_URL` alongside the existing
+`VAULT_ADDR` injection in `coldstart.go:spawnWorker()`.
+
+```go
+if srv.Config.Openbao != nil {
+    extraEnv = map[string]string{
+        "VAULT_ADDR":        srv.Config.Openbao.Address,
+        "BLOCKYARD_API_URL": srv.Config.Server.ExternalURL,
+    }
+}
+```
+
+**Config requirement:** `external_url` must be set when `[openbao]` is
+configured — the worker container needs a routable URL to call back to
+the server. This is already a soft requirement (the OIDC callback URL
+depends on it); phase 1-5 makes it a validation error when both
+`[openbao]` and `max_sessions_per_worker > 1` are configured but
+`external_url` is empty.
+
+**Tests:**
+
+- `TestSpawnWorkerInjectsAPIURL` — spawn with `[openbao]` configured,
+  verify `BLOCKYARD_API_URL` is in the worker spec's Env map
+
+### Step 4: Credential exchange endpoint
+
+New file: `internal/api/credentials.go`
+
+`POST /api/v1/credentials/vault` — accepts a session reference token,
+validates it, and returns a scoped OpenBao token.
+
+```go
+package api
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/server"
+)
+
+// ExchangeVaultCredential handles POST /api/v1/credentials/vault.
+// Accepts a session reference token (as Bearer auth), validates it,
+// and returns a scoped OpenBao token.
+//
+// This endpoint does NOT use the standard API bearer token auth.
+// The session reference token is its own authentication — it proves
+// the caller was routed through the proxy to a specific worker.
+func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Extract Bearer token
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			writeError(w, http.StatusUnauthorized, "unauthorized",
+				"Missing Bearer token")
+			return
+		}
+		rawToken := authHeader[7:]
+
+		// 2. Decode and validate session token
+		claims, err := auth.DecodeSessionToken(rawToken, srv.SessionTokenKey)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid_token",
+				"Invalid or expired session token")
+			return
+		}
+
+		// 3. Verify worker exists and belongs to the claimed app
+		worker, ok := srv.Workers.Get(claims.Wid)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "invalid_token",
+				"Worker not found")
+			return
+		}
+		if worker.AppID != claims.App {
+			writeError(w, http.StatusUnauthorized, "invalid_token",
+				"Token app does not match worker")
+			return
+		}
+
+		// 4. Exchange user identity for a scoped OpenBao token.
+		// Look up the user's IdP access token from the session store,
+		// then exchange it via VaultClient.JWTLogin (with caching).
+		if srv.VaultClient == nil {
+			writeError(w, http.StatusServiceUnavailable, "vault_unavailable",
+				"Credential service not configured")
+			return
+		}
+
+		userSession := srv.UserSessions.Get(claims.Sub)
+		if userSession == nil || userSession.AccessToken == "" {
+			writeError(w, http.StatusUnauthorized, "session_expired",
+				"User session not found or expired")
+			return
+		}
+
+		vaultToken, ok := srv.VaultTokenCache.Get(claims.Sub)
+		if !ok {
+			var ttl time.Duration
+			vaultToken, ttl, err = srv.VaultClient.JWTLogin(
+				r.Context(),
+				srv.Config.Openbao.JWTAuthPath,
+				userSession.AccessToken,
+			)
+			if err != nil {
+				slog.Warn("credential exchange: vault login failed",
+					"sub", claims.Sub, "error", err)
+				writeError(w, http.StatusBadGateway, "vault_error",
+					"Failed to obtain vault token")
+				return
+			}
+			if ttl == 0 {
+				ttl = srv.Config.Openbao.TokenTTL.Duration
+			}
+			srv.VaultTokenCache.Set(claims.Sub, vaultToken, ttl)
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"token": vaultToken,
+			"ttl":   int(srv.Config.Openbao.TokenTTL.Duration.Seconds()),
+		})
+	}
+}
+```
+
+**Router addition.** The exchange endpoint is mounted outside the
+standard `APIAuth` middleware — it uses session token auth instead:
+
+```go
+// Credential exchange — session token auth (not API bearer token)
+r.Post("/api/v1/credentials/vault", ExchangeVaultCredential(srv))
+```
+
+This is placed before the `r.Route("/api/v1", ...)` block so it is
+not wrapped by `APIAuth`.
+
+**Tests:**
+
+- `TestExchangeValidToken` — encode a valid session token, call
+  endpoint, verify 200 with vault token in response
+- `TestExchangeExpiredToken` — token with past expiry, verify 401
+- `TestExchangeTamperedToken` — modify token after signing, verify 401
+- `TestExchangeUnknownWorker` — valid signature but wid not in worker
+  map, verify 401
+- `TestExchangeAppMismatch` — valid token but wid belongs to a
+  different app than the `app` claim, verify 401
+- `TestExchangeNoVault` — `VaultClient == nil`, verify 503
+- `TestExchangeNoUserSession` — valid token but user's IdP session
+  has expired (not in UserSessionStore), verify 401
+- `TestExchangeMissingBearer` — no Authorization header, verify 401
+
+### Step 5: R helper documentation
+
+Document the R-side usage pattern for app developers. This is not
+shipped code — it's documentation showing how to use the exchange API
+from within a Shiny app.
+
+```r
+# blockyard_vault_token() — obtain a per-user OpenBao token.
+#
+# Call this from within a Shiny server function. The session token is
+# injected by the blockyard proxy as a request header. The function
+# exchanges it for a real vault token by calling back to the server.
+#
+# Returns the vault token string, or NULL if credentials are not
+# available (e.g. OpenBao not configured, user not authenticated).
+blockyard_vault_token <- function(session) {
+  session_token <- session$request$HTTP_X_BLOCKYARD_SESSION_TOKEN
+  if (is.null(session_token) || session_token == "") {
+    # Fall back to direct injection (single-tenant mode)
+    token <- session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN
+    if (!is.null(token) && token != "") return(token)
+    return(NULL)
+  }
+
+  api_url <- Sys.getenv("BLOCKYARD_API_URL", unset = "")
+  if (api_url == "") return(NULL)
+
+  resp <- httr2::request(api_url) |>
+    httr2::req_url_path("/api/v1/credentials/vault") |>
+    httr2::req_auth_bearer_token(session_token) |>
+    httr2::req_error(is_error = function(resp) FALSE) |>
+    httr2::req_perform()
+
+  if (httr2::resp_status(resp) != 200L) return(NULL)
+
+  httr2::resp_body_json(resp)$token
+}
+```
+
+The helper transparently handles both modes:
+
+1. **Shared container** (`max_sessions_per_worker > 1`) — reads
+   `X-Blockyard-Session-Token`, exchanges it via the API.
+2. **Single-tenant container** (`max_sessions_per_worker = 1`) — falls
+   back to reading `X-Blockyard-Vault-Token` directly.
+
+App developers use the same function regardless of deployment mode.
+
+### Credential exchange — new source files
+
+| File | Purpose |
+|------|---------|
+| `internal/auth/sessiontoken.go` | `SessionTokenClaims`, encode/decode, `DeriveSessionTokenKey` |
+| `internal/auth/sessiontoken_test.go` | Unit tests for session token signing |
+| `internal/api/credentials.go` | `ExchangeVaultCredential` handler |
+| `internal/api/credentials_test.go` | Integration tests for the exchange endpoint |
+
+### Credential exchange — modified files
+
+| File | Change |
+|------|--------|
+| `internal/proxy/proxy.go` | Rename `injectVaultToken` → `injectCredentials`, add session token path |
+| `internal/proxy/ws.go` | Forward `X-Blockyard-Session-Token` on WS dial |
+| `internal/proxy/coldstart.go` | Inject `BLOCKYARD_API_URL` env var |
+| `internal/api/router.go` | Mount `POST /api/v1/credentials/vault` outside `APIAuth` |
+| `internal/server/state.go` | Add `SessionTokenKey *auth.SigningKey` field |
+| `cmd/blockyard/main.go` | Initialize `SessionTokenKey` |
+
+---
+
+## Part B: Content Discovery
+
+User-facing features for navigating and accessing deployed content.
+
+### Design decision: proxy resolves apps by UUID and name
+
+The proxy handler at `/app/{name}/*` resolves the URL parameter by
+trying `GetApp(id)` (UUID lookup) first, then falling back to
+`GetAppByName(name)`. This gives every app a stable URL at
+`/app/{uuid}/` that survives renames, in addition to the human-readable
+`/app/{name}/` path.
+
+The API already uses this pattern (`resolveApp()` in `apps.go` does
+UUID-first, name-second). Extending it to the proxy is a one-line
+change and provides stable URLs for bookmarks, external links, and
+programmatic integrations without introducing a separate vanity URL
+system.
+
+### Design decision: catalog visibility respects RBAC
 
 The catalog API only returns apps the caller has access to:
 
@@ -96,7 +654,7 @@ different results. The query uses the same `EvaluateAccess` logic from
 phase 1-2, but applied at the database level for efficiency (filtering
 in SQL rather than loading all apps and filtering in Go).
 
-## Design decision: tags are admin-managed
+### Design decision: tags are admin-managed
 
 Tags are created and deleted by admins only. Any authenticated user can
 view tags and filter the catalog by tag. App owners and collaborators can
@@ -110,7 +668,7 @@ attach/detach existing tags to their apps.
 - The tag set is expected to be small (tens, not thousands) — categories
   like "finance", "reporting", "operations".
 
-## Design decision: title and description fields on apps
+### Design decision: title and description fields on apps
 
 Phase 1-5 adds `title` and `description` columns to the `apps` table.
 These are optional human-readable metadata for the catalog:
@@ -121,26 +679,19 @@ These are optional human-readable metadata for the catalog:
 
 These are set via `PATCH /api/v1/apps/{id}` alongside existing fields.
 
-## Deliverables
+### Deliverables
 
-1. Vanity URL assignment — `PATCH /api/v1/apps/{id}` with `vanity_url`
-   field
-2. Vanity URL routing — resolve `/{vanity}/` to the target app
-3. Vanity URL validation — reserved prefix blocklist, uniqueness,
-   format rules
-4. Trailing-slash redirect for vanity URLs (`/{vanity}` → `/{vanity}/`)
-5. Schema migration — `vanity_url`, `title`, `description` on apps;
-   `tags` and `app_tags` tables
-6. Tag management API — `POST/GET/DELETE /api/v1/tags`
-7. App tag management — `POST/DELETE /api/v1/apps/{id}/tags`
-8. Catalog API — `GET /api/v1/catalog` with tag/search/pagination
-9. `VanityCache` — in-memory slug → app ID cache, loaded at startup,
-   invalidated on writes
-10. DB access layer for vanity URL resolution, tags, and catalog queries
+1. Proxy UUID resolution — `/app/{uuid}/` resolves to the same app as
+   `/app/{name}/`
+2. Schema migration — `title`, `description` on apps; `tags` and
+   `app_tags` tables
+3. `title` and `description` via `PATCH /api/v1/apps/{id}`
+4. Tag management API — `POST/GET/DELETE /api/v1/tags`
+5. App tag management — `POST/DELETE /api/v1/apps/{id}/tags`
+6. Catalog API — `GET /api/v1/catalog` with tag/search/pagination
+7. DB access layer for tags and catalog queries
 
-## Step-by-step
-
-### Step 1: Schema migration
+### Step 6: Schema migration
 
 Add columns to `apps` and create tag tables. As with phase 1-2, this is
 folded into the consolidated schema (pre-release):
@@ -148,7 +699,6 @@ folded into the consolidated schema (pre-release):
 **Apps table additions:**
 
 ```sql
-ALTER TABLE apps ADD COLUMN vanity_url TEXT UNIQUE;
 ALTER TABLE apps ADD COLUMN title TEXT;
 ALTER TABLE apps ADD COLUMN description TEXT;
 ```
@@ -180,7 +730,6 @@ type AppRow struct {
     Name                 string
     Owner                string
     AccessType           string
-    VanityURL            *string  // new
     Title                *string  // new
     Description          *string  // new
     ActiveBundle         *string
@@ -196,456 +745,58 @@ type AppRow struct {
 **Tests:**
 
 - Schema creates without error
-- Apps with and without vanity_url
-- Vanity URL uniqueness constraint (insert two apps with same vanity_url
-  fails)
+- Apps with and without title/description
 
-### Step 2: Vanity URL validation
+### Step 7: Proxy UUID resolution
 
-New file: `internal/vanity/vanity.go`
+Modify the proxy handler in `proxy.go` to resolve apps by UUID first,
+then by name:
 
 ```go
-package vanity
-
-import (
-    "fmt"
-    "regexp"
-    "strings"
-)
-
-// reservedPrefixes are path prefixes that cannot be used as vanity URLs.
-var reservedPrefixes = []string{
-    "api", "app", "login", "callback", "logout",
-    "healthz", "readyz", "metrics",
-    "static", "assets", "admin",
+// 1. Look up app by ID (UUID) first, then by name.
+// UUID lookup gives stable URLs that survive app renames.
+app, err := srv.DB.GetApp(appName)
+if err != nil {
+    // ...
 }
-
-// vanityPattern matches valid vanity URL slugs: same rules as app names.
-// 1-63 chars, lowercase ASCII letters, digits, hyphens. Must start with
-// a letter, must not end with a hyphen.
-var vanityPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-
-// Validate checks whether a vanity URL slug is valid.
-// Returns nil on success, or an error describing the problem.
-func Validate(slug string) error {
-    if !vanityPattern.MatchString(slug) {
-        return fmt.Errorf("vanity URL must be 1-63 lowercase letters, digits, or hyphens, starting with a letter")
-    }
-
-    if strings.HasSuffix(slug, "-") {
-        return fmt.Errorf("vanity URL must not end with a hyphen")
-    }
-
-    lower := strings.ToLower(slug)
-    for _, prefix := range reservedPrefixes {
-        if lower == prefix {
-            return fmt.Errorf("vanity URL %q is reserved", slug)
-        }
-    }
-
-    return nil
+if app == nil {
+    app, err = srv.DB.GetAppByName(appName)
+    // ...
 }
 ```
+
+This mirrors the existing `resolveApp()` pattern used by the API
+handlers. Both `/app/{uuid}/` and `/app/{name}/` resolve to the same
+app and go through the same auth, session, and proxy logic.
 
 **Tests:**
 
-- Valid slugs: "sales-dashboard", "q4-report", "a"
-- Invalid: starts with digit, contains uppercase, too long (64 chars),
-  empty, ends with hyphen
-- Reserved: "api", "app", "login", "healthz", "admin" — all rejected
-- Not reserved: "api-docs", "application", "login-page" — all accepted
+- Proxy resolves by name (existing behavior)
+- Proxy resolves by UUID (new)
+- Unknown name/UUID returns 404
 
-### Step 3: DB access layer for vanity URLs
+### Step 8: Title and description via update endpoint
 
-**New methods in `internal/db/db.go`:**
-
-```go
-// GetAppByVanityURL looks up an app by its vanity URL slug.
-// Returns nil if no app has this vanity URL.
-func (db *DB) GetAppByVanityURL(vanityURL string) (*AppRow, error) {
-    row := db.QueryRow(
-        `SELECT id, name, owner, access_type, vanity_url, title, description,
-                active_bundle, max_workers_per_app,
-                max_sessions_per_worker, memory_limit, cpu_limit,
-                created_at, updated_at
-         FROM apps WHERE vanity_url = ?`,
-        vanityURL,
-    )
-    app := &AppRow{}
-    err := row.Scan(
-        &app.ID, &app.Name, &app.Owner, &app.AccessType,
-        &app.VanityURL, &app.Title, &app.Description,
-        &app.ActiveBundle, &app.MaxWorkersPerApp,
-        &app.MaxSessionsPerWorker, &app.MemoryLimit, &app.CPULimit,
-        &app.CreatedAt, &app.UpdatedAt,
-    )
-    if err == sql.ErrNoRows {
-        return nil, nil
-    }
-    if err != nil {
-        return nil, fmt.Errorf("get app by vanity url: %w", err)
-    }
-    return app, nil
-}
-
-// SetVanityURL sets or clears the vanity URL for an app.
-// Pass empty string to clear.
-func (db *DB) SetVanityURL(appID, vanityURL string) error {
-    var v *string
-    if vanityURL != "" {
-        v = &vanityURL
-    }
-    _, err := db.Exec(
-        "UPDATE apps SET vanity_url = ?, updated_at = ? WHERE id = ?",
-        v, time.Now().UTC().Format(time.RFC3339), appID,
-    )
-    return err
-}
-```
-
-**Tests:**
-
-- Set vanity URL and retrieve by it
-- Set vanity URL to empty string — clears it
-- Duplicate vanity URL — returns error (unique constraint)
-- Get by nonexistent vanity URL — returns nil
-
-### Step 4: Vanity URL cache
-
-New file: `internal/vanity/cache.go`
-
-```go
-package vanity
-
-import (
-    "sync"
-
-    "github.com/cynkra/blockyard/internal/db"
-)
-
-// Cache is an in-memory cache of vanity URL slug → app ID.
-// Loaded from the database at startup. Updated synchronously when
-// vanity URLs are assigned, cleared, or apps are deleted.
-//
-// The proxy handler checks the cache first. Misses (no matching slug)
-// are rejected without hitting the database. Hits are followed by a
-// DB lookup for the full app row (which is needed for auth checks,
-// active bundle, etc.).
-type Cache struct {
-    mu    sync.RWMutex
-    slugs map[string]string // slug → app ID
-}
-
-func NewCache() *Cache {
-    return &Cache{slugs: make(map[string]string)}
-}
-
-// Load populates the cache from the database.
-func (c *Cache) Load(database *db.DB) error {
-    apps, err := database.ListVanityURLs()
-    if err != nil {
-        return err
-    }
-
-    c.mu.Lock()
-    defer c.mu.Unlock()
-
-    c.slugs = make(map[string]string, len(apps))
-    for _, a := range apps {
-        c.slugs[a.VanityURL] = a.AppID
-    }
-    return nil
-}
-
-// Lookup checks if a slug is a registered vanity URL.
-// Returns the app ID and true if found, or empty string and false if not.
-// This is the fast path — no DB hit on miss.
-func (c *Cache) Lookup(slug string) (string, bool) {
-    c.mu.RLock()
-    defer c.mu.RUnlock()
-    id, ok := c.slugs[slug]
-    return id, ok
-}
-
-// Set adds or updates a vanity URL mapping. Called after a successful
-// DB write.
-func (c *Cache) Set(slug, appID string) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    c.slugs[slug] = appID
-}
-
-// Remove removes a vanity URL mapping. Called when a vanity URL is
-// cleared or an app is deleted.
-func (c *Cache) Remove(slug string) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    delete(c.slugs, slug)
-}
-
-// RemoveByAppID removes the vanity URL for a given app ID.
-// Used when deleting an app (we know the app ID but may not know
-// the slug without a lookup).
-func (c *Cache) RemoveByAppID(appID string) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    for slug, id := range c.slugs {
-        if id == appID {
-            delete(c.slugs, slug)
-            return
-        }
-    }
-}
-```
-
-**DB helper for loading:**
-
-```go
-type VanityEntry struct {
-    AppID     string
-    VanityURL string
-}
-
-func (db *DB) ListVanityURLs() ([]VanityEntry, error) {
-    rows, err := db.Query(
-        "SELECT id, vanity_url FROM apps WHERE vanity_url IS NOT NULL")
-    if err != nil {
-        return nil, err
-    }
-    defer rows.Close()
-    var entries []VanityEntry
-    for rows.Next() {
-        var e VanityEntry
-        if err := rows.Scan(&e.AppID, &e.VanityURL); err != nil {
-            return nil, err
-        }
-        entries = append(entries, e)
-    }
-    return entries, rows.Err()
-}
-```
-
-**Server struct addition:**
-
-```go
-type Server struct {
-    // ... existing fields ...
-    VanityCache *vanity.Cache
-}
-```
-
-**Initialization in `cmd/blockyard/main.go`:**
-
-```go
-vanityCache := vanity.NewCache()
-if err := vanityCache.Load(database); err != nil {
-    slog.Error("failed to load vanity URL cache", "error", err)
-    os.Exit(1)
-}
-srv.VanityCache = vanityCache
-```
-
-**Tests:**
-
-- `Load` populates cache from DB entries
-- `Lookup` hit returns app ID
-- `Lookup` miss returns false (no DB hit)
-- `Set` then `Lookup` returns new mapping
-- `Remove` then `Lookup` returns false
-- `RemoveByAppID` removes correct entry
-- Concurrent access: parallel `Set`/`Lookup`/`Remove`
-
-### Step 5: Vanity URL assignment via update endpoint
-
-Extend the `PATCH /api/v1/apps/{id}` handler to accept `vanity_url`:
+Extend the `PATCH /api/v1/apps/{id}` handler to accept `title` and
+`description`:
 
 ```go
 type updateAppBody struct {
     // ... existing fields ...
-    VanityURL   *string `json:"vanity_url"`
     Title       *string `json:"title"`
     Description *string `json:"description"`
 }
 ```
 
-In the handler:
-
-```go
-if body.VanityURL != nil {
-    if *body.VanityURL == "" {
-        // Clear vanity URL — remove from cache first (need old slug)
-        if app.VanityURL != nil {
-            srv.VanityCache.Remove(*app.VanityURL)
-        }
-        if err := srv.DB.SetVanityURL(app.ID, ""); err != nil {
-            writeError(w, http.StatusInternalServerError, "db_error", "Failed to clear vanity URL")
-            return
-        }
-    } else {
-        if err := vanity.Validate(*body.VanityURL); err != nil {
-            badRequest(w, err.Error())
-            return
-        }
-        if err := srv.DB.SetVanityURL(app.ID, *body.VanityURL); err != nil {
-            if isUniqueConstraintError(err) {
-                writeError(w, http.StatusConflict, "vanity_url_taken",
-                    "This vanity URL is already in use")
-                return
-            }
-            writeError(w, http.StatusInternalServerError, "db_error", "Failed to set vanity URL")
-            return
-        }
-        // Update cache: remove old slug (if any), add new one
-        if app.VanityURL != nil {
-            srv.VanityCache.Remove(*app.VanityURL)
-        }
-        srv.VanityCache.Set(*body.VanityURL, app.ID)
-    }
-}
-```
-
-**Permission check:** vanity URL assignment requires owner or admin
-access (`relation >= RelationOwner`). This is enforced by the existing
-update endpoint's auth guard from phase 1-2.
-
-**Cache invalidation on app delete:** the existing `DELETE /apps/{id}`
-handler must also clear the vanity cache. Add after the DB delete:
-
-```go
-srv.VanityCache.RemoveByAppID(app.ID)
-```
+Both fields are passed through `AppUpdate` and persisted via
+`UpdateApp()`. The response includes the new fields in `AppResponse`.
 
 **Tests:**
 
-- Set vanity URL — 200, app response includes `vanity_url`
-- Set vanity URL to reserved prefix — 400
-- Set vanity URL already in use — 409
-- Clear vanity URL (empty string) — 200
 - Set title and description — 200
-- Non-owner/admin cannot set vanity URL — 404 (phase 1-2 auth)
+- Fields appear in GET response
 
-### Step 6: Vanity URL routing
-
-Add vanity URL routes to the router, before the `/app/{name}/` routes:
-
-```go
-func NewRouter(srv *server.Server) http.Handler {
-    r := chi.NewRouter()
-
-    // Unauthenticated
-    r.Get("/healthz", healthz)
-
-    // Auth endpoints (phase 1-1)
-    r.Get("/login", loginHandler(srv))
-    r.Get("/callback", callbackHandler(srv))
-    r.Post("/logout", logoutHandler(srv))
-
-    // Vanity URL routes — checked before /app/{name}/
-    r.Get("/{vanity}", vanityRedirectTrailingSlash(srv))
-    r.Handle("/{vanity}/*", vanityProxyHandler(srv))
-
-    // Standard app proxy routes
-    r.Get("/app/{name}", proxy.RedirectTrailingSlash)
-    r.Handle("/app/{name}/*", proxy.Handler(srv))
-
-    // Authenticated API
-    r.Route("/api/v1", func(r chi.Router) {
-        // ... existing ...
-    })
-
-    return r
-}
-```
-
-**Vanity proxy handler:**
-
-```go
-// vanityProxyHandler resolves a vanity URL to an app and proxies to it.
-// Uses the in-memory VanityCache for fast rejection of non-vanity paths.
-// Returns 404 if no app has this vanity URL.
-func vanityProxyHandler(srv *server.Server) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        slug := chi.URLParam(r, "vanity")
-
-        // Fast path: check in-memory cache. Rejects /favicon.ico,
-        // /robots.txt, mistyped URLs, etc. without hitting the DB.
-        _, ok := srv.VanityCache.Lookup(slug)
-        if !ok {
-            http.NotFound(w, r)
-            return
-        }
-
-        // Cache hit — fetch full app row from DB (needed for auth,
-        // active bundle, etc.)
-        app, err := srv.DB.GetAppByVanityURL(slug)
-        if err != nil {
-            slog.Error("vanity: db error", "slug", slug, "error", err)
-            http.Error(w, "internal error", http.StatusInternalServerError)
-            return
-        }
-        if app == nil {
-            // Cache stale — slug was in cache but not in DB.
-            // Remove from cache and return 404.
-            srv.VanityCache.Remove(slug)
-            http.NotFound(w, r)
-            return
-        }
-
-        // Rewrite the request to look like /app/{name}/* so the
-        // standard proxy handler can process it.
-        r.URL.Path = "/app/" + app.Name + "/" + stripVanityPrefix(r.URL.Path, slug)
-
-        // Set the chi URL param so proxy.Handler can read it
-        rctx := chi.RouteContext(r.Context())
-        rctx.URLParams.Add("name", app.Name)
-
-        proxy.Handler(srv).ServeHTTP(w, r)
-    })
-}
-
-func stripVanityPrefix(path, slug string) string {
-    prefix := "/" + slug
-    stripped := strings.TrimPrefix(path, prefix)
-    stripped = strings.TrimPrefix(stripped, "/")
-    return stripped
-}
-
-func vanityRedirectTrailingSlash(srv *server.Server) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        slug := chi.URLParam(r, "vanity")
-
-        // Fast path: check cache before redirecting
-        if _, ok := srv.VanityCache.Lookup(slug); !ok {
-            http.NotFound(w, r)
-            return
-        }
-
-        http.Redirect(w, r, "/"+slug+"/", http.StatusMovedPermanently)
-    }
-}
-```
-
-**Route ordering concern:** the `/{vanity}` catch-all could match
-requests intended for other top-level paths. The key insight is that chi
-matches more specific routes first — `/healthz`, `/login`, `/api/v1/*`
-are all registered before `/{vanity}` and take precedence. The vanity
-catch-all only matches paths that don't match any other route.
-
-**Auth on vanity routes:** vanity proxy routes go through the same
-app-plane auth middleware as `/app/{name}/`. The middleware is applied
-inside `proxy.Handler`, which the vanity handler delegates to after
-resolving the app.
-
-**Tests:**
-
-- `GET /my-dashboard/` with valid vanity URL — proxied to correct app
-- `GET /my-dashboard/` with no matching vanity URL — 404
-- `GET /my-dashboard` (no trailing slash) — 301 redirect
-- `GET /api/v1/apps` — still works (not matched as vanity)
-- `GET /login` — still works (not matched as vanity)
-- `GET /healthz` — still works (not matched as vanity)
-
-### Step 7: Tag management API
+### Step 9: Tag management API
 
 **DB methods for tags:**
 
@@ -770,7 +921,7 @@ letters, digits, hyphens, starting with a letter).
 - Remove tag from app — 204
 - Non-admin cannot create/delete tags — 404
 
-### Step 8: Catalog API
+### Step 10: Catalog API
 
 New file: `internal/api/catalog.go`
 
@@ -796,7 +947,6 @@ New file: `internal/api/catalog.go`
             "title": "Sales Dashboard",
             "description": "Q4 sales metrics and KPIs",
             "owner": "user-sub",
-            "vanity_url": "sales-dashboard",
             "tags": ["finance", "reporting"],
             "status": "running",
             "url": "/app/sales-dashboard/",
@@ -809,9 +959,8 @@ New file: `internal/api/catalog.go`
 }
 ```
 
-**`url` field:** if the app has a vanity URL, `url` is `/{vanity}/`.
-Otherwise, it's `/app/{name}/`. This gives clients the canonical URL to
-link to.
+**`url` field:** always `/app/{name}/`. This gives clients the canonical
+URL to link to.
 
 **`status` field:** derived from the worker map (same as `GET /apps`).
 
@@ -831,7 +980,7 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
     var args []any
 
     // Access control filter
-    if params.CallerRole >= auth.RoleAdmin {
+    if params.CallerRole == "admin" {
         // Admin sees everything — no filter
     } else if params.CallerSub != "" {
         accessFilter := `(
@@ -896,10 +1045,7 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 
     // Fetch page
     query := fmt.Sprintf(
-        `SELECT id, name, owner, access_type, vanity_url, title, description,
-                active_bundle, max_workers_per_app,
-                max_sessions_per_worker, memory_limit, cpu_limit,
-                created_at, updated_at
+        `SELECT `+appColumns+`
          FROM apps %s
          ORDER BY updated_at DESC
          LIMIT ? OFFSET ?`,
@@ -920,7 +1066,7 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 type CatalogParams struct {
     CallerSub    string
     CallerGroups []string
-    CallerRole   auth.Role
+    CallerRole   string
     Tag          string
     Search       string
     Page         int
@@ -944,7 +1090,7 @@ func catalogHandler(srv *server.Server) http.HandlerFunc {
         if caller != nil {
             params.CallerSub = caller.Sub
             params.CallerGroups = caller.Groups
-            params.CallerRole = caller.Role
+            params.CallerRole = caller.Role.String()
         }
 
         apps, total, err := srv.DB.ListCatalog(params)
@@ -967,21 +1113,15 @@ func catalogHandler(srv *server.Server) http.HandlerFunc {
                 status = "running"
             }
 
-            url := "/app/" + app.Name + "/"
-            if app.VanityURL != nil {
-                url = "/" + *app.VanityURL + "/"
-            }
-
             items = append(items, catalogItem{
                 ID:          app.ID,
                 Name:        app.Name,
                 Title:       app.Title,
                 Description: app.Description,
                 Owner:       app.Owner,
-                VanityURL:   app.VanityURL,
                 Tags:        tagNames,
                 Status:      status,
-                URL:         url,
+                URL:         "/app/" + app.Name + "/",
                 UpdatedAt:   app.UpdatedAt,
             })
         }
@@ -1021,5 +1161,79 @@ admin access, so the catalog shows all apps.
 - Search filter — matches name, title, description
 - Pagination — correct total, page, per_page
 - Empty catalog — returns empty items array
-- App with vanity URL has correct `url` field
 - Status field reflects running/stopped state
+
+---
+
+## New source files (all parts)
+
+| File | Purpose |
+|------|---------|
+| `internal/auth/sessiontoken.go` | Session reference token encode/decode |
+| `internal/auth/sessiontoken_test.go` | Session token unit tests |
+| `internal/api/credentials.go` | `POST /api/v1/credentials/vault` exchange endpoint |
+| `internal/api/credentials_test.go` | Exchange endpoint tests |
+| `internal/api/tags.go` | Tag CRUD and app-tag management endpoints |
+| `internal/api/tags_test.go` | Tag endpoint tests |
+| `internal/api/catalog.go` | Catalog API handler |
+| `internal/api/catalog_test.go` | Catalog endpoint tests |
+
+## Modified files (all parts)
+
+| File | Change |
+|------|--------|
+| `internal/proxy/proxy.go` | Rename `injectVaultToken` → `injectCredentials`, add session token path, resolve apps by UUID then name |
+| `internal/proxy/ws.go` | Forward `X-Blockyard-Session-Token` on WS dial |
+| `internal/proxy/coldstart.go` | Inject `BLOCKYARD_API_URL` env var |
+| `internal/api/router.go` | Mount credential exchange, tag routes, catalog |
+| `internal/api/apps.go` | Accept `title`, `description` in PATCH |
+| `internal/server/state.go` | Add `SessionTokenKey` field |
+| `internal/db/db.go` | Add `title`, `description` to AppRow; tag CRUD; `ListCatalog`; `IsUniqueConstraintError` |
+| `internal/auth/identity.go` | Add `CanManageTags()` role method |
+| `cmd/blockyard/main.go` | Initialize `SessionTokenKey` |
+| `migrations/001_initial.sql` | Add `title`, `description` columns; `tags` and `app_tags` tables |
+
+## Exit criteria
+
+Phase 1-5 is done when:
+
+**Credential exchange:**
+
+- Proxy injects `X-Blockyard-Vault-Token` for single-tenant apps
+  (`max_sessions_per_worker = 1`) — unchanged from phase 1-3
+- Proxy injects `X-Blockyard-Session-Token` for shared apps
+  (`max_sessions_per_worker > 1`) — new
+- Both headers are stripped from incoming requests (anti-spoofing)
+- Session token contains correct claims (sub, app, wid, iat, exp)
+- Session token expires after 5 minutes
+- Session token signed with domain-separated key (not interchangeable
+  with session cookies)
+- `POST /api/v1/credentials/vault` accepts valid session token and
+  returns vault token
+- Exchange endpoint rejects expired, tampered, or wrong-worker tokens
+- Exchange endpoint does NOT require API bearer token
+- `BLOCKYARD_API_URL` is injected into worker containers when
+  `[openbao]` is configured
+- WebSocket dial forwards `X-Blockyard-Session-Token` header
+- R helper function works in both single-tenant and shared modes
+- All existing phase 1-3 credential injection tests still pass
+
+**Content discovery:**
+
+- Proxy resolves apps by UUID (`/app/{uuid}/`) and by name
+  (`/app/{name}/`)
+- `GET /api/v1/catalog` returns accessible apps with metadata
+- Catalog respects RBAC (admins see all, users see permitted, anon
+  sees public)
+- Tag filter, search filter, and pagination work
+- Tags are admin-managed (create, delete)
+- App owners can attach/detach tags
+- `title` and `description` fields on apps
+- `url` field is always `/app/{name}/`
+
+**General:**
+
+- All new unit and integration tests pass
+- All existing tests still pass
+- `go vet ./...` clean
+- `go test ./...` green
