@@ -19,7 +19,6 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 
@@ -62,9 +61,10 @@ type DockerBackend struct {
 	metaMode metadataMode
 }
 
-// New creates a DockerBackend, verifying Docker connectivity and detecting
-// whether the server is running inside a container.
-func New(ctx context.Context, cfg *config.DockerConfig, mountCfg MountConfig) (*DockerBackend, error) {
+// New creates a DockerBackend, verifying Docker connectivity, detecting
+// whether the server is running inside a container, and auto-detecting
+// how the data directory is mounted.
+func New(ctx context.Context, cfg *config.DockerConfig, bundleServerPath string) (*DockerBackend, error) {
 	cli, err := client.NewClientWithOpts(
 		client.WithHost("unix://"+cfg.Socket),
 		client.WithAPIVersionNegotiation(),
@@ -84,15 +84,9 @@ func New(ctx context.Context, cfg *config.DockerConfig, mountCfg MountConfig) (*
 		slog.Info("running in native mode (no server container ID detected)")
 	}
 
-	// In volume mode, ensure the named volume exists.
-	if mountCfg.UseVolume() {
-		if _, err := cli.VolumeCreate(ctx, volume.CreateOptions{
-			Name:   mountCfg.VolumeName,
-			Labels: map[string]string{"dev.blockyard/managed": "true"},
-		}); err != nil {
-			return nil, fmt.Errorf("create volume %s: %w", mountCfg.VolumeName, err)
-		}
-		slog.Info("bundle volume ready", "volume", mountCfg.VolumeName)
+	mountCfg, err := detectMountMode(ctx, cli, serverID, bundleServerPath)
+	if err != nil {
+		return nil, err
 	}
 
 	return &DockerBackend{

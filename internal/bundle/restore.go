@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/db"
@@ -28,7 +27,6 @@ type RestoreParams struct {
 	RvBinaryPath string // if set, skip download and use this path directly
 	Retention    int
 	BasePath     string // bundle_server_path for retention cleanup
-	HostBasePath string // host-side equivalent of BasePath for Docker bind mounts
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
@@ -66,15 +64,6 @@ func SpawnRestore(params RestoreParams) {
 			params.BundleID, params.Retention,
 		)
 	}()
-}
-
-// toHostPath translates a server-side path to the corresponding host path
-// by replacing the BasePath prefix with HostBasePath.
-func (p RestoreParams) toHostPath(serverPath string) string {
-	if p.HostBasePath == "" || p.HostBasePath == p.BasePath {
-		return serverPath
-	}
-	return filepath.Join(p.HostBasePath, strings.TrimPrefix(serverPath, p.BasePath))
 }
 
 func runRestore(p RestoreParams) error {
@@ -120,9 +109,9 @@ func runRestore(p RestoreParams) error {
 		AppID:        p.AppID,
 		BundleID:     p.BundleID,
 		Image:        p.Image,
-		RvBinaryPath: p.toHostPath(rvBinaryPath),
-		BundlePath:   p.toHostPath(p.Paths.Unpacked),
-		LibraryPath:  p.toHostPath(p.Paths.Library),
+		RvBinaryPath: rvBinaryPath,
+		BundlePath:   p.Paths.Unpacked,
+		LibraryPath:  p.Paths.Library,
 		Labels:       labels,
 		LogWriter:    p.Sender.Write,
 	}

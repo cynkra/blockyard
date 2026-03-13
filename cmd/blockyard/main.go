@@ -34,10 +34,7 @@ func main() {
 	slog.Info("loaded config", "bind", cfg.Server.Bind)
 
 	// Initialize backend
-	be, err := docker.New(context.Background(), &cfg.Docker, docker.MountConfig{
-		VolumeName:     cfg.Storage.BundleVolumeName,
-		BundleBasePath: cfg.Storage.BundleServerPath,
-	})
+	be, err := docker.New(context.Background(), &cfg.Docker, cfg.Storage.BundleServerPath)
 	if err != nil {
 		slog.Error("failed to create docker backend", "error", err)
 		os.Exit(1)

@@ -8,27 +8,27 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 )
 
-func TestMountConfig_WorkerMounts_BindMode(t *testing.T) {
-	mc := MountConfig{} // empty VolumeName = bind mode
+func TestMountConfig_WorkerMounts_NativeMode(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
 
-	binds, mounts := mc.WorkerMounts("/host/bundles/app1/b1", "/host/bundles/app1/b1_lib", "/app")
+	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "/app")
 	if len(mounts) != 0 {
-		t.Fatalf("expected no mounts in bind mode, got %d", len(mounts))
+		t.Fatalf("expected no mounts in native mode, got %d", len(mounts))
 	}
 	if len(binds) != 2 {
 		t.Fatalf("expected 2 binds, got %d: %v", len(binds), binds)
 	}
-	if binds[0] != "/host/bundles/app1/b1:/app:ro" {
+	if binds[0] != "/data/bundles/app1/b1:/app:ro" {
 		t.Errorf("bind[0] = %q", binds[0])
 	}
-	if binds[1] != "/host/bundles/app1/b1_lib:/blockyard-lib:ro" {
+	if binds[1] != "/data/bundles/app1/b1_lib:/blockyard-lib:ro" {
 		t.Errorf("bind[1] = %q", binds[1])
 	}
 }
 
-func TestMountConfig_WorkerMounts_BindMode_NoLibrary(t *testing.T) {
-	mc := MountConfig{}
-	binds, mounts := mc.WorkerMounts("/host/bundles/app1/b1", "", "/app")
+func TestMountConfig_WorkerMounts_NativeMode_NoLibrary(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
+	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "", "/app")
 	if len(mounts) != 0 {
 		t.Fatalf("expected no mounts, got %d", len(mounts))
 	}
@@ -37,10 +37,33 @@ func TestMountConfig_WorkerMounts_BindMode_NoLibrary(t *testing.T) {
 	}
 }
 
+func TestMountConfig_WorkerMounts_BindMode(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeBind,
+		HostSource: "/host/path/data",
+		MountDest:  "/data",
+	}
+
+	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "/app")
+	if len(mounts) != 0 {
+		t.Fatalf("expected no mounts in bind mode, got %d", len(mounts))
+	}
+	if len(binds) != 2 {
+		t.Fatalf("expected 2 binds, got %d: %v", len(binds), binds)
+	}
+	if binds[0] != "/host/path/data/bundles/app1/b1:/app:ro" {
+		t.Errorf("bind[0] = %q", binds[0])
+	}
+	if binds[1] != "/host/path/data/bundles/app1/b1_lib:/blockyard-lib:ro" {
+		t.Errorf("bind[1] = %q", binds[1])
+	}
+}
+
 func TestMountConfig_WorkerMounts_VolumeMode(t *testing.T) {
 	mc := MountConfig{
-		VolumeName:     "blockyard-data",
-		BundleBasePath: "/data/bundles",
+		Mode:       MountModeVolume,
+		VolumeName: "blockyard-data",
+		MountDest:  "/data",
 	}
 
 	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "/app")
@@ -51,35 +74,65 @@ func TestMountConfig_WorkerMounts_VolumeMode(t *testing.T) {
 		t.Fatalf("expected 2 mounts, got %d", len(mounts))
 	}
 
-	assertVolumeMount(t, mounts[0], "blockyard-data", "/app", true, "app1/b1")
-	assertVolumeMount(t, mounts[1], "blockyard-data", "/blockyard-lib", true, "app1/b1_lib")
+	assertVolumeMount(t, mounts[0], "blockyard-data", "/app", true, "bundles/app1/b1")
+	assertVolumeMount(t, mounts[1], "blockyard-data", "/blockyard-lib", true, "bundles/app1/b1_lib")
+}
+
+func TestMountConfig_BuildMounts_NativeMode(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
+
+	binds, mounts := mc.BuildMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "/data/bundles/.rv-cache/rv")
+	if len(mounts) != 0 {
+		t.Fatalf("expected no mounts in native mode, got %d", len(mounts))
+	}
+	if len(binds) != 3 {
+		t.Fatalf("expected 3 binds, got %d: %v", len(binds), binds)
+	}
+	if binds[0] != "/data/bundles/app1/b1:/app:ro" {
+		t.Errorf("bind[0] = %q", binds[0])
+	}
+	if binds[1] != "/data/bundles/app1/b1_lib:"+bundle.BuildContainerLibPath {
+		t.Errorf("bind[1] = %q", binds[1])
+	}
+	if binds[2] != "/data/bundles/.rv-cache/rv:/usr/local/bin/rv:ro" {
+		t.Errorf("bind[2] = %q", binds[2])
+	}
 }
 
 func TestMountConfig_BuildMounts_BindMode(t *testing.T) {
-	mc := MountConfig{}
+	mc := MountConfig{
+		Mode:       MountModeBind,
+		HostSource: "/host/data",
+		MountDest:  "/data",
+	}
 
-	binds, mounts := mc.BuildMounts("/host/app1/b1", "/host/app1/b1_lib", "/host/.rv-cache/rv")
+	binds, mounts := mc.BuildMounts(
+		"/data/bundles/app1/b1",
+		"/data/bundles/app1/b1_lib",
+		"/data/bundles/.rv-cache/rv-v0.19.0/rv",
+	)
 	if len(mounts) != 0 {
 		t.Fatalf("expected no mounts in bind mode, got %d", len(mounts))
 	}
 	if len(binds) != 3 {
 		t.Fatalf("expected 3 binds, got %d: %v", len(binds), binds)
 	}
-	if binds[0] != "/host/app1/b1:/app:ro" {
+	if binds[0] != "/host/data/bundles/app1/b1:/app:ro" {
 		t.Errorf("bind[0] = %q", binds[0])
 	}
-	if binds[1] != "/host/app1/b1_lib:"+bundle.BuildContainerLibPath {
+	if binds[1] != "/host/data/bundles/app1/b1_lib:"+bundle.BuildContainerLibPath {
 		t.Errorf("bind[1] = %q", binds[1])
 	}
-	if binds[2] != "/host/.rv-cache/rv:/usr/local/bin/rv:ro" {
+	if binds[2] != "/host/data/bundles/.rv-cache/rv-v0.19.0/rv:/usr/local/bin/rv:ro" {
 		t.Errorf("bind[2] = %q", binds[2])
 	}
 }
 
 func TestMountConfig_BuildMounts_VolumeMode(t *testing.T) {
 	mc := MountConfig{
-		VolumeName:     "blockyard-data",
-		BundleBasePath: "/data/bundles",
+		Mode:       MountModeVolume,
+		VolumeName: "blockyard-data",
+		MountDest:  "/data",
 	}
 
 	binds, mounts := mc.BuildMounts(
@@ -94,29 +147,72 @@ func TestMountConfig_BuildMounts_VolumeMode(t *testing.T) {
 		t.Fatalf("expected 3 mounts, got %d", len(mounts))
 	}
 
-	assertVolumeMount(t, mounts[0], "blockyard-data", "/app", true, "app1/b1")
-	assertVolumeMount(t, mounts[1], "blockyard-data", bundle.BuildContainerLibPath, false, "app1/b1_lib")
-	assertVolumeMount(t, mounts[2], "blockyard-data", "/usr/local/bin/rv", true, ".rv-cache/rv-v0.19.0/rv")
+	assertVolumeMount(t, mounts[0], "blockyard-data", "/app", true, "bundles/app1/b1")
+	assertVolumeMount(t, mounts[1], "blockyard-data", bundle.BuildContainerLibPath, false, "bundles/app1/b1_lib")
+	assertVolumeMount(t, mounts[2], "blockyard-data", "/usr/local/bin/rv", true, "bundles/.rv-cache/rv-v0.19.0/rv")
 }
 
 func TestMountConfig_Subpath(t *testing.T) {
 	mc := MountConfig{
-		VolumeName:     "vol",
-		BundleBasePath: "/data/bundles",
+		Mode:       MountModeVolume,
+		VolumeName: "vol",
+		MountDest:  "/data",
 	}
 
 	tests := []struct {
 		input string
 		want  string
 	}{
-		{"/data/bundles/app1/b1", "app1/b1"},
-		{"/data/bundles/.rv-cache/rv-v0.19.0/rv", ".rv-cache/rv-v0.19.0/rv"},
-		{"/data/bundles", ""},
+		{"/data/bundles/app1/b1", "bundles/app1/b1"},
+		{"/data/bundles/.rv-cache/rv-v0.19.0/rv", "bundles/.rv-cache/rv-v0.19.0/rv"},
+		{"/data", ""},
 	}
 	for _, tt := range tests {
 		got := mc.subpath(tt.input)
 		if got != tt.want {
 			t.Errorf("subpath(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestMountConfig_ToHostPath(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeBind,
+		HostSource: "/host/path/data",
+		MountDest:  "/data",
+	}
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"/data/bundles/app1/b1", "/host/path/data/bundles/app1/b1"},
+		{"/data/bundles/.rv-cache/rv", "/host/path/data/bundles/.rv-cache/rv"},
+		{"/data", "/host/path/data"},
+	}
+	for _, tt := range tests {
+		got := mc.toHostPath(tt.input)
+		if got != tt.want {
+			t.Errorf("toHostPath(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestPathIsPrefix(t *testing.T) {
+	tests := []struct {
+		prefix, target string
+		want           bool
+	}{
+		{"/data", "/data/bundles", true},
+		{"/data", "/data", true},
+		{"/data", "/data2", false},
+		{"/data/", "/data/bundles", true},
+		{"/foo", "/data/bundles", false},
+	}
+	for _, tt := range tests {
+		got := pathIsPrefix(tt.prefix, tt.target)
+		if got != tt.want {
+			t.Errorf("pathIsPrefix(%q, %q) = %v, want %v", tt.prefix, tt.target, got, tt.want)
 		}
 	}
 }

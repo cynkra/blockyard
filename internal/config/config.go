@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -37,26 +36,9 @@ type DockerConfig struct {
 
 type StorageConfig struct {
 	BundleServerPath string `toml:"bundle_server_path"`
-	BundleHostPath   string `toml:"bundle_host_path"`
 	BundleWorkerPath string `toml:"bundle_worker_path"`
-	BundleVolumeName string `toml:"bundle_volume_name"`
 	BundleRetention  int    `toml:"bundle_retention"`
 	MaxBundleSize    int64  `toml:"max_bundle_size"`
-}
-
-// UseVolume reports whether named Docker volume mode is configured.
-func (s StorageConfig) UseVolume() bool {
-	return s.BundleVolumeName != ""
-}
-
-// DockerBasePath returns the base path to use when constructing paths for
-// Docker bind mounts. In volume mode it returns BundleServerPath (the host
-// path concept does not apply); in bind mode it returns BundleHostPath.
-func (s StorageConfig) DockerBasePath() string {
-	if s.UseVolume() {
-		return s.BundleServerPath
-	}
-	return s.BundleHostPath
 }
 
 type DatabaseConfig struct {
@@ -120,11 +102,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.Docker.RvVersion == "" {
 		cfg.Docker.RvVersion = "v0.19.0"
 	}
-	if cfg.Storage.BundleHostPath == "" {
-		cfg.Storage.BundleHostPath = cfg.Storage.BundleServerPath
+	if cfg.Storage.BundleServerPath == "" {
+		cfg.Storage.BundleServerPath = "/data/bundles"
 	}
-	if cfg.Storage.BundleVolumeName != "" && cfg.Storage.BundleHostPath != cfg.Storage.BundleServerPath {
-		slog.Warn("storage.bundle_volume_name is set; bundle_host_path will be ignored")
+	if cfg.Database.Path == "" {
+		cfg.Database.Path = "/data/db/blockyard.db"
 	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"
@@ -215,13 +197,6 @@ func validate(cfg *Config) error {
 	if cfg.Docker.Image == "" {
 		return fmt.Errorf("config: docker.image must not be empty")
 	}
-	if cfg.Storage.BundleServerPath == "" {
-		return fmt.Errorf("config: storage.bundle_server_path must not be empty")
-	}
-	if cfg.Database.Path == "" {
-		return fmt.Errorf("config: database.path must not be empty")
-	}
-
 	if err := ensureDirWritable(cfg.Storage.BundleServerPath, "storage.bundle_server_path"); err != nil {
 		return err
 	}

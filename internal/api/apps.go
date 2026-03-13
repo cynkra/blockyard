@@ -318,7 +318,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 		// Build WorkerSpec
 		workerID := uuid.New().String()
 		hostPaths := bundle.NewBundlePaths(
-			srv.Config.Storage.DockerBasePath(), app.ID, *app.ActiveBundle,
+			srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
 		)
 
 		labels := map[string]string{

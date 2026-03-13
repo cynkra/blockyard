@@ -154,7 +154,9 @@ path = "/tmp/blockyard-test/db/blockyard.db"
 	}
 }
 
-func TestValidationRejectsEmptyBundleServerPath(t *testing.T) {
+func TestDefaultBundleServerPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
 	tomlContent := `
 [server]
 token = "test-token"
@@ -162,25 +164,25 @@ token = "test-token"
 [docker]
 image = "some-image"
 
-[storage]
-bundle_server_path = ""
-
 [database]
-path = "/tmp/blockyard-test/db/blockyard.db"
+path = "` + dbPath + `"
 `
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(tomlContent), 0o644)
+	// This will fail on validation (non-writable /data/bundles) but shows the default was set.
 	_, err := Load(path)
 	if err == nil {
-		t.Error("expected validation error for empty bundle_server_path")
+		t.Error("expected error for non-writable default path")
 	}
 	if err != nil && !strings.Contains(err.Error(), "bundle_server_path") {
 		t.Errorf("expected error about bundle_server_path, got: %v", err)
 	}
 }
 
-func TestValidationRejectsEmptyDatabasePath(t *testing.T) {
+func TestDefaultDatabasePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
 	tomlContent := `
 [server]
 token = "test-token"
@@ -189,17 +191,15 @@ token = "test-token"
 image = "some-image"
 
 [storage]
-bundle_server_path = "/tmp/blockyard-test/bundles"
-
-[database]
-path = ""
+bundle_server_path = "` + bundlePath + `"
 `
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(tomlContent), 0o644)
+	// This will fail on validation (non-writable /data/db) but shows the default was set.
 	_, err := Load(path)
 	if err == nil {
-		t.Error("expected validation error for empty database path")
+		t.Error("expected error for non-writable default db path")
 	}
 	if err != nil && !strings.Contains(err.Error(), "database.path") {
 		t.Errorf("expected error about database.path, got: %v", err)

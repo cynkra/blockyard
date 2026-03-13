@@ -9,30 +9,51 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 )
 
-// MountConfig holds the settings needed to decide between bind-mount and
-// named-volume mode when creating worker/build containers.
+// MountMode describes how the server's data directory is mounted.
+type MountMode int
+
+const (
+	// MountModeNative means no container detected; server path = host path.
+	MountModeNative MountMode = iota
+	// MountModeBind means the data path is a bind mount; paths are translated
+	// by replacing the container-side prefix with the host-side source.
+	MountModeBind
+	// MountModeVolume means the data path is on a named Docker volume;
+	// sibling containers use volume subpath mounts.
+	MountModeVolume
+)
+
+// MountConfig holds the auto-detected mount information used to create
+// bind mounts or volume mounts for sibling containers.
 type MountConfig struct {
-	VolumeName     string // if non-empty, use named Docker volume mode
-	BundleBasePath string // server-side base path, used to derive volume subpaths
+	Mode       MountMode
+	VolumeName string // MountModeVolume only: name of the Docker volume
+	HostSource string // MountModeBind only: host-side path of the mount source
+	MountDest  string // container-side mount destination (e.g. "/data")
 }
 
-// UseVolume reports whether named volume mode is active.
-func (mc MountConfig) UseVolume() bool {
-	return mc.VolumeName != ""
-}
-
-// subpath strips BundleBasePath from an absolute server-side path to produce
-// the volume subpath. For example, given base "/data/bundles" and path
-// "/data/bundles/app1/abc123", it returns "app1/abc123".
+// subpath strips MountDest from an absolute server-side path to produce
+// the volume subpath. For example, given MountDest "/data" and path
+// "/data/bundles/app1/abc123", it returns "bundles/app1/abc123".
 func (mc MountConfig) subpath(serverPath string) string {
-	rel := strings.TrimPrefix(serverPath, mc.BundleBasePath)
+	rel := strings.TrimPrefix(serverPath, mc.MountDest)
 	rel = strings.TrimPrefix(rel, string(filepath.Separator))
 	return rel
 }
 
+// toHostPath translates a server-side path to the corresponding host path
+// by replacing the MountDest prefix with HostSource.
+func (mc MountConfig) toHostPath(serverPath string) string {
+	rel := mc.subpath(serverPath)
+	if rel == "" {
+		return mc.HostSource
+	}
+	return filepath.Join(mc.HostSource, rel)
+}
+
 // volumeMount creates a mount.Mount of type Volume with an optional subpath.
 func (mc MountConfig) volumeMount(target string, readOnly bool, serverPath string) mount.Mount {
-	m := mount.Mount{
+	return mount.Mount{
 		Type:     mount.TypeVolume,
 		Source:   mc.VolumeName,
 		Target:   target,
@@ -41,47 +62,64 @@ func (mc MountConfig) volumeMount(target string, readOnly bool, serverPath strin
 			Subpath: mc.subpath(serverPath),
 		},
 	}
-	return m
 }
 
 // WorkerMounts returns the container HostConfig fields for a worker container.
-// In bind mode, only Binds is populated. In volume mode, only Mounts is populated.
+// All paths are server-side; MountConfig translates them as needed.
 func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, workerMount string) (binds []string, mounts []mount.Mount) {
-	if !mc.UseVolume() {
-		binds = []string{
-			bundlePath + ":" + workerMount + ":ro",
+	if mc.Mode == MountModeVolume {
+		mounts = []mount.Mount{
+			mc.volumeMount(workerMount, true, bundlePath),
 		}
 		if libraryPath != "" {
-			binds = append(binds, libraryPath+":/blockyard-lib:ro")
+			mounts = append(mounts, mc.volumeMount("/blockyard-lib", true, libraryPath))
 		}
-		return binds, nil
+		return nil, mounts
 	}
 
-	mounts = []mount.Mount{
-		mc.volumeMount(workerMount, true, bundlePath),
+	// Native or Bind mode — use bind mounts.
+	bp := bundlePath
+	lp := libraryPath
+	if mc.Mode == MountModeBind {
+		bp = mc.toHostPath(bundlePath)
+		lp = mc.toHostPath(libraryPath)
+	}
+
+	binds = []string{
+		bp + ":" + workerMount + ":ro",
 	}
 	if libraryPath != "" {
-		mounts = append(mounts, mc.volumeMount("/blockyard-lib", true, libraryPath))
+		binds = append(binds, lp+":/blockyard-lib:ro")
 	}
-	return nil, mounts
+	return binds, nil
 }
 
 // BuildMounts returns the container HostConfig fields for a build container.
-// In bind mode, only Binds is populated. In volume mode, only Mounts is populated.
+// All paths are server-side; MountConfig translates them as needed.
 func (mc MountConfig) BuildMounts(bundlePath, libraryPath, rvBinaryPath string) (binds []string, mounts []mount.Mount) {
-	if !mc.UseVolume() {
-		binds = []string{
-			bundlePath + ":/app:ro",
-			libraryPath + ":" + bundle.BuildContainerLibPath,
-			rvBinaryPath + ":/usr/local/bin/rv:ro",
+	if mc.Mode == MountModeVolume {
+		mounts = []mount.Mount{
+			mc.volumeMount("/app", true, bundlePath),
+			mc.volumeMount(bundle.BuildContainerLibPath, false, libraryPath),
+			mc.volumeMount("/usr/local/bin/rv", true, rvBinaryPath),
 		}
-		return binds, nil
+		return nil, mounts
 	}
 
-	mounts = []mount.Mount{
-		mc.volumeMount("/app", true, bundlePath),
-		mc.volumeMount(bundle.BuildContainerLibPath, false, libraryPath),
-		mc.volumeMount("/usr/local/bin/rv", true, rvBinaryPath),
+	// Native or Bind mode — use bind mounts.
+	bp := bundlePath
+	lp := libraryPath
+	rp := rvBinaryPath
+	if mc.Mode == MountModeBind {
+		bp = mc.toHostPath(bundlePath)
+		lp = mc.toHostPath(libraryPath)
+		rp = mc.toHostPath(rvBinaryPath)
 	}
-	return nil, mounts
+
+	binds = []string{
+		bp + ":/app:ro",
+		lp + ":" + bundle.BuildContainerLibPath,
+		rp + ":/usr/local/bin/rv:ro",
+	}
+	return binds, nil
 }
