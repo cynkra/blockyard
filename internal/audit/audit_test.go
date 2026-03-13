@@ -128,6 +128,37 @@ func TestBufferFullDropsEntry(t *testing.T) {
 	}
 }
 
+func TestNewEmptyPathReturnsNil(t *testing.T) {
+	l := New("")
+	if l != nil {
+		t.Error("expected nil for empty path")
+	}
+}
+
+func TestRunNilLogBlocksUntilCancel(t *testing.T) {
+	var l *Log
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		l.Run(ctx, "ignored")
+		close(done)
+	}()
+	cancel()
+	<-done // should return promptly
+}
+
+func TestRunInvalidPath(t *testing.T) {
+	l := New("/tmp/audit-test-path")
+	// Use a path under a non-existent directory to trigger OpenFile error.
+	done := make(chan struct{})
+	go func() {
+		l.Run(context.Background(), "/nonexistent-dir/sub/audit.jsonl")
+		close(done)
+	}()
+	// Run should return quickly due to the open error.
+	<-done
+}
+
 func TestJSONLinesFormat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")

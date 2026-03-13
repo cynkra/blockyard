@@ -573,6 +573,237 @@ func TestInvalidJWTReturns401(t *testing.T) {
 	}
 }
 
+func TestGrantAccessInvalidKind(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	// Create app
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant with invalid kind
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/access", adminToken,
+			strings.NewReader(`{"principal":"user-2","kind":"invalid","role":"viewer"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestGrantAccessInvalidRole(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	// Create app
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant with invalid role
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/access", adminToken,
+			strings.NewReader(`{"principal":"user-2","kind":"user","role":"superuser"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestGrantAccessEmptyPrincipal(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	// Create app
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant with empty principal
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/access", adminToken,
+			strings.NewReader(`{"principal":"","kind":"user","role":"viewer"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestGrantAccessInvalidJSON(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	// Create app
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant with bad JSON
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/access", adminToken,
+			strings.NewReader(`{not json`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeAccessNonexistent(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	// Create app
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Revoke access that doesn't exist
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("DELETE", ts.URL+"/api/v1/apps/"+appID+"/access/user/nobody", adminToken, nil))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestSetRoleMappingInvalidRole(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/some-group", adminToken,
+			strings.NewReader(`{"role":"superuser"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestSetRoleMappingInvalidJSON(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/some-group", adminToken,
+			strings.NewReader(`{not json`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestNonAdminCannotGrantAccess(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	srv.RoleCache.Set("viewers", auth.RoleViewer)
+
+	// Admin creates app
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant viewer access so the viewer can see the app
+	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "admin-1")
+
+	// Viewer tries to grant access -> 404 (hidden)
+	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/access", viewerToken,
+			strings.NewReader(`{"principal":"user-2","kind":"user","role":"viewer"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for viewer granting access, got %d", resp.StatusCode)
+	}
+}
+
+func TestNonAdminCannotRevokeAccess(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	srv.RoleCache.Set("viewers", auth.RoleViewer)
+
+	// Admin creates app and grants access to user-2
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	srv.DB.GrantAppAccess(appID, "user-2", "user", "viewer", "admin-1")
+	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "admin-1")
+
+	// Viewer tries to revoke access -> 404 (hidden)
+	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("DELETE", ts.URL+"/api/v1/apps/"+appID+"/access/user/user-2", viewerToken, nil))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for viewer revoking access, got %d", resp.StatusCode)
+	}
+}
+
 func TestPublicAppInUnfilteredList(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()

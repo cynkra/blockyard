@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -131,6 +132,111 @@ func TestPathTraversal(t *testing.T) {
 	err := UnpackArchive(paths)
 	if err == nil {
 		t.Fatal("expected error on path traversal")
+	}
+}
+
+func TestWriteArchiveCreatesFiles(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	data := testutil.MakeBundle(t)
+	if err := WriteArchive(paths, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Archive file should exist
+	info, err := os.Stat(paths.Archive)
+	if err != nil {
+		t.Fatalf("archive not created: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("archive is empty")
+	}
+
+	// App directory should have been created
+	info, err = os.Stat(filepath.Dir(paths.Archive))
+	if err != nil {
+		t.Fatalf("app dir not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("app dir is not a directory")
+	}
+}
+
+func TestUnpackArchiveInvalid(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	// Write a non-tar.gz file as the archive
+	appDir := filepath.Dir(paths.Archive)
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Archive, []byte("this is not a gzip file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := UnpackArchive(paths)
+	if err == nil {
+		t.Fatal("expected error unpacking invalid archive")
+	}
+}
+
+func TestUnpackArchiveMissingFile(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	// Archive file does not exist
+	err := UnpackArchive(paths)
+	if err == nil {
+		t.Fatal("expected error for missing archive")
+	}
+}
+
+func TestDeleteFilesNonexistent(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "nonexistent-bundle")
+
+	// Should not panic when paths don't exist
+	DeleteFiles(paths)
+}
+
+func TestSetLibraryPathCreatesUpdatedConfig(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	data := testutil.MakeBundle(t)
+	WriteArchive(paths, bytes.NewReader(data))
+	UnpackArchive(paths)
+
+	// Write a config with existing library set to something else
+	config := "[project]\nname = \"myapp\"\n"
+	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte(config), 0o644)
+
+	if err := SetLibraryPath(paths, BuildContainerLibPath); err != nil {
+		t.Fatalf("SetLibraryPath: %v", err)
+	}
+
+	content, _ := os.ReadFile(paths.Unpacked + "/rproject.toml")
+	if !strings.Contains(string(content), `library = "/rv-library"`) {
+		t.Errorf("expected library path in config, got:\n%s", content)
+	}
+}
+
+func TestSetLibraryPathInvalidTOML(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	data := testutil.MakeBundle(t)
+	WriteArchive(paths, bytes.NewReader(data))
+	UnpackArchive(paths)
+
+	// Write invalid TOML
+	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte("{{invalid toml"), 0o644)
+
+	err := SetLibraryPath(paths, "/rv-library")
+	if err == nil {
+		t.Fatal("expected error for invalid TOML")
 	}
 }
 

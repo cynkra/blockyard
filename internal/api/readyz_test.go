@@ -1,16 +1,28 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
 )
+
+// failingBackend wraps MockBackend but forces ListManaged to return an error.
+type failingBackend struct {
+	*mock.MockBackend
+}
+
+func (b *failingBackend) ListManaged(_ context.Context) ([]backend.ManagedResource, error) {
+	return nil, errors.New("docker unavailable")
+}
 
 func testServerForReadyz(t *testing.T) *server.Server {
 	t.Helper()
@@ -115,5 +127,111 @@ func TestMetricsEndpointDisabled(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestReadyzWithOIDCConfigured(t *testing.T) {
+	// Start a test server that returns 200 for the OIDC discovery endpoint.
+	idpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"issuer":"test"}`))
+	}))
+	t.Cleanup(idpSrv.Close)
+
+	srv := testServerForReadyz(t)
+	srv.Config.OIDC = &config.OidcConfig{
+		IssuerURL: idpSrv.URL,
+	}
+
+	handler := readyzHandler(srv)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map")
+	}
+	if checks["idp"] != "pass" {
+		t.Errorf("idp = %v, want pass", checks["idp"])
+	}
+}
+
+func TestReadyzWithOIDCFail(t *testing.T) {
+	srv := testServerForReadyz(t)
+	// Use a URL that will not resolve, causing the IDP check to fail.
+	srv.Config.OIDC = &config.OidcConfig{
+		IssuerURL: "http://127.0.0.1:1",
+	}
+
+	handler := readyzHandler(srv)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "not_ready" {
+		t.Errorf("expected not_ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map")
+	}
+	if checks["idp"] != "fail" {
+		t.Errorf("idp = %v, want fail", checks["idp"])
+	}
+}
+
+func TestReadyzDockerFail(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Token: config.NewSecret("test-token"),
+		},
+	}
+	be := &failingBackend{MockBackend: mock.New()}
+	srv := server.NewServer(cfg, be, database)
+
+	handler := readyzHandler(srv)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "not_ready" {
+		t.Errorf("expected not_ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map")
+	}
+	if checks["docker"] != "fail" {
+		t.Errorf("docker = %v, want fail", checks["docker"])
 	}
 }

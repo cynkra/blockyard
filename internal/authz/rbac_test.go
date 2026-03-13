@@ -36,23 +36,27 @@ func TestParseContentRole(t *testing.T) {
 
 func TestAppRelationPermissions(t *testing.T) {
 	tests := []struct {
-		relation  authz.AppRelation
-		proxy     bool
-		deploy    bool
-		startStop bool
-		update    bool
-		delete    bool
-		acl       bool
+		relation    authz.AppRelation
+		viewDetail bool
+		proxy      bool
+		deploy     bool
+		startStop  bool
+		update     bool
+		delete     bool
+		acl        bool
 	}{
-		{authz.RelationNone, false, false, false, false, false, false},
-		{authz.RelationAnonymous, true, false, false, false, false, false},
-		{authz.RelationContentViewer, true, false, false, false, false, false},
-		{authz.RelationContentCollaborator, true, true, true, true, false, false},
-		{authz.RelationOwner, true, true, true, true, true, true},
-		{authz.RelationAdmin, true, true, true, true, true, true},
+		{authz.RelationNone, false, false, false, false, false, false, false},
+		{authz.RelationAnonymous, true, true, false, false, false, false, false},
+		{authz.RelationContentViewer, true, true, false, false, false, false, false},
+		{authz.RelationContentCollaborator, true, true, true, true, true, false, false},
+		{authz.RelationOwner, true, true, true, true, true, true, true},
+		{authz.RelationAdmin, true, true, true, true, true, true, true},
 	}
 
 	for _, tt := range tests {
+		if got := tt.relation.CanViewDetails(); got != tt.viewDetail {
+			t.Errorf("%v.CanViewDetails() = %v, want %v", tt.relation, got, tt.viewDetail)
+		}
 		if got := tt.relation.CanAccessProxy(); got != tt.proxy {
 			t.Errorf("%v.CanAccessProxy() = %v, want %v", tt.relation, got, tt.proxy)
 		}

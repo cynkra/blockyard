@@ -207,3 +207,70 @@ func TestJWKSCacheWithIdPDown(t *testing.T) {
 
 // Ensure time import is used
 var _ = time.Now
+
+func TestJWTClaimsExtractGroupsExtraNonArray(t *testing.T) {
+	claims := &auth.JWTClaims{
+		Extra: map[string]any{
+			"roles": "not-an-array",
+		},
+	}
+	groups := claims.ExtractGroups("roles")
+	if groups != nil {
+		t.Errorf("expected nil for non-array extra value, got %v", groups)
+	}
+}
+
+func TestJWTClaimsExtractGroupsExtraNonStringElements(t *testing.T) {
+	claims := &auth.JWTClaims{
+		Extra: map[string]any{
+			"roles": []any{123, true, "valid-group"},
+		},
+	}
+	groups := claims.ExtractGroups("roles")
+	if len(groups) != 1 || groups[0] != "valid-group" {
+		t.Errorf("expected [valid-group], got %v", groups)
+	}
+}
+
+func TestJWTClaimsExtractGroupsEmptyTypedField(t *testing.T) {
+	// When Groups is empty but Extra has the "groups" key, should use Extra.
+	claims := &auth.JWTClaims{
+		Groups: []string{},
+		Extra: map[string]any{
+			"groups": []any{"from-extra"},
+		},
+	}
+	groups := claims.ExtractGroups("groups")
+	if len(groups) != 1 || groups[0] != "from-extra" {
+		t.Errorf("expected [from-extra], got %v", groups)
+	}
+}
+
+func TestJWKSCacheValidateGarbageToken(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	cache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = cache.Validate("not-a-jwt", idp.IssuerURL(), "blockyard")
+	if err == nil {
+		t.Error("expected error for garbage token")
+	}
+}
+
+func TestNewJWKSCacheInvalidJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("this is not json"))
+	}))
+	defer srv.Close()
+
+	_, err := auth.NewJWKSCache(srv.URL)
+	if err == nil {
+		t.Error("expected error for non-JSON JWKS response")
+	}
+}

@@ -2,15 +2,18 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
@@ -1028,5 +1031,383 @@ func TestUploadBundleByName(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusAccepted {
 		t.Errorf("expected 202, got %d", resp.StatusCode)
+	}
+}
+
+// --- Audit log integration tests ---
+
+// testServerWithAudit creates a test server with an active audit log.
+func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	auditPath := tmp + "/audit.jsonl"
+
+	cfg := &config.Config{
+		Server:  config.ServerConfig{Token: config.NewSecret("test-token")},
+		Docker:  config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+		Audit: &config.AuditConfig{Path: auditPath},
+	}
+
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	srv.RoleCache = auth.NewRoleMappingCache()
+
+	// Create and start audit log.
+	auditLog := audit.New(auditPath)
+	srv.AuditLog = auditLog
+	ctx, cancel := context.WithCancel(context.Background())
+	go auditLog.Run(ctx, auditPath)
+	t.Cleanup(cancel)
+
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return srv, ts, auditPath
+}
+
+func TestAuditLogCapturesAppCRUD(t *testing.T) {
+	_, ts, auditPath := testServerWithAudit(t)
+
+	// Create app
+	app := createApp(t, ts, "audited-app")
+	appID := app["id"].(string)
+
+	// Update app
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+appID,
+		strings.NewReader(`{"memory_limit":"256m"}`))
+	http.DefaultClient.Do(req)
+
+	// Delete app
+	req = authReq("DELETE", ts.URL+"/api/v1/apps/"+appID, nil)
+	http.DefaultClient.Do(req)
+
+	// Give the background writer time to flush.
+	time.Sleep(100 * time.Millisecond)
+
+	// Read audit log and check for entries.
+	data, err := io.ReadAll(openFile(t, auditPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 audit entries, got %d: %s", len(lines), string(data))
+	}
+
+	actions := make([]string, len(lines))
+	for i, line := range lines {
+		var entry map[string]any
+		json.Unmarshal([]byte(line), &entry)
+		actions[i] = entry["action"].(string)
+	}
+
+	// Verify we have create, update, delete actions.
+	found := map[string]bool{}
+	for _, a := range actions {
+		found[a] = true
+	}
+	for _, expected := range []string{"app.create", "app.update", "app.delete"} {
+		if !found[expected] {
+			t.Errorf("missing audit action %q in %v", expected, actions)
+		}
+	}
+}
+
+func openFile(t *testing.T, path string) io.Reader {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	return f
+}
+
+// --- Tracing middleware integration test ---
+
+func TestTracingMiddlewareEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+		Telemetry: &config.TelemetryConfig{
+			MetricsEnabled: true,
+			OTLPEndpoint:   "localhost:4317", // triggers middleware registration
+		},
+	}
+
+	database, _ := db.Open(":memory:")
+	t.Cleanup(func() { database.Close() })
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	handler := NewRouter(srv)
+
+	// Healthz should work even with tracing middleware enabled.
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	// Metrics endpoint should be available.
+	req = httptest.NewRequest("GET", "/metrics", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for /metrics, got %d", rec.Code)
+	}
+}
+
+// --- Helper function unit tests ---
+
+func TestValidateTagName(t *testing.T) {
+	valid := []string{"a", "my-tag", "tag-123", "abc", "a1"}
+	for _, name := range valid {
+		if err := validateTagName(name); err != nil {
+			t.Errorf("expected %q to be valid, got error: %v", name, err)
+		}
+	}
+	invalid := []string{
+		"",                       // empty
+		"A",                      // uppercase
+		"-tag",                   // starts with hyphen
+		"tag-",                   // ends with hyphen
+		"tag_name",               // underscore
+		"1tag",                   // starts with digit
+		strings.Repeat("a", 64), // too long
+	}
+	for _, name := range invalid {
+		if err := validateTagName(name); err == nil {
+			t.Errorf("expected %q to be invalid", name)
+		}
+	}
+}
+
+func TestStringOrEmpty(t *testing.T) {
+	if got := stringOrEmpty(nil); got != "" {
+		t.Errorf("stringOrEmpty(nil) = %q, want empty", got)
+	}
+	s := "hello"
+	if got := stringOrEmpty(&s); got != "hello" {
+		t.Errorf("stringOrEmpty(&s) = %q, want hello", got)
+	}
+}
+
+func TestFloatOrZero(t *testing.T) {
+	if got := floatOrZero(nil); got != 0 {
+		t.Errorf("floatOrZero(nil) = %f, want 0", got)
+	}
+	f := 3.14
+	if got := floatOrZero(&f); got != 3.14 {
+		t.Errorf("floatOrZero(&f) = %f, want 3.14", got)
+	}
+}
+
+func TestParseIntOr(t *testing.T) {
+	if got := parseIntOr("", 42); got != 42 {
+		t.Errorf("parseIntOr empty = %d, want 42", got)
+	}
+	if got := parseIntOr("abc", 42); got != 42 {
+		t.Errorf("parseIntOr invalid = %d, want 42", got)
+	}
+	if got := parseIntOr("7", 42); got != 7 {
+		t.Errorf("parseIntOr valid = %d, want 7", got)
+	}
+}
+
+func TestClampEdgeCases(t *testing.T) {
+	if got := clamp(0, 1, 100); got != 1 {
+		t.Errorf("clamp below = %d, want 1", got)
+	}
+	if got := clamp(200, 1, 100); got != 100 {
+		t.Errorf("clamp above = %d, want 100", got)
+	}
+	if got := clamp(50, 1, 100); got != 50 {
+		t.Errorf("clamp within = %d, want 50", got)
+	}
+}
+
+// --- Additional UpdateApp error path tests ---
+
+func TestUpdateAppMaxWorkersInvalid(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"max_workers_per_app":-1}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for max_workers_per_app=-1, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppInvalidAccessType(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"access_type":"invalid"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 400 for access_type=invalid, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppSetDescription(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"title":"My App","description":"A test app"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var updated map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&updated)
+	if updated["title"] != "My App" {
+		t.Errorf("expected title=My App, got %v", updated["title"])
+	}
+	if updated["description"] != "A test app" {
+		t.Errorf("expected description=A test app, got %v", updated["description"])
+	}
+}
+
+// --- CreateApp additional error paths ---
+
+func TestCreateAppRejectsEmptyName(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("POST", ts.URL+"/api/v1/apps", strings.NewReader(`{"name":""}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty name, got %d", resp.StatusCode)
+	}
+}
+
+// --- DeleteApp with bundles ---
+
+func TestDeleteAppWithBundles(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Upload a bundle
+	req, _ := http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/bundles",
+		bytes.NewReader(testutil.MakeBundle(t)))
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("upload: expected 202, got %d", resp.StatusCode)
+	}
+
+	// Wait for restore to finish
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify bundles exist
+	req = authReq("GET", ts.URL+"/api/v1/apps/"+id+"/bundles", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	var bundles []map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&bundles)
+	if len(bundles) == 0 {
+		t.Fatal("expected at least 1 bundle before delete")
+	}
+
+	// Delete the app
+	req = authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 204, got %d: %s", resp.StatusCode, b)
+	}
+
+	// Confirm the app is gone
+	req = authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 after delete, got %d", resp.StatusCode)
+	}
+}
+
+// --- StopApp already stopped path ---
+
+func TestStopAppAlreadyStopped(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Stop an app that was never started — should return 200 with stopped_workers=0
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["stopped_workers"] != float64(0) {
+		t.Errorf("expected stopped_workers=0, got %v", body["stopped_workers"])
+	}
+
+	// Call stop again — same result
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 on second stop, got %d", resp.StatusCode)
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["stopped_workers"] != float64(0) {
+		t.Errorf("expected stopped_workers=0 on second stop, got %v", body["stopped_workers"])
 	}
 }

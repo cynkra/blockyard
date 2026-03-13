@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
@@ -214,5 +215,140 @@ func TestEnrollCredential_WithStaticToken(t *testing.T) {
 	// VaultClient is nil → 503
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 (no vault), got %d", resp.StatusCode)
+	}
+}
+
+func TestUserAuthWithSessionCookie(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	srv, ts := testServerWithOIDC(t, idp)
+
+	// Set up signing key and session store.
+	signingKey := auth.DeriveSigningKey("test-session-secret")
+	srv.SigningKey = signingKey
+	srv.UserSessions = auth.NewUserSessionStore()
+
+	// Create a session.
+	srv.UserSessions.Set("cookie-user", &auth.UserSession{
+		Groups:      []string{"testers"},
+		AccessToken: "access-token",
+		ExpiresAt:   time.Now().Unix() + 3600,
+	})
+
+	// Encode a cookie.
+	cookie := &auth.CookiePayload{
+		Sub:      "cookie-user",
+		IssuedAt: time.Now().Unix(),
+	}
+	cookieValue, err := cookie.Encode(signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The /api/v1/users/me/credentials/openai route uses UserAuth middleware.
+	// VaultClient is nil so we expect 503 (not 401), proving auth succeeded.
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/credentials/openai", strings.NewReader(`{"api_key":"sk-test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// 503 means auth passed but vault is not configured.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (auth passed, no vault), got %d", resp.StatusCode)
+	}
+}
+
+func TestUserAuthWithExpiredCookie(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	srv, ts := testServerWithOIDC(t, idp)
+
+	signingKey := auth.DeriveSigningKey("test-session-secret")
+	srv.SigningKey = signingKey
+	srv.UserSessions = auth.NewUserSessionStore()
+
+	srv.UserSessions.Set("expired-user", &auth.UserSession{
+		Groups:      []string{"testers"},
+		AccessToken: "access-token",
+		ExpiresAt:   time.Now().Unix() + 3600,
+	})
+
+	// Create cookie with IssuedAt far in the past (2 days ago).
+	cookie := &auth.CookiePayload{
+		Sub:      "expired-user",
+		IssuedAt: time.Now().Unix() - 2*86400,
+	}
+	cookieValue, err := cookie.Encode(signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/credentials/openai", strings.NewReader(`{"api_key":"sk-test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for expired cookie, got %d", resp.StatusCode)
+	}
+}
+
+func TestUserAuthNeitherCookieNorToken(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	_, ts := testServerWithOIDC(t, idp)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/credentials/openai", strings.NewReader(`{"api_key":"sk-test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// No cookie, no Authorization header.
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestEnrollCredentialInvalidJSON(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	_, ts := testServerWithVault(t, idp)
+
+	jwt := idp.IssueJWT("test-user", []string{"testers"})
+	// Send invalid JSON.
+	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", jwt, strings.NewReader(`{invalid-json`))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+
+	var errResp errorResponse
+	json.NewDecoder(resp.Body).Decode(&errResp)
+	if !strings.Contains(errResp.Message, "invalid request body") {
+		t.Errorf("expected 'invalid request body' in message, got %q", errResp.Message)
 	}
 }

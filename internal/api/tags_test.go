@@ -219,3 +219,175 @@ func TestNonAdminCannotCreateTags(t *testing.T) {
 		t.Errorf("expected 404 for non-admin, got %d", resp.StatusCode)
 	}
 }
+
+func TestCreateTagInvalidJSON(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("POST", ts.URL+"/api/v1/tags", strings.NewReader(`{not json`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateTagEmptyName(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("POST", ts.URL+"/api/v1/tags", strings.NewReader(`{"name":""}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateTagInvalidName(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("POST", ts.URL+"/api/v1/tags", strings.NewReader(`{"name":"UPPER"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestAddTagToAppMissingTagID(t *testing.T) {
+	_, ts := testServer(t)
+
+	app := createApp(t, ts, "tag-app")
+	appID := app["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+appID+"/tags",
+		strings.NewReader(`{"tag_id":""}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestAddTagToAppNonexistentTag(t *testing.T) {
+	_, ts := testServer(t)
+
+	app := createApp(t, ts, "tag-app")
+	appID := app["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+appID+"/tags",
+		strings.NewReader(`{"tag_id":"nonexistent-tag-id"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestAddTagToAppInvalidJSON(t *testing.T) {
+	_, ts := testServer(t)
+
+	app := createApp(t, ts, "tag-app")
+	appID := app["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+appID+"/tags",
+		strings.NewReader(`{not json`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRemoveTagFromAppNonexistent(t *testing.T) {
+	_, ts := testServer(t)
+
+	app := createApp(t, ts, "tag-app")
+	appID := app["id"].(string)
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+appID+"/tags/nonexistent-tag-id", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestListTagsEmpty(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("GET", ts.URL+"/api/v1/tags", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var tags []map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&tags)
+	if len(tags) != 0 {
+		t.Errorf("expected 0 tags, got %d", len(tags))
+	}
+}
+
+func TestCreateTagNameEdgeCases(t *testing.T) {
+	_, ts := testServer(t)
+
+	cases := []struct {
+		name       string
+		wantStatus int
+	}{
+		{"1starts-with-digit", http.StatusBadRequest},
+		{"ends-with-hyphen-", http.StatusBadRequest},
+		{"has_underscore", http.StatusBadRequest},
+		{"HAS-UPPER", http.StatusBadRequest},
+		{"a", http.StatusCreated},        // single letter is valid
+		{"a-b-c", http.StatusCreated},    // hyphens in the middle
+		{"abc123", http.StatusCreated},   // letters and digits
+	}
+
+	for _, tc := range cases {
+		req := authReq("POST", ts.URL+"/api/v1/tags",
+			strings.NewReader(`{"name":"`+tc.name+`"}`))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != tc.wantStatus {
+			t.Errorf("name %q: expected %d, got %d", tc.name, tc.wantStatus, resp.StatusCode)
+		}
+	}
+}

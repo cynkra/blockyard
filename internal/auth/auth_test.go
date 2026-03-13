@@ -466,3 +466,179 @@ func init() {
 	// Suppress JSON output in tests.
 	_ = json.Marshal
 }
+
+func TestCallbackWithoutOIDCReturns404(t *testing.T) {
+	deps := &auth.Deps{
+		Config: &config.Config{},
+	}
+	router := buildTestRouter(deps)
+
+	req := httptest.NewRequest("GET", "/callback?code=test-code&state=abc", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestSecureFlagHTTPS(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	// Build deps with an HTTPS external URL.
+	secret := config.NewSecret("test-session-secret")
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Token:         config.NewSecret("test-token"),
+			SessionSecret: &secret,
+			ExternalURL:   "https://example.com",
+		},
+		OIDC: &config.OidcConfig{
+			IssuerURL:    idp.IssuerURL(),
+			ClientID:     "test-client",
+			ClientSecret: config.NewSecret("test-client-secret"),
+			GroupsClaim:  "groups",
+			CookieMaxAge: config.Duration{Duration: 24 * 60 * 60 * 1e9},
+		},
+	}
+
+	oidcClient, err := auth.Discover(
+		context.Background(),
+		cfg.OIDC.IssuerURL,
+		cfg.OIDC.ClientID,
+		cfg.OIDC.ClientSecret.Expose(),
+		cfg.Server.ExternalURL+"/callback",
+		cfg.OIDC.GroupsClaim,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deps := &auth.Deps{
+		Config:       cfg,
+		OIDCClient:   oidcClient,
+		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose()),
+		UserSessions: auth.NewUserSessionStore(),
+	}
+
+	router := buildTestRouter(deps)
+
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+
+	setCookies := w.Header().Values("Set-Cookie")
+	foundSecure := false
+	for _, sc := range setCookies {
+		if strings.Contains(sc, "blockyard_oidc_state") && strings.Contains(sc, "Secure") {
+			foundSecure = true
+		}
+	}
+	if !foundSecure {
+		t.Errorf("expected Set-Cookie to contain Secure flag for HTTPS external URL, cookies: %v", setCookies)
+	}
+}
+
+func TestExtractStateCookieMalformed(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// Send a callback with a state cookie that has no "." separator.
+	req := httptest.NewRequest("GET", "/callback?code=test-code&state=abc", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_oidc_state", Value: "bad-value-no-dot"})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for malformed state cookie, got %d", w.Code)
+	}
+}
+
+func TestExtractStateCookieBadSignature(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// Send a callback with a state cookie that has a tampered signature.
+	req := httptest.NewRequest("GET", "/callback?code=test-code&state=abc", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_oidc_state", Value: "dGVzdA.badsignature"})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for bad signature state cookie, got %d", w.Code)
+	}
+}
+
+func TestLogoutWithoutOIDCRedirectsToRoot(t *testing.T) {
+	secret := config.NewSecret("test-session-secret")
+	deps := &auth.Deps{
+		Config: &config.Config{
+			Server: config.ServerConfig{
+				SessionSecret: &secret,
+			},
+		},
+		SigningKey:    auth.DeriveSigningKey(secret.Expose()),
+		UserSessions: auth.NewUserSessionStore(),
+	}
+
+	// Set up a session so logout has something to clear.
+	deps.UserSessions.Set("test-sub", &auth.UserSession{
+		AccessToken: "at-1",
+	})
+	cookie := &auth.CookiePayload{Sub: "test-sub", IssuedAt: nowUnix()}
+	cookieValue, _ := cookie.Encode(deps.SigningKey)
+
+	router := buildTestRouter(deps)
+
+	req := httptest.NewRequest("POST", "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	location := w.Header().Get("Location")
+	if location != "/" {
+		t.Errorf("expected redirect to /, got %q", location)
+	}
+}
+
+func TestLogoutWithoutSigningKey(t *testing.T) {
+	deps := &auth.Deps{
+		Config: &config.Config{},
+		// No SigningKey, no OIDCClient.
+	}
+
+	router := buildTestRouter(deps)
+
+	req := httptest.NewRequest("POST", "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: "some-value"})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	location := w.Header().Get("Location")
+	if location != "/" {
+		t.Errorf("expected redirect to /, got %q", location)
+	}
+
+	// Verify session cookie is cleared.
+	cleared := findCookie(w.Result(), "blockyard_session")
+	if cleared == nil || cleared.Value != "" {
+		t.Error("expected session cookie to be cleared")
+	}
+}
