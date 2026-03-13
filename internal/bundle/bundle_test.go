@@ -188,7 +188,7 @@ func TestEnforceRetention_DeletesOldest(t *testing.T) {
 	database := openTestDB(t)
 	tmp := t.TempDir()
 
-	app, err := database.CreateApp("test-app")
+	app, err := database.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestEnforceRetention_ActiveBundlePreserved(t *testing.T) {
 	database := openTestDB(t)
 	tmp := t.TempDir()
 
-	app, err := database.CreateApp("test-app")
+	app, err := database.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestEnforceRetention_UnderLimit(t *testing.T) {
 	database := openTestDB(t)
 	tmp := t.TempDir()
 
-	app, err := database.CreateApp("test-app")
+	app, err := database.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestRunRestore_Success(t *testing.T) {
 	be := mockmock.New()
 	be.BuildSuccess.Store(true)
 
-	app, err := database.CreateApp("test-app")
+	app, err := database.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestRunRestore_BuildFailure(t *testing.T) {
 	be := mockmock.New()
 	be.BuildSuccess.Store(false)
 
-	app, err := database.CreateApp("test-app")
+	app, err := database.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}

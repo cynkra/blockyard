@@ -10,12 +10,13 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/session"
 )
 
 func testServer(t *testing.T) (*server.Server, *mock.MockBackend) {
 	t.Helper()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: "test-token"},
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
 		Storage: config.StorageConfig{
 			BundleServerPath: t.TempDir(),
@@ -54,7 +55,7 @@ func spawnWorker(t *testing.T, srv *server.Server, be *mock.MockBackend, workerI
 func TestEvictWorker(t *testing.T) {
 	srv, be := testServer(t)
 	spawnWorker(t, srv, be, "w1", "app1")
-	srv.Sessions.Set("sess1", "w1")
+	srv.Sessions.Set("sess1", session.Entry{WorkerID: "w1"})
 	srv.LogStore.Create("w1", "app1")
 
 	EvictWorker(context.Background(), srv, "w1")
@@ -105,7 +106,7 @@ func TestStartupCleanupRemovesOrphans(t *testing.T) {
 func TestStartupCleanupFailsStaleBuilds(t *testing.T) {
 	srv, _ := testServer(t)
 
-	app, err := srv.DB.CreateApp("test-app")
+	app, err := srv.DB.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +250,7 @@ func TestGracefulShutdownStopsAllWorkers(t *testing.T) {
 func TestGracefulShutdownFailsInProgressBuilds(t *testing.T) {
 	srv, _ := testServer(t)
 
-	app, err := srv.DB.CreateApp("test-app")
+	app, err := srv.DB.CreateApp("test-app", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}

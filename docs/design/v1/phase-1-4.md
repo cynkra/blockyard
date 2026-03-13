@@ -361,16 +361,24 @@ func assignWorker(
 
 ### Step 5: Update ensureWorker to use load balancer
 
-Rewrite `ensureWorker` in `internal/proxy/coldstart.go`:
+Rewrite `ensureWorker` in `internal/proxy/coldstart.go`. The function
+returns `(workerID, addr, err)` — session pinning remains in the proxy
+handler (see below) to keep `ensureWorker` focused on worker lifecycle:
 
 ```go
 func ensureWorker(
     ctx context.Context,
     srv *server.Server,
     app *db.AppRow,
-    sessionID string,
 ) (workerID, addr string, err error) {
-    // 1. Try to assign to an existing worker via load balancer
+    // 1. Check if app is draining
+    if workers := srv.Workers.ForApp(app.ID); len(workers) > 0 {
+        if w, ok := srv.Workers.Get(workers[0]); ok && w.Draining {
+            return "", "", errMaxWorkers
+        }
+    }
+
+    // 2. Try to assign to an existing worker via load balancer
     wid, err := assignWorker(
         app.ID,
         srv.Workers,
@@ -386,7 +394,6 @@ func ensureWorker(
         // Found a worker with capacity
         a, ok := srv.Registry.Get(wid)
         if ok {
-            srv.Sessions.Set(sessionID, wid)
             srv.Workers.ClearIdleSince(wid)
             return wid, a, nil
         }
@@ -394,7 +401,6 @@ func ensureWorker(
         a, err := srv.Backend.Addr(ctx, wid)
         if err == nil {
             srv.Registry.Set(wid, a)
-            srv.Sessions.Set(sessionID, wid)
             srv.Workers.ClearIdleSince(wid)
             return wid, a, nil
         }
@@ -403,90 +409,29 @@ func ensureWorker(
         ops.EvictWorker(ctx, srv, wid)
     }
 
-    // 2. Need to spawn a new worker
-
-    // Check global worker limit
-    if srv.Workers.Count() >= srv.Config.Proxy.MaxWorkers {
-        return "", "", errMaxWorkers
-    }
-
-    // Must have an active bundle
-    if app.ActiveBundle == nil {
-        return "", "", errNoBundle
-    }
-
-    // Build WorkerSpec and spawn
-    newWID := uuid.New().String()
-    paths := bundle.NewBundlePaths(
-        srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
-    )
-    spec := backend.WorkerSpec{
-        AppID:       app.ID,
-        WorkerID:    newWID,
-        Image:       srv.Config.Docker.Image,
-        BundlePath:  paths.Unpacked,
-        LibraryPath: paths.Library,
-        WorkerMount: srv.Config.Storage.BundleWorkerPath,
-        ShinyPort:   srv.Config.Docker.ShinyPort,
-        MemoryLimit: ptrOr(app.MemoryLimit, ""),
-        CPULimit:    ptrOr(app.CPULimit, 0.0),
-    }
-
-    if err := srv.Backend.Spawn(ctx, spec); err != nil {
-        return "", "", fmt.Errorf("spawn worker: %w", err)
-    }
-
-    // Resolve address and register
-    a, err := srv.Backend.Addr(ctx, newWID)
-    if err != nil {
-        srv.Backend.Stop(ctx, newWID)
-        return "", "", fmt.Errorf("resolve worker address: %w", err)
-    }
-
-    srv.Workers.Set(newWID, server.ActiveWorker{AppID: app.ID})
-    srv.Registry.Set(newWID, a)
-
-    // Start log capture before health polling
-    ops.SpawnLogCapture(ctx, srv, newWID, app.ID)
-
-    // Cold-start hold
-    if err := pollHealthy(ctx, srv, newWID); err != nil {
-        srv.Workers.Delete(newWID)
-        srv.Registry.Delete(newWID)
-        srv.Backend.Stop(context.Background(), newWID)
-        return "", "", err
-    }
-
-    // Pin session to new worker
-    srv.Sessions.Set(sessionID, newWID)
-
-    slog.Info("worker ready",
-        "worker_id", newWID, "app_id", app.ID, "addr", a)
-    return newWID, a, nil
+    // 3. Need to spawn a new worker — delegate to spawnWorker
+    //    via spawnSingleFlight to serialize per-app spawns.
+    return spawnWorker(ctx, srv, app)
 }
 ```
 
 **Key changes from v0:**
 
-- `ensureWorker` now receives `sessionID` so it can pin the session to
-  the assigned worker inside the function.
 - First tries `assignWorker` to find an existing worker with capacity.
 - Only spawns a new worker if no existing worker has capacity.
 - Clears `IdleSince` when assigning a session to a previously idle worker.
+- Spawning is serialized per-app via `spawnSingleFlight` (see step 9) to
+  avoid thundering-herd spawns.
 
-**Proxy handler update** — in `proxy.go`, the session pinning that was
-previously done after `ensureWorker` is now done inside it:
+**Session pinning** stays in the proxy handler (`proxy.go`), called
+after `ensureWorker` returns. This keeps `ensureWorker` focused on
+worker lifecycle and avoids passing the session ID through the spawn
+deduplication layer:
 
 ```go
-// Before (v0):
 wid, a, err := ensureWorker(r.Context(), srv, app)
 // ... error handling ...
-srv.Sessions.Set(sessionID, workerID)
-
-// After (v1):
-wid, a, err := ensureWorker(r.Context(), srv, app, sessionID)
-// ... error handling ...
-// session already pinned inside ensureWorker
+srv.Sessions.Set(sessionID, wid)
 ```
 
 **Tests:**
@@ -551,10 +496,15 @@ scale-to-zero (keeps at least one worker per app).
 
 ### Step 7: Auto-scaler
 
-New file: `internal/ops/autoscale.go`
+New file: `internal/proxy/autoscaler.go`
+
+The auto-scaler lives in the `proxy` package (not `ops`) because it is
+tightly coupled to session and worker state managed by the proxy layer.
+It combines idle worker reaping with proactive scale-up and session
+sweeping into a single tick loop:
 
 ```go
-package ops
+package proxy
 
 import (
     "context"
@@ -564,17 +514,15 @@ import (
     "github.com/cynkra/blockyard/internal/server"
 )
 
-// SpawnIdleWorkerReaper periodically checks for workers that have been
-// idle beyond the configured timeout and evicts them. It never removes
-// the last worker for an app (no scale-to-zero).
-//
-// Runs alongside SpawnHealthPoller as a separate background goroutine.
-func SpawnIdleWorkerReaper(ctx context.Context, srv *server.Server) {
-    timeout := srv.Config.Proxy.IdleWorkerTimeout.Duration
-    // Check more frequently than the timeout to avoid delayed eviction.
-    // Use health_interval as the check frequency — same cadence as
-    // the health poller.
+// RunAutoscaler is a background goroutine that periodically:
+//   - evicts workers idle beyond idle_worker_timeout (never the last
+//     worker per app — no scale-to-zero)
+//   - sweeps expired idle sessions
+//   - health-checks workers and evicts crashed ones
+//   - attempts scale-up when all workers for an app are at capacity
+func RunAutoscaler(ctx context.Context, srv *server.Server) {
     interval := srv.Config.Proxy.HealthInterval.Duration
+    timeout  := srv.Config.Proxy.IdleWorkerTimeout.Duration
 
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
@@ -584,12 +532,7 @@ func SpawnIdleWorkerReaper(ctx context.Context, srv *server.Server) {
         case <-ctx.Done():
             return
         case <-ticker.C:
-            idle := srv.Workers.IdleWorkers(timeout)
-            for _, wid := range idle {
-                slog.Info("auto-scaler: evicting idle worker",
-                    "worker_id", wid, "idle_for", timeout)
-                EvictWorker(ctx, srv, wid)
-            }
+            autoscaleTick(ctx, srv, timeout)
         }
     }
 }
@@ -600,7 +543,7 @@ func SpawnIdleWorkerReaper(ctx context.Context, srv *server.Server) {
 ```go
 go ops.SpawnHealthPoller(bgCtx, srv)
 go ops.SpawnLogRetentionCleaner(bgCtx, srv)
-go ops.SpawnIdleWorkerReaper(bgCtx, srv)  // new
+go proxy.RunAutoscaler(bgCtx, srv)  // new
 ```
 
 **Tests:**
@@ -828,65 +771,65 @@ limits), and the extra worker will be reaped by the idle worker reaper
 if it ends up with zero sessions. The global `max_workers` check prevents
 unbounded spawning.
 
-To avoid excessive concurrent spawns, `ensureWorker` should acquire a
-per-app spawn lock:
+To avoid excessive concurrent spawns, `ensureWorker` delegates spawning
+to a `spawnSingleFlight` deduplicator. This is more robust than a simple
+per-app mutex: concurrent callers with the same app key block until the
+first caller's spawn completes, then all callers share the result.
 
-New file: `internal/proxy/spawnlock.go`
+Implemented in `internal/proxy/coldstart.go` alongside `ensureWorker`:
 
 ```go
-package proxy
+// spawnGroup is a package-level singleflight deduplicator keyed by
+// app ID. When multiple goroutines call ensureWorker concurrently for
+// the same at-capacity app, only one spawn proceeds; the others block
+// and receive the same (workerID, addr) result.
+var spawnGroup spawnSingleFlight
 
-import "sync"
-
-// spawnLock serializes worker spawning per app to avoid thundering herd.
-// Multiple concurrent requests for an at-capacity app would all try to
-// spawn; the lock ensures only one spawn proceeds while others wait and
-// then find the newly spawned worker via assignWorker.
-type spawnLock struct {
+type spawnSingleFlight struct {
     mu    sync.Mutex
-    locks map[string]*sync.Mutex
+    calls map[string]*spawnCall
 }
 
-func newSpawnLock() *spawnLock {
-    return &spawnLock{locks: make(map[string]*sync.Mutex)}
+type spawnCall struct {
+    wg  sync.WaitGroup
+    wid string
+    addr string
+    err error
 }
 
-func (s *spawnLock) ForApp(appID string) *sync.Mutex {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    if _, ok := s.locks[appID]; !ok {
-        s.locks[appID] = &sync.Mutex{}
+// do deduplicates concurrent spawns for the same app.
+func (g *spawnSingleFlight) do(key string, fn func() (string, string, error)) (string, string, error) {
+    g.mu.Lock()
+    if c, ok := g.calls[key]; ok {
+        g.mu.Unlock()
+        c.wg.Wait()
+        return c.wid, c.addr, c.err
     }
-    return s.locks[appID]
+    c := &spawnCall{}
+    c.wg.Add(1)
+    if g.calls == nil {
+        g.calls = make(map[string]*spawnCall)
+    }
+    g.calls[key] = c
+    g.mu.Unlock()
+
+    c.wid, c.addr, c.err = fn()
+    c.wg.Done()
+
+    g.mu.Lock()
+    delete(g.calls, key)
+    g.mu.Unlock()
+    return c.wid, c.addr, c.err
 }
 ```
 
-In `ensureWorker`, before spawning:
+In `ensureWorker`, the spawn path calls through the deduplicator:
 
 ```go
-// Serialize spawns for this app
-appLock := spawnLocks.ForApp(app.ID)
-appLock.Lock()
-
-// Re-check — another goroutine may have spawned while we waited
-wid, err := assignWorker(app.ID, srv.Workers, srv.Sessions,
-    app.MaxSessionsPerWorker, app.MaxWorkersPerApp)
-if err != nil {
-    appLock.Unlock()
-    return "", "", errMaxWorkers
-}
-if wid != "" {
-    appLock.Unlock()
-    // ... assign to existing worker (same as above) ...
-}
-
-// Proceed with spawn...
-// ... spawn, register, health check ...
-appLock.Unlock()
+return spawnGroup.do(app.ID, func() (string, string, error) {
+    return spawnWorker(ctx, srv, app)
+})
 ```
-
-The `spawnLocks` instance is created in `Handler()` alongside the
-`WsCache` and `Transport`, and captured by the handler closure.
 
 **Tests:**
 

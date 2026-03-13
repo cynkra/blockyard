@@ -29,7 +29,7 @@ func TestExtractSessionIDEmpty(t *testing.T) {
 }
 
 func TestSessionCookie(t *testing.T) {
-	c := sessionCookie("sess-123", "my-app")
+	c := sessionCookie("sess-123", "my-app", "http://localhost:3000")
 	if c.Name != cookieName {
 		t.Errorf("expected name %q, got %q", cookieName, c.Name)
 	}
@@ -44,5 +44,15 @@ func TestSessionCookie(t *testing.T) {
 	}
 	if c.SameSite != http.SameSiteLaxMode {
 		t.Errorf("expected SameSiteLax, got %v", c.SameSite)
+	}
+	if c.Secure {
+		t.Error("expected Secure=false for http external URL")
+	}
+}
+
+func TestSessionCookieSecureWhenHTTPS(t *testing.T) {
+	c := sessionCookie("sess-123", "my-app", "https://example.com")
+	if !c.Secure {
+		t.Error("expected Secure=true for https external URL")
 	}
 }

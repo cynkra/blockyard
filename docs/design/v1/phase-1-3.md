@@ -1,789 +1,168 @@
-# Phase 1-3: Identity Injection + OpenBao Integration
+# Phase 1-3: OpenBao Integration + Credential Injection
 
-Deliver authenticated user identity and per-user credentials to Shiny apps
-at runtime. Phase 1-1 established who the user is (OIDC session), phase 1-2
-established what they can do (RBAC + ACL). This phase makes identity and
-credentials available *inside* the R process — the last piece needed for
-apps to personalize content and access external services on behalf of the
-logged-in user.
+Deliver per-user credentials to Shiny apps at runtime via OpenBao (Vault
+fork). Phase 1-1 established user identity and phase 1-2 added
+authorization; this phase uses the authenticated user's IdP access token
+to obtain scoped OpenBao tokens and inject them into proxied requests.
 
-Two capabilities land together because they share the same dependency (the
-`AuthenticatedUser` in request context from phase 1-1) and serve the same
-goal (making identity actionable inside the app):
+Identity header injection (`X-Shiny-User`, `X-Shiny-Groups`) was
+completed in phase 1-2 and is not repeated here.
 
-1. **Identity header injection** — `X-Shiny-User` and `X-Shiny-Groups`
-   headers on every proxied request. R apps read these via
-   `session$request$HTTP_X_SHINY_USER`.
-2. **OpenBao credential injection** — exchange the user's IdP access token
-   for a scoped OpenBao token, injected as `X-Blockyard-Vault-Token` and
-   `X-Blockyard-Vault-Addr` headers. R apps use these to read per-user
-   secrets from OpenBao directly.
+This phase depends on phases 1-1 (OIDC sessions, access tokens) and 1-2
+(CallerIdentity, RBAC). OpenBao is an optional dependency — when
+`[openbao]` is not configured, credential injection is skipped and the
+server behaves as before.
 
-This phase depends on phase 1-1 (OIDC sessions, `AuthenticatedUser` in
-context, access tokens) and phase 1-2 (`CallerIdentity` in context for the
-credential enrollment API's auth guard).
+## Design decisions
 
-## Design decision: per-request headers, not per-container env vars
+### Per-request token injection via HTTP headers
 
-Credentials are injected per-request as HTTP headers, not per-container as
-environment variables. This is the same model Posit Connect uses for OAuth
-Integrations — per-user credentials are part of the Shiny session context,
-not the process environment.
+OpenBao tokens are injected per-request as the `X-Blockyard-Vault-Token`
+header. This matches Posit Connect's model for OAuth Integrations: R
+code reads `session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN` at session
+init.
 
-**Why not env vars?**
+**Note (updated in phase 1-5):** raw vault tokens in headers are safe
+for single-tenant containers (`max_sessions_per_worker = 1`) but not
+for shared containers — they could leak between co-tenant sessions if
+the app logs request headers or stores them in a shared variable.
+Phase 1-5 introduces a two-phase exchange pattern for shared
+containers: the proxy injects a signed session reference token
+(`X-Blockyard-Session-Token`) instead, and the app exchanges it for
+the real vault credential via `POST /api/v1/credentials/vault`.
 
-- **Session sharing:** phase 1-4 unlocks `max_sessions_per_worker > 1`.
-  With env vars, all sessions on a shared worker would see the same
-  credential — the one belonging to whoever triggered the container spawn.
-  Per-request headers give each user their own scoped token.
-- **Token rotation:** OpenBao tokens expire. Headers carry the current
-  token on every request. Env vars would require restarting the container
-  to rotate.
-- **Isolation:** env vars are readable by any code in the process. Headers
-  are scoped to the request that carries them.
+### VAULT_ADDR as container environment variable
 
-**Trade-off:** the R app reads credentials via `session$request` (captured
-at Shiny session init on the WebSocket upgrade), not via `Sys.getenv()`.
-This is slightly less ergonomic for app developers, but it's the standard
-Shiny pattern for per-session data and matches how Posit Connect exposes
-OAuth tokens.
+The OpenBao address is the same for all users and all requests, so it is
+injected once at container startup as the `VAULT_ADDR` environment
+variable (recognized natively by Vault/OpenBao client libraries). This
+is added to `WorkerSpec.Env` when `[openbao]` is configured.
 
-**Consequence for `WorkerSpec`:** no changes. `WorkerSpec` does not carry
-`vault_token` or `vault_addr` fields. Credentials never enter the container
-environment.
+### Token caching
 
-## Design decision: OpenBao JWT auth (not AppRole)
+Per-request calls to OpenBao's JWT login endpoint would be expensive.
+The `VaultTokenCache` caches scoped tokens keyed by user `sub` with TTL
+matching `[openbao] token_ttl` (default 1h). Cache misses trigger a JWT
+login; cache hits return the existing token. The cache uses a renewal
+buffer (30s before expiry) to avoid serving tokens that expire
+mid-request.
 
-The server exchanges user access tokens for scoped OpenBao tokens via
-OpenBao's JWT auth method. The flow:
+### Credential enrollment dual auth
 
-1. Server configures OpenBao's JWT auth with the IdP's JWKS endpoint (once,
-   at bootstrap).
-2. On each proxied request, the server `POST`s the user's access token to
-   OpenBao's `/auth/jwt/login` endpoint.
-3. OpenBao validates the JWT against the IdP's JWKS, checks the
-   `blockyard-user` role, and returns a short-lived token scoped to
-   `secret/users/{sub}/*`.
+The `POST /api/v1/users/me/credentials/{service}` endpoint accepts both
+session cookie auth (app-plane users) and JWT bearer auth (control-plane
+clients). Users can only manage their own credentials — the `sub` comes
+from the authenticated identity, never from the URL.
 
-**Why JWT auth instead of AppRole?**
+### Soft dependency on OpenBao
 
-- **No server-side secret storage:** the server doesn't need to store or
-  rotate role IDs and secret IDs. The IdP access token is already
-  available in the session.
-- **Per-user scoping is automatic:** OpenBao's JWT auth can template the
-  policy using claims from the JWT (`{{identity.entity.aliases.auth_jwt_*.metadata.sub}}`).
-  Each token is scoped to the user's own secrets.
-- **Standard IdP integration:** no custom auth backend. Any IdP that
-  speaks OIDC works.
-
-**Trade-off:** requires the IdP's access tokens to be valid JWTs with a
-`sub` claim (standard for OIDC). Opaque access tokens won't work — the
-IdP must be configured to issue JWT access tokens.
-
-## Design decision: server-side token cache
-
-The server caches OpenBao tokens in memory, keyed by user `sub`. Without
-caching, every proxied request would call OpenBao's login endpoint — this
-is too expensive for interactive Shiny apps that make many HTTP requests
-per user action.
-
-**Cache behavior:**
-
-- **Key:** user `sub` (same user gets same cached token regardless of
-  which worker serves them).
-- **TTL:** matches `[openbao] token_ttl` (default 1h). Conservative:
-  evict from cache at 90% of TTL to avoid using near-expired tokens.
-- **Eviction:** expired entries are lazily evicted on access. No background
-  cleanup goroutine — the cache size is bounded by the number of active
-  users.
-- **Invalidation on logout:** `POST /logout` removes the user's cached
-  token (phase 1-1's `UserSessionStore.Delete` is extended to also clear
-  the vault token cache entry).
-
-**Trade-off:** a user who changes their OpenBao policy (via admin action)
-won't see the change until the cached token expires. Acceptable for v1 —
-policies change rarely, and the TTL is bounded.
-
-## Design decision: bootstrap verification is best-effort
-
-When `[openbao]` is configured, the server checks OpenBao's health and
-configuration at startup. If any check fails, the server **logs a warning
-but starts anyway**.
-
-**Why not fail hard?**
-
-- **Startup ordering:** in Docker Compose, the server and OpenBao may
-  start in any order. If the server fails hard when OpenBao is
-  unreachable, you need `depends_on` with health checks — adding
-  operational complexity.
-- **Graceful degradation:** identity headers (`X-Shiny-User`,
-  `X-Shiny-Groups`) work without OpenBao. Apps that only need user
-  identity (not credentials) should not be blocked by an OpenBao outage.
-- **Observability:** the `/readyz` endpoint (phase 1-6) reports OpenBao
-  health. Operators can use it for liveness probes.
-
-**What the proxy does when OpenBao is unreachable at request time:** the
-credential injection middleware skips the `X-Blockyard-Vault-Token` and
-`X-Blockyard-Vault-Addr` headers. The request is proxied with identity
-headers only. R apps that depend on credentials will fail gracefully (the
-header is absent, not stale).
-
-## Design decision: credential enrollment via admin token
-
-The credential enrollment API (`POST /api/v1/users/me/credentials/{service}`)
-writes secrets to OpenBao using the server's admin token, not the user's
-scoped token. The user's scoped token only has `read` permission on their
-secrets path.
-
-**Why?**
-
-- **Least privilege at runtime:** the per-request scoped token can read
-  but not write. If a Shiny app is compromised, it can read the user's
-  existing credentials but cannot write new ones or modify existing ones.
-- **Simpler policy:** one policy (`read` on `secret/users/{sub}/*`) for
-  all runtime tokens. Write access is only needed during enrollment, which
-  goes through the server's authenticated API.
-
-**Trade-off:** the server's admin token has broad write access. It's
-protected by: (a) never entering the container environment, (b) being
-loaded from an env var, not the config file, (c) being wrapped in the
-`Secret` type that redacts in logs.
-
-## Design decision: services network for worker-to-OpenBao connectivity
-
-In v0, each worker gets its own isolated bridge network
-(`blockyard-{worker-id}`). The server joins each worker's network to reach
-it. Workers are fully isolated — they cannot reach each other, and they
-cannot reach anything outside their per-worker network.
-
-This creates a problem for OpenBao: the `[openbao].address` is reachable
-from the server (which runs on the host or on the Docker Compose default
-network), but not from inside a worker container. The R app needs to call
-OpenBao directly using the address from `X-Blockyard-Vault-Addr`, and
-that call will fail if the worker has no network path to OpenBao.
-
-**Solution:** an optional `docker.services_network` config field. When set,
-every worker container is connected to this network in addition to its
-per-worker bridge network. In a Docker Compose deployment, this is
-typically the Compose-managed default network that the server, OpenBao,
-and other infrastructure services share.
-
-```toml
-[docker]
-services_network = "blockyard_default"
-```
-
-**What this preserves:**
-
-- **Worker-to-worker isolation:** workers are still on separate per-worker
-  bridge networks. Being on a shared services network does not let them
-  reach each other by worker IP — they'd need to know the other worker's
-  IP on the services network, which is not exposed. (This is the same
-  isolation model as Docker Compose services on a shared network.)
-- **Metadata endpoint protection:** iptables rules are scoped to the
-  per-worker network's subnet. The services network does not bypass them.
-
-**What this enables:**
-
-- Workers can reach OpenBao at the same address the server uses.
-- Workers can reach any other service on the shared network (e.g., a
-  database the R app needs to connect to). This is a useful side effect
-  — currently workers are fully isolated from all external services,
-  which limits what Shiny apps can do.
-
-**When not set:** workers remain fully isolated (v0 behavior). OpenBao
-credential injection still works — the server exchanges tokens on behalf
-of the user — but R apps cannot call OpenBao directly. The
-`X-Blockyard-Vault-Addr` header is still injected; the R app will get a
-connection error if it tries to use it. This is documented as an operator
-configuration requirement.
-
-**Implementation:** in `DockerBackend.Spawn`, after creating the container
-on its per-worker network and before starting it, connect it to the
-services network:
-
-```go
-// Connect to services network (if configured) for external service access
-if d.config.ServicesNetwork != "" {
-    if err := d.joinNetwork(ctx, containerID, d.config.ServicesNetwork); err != nil {
-        // cleanup: remove container, iptables rule, per-worker network
-        return fmt.Errorf("spawn: join services network: %w", err)
-    }
-}
-```
-
-**Build containers:** the `Build` flow currently runs on the default
-bridge network (no explicit network assignment). Build containers need
-internet access to download rv from GitHub. If `services_network` is set,
-build containers are also connected to it for consistency — though builds
-don't currently need OpenBao access, having a uniform network policy
-simplifies reasoning about what containers can reach.
-
-**Validation:** if `[openbao]` is configured and `docker.services_network`
-is not set, the server logs a warning at startup:
-
-```
-WARN openbao configured but docker.services_network is not set —
-     worker containers may not be able to reach OpenBao directly
-```
-
-This is a warning, not an error — the server-side credential injection
-still works without direct worker-to-OpenBao connectivity.
-
-## Design decision: WebSocket credential capture at session init
-
-Shiny apps communicate over WebSocket after the initial HTTP upgrade.
-Headers are only present on the upgrade request — there's no mechanism to
-inject new headers on subsequent WebSocket frames.
-
-R apps read per-session data via `session$request`, which captures the
-headers from the upgrade request at session init time. This means:
-
-- The OpenBao token available to the R app is the one issued at session
-  start.
-- If the token expires mid-session (default TTL 1h), the R app can call
-  OpenBao's token renewal API directly using the token from
-  `session$request`.
-- For most Shiny apps, sessions are shorter than the token TTL, so this
-  is not a practical concern.
-
-**Alternative considered:** injecting credentials via a custom WebSocket
-message. Rejected — it would require a companion R package to receive and
-store the token, breaking the "no companion package needed" principle from
-the roadmap.
+If `[openbao]` is configured but OpenBao is unreachable at startup, the
+server logs a warning and starts anyway. Credential injection fails
+gracefully (logs warning, omits headers). The `/readyz` endpoint (phase
+1-6) will report OpenBao as unhealthy.
 
 ## Deliverables
 
-1. Identity header injection — `X-Shiny-User` and `X-Shiny-Groups` on
-   every proxied request (HTTP and WebSocket upgrade)
-2. Header spoofing prevention — strip client-supplied identity and
-   credential headers before forwarding
-3. `internal/integration/openbao.go` — OpenBao HTTP client for KV v2
-   read/write and JWT auth login
-4. OpenBao bootstrap verification — health + configuration checks at
-   startup
-5. Per-request credential injection — exchange user's access token for
-   scoped OpenBao token, inject as headers
-6. `VaultTokenCache` — in-memory token cache keyed by user `sub`
-7. Cache invalidation on logout
-8. Credential enrollment API — `POST /api/v1/users/me/credentials/{service}`
-9. Config additions: `[openbao]` section, `docker.services_network` field
-10. Services network — connect workers to a shared network for OpenBao
-    (and general external service) reachability
-11. Server struct additions: `OpenBaoClient`, `VaultTokenCache`
+1. **`internal/integration/` package** — OpenBao HTTP client, JWT login,
+   KV v2 read/write, health check, bootstrap verification
+2. **`VaultTokenCache`** — in-memory cache keyed by `sub`, avoids
+   per-request OpenBao calls
+3. **Per-request credential injection** — exchange user's access token
+   for scoped OpenBao token, inject `X-Blockyard-Vault-Token` header
+4. **`VAULT_ADDR` env var** — added to worker containers when `[openbao]`
+   is configured
+5. **Credential enrollment API** — `POST /api/v1/users/me/credentials/{service}`
+   with dual auth (session cookie + JWT bearer)
+6. **Config additions** — `[openbao]` section
+7. **OpenBao bootstrap** — startup verification of OpenBao state
+8. **Tests** — unit tests with `httptest.Server` mock + integration tests
+   against real OpenBao container (`//go:build openbao_test`)
 
-## Step-by-step
+## Config additions
 
-### Step 1: Config additions
-
-**New struct** in `internal/config/config.go`:
+```toml
+[openbao]
+address = "https://bao.example.com"
+admin_token = "hvs.xxx"        # or BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
+token_ttl = "1h"               # default: 1h
+jwt_auth_path = "jwt"          # default: "jwt"
+```
 
 ```go
 type OpenbaoConfig struct {
-    Address     string   `toml:"address"`        // e.g. https://bao.example.com
-    AdminToken  Secret   `toml:"admin_token"`    // use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
-    TokenTTL    Duration `toml:"token_ttl"`      // default: 1h
-    JWTAuthPath string   `toml:"jwt_auth_path"`  // default: "jwt"
+    Address     string   `toml:"address"`
+    AdminToken  Secret   `toml:"admin_token"`
+    TokenTTL    Duration `toml:"token_ttl"`     // default: 1h
+    JWTAuthPath string   `toml:"jwt_auth_path"` // default: "jwt"
 }
 ```
 
-**Changes to `DockerConfig` struct:**
+Validation: when `[openbao]` is set, `address` and `admin_token` are
+required. `[openbao]` requires `[oidc]` (JWT login needs an IdP).
+
+Env var auto-construction: if any `BLOCKYARD_OPENBAO_*` env var is set,
+the `[openbao]` section is created with defaults applied (same pattern
+as `[oidc]`).
+
+## Package: `internal/integration/`
+
+### openbao.go — OpenBao HTTP client
 
 ```go
-type DockerConfig struct {
-    Socket          string `toml:"socket"`           // default: "/var/run/docker.sock"
-    Image           string `toml:"image"`            // required
-    ShinyPort       int    `toml:"shiny_port"`       // default: 3838
-    RvVersion       string `toml:"rv_version"`       // default: "latest"
-    ServicesNetwork string `toml:"services_network"` // new — optional, e.g. "blockyard_default"
+// Client is a lightweight HTTP client for OpenBao's REST API.
+// It wraps net/http and targets only the endpoints blockyard needs:
+// JWT auth login, KV v2 read/write, sys/health.
+type Client struct {
+    addr       string        // OpenBao base URL
+    adminToken string        // admin token for bootstrap and enrollment
+    httpClient *http.Client
 }
+
+func NewClient(addr, adminToken string) *Client
+
+// Health checks if OpenBao is reachable and unsealed.
+// GET {addr}/v1/sys/health
+func (c *Client) Health(ctx context.Context) error
+
+// JWTLogin exchanges an IdP access token for a scoped OpenBao token.
+// POST {addr}/v1/auth/{mountPath}/login
+// Body: {"role": "blockyard-user", "jwt": "{accessToken}"}
+// Returns the client token and its TTL.
+func (c *Client) JWTLogin(ctx context.Context, mountPath, accessToken string) (token string, ttl time.Duration, err error)
+
+// KVWrite writes a secret to the KV v2 secrets engine.
+// POST {addr}/v1/secret/data/{path}
+// Used by credential enrollment (admin token auth).
+func (c *Client) KVWrite(ctx context.Context, path string, data map[string]any) error
+
+// KVRead reads a secret from the KV v2 secrets engine.
+// GET {addr}/v1/secret/data/{path}
+func (c *Client) KVRead(ctx context.Context, path string, token string) (map[string]any, error)
 ```
 
-**Changes to `Config` struct:**
+### bootstrap.go — Startup verification
 
 ```go
-type Config struct {
-    Server   ServerConfig   `toml:"server"`
-    Docker   DockerConfig   `toml:"docker"`
-    Storage  StorageConfig  `toml:"storage"`
-    Database DatabaseConfig `toml:"database"`
-    Proxy    ProxyConfig    `toml:"proxy"`
-    OIDC     *OidcConfig    `toml:"oidc"`
-    Openbao  *OpenbaoConfig `toml:"openbao"`   // new — nil when not configured
-}
+// Bootstrap verifies OpenBao is configured correctly for blockyard.
+// Checks:
+// 1. OpenBao is reachable and unsealed (GET /v1/sys/health)
+// 2. JWT auth method is enabled at the configured path
+// 3. The "blockyard-user" role exists
+// 4. KV v2 secrets engine is mounted at "secret/"
+// 5. At least one attached policy uses per-user path scoping (warning only)
+//
+// Returns nil if all checks pass. Returns an error describing the
+// first failure. The caller decides whether to treat this as fatal.
+func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string) error
 ```
 
-**Defaults:**
+### tokencache.go — Token cache
 
 ```go
-func openbaoDefaults(c *OpenbaoConfig) {
-    if c.TokenTTL.Duration == 0 {
-        c.TokenTTL.Duration = time.Hour
-    }
-    if c.JWTAuthPath == "" {
-        c.JWTAuthPath = "jwt"
-    }
-}
-```
-
-**Validation:**
-
-```go
-if cfg.Openbao != nil {
-    if cfg.Openbao.Address == "" {
-        return fmt.Errorf("config: openbao.address must not be empty")
-    }
-    if cfg.Openbao.AdminToken.IsEmpty() {
-        return fmt.Errorf("config: openbao.admin_token must not be empty")
-    }
-    if cfg.OIDC == nil {
-        return fmt.Errorf("config: [oidc] is required when [openbao] is configured")
-    }
-}
-```
-
-The last check enforces that OpenBao integration requires OIDC — the JWT
-auth flow needs IdP access tokens.
-
-**Startup warning** (in `cmd/blockyard/main.go`, after config validation):
-
-```go
-if cfg.Openbao != nil && cfg.Docker.ServicesNetwork == "" {
-    slog.Warn("openbao configured but docker.services_network is not set — " +
-        "worker containers may not be able to reach OpenBao directly")
-}
-```
-
-**Auto-construction from env vars:**
-
-```go
-if cfg.Openbao == nil && envPrefixExists("BLOCKYARD_OPENBAO_") {
-    cfg.Openbao = &OpenbaoConfig{}
-    openbaoDefaults(cfg.Openbao)
-}
-```
-
-**Env var mappings:**
-
-```
-BLOCKYARD_DOCKER_SERVICES_NETWORK
-BLOCKYARD_OPENBAO_ADDRESS
-BLOCKYARD_OPENBAO_ADMIN_TOKEN
-BLOCKYARD_OPENBAO_TOKEN_TTL
-BLOCKYARD_OPENBAO_JWT_AUTH_PATH
-```
-
-**Tests:**
-
-- Parse config with `[openbao]` section present
-- Parse config without `[openbao]` section (backward compat)
-- Validation: reject empty address, empty admin_token
-- Validation: reject `[openbao]` without `[oidc]`
-- Default: `token_ttl` defaults to 1h, `jwt_auth_path` defaults to "jwt"
-- Env var override for each field
-- Auto-construction from env vars
-- `TestEnvVarCoverageComplete` passes with new fields
-
-### Step 2: Identity header injection
-
-New file: `internal/proxy/identity.go`
-
-```go
-package proxy
-
-import (
-    "net/http"
-    "strings"
-
-    "github.com/cynkra/blockyard/internal/auth"
-)
-
-// identityHeaders are the headers injected by the proxy. Client-supplied
-// values are stripped before forwarding to prevent spoofing.
-var identityHeaders = []string{
-    "X-Shiny-User",
-    "X-Shiny-Groups",
-    "X-Blockyard-Vault-Token",
-    "X-Blockyard-Vault-Addr",
-}
-
-// stripSpoofedHeaders removes any client-supplied identity/credential
-// headers from the incoming request. Called before forwarding.
-func stripSpoofedHeaders(r *http.Request) {
-    for _, h := range identityHeaders {
-        r.Header.Del(h)
-    }
-}
-
-// injectIdentityHeaders adds X-Shiny-User and X-Shiny-Groups to the
-// outgoing request based on the authenticated user in context. If no
-// user is authenticated (public app, anonymous access), the headers
-// are absent.
-func injectIdentityHeaders(r *http.Request, user *auth.AuthenticatedUser) {
-    if user == nil {
-        return
-    }
-    r.Header.Set("X-Shiny-User", user.Sub)
-    if len(user.Groups) > 0 {
-        r.Header.Set("X-Shiny-Groups", strings.Join(user.Groups, ","))
-    }
-}
-```
-
-**Integration into the proxy Director** — in `forward.go`, the Director
-function is extended to strip and inject headers:
-
-```go
-proxy.Director = func(req *http.Request) {
-    originalDirector(req)
-    req.URL.Path = stripAppPrefix(req.URL.Path, appName)
-    req.URL.RawPath = ""
-    req.Host = addr
-    req.Header.Set("X-Forwarded-Proto", "http")
-
-    // v1: identity + credential headers
-    stripSpoofedHeaders(req)
-    user := auth.AuthenticatedUserFromContext(req.Context())
-    injectIdentityHeaders(req, user)
-}
-```
-
-The same stripping and injection happens in the WebSocket upgrade path
-(`ws.go`), on the backend dial request.
-
-**Tests:**
-
-- `stripSpoofedHeaders` removes all identity/credential headers
-- `injectIdentityHeaders` with authenticated user sets both headers
-- `injectIdentityHeaders` with nil user leaves headers absent
-- Groups with commas in names: verify join behavior (commas in group names
-  are an IdP configuration issue, not a blockyard concern — document it)
-- Integration test: proxy request to mock worker, verify headers arrive
-- Integration test: client-supplied `X-Shiny-User` is stripped and
-  replaced with the authenticated user's identity
-
-### Step 3: OpenBao client
-
-New file: `internal/integration/openbao.go`
-
-```go
-package integration
-
-import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "io"
-    "log/slog"
-    "net/http"
-    "time"
-
-    "github.com/cynkra/blockyard/internal/config"
-)
-
-// OpenBaoClient is an HTTP client for OpenBao's API. It handles JWT auth
-// login (for per-user token issuance) and KV v2 operations (for credential
-// enrollment).
-type OpenBaoClient struct {
-    address     string
-    adminToken  string
-    jwtAuthPath string
-    httpClient  *http.Client
-}
-
-// NewOpenBaoClient creates a new client from the [openbao] config.
-func NewOpenBaoClient(cfg *config.OpenbaoConfig) *OpenBaoClient {
-    return &OpenBaoClient{
-        address:     cfg.Address,
-        adminToken:  cfg.AdminToken.Expose(),
-        jwtAuthPath: cfg.JWTAuthPath,
-        httpClient:  &http.Client{Timeout: 10 * time.Second},
-    }
-}
-
-// JWTLoginResult holds the response from a JWT auth login.
-type JWTLoginResult struct {
-    Token     string
-    TTL       time.Duration
-    Renewable bool
-}
-
-// JWTLogin exchanges a JWT (the user's IdP access token) for a scoped
-// OpenBao token. The "blockyard-user" role's policy restricts the token
-// to read access on secret/users/{sub}/*.
-func (c *OpenBaoClient) JWTLogin(ctx context.Context, jwt string) (*JWTLoginResult, error) {
-    url := fmt.Sprintf("%s/v1/auth/%s/login", c.address, c.jwtAuthPath)
-
-    body, err := json.Marshal(map[string]string{
-        "role": "blockyard-user",
-        "jwt":  jwt,
-    })
-    if err != nil {
-        return nil, fmt.Errorf("marshal login body: %w", err)
-    }
-
-    req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-    if err != nil {
-        return nil, fmt.Errorf("create login request: %w", err)
-    }
-    req.Header.Set("Content-Type", "application/json")
-
-    resp, err := c.httpClient.Do(req)
-    if err != nil {
-        return nil, fmt.Errorf("jwt login request: %w", err)
-    }
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK {
-        respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-        return nil, fmt.Errorf("jwt login failed (status %d): %s", resp.StatusCode, respBody)
-    }
-
-    var result struct {
-        Auth struct {
-            ClientToken string `json:"client_token"`
-            LeaseDuration int  `json:"lease_duration"`
-            Renewable   bool   `json:"renewable"`
-        } `json:"auth"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-        return nil, fmt.Errorf("decode login response: %w", err)
-    }
-
-    return &JWTLoginResult{
-        Token:     result.Auth.ClientToken,
-        TTL:       time.Duration(result.Auth.LeaseDuration) * time.Second,
-        Renewable: result.Auth.Renewable,
-    }, nil
-}
-
-// WriteSecret writes a secret to OpenBao's KV v2 engine using the admin
-// token. Used by the credential enrollment API.
-func (c *OpenBaoClient) WriteSecret(ctx context.Context, path string, data map[string]any) error {
-    url := fmt.Sprintf("%s/v1/secret/data/%s", c.address, path)
-
-    body, err := json.Marshal(map[string]any{"data": data})
-    if err != nil {
-        return fmt.Errorf("marshal secret data: %w", err)
-    }
-
-    req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-    if err != nil {
-        return fmt.Errorf("create write request: %w", err)
-    }
-    req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("X-Vault-Token", c.adminToken)
-
-    resp, err := c.httpClient.Do(req)
-    if err != nil {
-        return fmt.Errorf("write secret request: %w", err)
-    }
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-        respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-        return fmt.Errorf("write secret failed (status %d): %s", resp.StatusCode, respBody)
-    }
-
-    return nil
-}
-
-// Health checks if OpenBao is reachable and unsealed. Returns nil on
-// success.
-func (c *OpenBaoClient) Health(ctx context.Context) error {
-    url := fmt.Sprintf("%s/v1/sys/health", c.address)
-
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-    if err != nil {
-        return fmt.Errorf("create health request: %w", err)
-    }
-
-    resp, err := c.httpClient.Do(req)
-    if err != nil {
-        return fmt.Errorf("health request: %w", err)
-    }
-    defer resp.Body.Close()
-
-    // 200 = initialized + unsealed + active
-    // 429 = unsealed + standby
-    // 472 = data recovery mode
-    // 473 = performance standby
-    // 501 = not initialized
-    // 503 = sealed
-    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusTooManyRequests {
-        return fmt.Errorf("openbao unhealthy (status %d)", resp.StatusCode)
-    }
-
-    return nil
-}
-```
-
-**Tests:**
-
-- `JWTLogin` with mock OpenBao server returning 200 + token
-- `JWTLogin` with mock OpenBao server returning 403 (bad JWT)
-- `WriteSecret` with mock server returning 200
-- `WriteSecret` with mock server returning 403 (bad admin token)
-- `Health` with mock server returning 200 (healthy)
-- `Health` with mock server returning 503 (sealed)
-
-### Step 4: Bootstrap verification
-
-New file: `internal/integration/bootstrap.go`
-
-```go
-package integration
-
-import (
-    "context"
-    "fmt"
-    "log/slog"
-
-    "github.com/cynkra/blockyard/internal/config"
-)
-
-// BootstrapResult contains the outcome of OpenBao bootstrap verification.
-type BootstrapResult struct {
-    Reachable    bool
-    Unsealed     bool
-    JWTAuthReady bool
-    KVReady      bool
-}
-
-// AllOK reports whether all bootstrap checks passed.
-func (r *BootstrapResult) AllOK() bool {
-    return r.Reachable && r.Unsealed && r.JWTAuthReady && r.KVReady
-}
-
-// Bootstrap verifies OpenBao's health and configuration. Returns the
-// result; callers decide whether to fail or warn.
-func Bootstrap(ctx context.Context, client *OpenBaoClient, cfg *config.OpenbaoConfig) *BootstrapResult {
-    result := &BootstrapResult{}
-
-    // 1. Health check — reachable and unsealed?
-    if err := client.Health(ctx); err != nil {
-        slog.Warn("openbao health check failed", "error", err)
-        return result
-    }
-    result.Reachable = true
-    result.Unsealed = true
-
-    // 2. JWT auth method enabled?
-    if err := client.checkJWTAuth(ctx, cfg.JWTAuthPath); err != nil {
-        slog.Warn("openbao jwt auth check failed", "error", err)
-        return result
-    }
-    result.JWTAuthReady = true
-
-    // 3. KV v2 secrets engine mounted?
-    if err := client.checkKVMount(ctx); err != nil {
-        slog.Warn("openbao kv mount check failed", "error", err)
-        return result
-    }
-    result.KVReady = true
-
-    return result
-}
-```
-
-**Helper methods** on `OpenBaoClient` (in `openbao.go`):
-
-```go
-// checkJWTAuth verifies the JWT auth method is enabled at the configured
-// path by reading its configuration.
-func (c *OpenBaoClient) checkJWTAuth(ctx context.Context, path string) error {
-    url := fmt.Sprintf("%s/v1/auth/%s/config", c.address, path)
-
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-    if err != nil {
-        return err
-    }
-    req.Header.Set("X-Vault-Token", c.adminToken)
-
-    resp, err := c.httpClient.Do(req)
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK {
-        return fmt.Errorf("jwt auth at %q returned %d", path, resp.StatusCode)
-    }
-    return nil
-}
-
-// checkKVMount verifies the KV v2 secrets engine is mounted at secret/.
-func (c *OpenBaoClient) checkKVMount(ctx context.Context) error {
-    url := fmt.Sprintf("%s/v1/sys/mounts/secret", c.address)
-
-    req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-    if err != nil {
-        return err
-    }
-    req.Header.Set("X-Vault-Token", c.adminToken)
-
-    resp, err := c.httpClient.Do(req)
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK {
-        return fmt.Errorf("kv mount at secret/ returned %d", resp.StatusCode)
-    }
-    return nil
-}
-```
-
-**Wiring in `cmd/blockyard/main.go`:**
-
-```go
-if cfg.Openbao != nil {
-    baoClient := integration.NewOpenBaoClient(cfg.Openbao)
-    result := integration.Bootstrap(ctx, baoClient, cfg.Openbao)
-
-    if result.AllOK() {
-        slog.Info("openbao bootstrap: all checks passed")
-    } else {
-        slog.Warn("openbao bootstrap: some checks failed — credential injection will be unavailable",
-            "reachable", result.Reachable,
-            "unsealed", result.Unsealed,
-            "jwt_auth", result.JWTAuthReady,
-            "kv_mount", result.KVReady,
-        )
-    }
-
-    srv.OpenBaoClient = baoClient
-    srv.VaultTokenCache = integration.NewVaultTokenCache(cfg.Openbao.TokenTTL.Duration)
-}
-```
-
-**Tests:**
-
-- All checks pass — `AllOK()` returns true
-- Health fails — `Reachable` false, other fields false
-- JWT auth check fails — `JWTAuthReady` false
-- KV mount check fails — `KVReady` false
-
-### Step 5: Vault token cache
-
-New file: `internal/integration/cache.go`
-
-```go
-package integration
-
-import (
-    "sync"
-    "time"
-)
-
-// VaultTokenCache caches OpenBao tokens keyed by user sub. Avoids
-// calling OpenBao's JWT login endpoint on every proxied request.
+// VaultTokenCache caches OpenBao tokens keyed by user sub.
 type VaultTokenCache struct {
-    mu         sync.RWMutex
-    tokens     map[string]*cachedToken
-    defaultTTL time.Duration
+    mu     sync.RWMutex
+    tokens map[string]*cachedToken
 }
 
 type cachedToken struct {
@@ -791,263 +170,201 @@ type cachedToken struct {
     ExpiresAt time.Time
 }
 
-// NewVaultTokenCache creates an empty cache with the given default TTL.
-func NewVaultTokenCache(defaultTTL time.Duration) *VaultTokenCache {
-    return &VaultTokenCache{
-        tokens:     make(map[string]*cachedToken),
-        defaultTTL: defaultTTL,
-    }
-}
+func NewVaultTokenCache() *VaultTokenCache
 
-// Get retrieves a cached token for the given user sub. Returns empty
-// string if not cached or expired. Expired entries are lazily deleted.
-func (c *VaultTokenCache) Get(sub string) string {
-    c.mu.RLock()
-    entry, ok := c.tokens[sub]
-    c.mu.RUnlock()
+// Get returns a cached token if it exists and has at least 30 seconds
+// of remaining validity. Returns ("", false) on miss or near-expiry.
+func (c *VaultTokenCache) Get(sub string) (string, bool)
 
-    if !ok {
-        return ""
-    }
+// Set stores a token with the given TTL.
+func (c *VaultTokenCache) Set(sub string, token string, ttl time.Duration)
 
-    // Use 90% of TTL as effective expiry to avoid near-expired tokens
-    if time.Now().After(entry.ExpiresAt) {
-        c.mu.Lock()
-        delete(c.tokens, sub)
-        c.mu.Unlock()
-        return ""
-    }
+// Delete removes a cached token (e.g. on logout).
+func (c *VaultTokenCache) Delete(sub string)
 
-    return entry.Token
-}
-
-// Set caches a token for the given user sub. The TTL is taken from the
-// login result if available, otherwise falls back to the configured
-// default.
-func (c *VaultTokenCache) Set(sub, token string, ttl time.Duration) {
-    if ttl == 0 {
-        ttl = c.defaultTTL
-    }
-
-    // Cache at 90% of actual TTL to avoid using near-expired tokens
-    effectiveTTL := time.Duration(float64(ttl) * 0.9)
-
-    c.mu.Lock()
-    c.tokens[sub] = &cachedToken{
-        Token:     token,
-        ExpiresAt: time.Now().Add(effectiveTTL),
-    }
-    c.mu.Unlock()
-}
-
-// Delete removes a cached token for the given user sub.
-// Called on logout.
-func (c *VaultTokenCache) Delete(sub string) {
-    c.mu.Lock()
-    delete(c.tokens, sub)
-    c.mu.Unlock()
-}
+// Sweep removes all expired tokens from the cache.
+// Called periodically by the health poller.
+func (c *VaultTokenCache) Sweep() int
 ```
 
-**Tests:**
-
-- `Get` on empty cache returns empty string
-- `Set` then `Get` returns the token
-- `Get` after expiry returns empty string and removes entry
-- `Delete` removes entry
-- Concurrent access: parallel `Set`/`Get`/`Delete` (race detector)
-
-### Step 6: Per-request credential injection
-
-New file: `internal/proxy/credentials.go`
+### enrollment.go — Credential enrollment logic
 
 ```go
-package proxy
+// EnrollCredential writes a user's credential for a service into
+// OpenBao's KV v2 store at secret/data/users/{sub}/apikeys/{service}.
+// Uses the admin token, not the user's scoped token.
+func EnrollCredential(ctx context.Context, client *Client, sub, service string, data map[string]any) error
+```
 
-import (
-    "context"
-    "log/slog"
-    "net/http"
+## WorkerSpec changes
 
-    "github.com/cynkra/blockyard/internal/auth"
-    "github.com/cynkra/blockyard/internal/integration"
-    "github.com/cynkra/blockyard/internal/server"
-)
+Add an `Env` field to `WorkerSpec` for additional environment variables:
 
-// injectCredentialHeaders exchanges the user's access token for a scoped
-// OpenBao token and injects it as request headers. Skips silently if
-// OpenBao is not configured or the user is not authenticated.
-func injectCredentialHeaders(ctx context.Context, r *http.Request, srv *server.Server) {
-    if srv.OpenBaoClient == nil || srv.VaultTokenCache == nil {
-        return
-    }
-
-    user := auth.AuthenticatedUserFromContext(ctx)
-    if user == nil {
-        return
-    }
-
-    // Check cache first
-    token := srv.VaultTokenCache.Get(user.Sub)
-    if token == "" {
-        // Cache miss — exchange access token for OpenBao token
-        result, err := srv.OpenBaoClient.JWTLogin(ctx, user.AccessToken)
-        if err != nil {
-            slog.Warn("openbao jwt login failed — skipping credential injection",
-                "sub", user.Sub, "error", err)
-            return
-        }
-        token = result.Token
-        srv.VaultTokenCache.Set(user.Sub, result.Token, result.TTL)
-    }
-
-    r.Header.Set("X-Blockyard-Vault-Token", token)
-    r.Header.Set("X-Blockyard-Vault-Addr", srv.OpenBaoClient.Address())
+```go
+type WorkerSpec struct {
+    // ... existing fields ...
+    Env map[string]string // additional env vars (e.g. VAULT_ADDR)
 }
 ```
 
-**`Address()` accessor** on `OpenBaoClient`:
+In `coldstart.go`, populate from config when `[openbao]` is configured:
 
 ```go
-func (c *OpenBaoClient) Address() string { return c.address }
-```
-
-**Integration into the proxy Director** — extending the changes from
-Step 2:
-
-```go
-proxy.Director = func(req *http.Request) {
-    originalDirector(req)
-    req.URL.Path = stripAppPrefix(req.URL.Path, appName)
-    req.URL.RawPath = ""
-    req.Host = addr
-    req.Header.Set("X-Forwarded-Proto", "http")
-
-    // v1: identity + credential headers
-    stripSpoofedHeaders(req)
-    user := auth.AuthenticatedUserFromContext(req.Context())
-    injectIdentityHeaders(req, user)
-    injectCredentialHeaders(req.Context(), req, srv)
+if srv.Config.Openbao != nil {
+    spec.Env = map[string]string{
+        "VAULT_ADDR": srv.Config.Openbao.Address,
+    }
 }
 ```
 
-**WebSocket upgrade path** — the same injection happens on the backend
-dial request in `ws.go`. The backend request is created from the original
-request's context, so `AuthenticatedUser` is available.
+In `docker.go`, append to the container environment:
 
-**Server struct additions** (in `internal/server/state.go`):
+```go
+env := []string{
+    fmt.Sprintf("SHINY_PORT=%d", spec.ShinyPort),
+    "R_LIBS=/blockyard-lib",
+}
+for k, v := range spec.Env {
+    env = append(env, k+"="+v)
+}
+```
+
+## Server state additions
 
 ```go
 type Server struct {
     // ... existing fields ...
 
-    // OpenBao fields — nil when [openbao] is not configured.
-    OpenBaoClient   *integration.OpenBaoClient
+    // OpenBao — nil when [openbao] is not configured.
+    VaultClient     *integration.Client
     VaultTokenCache *integration.VaultTokenCache
 }
 ```
 
-**Tests:**
-
-- OpenBao not configured — no headers injected, no error
-- User not authenticated — no headers injected
-- Cache hit — uses cached token, no OpenBao call
-- Cache miss — calls `JWTLogin`, caches result, injects headers
-- OpenBao login failure — logs warning, no headers, request still proxied
-- Integration test: full flow through proxy with mock OpenBao
-
-### Step 7: Logout cache invalidation
-
-Phase 1-1's logout handler deletes the server-side session. Extend it to
-also clear the vault token cache entry.
-
-**Change in `internal/api/auth_handlers.go`** (the logout handler):
+Initialization in `main.go` after OIDC setup:
 
 ```go
-func logoutHandler(srv *server.Server) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        // ... existing: extract user from cookie, delete session ...
+if cfg.Openbao != nil {
+    srv.VaultClient = integration.NewClient(
+        cfg.Openbao.Address,
+        cfg.Openbao.AdminToken.Expose(),
+    )
+    srv.VaultTokenCache = integration.NewVaultTokenCache()
 
-        // Clear vault token cache on logout
-        if srv.VaultTokenCache != nil && user != nil {
-            srv.VaultTokenCache.Delete(user.Sub)
-        }
-
-        // ... existing: clear cookie, redirect ...
+    if err := integration.Bootstrap(ctx, srv.VaultClient, cfg.Openbao.JWTAuthPath); err != nil {
+        slog.Warn("OpenBao bootstrap failed — credential injection disabled until resolved",
+            "error", err)
     }
 }
 ```
 
-**Tests:**
+## Proxy changes — credential injection
 
-- Logout clears vault token cache entry
-- Logout with no vault cache configured — no panic
-
-### Step 8: Credential enrollment API
-
-New file: `internal/api/credentials.go`
+In `proxy.go`, after identity header injection (step 4), add step 4b:
 
 ```go
-package api
+// 4b. Inject OpenBao credentials when configured.
+injectVaultToken(r, srv)
+```
 
-import (
-    "encoding/json"
-    "fmt"
-    "net/http"
-    "regexp"
+`injectVaultToken` is extracted as a named function:
 
-    "github.com/go-chi/chi/v5"
+```go
+func injectVaultToken(r *http.Request, srv *server.Server) {
+    r.Header.Del("X-Blockyard-Vault-Token")
 
-    "github.com/cynkra/blockyard/internal/auth"
-    "github.com/cynkra/blockyard/internal/server"
-)
+    if srv.VaultClient == nil {
+        return
+    }
+    user := auth.UserFromContext(r.Context())
+    if user == nil || user.AccessToken == "" {
+        return
+    }
 
-// serviceNamePattern validates credential service names. Same rules as
-// app names: lowercase ASCII letters, digits, hyphens. 1-63 chars.
-var serviceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-
-// enrollCredential handles POST /api/v1/users/me/credentials/{service}.
-// Writes a secret to OpenBao on behalf of the authenticated user.
-func enrollCredential(srv *server.Server) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        // 1. Require OpenBao
-        if srv.OpenBaoClient == nil {
-            writeError(w, http.StatusServiceUnavailable, "openbao_not_configured",
-                "Credential management requires OpenBao to be configured")
+    token, ok := srv.VaultTokenCache.Get(user.Sub)
+    if !ok {
+        var ttl time.Duration
+        var err error
+        token, ttl, err = srv.VaultClient.JWTLogin(
+            r.Context(),
+            srv.Config.Openbao.JWTAuthPath,
+            user.AccessToken,
+        )
+        if err != nil {
+            slog.Warn("vault JWT login failed", "sub", user.Sub, "error", err)
             return
         }
+        if ttl == 0 {
+            ttl = srv.Config.Openbao.TokenTTL.Duration
+        }
+        srv.VaultTokenCache.Set(user.Sub, token, ttl)
+    }
+    r.Header.Set("X-Blockyard-Vault-Token", token)
+}
+```
 
-        // 2. Extract caller identity
+The same headers are forwarded on WebSocket upgrade (already handled by
+`ws.go`'s header copying pattern — extend to include
+`X-Blockyard-Vault-Token`).
+
+## API: credential enrollment
+
+### Route
+
+```
+POST /api/v1/users/me/credentials/{service}
+```
+
+Mounted outside the standard `APIAuth` middleware group. Instead, uses
+a dual-auth middleware that accepts either:
+- Session cookie (app-plane) — extracts `sub` from `AuthenticatedUser`
+- Bearer JWT (control-plane) — extracts `sub` from `CallerIdentity`
+
+### Dual-auth middleware
+
+A new `UserAuth` middleware that tries session cookie first, then JWT
+bearer. Produces a `CallerIdentity` in context either way. Mounted on
+the `/api/v1/users/me` sub-router.
+
+```go
+r.Route("/api/v1/users/me", func(r chi.Router) {
+    r.Use(UserAuth(srv))
+    r.Post("/credentials/{service}", EnrollCredential(srv))
+})
+```
+
+### Handler
+
+```go
+func EnrollCredential(srv *server.Server) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
         caller := auth.CallerFromContext(r.Context())
         if caller == nil {
-            writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+            writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
             return
         }
 
-        // 3. Validate service name
+        if srv.VaultClient == nil {
+            serviceUnavailable(w, "credential storage not configured")
+            return
+        }
+
         service := chi.URLParam(r, "service")
-        if !serviceNamePattern.MatchString(service) {
-            writeError(w, http.StatusBadRequest, "invalid_service_name",
-                "Service name must be 1-63 lowercase ASCII letters, digits, or hyphens")
-            return
-        }
+        // Validate service name (alphanumeric + hyphens + underscores, max 64 chars)
 
-        // 4. Parse request body
-        var body map[string]any
-        if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-            writeError(w, http.StatusBadRequest, "invalid_body", "Request body must be valid JSON")
-            return
+        var body struct {
+            APIKey string `json:"api_key"`
         }
-        if len(body) == 0 {
-            writeError(w, http.StatusBadRequest, "empty_body", "Request body must not be empty")
-            return
-        }
+        // Decode and validate body
 
-        // 5. Write to OpenBao
-        path := fmt.Sprintf("users/%s/apikeys/%s", caller.Sub, service)
-        if err := srv.OpenBaoClient.WriteSecret(r.Context(), path, body); err != nil {
-            writeError(w, http.StatusBadGateway, "openbao_write_failed",
-                "Failed to write credential to OpenBao")
+        err := integration.EnrollCredential(
+            r.Context(), srv.VaultClient,
+            caller.Sub, service,
+            map[string]any{"api_key": body.APIKey},
+        )
+        if err != nil {
+            slog.Error("credential enrollment failed", "sub", caller.Sub, "service", service, "error", err)
+            serverError(w, "failed to store credential")
             return
         }
 
@@ -1056,142 +373,106 @@ func enrollCredential(srv *server.Server) http.HandlerFunc {
 }
 ```
 
-**Router addition:**
+## WebSocket credential forwarding
+
+The `X-Blockyard-Vault-Token` header is injected on the HTTP request
+before the WebSocket upgrade check. The existing `ws.go` pattern copies
+named headers from the incoming request to the backend dial. Extend it
+to also forward `X-Blockyard-Vault-Token`:
 
 ```go
-r.Route("/api/v1", func(r chi.Router) {
-    r.Use(authMiddleware(srv))
-
-    // ... existing app/bundle/task routes ...
-
-    // Credential enrollment (requires authenticated user)
-    r.Post("/users/me/credentials/{service}", enrollCredential(srv))
-})
-```
-
-**Tests:**
-
-- Enroll credential with valid body — 204, secret written
-- Enroll without authentication — 401
-- Enroll with invalid service name — 400
-- Enroll with empty body — 400
-- Enroll when OpenBao not configured — 503
-- Enroll when OpenBao write fails — 502
-- Integration test: enroll credential, then verify the user's scoped
-  token can read it
-
-### Step 9: Services network in Docker backend
-
-Extend `DockerBackend.Spawn` to connect worker containers to the
-configured services network. This gives workers a network path to OpenBao
-and other external services.
-
-**Change in `internal/backend/docker/docker.go`**, in `Spawn`, between
-container creation (step 4) and server network join (step 5):
-
-```go
-// 4b. Connect to services network (if configured)
-if d.config.ServicesNetwork != "" {
-    if err := d.joinNetwork(ctx, containerID, d.config.ServicesNetwork); err != nil {
-        _ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
-        d.unblockMetadataForWorker(spec.WorkerID)
-        _ = d.client.NetworkRemove(ctx, networkID)
-        return fmt.Errorf("spawn: join services network %q: %w",
-            d.config.ServicesNetwork, err)
-    }
+if v := r.Header.Get("X-Blockyard-Vault-Token"); v != "" {
+    dialHeaders.Set("X-Blockyard-Vault-Token", v)
 }
 ```
 
-**Change in `Build`:** connect build containers to the services network
-too. Build containers currently use the default bridge. When
-`services_network` is set, the build container is connected after
-creation:
+R/Shiny reads the token at session init via `session$request`. The
+token is available when the WebSocket session starts. Mid-session token
+refresh is not needed — the token TTL (default 1h) exceeds typical
+Shiny session durations, and if needed, the R code can call OpenBao's
+renewal API directly.
 
-```go
-// Connect build container to services network (if configured)
-if d.config.ServicesNetwork != "" {
-    if err := d.joinNetwork(ctx, containerID, d.config.ServicesNetwork); err != nil {
-        _ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
-        return backend.BuildResult{}, fmt.Errorf("build: join services network: %w", err)
-    }
-}
+## Testing strategy
+
+### Unit tests (no build tag — run in CI `check` job)
+
+- **`internal/integration/` unit tests** — `httptest.Server` that mimics
+  OpenBao's API responses:
+  - `TestJWTLogin` — success, invalid JWT, OpenBao error
+  - `TestKVWrite` / `TestKVRead` — success, not found, permission denied
+  - `TestHealth` — healthy, sealed, unreachable
+  - `TestBootstrap` — all checks pass, each check failing individually
+  - `TestVaultTokenCache` — hit, miss, expiry, near-expiry renewal buffer
+  - `TestEnrollCredential` — success, OpenBao error
+
+- **Proxy credential injection tests** — extend existing proxy
+  integration tests to verify header injection when a mock OpenBao is
+  wired up
+
+- **API credential enrollment tests** — test dual auth, service name
+  validation, body validation
+
+### Integration tests (`//go:build openbao_test`)
+
+Run against a real OpenBao dev server container. CI job pulls
+`ghcr.io/openbao/openbao:latest`, starts in dev mode.
+
+- `TestMain` — starts OpenBao container, configures JWT auth method
+  with the test IdP's JWKS URI, creates `blockyard-user` role and
+  policy, mounts KV v2 at `secret/`
+- `TestBootstrapReal` — verify bootstrap passes against configured
+  instance
+- `TestJWTLoginReal` — issue a JWT via MockIdP, exchange for OpenBao
+  token
+- `TestEnrollAndReadCredential` — write credential via admin token,
+  read via user-scoped token
+- `TestTokenScopingReal` — verify user-scoped tokens can only read
+  their own secrets
+
+## CI additions
+
+New job in `.github/workflows/ci.yml`:
+
+```yaml
+openbao:
+  runs-on: ubuntu-latest
+  needs: [check]
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+    - run: docker pull ghcr.io/openbao/openbao:latest
+    - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./... ./internal/integration/...
+    - uses: actions/upload-artifact@v4
+      with:
+        name: coverage-openbao
+        path: coverage-openbao.out
 ```
 
-**Stop cleanup:** no change needed. The services network is shared — we
-don't remove it. We only disconnect the worker from its per-worker network
-(which we do remove). Docker automatically disconnects a container from
-all networks when the container is removed.
+Update coverage job to include `coverage-openbao.out`.
 
-**Startup validation:** verify the services network exists at
-`DockerBackend` initialization time, not at each spawn:
+## File inventory
 
-```go
-func New(ctx context.Context, cfg *config.DockerConfig) (*DockerBackend, error) {
-    // ... existing: create client, ping, detect server ID ...
+New files:
+- `internal/integration/openbao.go` — Client, JWTLogin, KVWrite, KVRead, Health
+- `internal/integration/bootstrap.go` — Bootstrap verification
+- `internal/integration/tokencache.go` — VaultTokenCache
+- `internal/integration/enrollment.go` — EnrollCredential
+- `internal/integration/openbao_test.go` — unit tests (httptest mock)
+- `internal/integration/tokencache_test.go` — cache unit tests
+- `internal/integration/openbao_integration_test.go` — real OpenBao tests (`//go:build openbao_test`)
 
-    if cfg.ServicesNetwork != "" {
-        _, err := cli.NetworkInspect(ctx, cfg.ServicesNetwork, network.InspectOptions{})
-        if err != nil {
-            return nil, fmt.Errorf("services_network %q not found: %w",
-                cfg.ServicesNetwork, err)
-        }
-        slog.Info("services network verified", "network", cfg.ServicesNetwork)
-    }
-
-    return &DockerBackend{ /* ... */ }, nil
-}
-```
-
-This fails fast at startup if the operator configured a network that
-doesn't exist, rather than failing on the first spawn.
-
-**Tests:**
-
-- Spawn with `services_network` set — container is connected to both
-  per-worker and services networks
-- Spawn with `services_network` empty — container is only on per-worker
-  network (v0 behavior)
-- Build with `services_network` set — build container is connected
-- Startup with nonexistent `services_network` — returns error
-- Docker integration test: spawn worker with services network, verify
-  worker can reach a service on that network
-
-### Step 10: Update proxy handler to pass `srv`
-
-The proxy handler currently does not have access to the `Server` struct
-at the point where `forwardHTTP` is called. The Director closure needs
-`srv` for credential injection.
-
-**Change in `proxy.go`:** pass `srv` to `forwardHTTP` and `shuttleWS`:
-
-```go
-func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName string, transport http.RoundTripper, srv *server.Server) {
-    // ... existing setup ...
-
-    proxy.Director = func(req *http.Request) {
-        originalDirector(req)
-        req.URL.Path = stripAppPrefix(req.URL.Path, appName)
-        req.URL.RawPath = ""
-        req.Host = addr
-        req.Header.Set("X-Forwarded-Proto", "http")
-
-        // v1: identity + credential headers
-        stripSpoofedHeaders(req)
-        user := auth.AuthenticatedUserFromContext(req.Context())
-        injectIdentityHeaders(req, user)
-        injectCredentialHeaders(req.Context(), req, srv)
-    }
-
-    proxy.ServeHTTP(w, r)
-}
-```
-
-This is a minimal change — `srv` was already available in the `Handler`
-closure and just needs to be threaded through to `forwardHTTP` and
-`shuttleWS`.
-
-**Tests:**
-
-- Existing proxy tests still pass (no behavioral change when OpenBao not
-  configured)
-- New test: proxy with OpenBao configured injects credential headers
+Modified files:
+- `internal/config/config.go` — add OpenbaoConfig, validation, defaults, env auto-construction
+- `internal/backend/backend.go` — add Env field to WorkerSpec
+- `internal/backend/docker/docker.go` — append WorkerSpec.Env to container env
+- `internal/server/state.go` — add VaultClient + VaultTokenCache fields
+- `internal/proxy/proxy.go` — credential injection (step 4b)
+- `internal/proxy/ws.go` — forward X-Blockyard-Vault-Token on dial
+- `internal/api/router.go` — add /users/me route group with dual auth
+- `internal/api/auth.go` — add UserAuth dual-auth middleware
+- `internal/api/users.go` — EnrollCredential handler (new file)
+- `cmd/blockyard/main.go` — OpenBao client init + bootstrap
+- `.github/workflows/ci.yml` — add openbao job
+- `internal/backend/mock/mock.go` — handle Env field (if needed)

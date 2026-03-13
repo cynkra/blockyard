@@ -219,7 +219,7 @@ plane protected by a single static bearer token in config.
   ```
   /api/v1/...      → control plane REST API
   /app/{name}/     → proxied Shiny app (name-based, v0)
-  /{vanity}/       → vanity URL alias resolving to an app (v1)
+  /app/{uuid}/     → proxied Shiny app (UUID-based, stable across renames, v1)
   ```
 
   Apps are routed by name. The proxy redirects `/app/{name}` (no trailing
@@ -424,10 +424,12 @@ infrastructure.
 ---
 
 - **Multi-worker and session sharing.** Enforce `max_workers_per_app` and
-  `max_sessions_per_worker` when `> 1`. In v1, OpenBao tokens are injected per
-  worker at spawn time; with `max_sessions_per_worker = 1` each container gets
-  its own scoped token, automatically invalidated when the container is
-  destroyed.
+  `max_sessions_per_worker` when `> 1`. OpenBao credentials are injected
+  per-request via HTTP headers — not per-worker at spawn time. With
+  `max_sessions_per_worker = 1`, the proxy injects the raw vault token
+  directly. With `max_sessions_per_worker > 1`, the proxy injects a
+  signed session reference token that the app exchanges for the real
+  credential via a server callback (see Integration system).
 
 - **Load balancing.** Distribute incoming sessions across multiple workers when
   `max_workers_per_app > 1`. Shiny requires cookie-hash sticky sessions —
@@ -508,23 +510,44 @@ infrastructure.
   valid IdP JWT can be exchanged for a scoped OpenBao token. Per-user policies
   restrict each token to `read` on `secret/users/{sub}/*` only.
 
-  **Session flow:**
+  **Session flow (single-tenant, `max_sessions_per_worker = 1`):**
   1. User authenticates via IdP → server receives their OIDC JWT
   2. On each proxied request, the **server** (not the R process) presents the
      user's access token to OpenBao's `/auth/jwt/login` endpoint (with
      in-memory caching keyed by `sub` to avoid per-request calls)
   3. OpenBao validates the JWT, maps the `sub` claim to a policy, and returns
      a short-lived token scoped to `secret/users/{sub}/*`
-  4. The scoped OpenBao token and OpenBao address are injected as HTTP headers
-     (`X-Blockyard-Vault-Token`, `X-Blockyard-Vault-Addr`) on the proxied
-     request — not as container env vars. This supports
-     `max_sessions_per_worker > 1`: each user's request carries their own
-     scoped token, even on shared workers.
+  4. The scoped OpenBao token is injected as the `X-Blockyard-Vault-Token`
+     HTTP header on the proxied request. The OpenBao address is injected once
+     at container startup as the `VAULT_ADDR` environment variable (recognized
+     natively by Vault/OpenBao client libraries).
   5. The R process reads the token via `session$request` and calls OpenBao
      directly to read its credentials — it never touches the server's DB or
      decryption keys
   6. The server's OpenBao admin credentials (used for enrollment writes) never
      enter the process space
+
+  **Session flow (shared containers, `max_sessions_per_worker > 1`):**
+
+  Raw vault tokens in HTTP headers are not safe for shared containers —
+  they could leak between co-tenant sessions if the app logs request
+  headers or stores them in a shared variable. Instead, the proxy uses a
+  two-phase exchange pattern (the same approach Posit Connect uses for
+  OAuth Integrations):
+
+  1. On each proxied request, the server injects
+     `X-Blockyard-Session-Token` — a signed, short-lived token containing
+     the user's `sub`, the app ID, and the worker ID.
+  2. The R app exchanges the session token for a real vault credential
+     by calling `POST /api/v1/credentials/vault` with the session token
+     as a Bearer credential.
+  3. The server validates the token (signature, expiry, worker existence),
+     exchanges the user's identity for a scoped OpenBao token, and returns
+     it to the app.
+
+  The actual vault secret never crosses the proxy layer. The server also
+  injects `BLOCKYARD_API_URL` as a container environment variable so the
+  R process knows where to call the exchange endpoint.
 
   **Enrollment progression:**
   - **v1a (stopgap):** users write credentials directly via the OpenBao web UI
@@ -538,22 +561,23 @@ infrastructure.
   The server authenticates to OpenBao with a static admin token supplied via
   env var (`BLOCKYARD_OPENBAO_ADMIN_TOKEN`). AppRole auth is deferred.
 
-  **R interface:** no companion R package. App developers query OpenBao
-  directly using `httr2` (or similar). The server injects two HTTP headers
-  on every proxied request:
-  - `X-Blockyard-Vault-Token` — the scoped OpenBao token for this user
-  - `X-Blockyard-Vault-Addr` — the OpenBao address reachable from inside
-    the container
+  **R interface:** no companion R package. A documented helper function
+  transparently handles both deployment modes:
+  - **Single-tenant** (`max_sessions_per_worker = 1`): reads the raw
+    `X-Blockyard-Vault-Token` header directly.
+  - **Shared containers** (`max_sessions_per_worker > 1`): reads
+    `X-Blockyard-Session-Token`, exchanges it for a vault token via
+    `POST /api/v1/credentials/vault`, and returns the token.
 
-  The R app reads these via `session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN`
-  and `session$request$HTTP_X_BLOCKYARD_VAULT_ADDR` — the standard Shiny
-  mechanism for proxy-injected headers.
+  The OpenBao address is available as the `VAULT_ADDR` environment
+  variable (injected at container startup). App developers use the helper
+  function and `httr2` to query OpenBao for their credentials.
 
-- **Vanity URLs.** Allow publishers to assign a custom URL path (e.g.
-  `/sales-dashboard`) to a content item, in addition to its base `/app/{name}/`
-  URL. The router resolves vanity paths before falling back to name-based
-  routing. Requires collision detection and a reserved-prefix blocklist
-  (e.g. `/api`, `/app`, `/login`).
+- **Stable UUID URLs.** The proxy resolves `/app/{uuid}/` in addition to
+  `/app/{name}/`, giving every app a stable URL that survives renames.
+  Vanity URLs (top-level path aliases like `/sales-dashboard/`) were
+  considered and dropped — app names are already human-readable, and the
+  routing complexity wasn't justified for v1.
 
 - **Content discovery.** A content catalog endpoint in the REST API listing all
   accessible items with metadata (title, type, owner, status, URL), a

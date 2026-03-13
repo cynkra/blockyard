@@ -8,26 +8,36 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/cynkra/blockyard/internal/audit"
+	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/task"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // AppResponse wraps an AppRow with a derived runtime status.
 type AppResponse struct {
 	ID                   string   `json:"id"`
 	Name                 string   `json:"name"`
+	Owner                string   `json:"owner"`
+	AccessType           string   `json:"access_type"`
 	ActiveBundle         *string  `json:"active_bundle"`
 	MaxWorkersPerApp     *int     `json:"max_workers_per_app"`
 	MaxSessionsPerWorker int      `json:"max_sessions_per_worker"`
 	MemoryLimit          *string  `json:"memory_limit"`
 	CPULimit             *float64 `json:"cpu_limit"`
+	Title                *string  `json:"title"`
+	Description          *string  `json:"description"`
 	CreatedAt            string   `json:"created_at"`
 	UpdatedAt            string   `json:"updated_at"`
 	Status               string   `json:"status"`
@@ -46,11 +56,15 @@ func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
 	return AppResponse{
 		ID:                   app.ID,
 		Name:                 app.Name,
+		Owner:                app.Owner,
+		AccessType:           app.AccessType,
 		ActiveBundle:         app.ActiveBundle,
 		MaxWorkersPerApp:     app.MaxWorkersPerApp,
 		MaxSessionsPerWorker: app.MaxSessionsPerWorker,
 		MemoryLimit:          app.MemoryLimit,
 		CPULimit:             app.CPULimit,
+		Title:                app.Title,
+		Description:          app.Description,
 		CreatedAt:            app.CreatedAt,
 		UpdatedAt:            app.UpdatedAt,
 		Status:               status,
@@ -68,6 +82,62 @@ func resolveApp(database *db.DB, id string) (*db.AppRow, error) {
 		return app, nil
 	}
 	return database.GetAppByName(id)
+}
+
+// resolveAppRelation loads an app + ACL grants, evaluates the caller's
+// relationship. Returns the app and relation, or writes an error response
+// and returns false.
+//
+// Returns 404 both when the app doesn't exist and when the caller has no
+// access — this prevents leaking app existence to unauthorized users.
+func resolveAppRelation(
+	srv *server.Server,
+	w http.ResponseWriter,
+	caller *auth.CallerIdentity,
+	appID string,
+) (*db.AppRow, authz.AppRelation, bool) {
+	app, err := resolveApp(srv.DB, appID)
+	if err != nil {
+		serverError(w, "db error: "+err.Error())
+		return nil, authz.RelationNone, false
+	}
+	if app == nil {
+		notFound(w, "app not found")
+		return nil, authz.RelationNone, false
+	}
+
+	rows, err := srv.DB.ListAppAccess(app.ID)
+	if err != nil {
+		serverError(w, "db error: "+err.Error())
+		return nil, authz.RelationNone, false
+	}
+
+	grants := make([]authz.AccessGrant, len(rows))
+	for i, row := range rows {
+		grants[i] = accessRowToGrant(row)
+	}
+
+	relation := authz.EvaluateAccess(caller, app.Owner, grants, app.AccessType)
+
+	if relation == authz.RelationNone {
+		notFound(w, "app not found")
+		return nil, authz.RelationNone, false
+	}
+
+	return app, relation, true
+}
+
+// accessRowToGrant converts a db.AppAccessRow to an authz.AccessGrant.
+func accessRowToGrant(row db.AppAccessRow) authz.AccessGrant {
+	role, _ := authz.ParseContentRole(row.Role)
+	return authz.AccessGrant{
+		AppID:     row.AppID,
+		Principal: row.Principal,
+		Kind:      authz.AccessKind(row.Kind),
+		Role:      role,
+		GrantedBy: row.GrantedBy,
+		GrantedAt: row.GrantedAt,
+	}
 }
 
 // validateAppName checks that name is a valid URL-safe slug.
@@ -95,6 +165,12 @@ type createAppRequest struct {
 
 func CreateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanCreateApp() {
+			forbidden(w, "insufficient permissions")
+			return
+		}
+
 		var body createAppRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			badRequest(w, "invalid JSON body")
@@ -116,10 +192,15 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		app, err := srv.DB.CreateApp(body.Name)
+		app, err := srv.DB.CreateApp(body.Name, caller.Sub)
 		if err != nil {
 			serverError(w, "create app: "+err.Error())
 			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppCreate, app.ID,
+				map[string]any{"name": app.Name}))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -130,7 +211,16 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 
 func ListApps(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		apps, err := srv.DB.ListApps()
+		caller := auth.CallerFromContext(r.Context())
+
+		var apps []db.AppRow
+		var err error
+
+		if caller.Role.CanViewAllApps() {
+			apps, err = srv.DB.ListApps()
+		} else {
+			apps, err = srv.DB.ListAccessibleApps(caller.Sub, caller.Groups)
+		}
 		if err != nil {
 			serverError(w, "db error: "+err.Error())
 			return
@@ -148,15 +238,11 @@ func ListApps(srv *server.Server) http.HandlerFunc {
 
 func GetApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
-			return
-		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+		app, _, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
 
@@ -170,10 +256,14 @@ type updateAppRequest struct {
 	MaxSessionsPerWorker *int     `json:"max_sessions_per_worker"`
 	MemoryLimit          *string  `json:"memory_limit"`
 	CPULimit             *float64 `json:"cpu_limit"`
+	AccessType           *string  `json:"access_type"`
+	Title                *string  `json:"title"`
+	Description          *string  `json:"description"`
 }
 
 func UpdateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
 		var body updateAppRequest
@@ -182,20 +272,35 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// v0: max_sessions_per_worker is locked to 1
-		if body.MaxSessionsPerWorker != nil && *body.MaxSessionsPerWorker != 1 {
-			badRequest(w, "max_sessions_per_worker must be 1 in this version")
+		if body.MaxSessionsPerWorker != nil && *body.MaxSessionsPerWorker < 1 {
+			badRequest(w, "max_sessions_per_worker must be >= 1")
+			return
+		}
+		if body.MaxWorkersPerApp != nil && *body.MaxWorkersPerApp < 1 {
+			badRequest(w, "max_workers_per_app must be >= 1")
 			return
 		}
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+
+		if !relation.CanUpdateConfig() {
+			notFound(w, "app not found")
 			return
+		}
+
+		// Changing access_type requires ACL management permission (owner or admin).
+		if body.AccessType != nil {
+			if !relation.CanManageACL() {
+				notFound(w, "app not found")
+				return
+			}
+			if *body.AccessType != "acl" && *body.AccessType != "public" {
+				badRequest(w, "access_type must be 'acl' or 'public'")
+				return
+			}
 		}
 
 		update := db.AppUpdate{
@@ -203,11 +308,18 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			MaxSessionsPerWorker: body.MaxSessionsPerWorker,
 			MemoryLimit:          body.MemoryLimit,
 			CPULimit:             body.CPULimit,
+			AccessType:           body.AccessType,
+			Title:                body.Title,
+			Description:          body.Description,
 		}
-		app, err = srv.DB.UpdateApp(app.ID, update)
+		app, err := srv.DB.UpdateApp(app.ID, update)
 		if err != nil {
 			serverError(w, "update app: "+err.Error())
 			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppUpdate, app.ID, nil))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -217,20 +329,21 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 
 func DeleteApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
-			return
-		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
 
-		// 1. Stop all workers for this app
-		stopAppWorkers(srv, app.ID)
+		if !relation.CanDelete() {
+			notFound(w, "app not found")
+			return
+		}
+
+		// 1. Stop all workers for this app (synchronous for delete).
+		stopAppSync(srv, app.ID)
 
 		// 2. Delete bundle files from disk
 		bundles, err := srv.DB.ListBundlesByApp(app.ID)
@@ -267,6 +380,11 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 		appDir := filepath.Join(srv.Config.Storage.BundleServerPath, app.ID)
 		os.RemoveAll(appDir)
 
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppDelete, app.ID,
+				map[string]any{"name": app.Name}))
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -280,15 +398,16 @@ type startResponse struct {
 
 func StartApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+
+		if !relation.CanStartStop() {
+			notFound(w, "app not found")
 			return
 		}
 
@@ -359,6 +478,12 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		ops.SpawnLogCapture(context.Background(), srv, workerID, app.ID)
+		telemetry.WorkersSpawned.Inc()
+		telemetry.WorkersActive.Inc()
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppStart, app.ID, nil))
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(startResponse{
@@ -370,50 +495,111 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 
 func StopApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
-			return
-		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
 
-		stopped := stopAppWorkers(srv, app.ID)
+		if !relation.CanStartStop() {
+			notFound(w, "app not found")
+			return
+		}
+
+		// Mark draining so no new sessions are routed.
+		workerIDs := srv.Workers.MarkDraining(app.ID)
+		if len(workerIDs) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"stopped_workers": 0,
+			})
+			return
+		}
+
+		// Create task for drain tracking.
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID)
+		sender.Write(fmt.Sprintf("draining %d workers", len(workerIDs)))
+
+		// Drain in background — caller polls GET /tasks/{taskID}/logs.
+		go drainWorkers(srv, app.ID, workerIDs, sender)
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppStop, app.ID,
+				map[string]any{"worker_count": len(workerIDs)}))
+		}
 
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":          "stopped",
-			"workers_stopped": stopped,
+			"task_id":      taskID,
+			"worker_count": len(workerIDs),
 		})
 	}
 }
 
-// stopAppWorkers stops all workers belonging to the given app. Returns
-// the count of workers stopped.
-func stopAppWorkers(srv *server.Server, appID string) int {
-	workerIDs := srv.Workers.ForApp(appID)
+// drainWorkers waits for sessions to end, then evicts workers.
+// Writes progress to the task sender so operators can stream it
+// via GET /tasks/{taskID}/logs.
+func drainWorkers(srv *server.Server, appID string, workerIDs []string, sender task.Sender) {
+	defer sender.Complete(task.Completed)
+
+	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
+
+	for {
+		remaining := srv.Sessions.CountForWorkers(workerIDs)
+		if remaining == 0 {
+			sender.Write("all sessions ended")
+			break
+		}
+		if time.Now().After(deadline) {
+			sender.Write(fmt.Sprintf("drain timeout reached, %d sessions remaining — forcing stop", remaining))
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	for _, wid := range workerIDs {
+		ops.EvictWorker(context.Background(), srv, wid)
+		sender.Write(fmt.Sprintf("stopped worker %s", wid))
+	}
+	sender.Write(fmt.Sprintf("stopped %d workers", len(workerIDs)))
+}
+
+// stopAppSync stops all workers for an app synchronously.
+// Used by DeleteApp where we must wait for workers to stop before
+// deleting the app row. Not suitable for the stop endpoint (use
+// the async drainWorkers path instead).
+func stopAppSync(srv *server.Server, appID string) {
+	workerIDs := srv.Workers.MarkDraining(appID)
+	if len(workerIDs) == 0 {
+		return
+	}
+
+	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
+	for {
+		remaining := srv.Sessions.CountForWorkers(workerIDs)
+		if remaining == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
 	for _, wid := range workerIDs {
 		ops.EvictWorker(context.Background(), srv, wid)
 	}
-	return len(workerIDs)
 }
 
 // AppLogs streams logs from the LogStore for a specific worker.
 func AppLogs(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, err := resolveApp(srv.DB, id)
-		if err != nil {
-			serverError(w, "db error: "+err.Error())
-			return
-		}
-		if app == nil {
-			notFound(w, "app "+id+" not found")
+		_, _, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
 			return
 		}
 

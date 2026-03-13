@@ -31,28 +31,24 @@ internal/
 ├── integration/
 │   ├── openbao.go           # OpenBao client, JWT auth setup, bootstrap
 │   └── enrollment.go        # credential enrollment logic
-├── vanity/
-│   ├── vanity.go            # vanity URL resolution + collision detection
-│   └── reserved.go          # reserved prefix blocklist
-├── catalog/
+├── catalog/                 # (inlined into api/ and db/ — no separate package)
 │   ├── catalog.go           # content listing, search, filtering
 │   └── tags.go              # tag CRUD, app-tag associations
-├── audit/
+├── audit/                   # (inlined into db/ — no separate package)
 │   └── audit.go             # append-only JSON Lines audit log writer
 ├── telemetry/
 │   └── telemetry.go         # Prometheus metrics + OpenTelemetry tracing setup
 ├── api/
 │   ├── ... (existing)
 │   ├── users.go             # /users/me, credential enrollment endpoints
-│   ├── catalog.go           # catalog + tag endpoints
-│   └── vanity.go            # vanity URL management endpoints
+│   └── catalog.go           # catalog + tag endpoints
 ├── proxy/
 │   ├── ... (existing)
 │   ├── identity.go          # X-Shiny-User / X-Shiny-Groups injection
 │   ├── loadbalancer.go      # least-loaded worker assignment
 │   └── autoscaler.go        # connection-based auto-scaling loop
 └── db/
-    └── ... (existing, extended with roles, ACLs, tags, vanity URLs)
+    └── ... (existing, extended with roles, ACLs, tags)
 ```
 
 ## New Dependencies
@@ -351,7 +347,7 @@ CREATE TABLE role_mappings (
 );
 ```
 
-### Phase 1-3: Identity Injection + OpenBao Integration
+### Phase 1-3: Identity Injection + OpenBao Integration ([detailed plan](phase-1-3.md))
 
 Deliver authenticated user identity and per-user credentials to Shiny apps
 at runtime.
@@ -597,69 +593,116 @@ func stopAppGraceful(ctx context.Context, srv *server.Server, appID string) {
 }
 ```
 
-### Phase 1-5: Vanity URLs + Content Discovery
+### Phase 1-5: Credential Exchange API + Stable URLs + Content Discovery
+
+This phase covers two independent work streams: a credential exchange API
+that makes vault tokens safe in shared containers, and user-facing
+features for navigating deployed content (catalog, tags, UUID-based stable
+URLs).
+
+#### Credential Exchange API (secure vault tokens in shared containers)
+
+Phase 1-4 introduced `max_sessions_per_worker > 1`, which means multiple
+users' requests are proxied to the same R process. The current
+implementation injects the user's OpenBao token directly as an
+`X-Blockyard-Vault-Token` HTTP header. This is safe when
+`max_sessions_per_worker = 1` (each container is single-tenant), but in
+shared containers the raw bearer token could leak between co-tenant
+sessions — e.g. if the app logs request headers or stores them in a
+shared variable.
+
+Posit Connect solves an analogous problem (per-user OAuth tokens in
+shared R processes) with a **two-phase exchange pattern**: the proxy
+injects a signed, short-lived, scoped *session reference token* (a JWT),
+and the app exchanges it for the real credential by calling back to the
+server's API. The actual secret never crosses the proxy layer.
+
+**Deliverables:**
+
+1. **Session reference token** — on each proxied request (including WS
+   handshake), the proxy injects `X-Blockyard-Session-Token`, a signed
+   JWT containing:
+   - `sub` — the authenticated user's subject
+   - `app` — the app ID
+   - `wid` — the worker ID (scopes the token to this process)
+   - `iat` / `exp` — short expiry (e.g. 5 minutes; refreshed on every
+     request)
+
+   Signed with the server's existing `SigningKey` (HMAC-SHA256). This
+   replaces the raw `X-Blockyard-Vault-Token` header for shared
+   containers.
+
+2. **Credential exchange endpoint** —
+   `POST /api/v1/credentials/vault` that:
+   - Accepts the session reference JWT as a bearer token
+   - Validates signature, expiry, and that the `wid` claim matches an
+     active worker
+   - Exchanges the user's identity for a scoped OpenBao token (reusing
+     the existing `VaultTokenCache` + `JWTLogin` flow)
+   - Returns `{ "token": "...", "ttl": 3600 }` to the app
+
+   Authenticated by the signed session token itself (validated via
+   signature, expiry, and `wid` claim matching an active worker). This
+   endpoint does NOT require the standard API bearer token. Source IP
+   validation was considered but rejected — Docker NAT makes source IPs
+   unreliable across bridge networks, and the signed, short-lived,
+   worker-scoped token is sufficient.
+
+3. **R helper** — a small R function (or lightweight package) that apps
+   use to obtain vault tokens:
+   ```r
+   # Read the session token from the proxy-injected header
+   blockyard_vault_token <- function(session) {
+     session_token <- session$request$HTTP_X_BLOCKYARD_SESSION_TOKEN
+     resp <- httr2::request(Sys.getenv("BLOCKYARD_API_URL")) |>
+       httr2::req_url_path("/api/v1/credentials/vault") |>
+       httr2::req_auth_bearer_token(session_token) |>
+       httr2::req_perform()
+     httr2::resp_body_json(resp)$token
+   }
+   ```
+   The `BLOCKYARD_API_URL` environment variable is injected into worker
+   containers at spawn time (alongside the existing `VAULT_ADDR`).
+
+4. **Fallback for `max_sessions_per_worker = 1`** — when the app runs in
+   single-tenant mode, the proxy MAY continue injecting
+   `X-Blockyard-Vault-Token` directly for backwards compatibility (zero
+   code changes in the app). The session reference approach is required
+   only when `max_sessions_per_worker > 1`.
+
+**Migration path:** existing apps using `X-Blockyard-Vault-Token`
+continue to work in single-tenant mode. Apps opting into shared
+containers must switch to the exchange pattern.
+
+#### Stable URLs + Content Discovery
 
 User-facing features for navigating and accessing deployed content.
 
 **Deliverables:**
 
-1. Vanity URL assignment — `PATCH /api/v1/apps/{id}` with `vanity_url` field
-2. Vanity URL routing — resolve `/{vanity}/` to the target app before
-   name-based routing
-3. Collision detection — reject vanity URLs that collide with reserved
-   prefixes or existing vanity URLs
-4. Catalog API — `GET /api/v1/catalog` listing accessible apps with metadata
-5. Tag system — admin-managed tags attached to apps
-6. Search/filter — query params on the catalog endpoint
+1. UUID-based app access — apps are accessible via both `/app/{name}/` and
+   `/app/{uuid}/` for stable URLs that survive renames. The proxy resolves
+   by UUID first, then by name.
+2. Catalog API — `GET /api/v1/catalog` listing accessible apps with metadata
+3. Tag system — admin-managed tags attached to apps
+4. Search/filter — query params on the catalog endpoint
 
-**Vanity URL routing:**
+**UUID resolution in proxy:**
 
 ```go
-// Router setup. Vanity routes are checked before /app/{name}/ routes.
-func NewRouter(srv *server.Server) *chi.Mux {
-    r := chi.NewRouter()
-
-    // API routes (existing)
-    r.Route("/api/v1", func(r chi.Router) { /* ... */ })
-
-    // Auth endpoints
-    r.Get("/login", loginHandler(srv))
-    r.Get("/callback", callbackHandler(srv))
-    r.Post("/logout", logoutHandler(srv))
-
-    // Vanity URL catch-all — checked before /app/{name}/
-    // Returns 404 if no vanity URL matches.
-    r.Get("/{vanity}", trailingSlashRedirectVanity)
-    r.HandleFunc("/{vanity}/", vanityProxyHandler(srv))
-    r.HandleFunc("/{vanity}/*", vanityProxyHandler(srv))
-
-    // Standard app routes
-    r.Get("/app/{name}", trailingSlashRedirect)
-    r.HandleFunc("/app/{name}/", proxyHandler(srv))
-    r.HandleFunc("/app/{name}/*", proxyHandler(srv))
-
-    return r
+// Proxy handler resolves app by UUID first, then by name.
+// This gives stable URLs that survive app renames.
+app, err := srv.DB.GetApp(appName)   // tries UUID lookup
+if err != nil { /* ... */ }
+if app == nil {
+    app, err = srv.DB.GetAppByName(appName)  // falls back to name
+    if err != nil { /* ... */ }
 }
 ```
-
-**Reserved prefix blocklist:**
-
-```go
-var reservedPrefixes = []string{
-    "api", "app", "login", "callback", "logout", "healthz", "readyz",
-    "metrics", "static", "assets", "admin",
-}
-```
-
-Vanity URLs are validated against this list and against existing vanity URLs
-on assignment. The vanity URL is stored in the `apps` table.
 
 **Schema additions:**
 
 ```sql
--- Add vanity URL to apps table
-ALTER TABLE apps ADD COLUMN vanity_url TEXT UNIQUE;
-
 -- Tags
 CREATE TABLE tags (
     id      TEXT PRIMARY KEY,
@@ -687,8 +730,8 @@ Authorization: Bearer <token>
       "id": "a3f2c1...",
       "name": "sales-dashboard",
       "title": "Sales Dashboard",
+      "description": "Quarterly sales metrics and KPIs",
       "owner": "user-sub",
-      "vanity_url": "/sales-dashboard",
       "tags": ["finance", "reporting"],
       "status": "running",
       "url": "/app/sales-dashboard/",
@@ -1022,14 +1065,14 @@ will be assigned final numbers at implementation time.
 v1 adds three migrations:
 
 ```sql
--- 002_add_owner_vanity_access_type.sql
+-- 002_add_owner_access_type.sql
 -- owner is NOT NULL — table rebuild required for SQLite compatibility.
 -- Since v0 migrations are consolidated pre-release, no existing rows
 -- need migration.
 ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL;
 ALTER TABLE apps ADD COLUMN access_type TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'public'));
-ALTER TABLE apps ADD COLUMN vanity_url TEXT UNIQUE;
 ALTER TABLE apps ADD COLUMN title TEXT;
+ALTER TABLE apps ADD COLUMN description TEXT;
 
 -- 003_access_control.sql
 CREATE TABLE app_access (
@@ -1092,10 +1135,12 @@ Phase 1-4: Session Sharing + Load Balancing + Auto-scaling
   ├── Graceful drain
   └── depends on: Phase 1-2 (RBAC for per-app worker limits)
 
-Phase 1-5: Vanity URLs + Content Discovery
-  ├── Vanity URL routing
+Phase 1-5: Credential Exchange API + Stable URLs + Content Discovery
+  ├── Credential exchange API (session JWT → vault token)
+  ├── UUID-based stable app URLs
   ├── Catalog API + tags
-  └── depends on: Phase 1-2 (RBAC for catalog visibility)
+  └── depends on: Phase 1-3 (OpenBao), Phase 1-4 (session sharing),
+      Phase 1-2 (RBAC for catalog visibility)
 
 Phase 1-6: Audit Logging + Telemetry + /readyz
   ├── Audit log writer
@@ -1105,9 +1150,9 @@ Phase 1-6: Audit Logging + Telemetry + /readyz
   └── depends on: Phase 1-3 (OpenBao health check)
 ```
 
-Phases 1-5 and 1-6 are independent of each other and can be developed in
-parallel. Phase 1-4 is independent of 1-5 and 1-6. The critical path is
-1-1 → 1-2 → 1-3 → 1-4.
+Phase 1-6 is independent of 1-5 and can be developed in parallel. The
+critical path is 1-1 → 1-2 → 1-3 → 1-4. Phase 1-5's credential
+exchange work depends on 1-3 + 1-4; its catalog work depends on 1-2.
 
 ## Test Strategy
 
@@ -1122,8 +1167,6 @@ parallel. Phase 1-4 is independent of 1-5 and 1-6. The critical path is
   role, ACL evaluation with user grants, group grants, owner override.
 - **Load balancer tests:** least-loaded assignment, capacity exhaustion
   (503), scale-up trigger, scale-down with idle workers.
-- **Vanity URL tests:** collision detection against reserved prefixes,
-  duplicate rejection, resolution to correct app.
 - **Audit log tests:** entry serialization, write ordering.
 
 ### Integration tests
@@ -1141,8 +1184,8 @@ server):
   sessions, verify 2 workers spawned, sessions distributed correctly.
 - **Auto-scaling tests:** saturate workers, verify scale-up; disconnect
   sessions, verify scale-down.
-- **Vanity URL tests:** assign vanity URL, request via vanity path, verify
-  proxied to correct app.
+- **UUID resolution tests:** access app via UUID path, verify proxied to
+  correct app; rename app, verify UUID path still works.
 - **Catalog tests:** create apps with tags, query catalog with filters,
   verify RBAC-filtered results.
 
@@ -1219,18 +1262,26 @@ Extended with:
    any order in Docker Compose. Credential-dependent features are
    unavailable until OpenBao is healthy.
 
-7. **Vanity URLs are a column on the apps table, not a separate routing
-   table.** Each app can have at most one vanity URL. This is simpler than
-   a many-to-many routing table and sufficient for v1. If multiple aliases
-   per app are needed later, extract to a separate table.
+7. **Stable app URLs via UUID resolution, not vanity URLs.** Apps are
+   accessible via both `/app/{name}/` (human-readable) and `/app/{uuid}/`
+   (stable across renames). The proxy resolves by UUID first, then by name.
+   Vanity URLs were considered but dropped — app names are already
+   human-readable, so the marginal benefit of custom vanity slugs did not
+   justify the routing complexity (catch-all routes, reserved prefix
+   blocklist, collision detection).
 
-8. **Per-request credential injection, not per-container env vars.** OpenBao
-   tokens are injected as HTTP headers (`X-Blockyard-Vault-Token`) on each
-   proxied request, not as env vars at container spawn time. This supports
-   `max_sessions_per_worker > 1` safely — each user's session gets their
-   own scoped token. The R app reads the token via `session$request`, the
-   standard Shiny mechanism for proxy-injected headers. This matches how
-   Posit Connect handles OAuth Integrations.
+8. **Two-tier credential injection.** When `max_sessions_per_worker = 1`,
+   the proxy injects the user's OpenBao token directly as
+   `X-Blockyard-Vault-Token` — simple and sufficient for single-tenant
+   containers. When `max_sessions_per_worker > 1`, raw bearer tokens
+   must not cross the proxy layer (they could leak between sessions in a
+   shared R process). Instead, the proxy injects a signed session
+   reference JWT (`X-Blockyard-Session-Token`), and the app exchanges it
+   for the real vault token via `POST /api/v1/credentials/vault`. This
+   matches the pattern Posit Connect uses for OAuth Integrations: Connect
+   injects a `Posit-Connect-User-Session-Token` JWT and the app calls
+   back to exchange it for an OAuth access token. See Phase 1-5 for
+   the full design.
 
 9. **Metadata endpoint protection unchanged from v0.** v0's per-network
    iptables rules (or host-level rule fallback) blocking `169.254.169.254`
