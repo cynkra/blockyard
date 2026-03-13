@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -57,7 +58,7 @@ func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 				}
 			} else {
 				// Static token fallback
-				if token != srv.Config.Server.Token.Expose() {
+				if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) != 1 {
 					writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 					return
 				}

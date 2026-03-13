@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"strings"
 )
 
 const cookieName = "blockyard_session"
@@ -19,9 +20,9 @@ func extractSessionID(r *http.Request) string {
 // sessionCookie builds a Set-Cookie header value for the given session
 // ID and app name. Path is scoped to /app/{name}/ so the cookie is not
 // sent to other apps or the API.
-// The Secure flag is set when the request arrived over HTTPS.
-func sessionCookie(sessionID, appName string, r *http.Request) *http.Cookie {
-	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+// The Secure flag is derived from externalURL (same as auth cookies).
+func sessionCookie(sessionID, appName, externalURL string) *http.Cookie {
+	secure := strings.HasPrefix(externalURL, "https://")
 	return &http.Cookie{
 		Name:     cookieName,
 		Value:    sessionID,

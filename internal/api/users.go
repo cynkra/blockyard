@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -122,7 +123,7 @@ func authenticateFromBearer(srv *server.Server, token string) *auth.CallerIdenti
 	}
 
 	// Static token fallback.
-	if token == srv.Config.Server.Token.Expose() {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1 {
 		return &auth.CallerIdentity{
 			Sub:    "admin",
 			Groups: nil,
