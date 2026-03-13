@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
@@ -207,5 +209,180 @@ func TestAutoscaleKeepsLastWorker(t *testing.T) {
 	workerIDs := srv.Workers.ForApp(app.ID)
 	if len(workerIDs) != 1 {
 		t.Errorf("expected 1 worker (keep last), got %d", len(workerIDs))
+	}
+}
+
+func TestRunAutoscalerStopsOnContextCancel(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	srv.Config.Proxy.HealthInterval = config.Duration{Duration: 50 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		RunAutoscaler(ctx, srv)
+		close(done)
+	}()
+
+	// Let the autoscaler run for a few ticks.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// RunAutoscaler returned — success.
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunAutoscaler did not return after context cancel")
+	}
+}
+
+func TestAutoscaleEvictsUnhealthy(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	// Spawn 2 workers while backend reports healthy.
+	wid1, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wid2, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 2 {
+		t.Fatalf("expected 2 workers, got %d", len(workerIDs))
+	}
+
+	// Mark backend as unhealthy — both workers should be evicted.
+	be := srv.Backend.(*mock.MockBackend)
+	be.HealthOK.Store(false)
+
+	autoscaleTick(context.Background(), srv)
+
+	if _, ok := srv.Workers.Get(wid1); ok {
+		t.Error("expected worker 1 to be evicted")
+	}
+	if _, ok := srv.Workers.Get(wid2); ok {
+		t.Error("expected worker 2 to be evicted")
+	}
+}
+
+func TestAutoscaleSessionSweep(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	// Set a very short session idle TTL.
+	srv.Config.Proxy.SessionIdleTTL = config.Duration{Duration: 50 * time.Millisecond}
+
+	// Spawn a worker and create a session with an old LastAccess.
+	wid, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Sessions.Set("old-sess", session.Entry{
+		WorkerID:   wid,
+		LastAccess: time.Now().Add(-10 * time.Minute),
+	})
+
+	if _, ok := srv.Sessions.Get("old-sess"); !ok {
+		t.Fatal("session should exist before sweep")
+	}
+
+	autoscaleTick(context.Background(), srv)
+
+	if _, ok := srv.Sessions.Get("old-sess"); ok {
+		t.Error("expected idle session to be swept")
+	}
+}
+
+func TestAutoscaleSkipsMissingApp(t *testing.T) {
+	srv := testAutoscaleServer(t)
+
+	// Register workers for an app ID that doesn't exist in the DB.
+	srv.Workers.Set("orphan-w1", server.ActiveWorker{AppID: "nonexistent-app"})
+	srv.Workers.Set("orphan-w2", server.ActiveWorker{AppID: "nonexistent-app"})
+
+	// Should not panic — the tick skips apps not found in the DB.
+	autoscaleTick(context.Background(), srv)
+
+	// Workers remain (they are not evicted just because the app is missing).
+	if srv.Workers.Count() != 2 {
+		t.Errorf("expected 2 workers to remain, got %d", srv.Workers.Count())
+	}
+}
+
+func TestEvictUnhealthyReturnsHealthy(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+	be := srv.Backend.(*mock.MockBackend)
+
+	// Spawn 3 workers while healthy.
+	wid1, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wid2, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wid3, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// All unhealthy — should evict all.
+	be.HealthOK.Store(false)
+	healthy := evictUnhealthy(context.Background(), srv, []string{wid1, wid2, wid3})
+	if len(healthy) != 0 {
+		t.Errorf("expected 0 healthy workers, got %d", len(healthy))
+	}
+
+	// Spawn 2 new workers while healthy.
+	be.HealthOK.Store(true)
+	wid4, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wid5, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	healthy = evictUnhealthy(context.Background(), srv, []string{wid4, wid5})
+	if len(healthy) != 2 {
+		t.Errorf("expected 2 healthy workers, got %d", len(healthy))
+	}
+}
+
+func TestTryScaleUpFailure(t *testing.T) {
+	fb := &faultyBackend{
+		MockBackend: mock.New(),
+		spawnErr:    fmt.Errorf("container runtime unavailable"),
+	}
+	srv := testColdstartServerWithBackend(t, fb)
+	srv.Config.Proxy.HealthInterval = config.Duration{Duration: 100 * time.Millisecond}
+
+	app := createTestApp(t, srv, "my-app", true)
+
+	// Set max sessions to 1 so the single worker is at capacity.
+	maxSessions := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{
+		MaxSessionsPerWorker: &maxSessions,
+	})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	// Manually register a worker + session to simulate capacity.
+	srv.Workers.Set("existing-w", server.ActiveWorker{AppID: app.ID})
+	srv.Registry.Set("existing-w", "127.0.0.1:9999")
+	setSession(srv, "s1", "existing-w")
+
+	// tryScaleUp should fail (faulty backend) but not panic.
+	tryScaleUp(context.Background(), srv, app, []string{"existing-w"})
+
+	// Only the original worker should remain.
+	if srv.Workers.Count() != 1 {
+		t.Errorf("expected 1 worker, got %d", srv.Workers.Count())
 	}
 }

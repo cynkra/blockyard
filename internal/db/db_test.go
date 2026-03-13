@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -522,3 +523,350 @@ func TestListCatalogWithGroups(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestOpenMemory(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open(:memory:) failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify functional by creating an app.
+	app, err := db.CreateApp("mem-app", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Name != "mem-app" {
+		t.Errorf("expected mem-app, got %q", app.Name)
+	}
+}
+
+func TestPing(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	if err := db.Ping(ctx); err != nil {
+		t.Fatalf("Ping failed: %v", err)
+	}
+}
+
+func TestIsUniqueConstraintError(t *testing.T) {
+	db := testDB(t)
+
+	_, err := db.CreateApp("dup-app", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateApp("dup-app", "admin")
+	if !IsUniqueConstraintError(err) {
+		t.Errorf("expected unique constraint error, got %v", err)
+	}
+
+	// nil error should return false.
+	if IsUniqueConstraintError(nil) {
+		t.Error("expected false for nil error")
+	}
+
+	// Unrelated error should return false.
+	if IsUniqueConstraintError(fmt.Errorf("some other error")) {
+		t.Error("expected false for unrelated error")
+	}
+}
+
+func TestGetAppNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	app, err := db.GetApp("00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app != nil {
+		t.Error("expected nil for nonexistent app")
+	}
+}
+
+func TestGetBundleNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	bundle, err := db.GetBundle("nonexistent-bundle-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle != nil {
+		t.Error("expected nil for nonexistent bundle")
+	}
+}
+
+func TestDeleteAppNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	deleted, err := db.DeleteApp("00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Error("expected false for nonexistent app")
+	}
+}
+
+func TestDeleteBundleNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	deleted, err := db.DeleteBundle("nonexistent-bundle-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Error("expected false for nonexistent bundle")
+	}
+}
+
+func TestDeleteTagNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	deleted, err := db.DeleteTag("nonexistent-tag-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Error("expected false for nonexistent tag")
+	}
+}
+
+func TestRoleMappings(t *testing.T) {
+	db := testDB(t)
+
+	// Create a role mapping.
+	if err := db.UpsertRoleMapping("admins", "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	// List and verify.
+	mappings, err := db.ListRoleMappings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("expected 1 mapping, got %d", len(mappings))
+	}
+	if mappings[0].GroupName != "admins" || mappings[0].Role != "admin" {
+		t.Errorf("got mapping %+v", mappings[0])
+	}
+
+	// Update (upsert) the role.
+	if err := db.UpsertRoleMapping("admins", "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	mappings, _ = db.ListRoleMappings()
+	if len(mappings) != 1 {
+		t.Fatalf("expected 1 mapping after upsert, got %d", len(mappings))
+	}
+	if mappings[0].Role != "viewer" {
+		t.Errorf("expected role viewer after upsert, got %q", mappings[0].Role)
+	}
+
+	// Delete.
+	deleted, err := db.DeleteRoleMapping("admins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Error("expected deletion")
+	}
+	mappings, _ = db.ListRoleMappings()
+	if len(mappings) != 0 {
+		t.Errorf("expected 0 mappings after delete, got %d", len(mappings))
+	}
+}
+
+func TestAppAccess(t *testing.T) {
+	db := testDB(t)
+
+	app, _ := db.CreateApp("access-app", "owner")
+
+	// Grant access.
+	if err := db.GrantAppAccess(app.ID, "alice", "user", "viewer", "owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	// List and verify.
+	grants, err := db.ListAppAccess(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("expected 1 grant, got %d", len(grants))
+	}
+	if grants[0].Principal != "alice" || grants[0].Role != "viewer" {
+		t.Errorf("got grant %+v", grants[0])
+	}
+
+	// Revoke access.
+	revoked, err := db.RevokeAppAccess(app.ID, "alice", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !revoked {
+		t.Error("expected revocation")
+	}
+	grants, _ = db.ListAppAccess(app.ID)
+	if len(grants) != 0 {
+		t.Errorf("expected 0 grants after revoke, got %d", len(grants))
+	}
+}
+
+func TestTags(t *testing.T) {
+	db := testDB(t)
+
+	// Create tags.
+	tag1, err := db.CreateTag("production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag2, err := db.CreateTag("staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// List tags.
+	tags, err := db.ListTags()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 2 {
+		t.Fatalf("expected 2 tags, got %d", len(tags))
+	}
+
+	// Get tag by ID.
+	fetched, err := db.GetTag(tag1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched.Name != "production" {
+		t.Errorf("expected production, got %q", fetched.Name)
+	}
+
+	// Add app tags.
+	app, _ := db.CreateApp("tagged-app", "admin")
+	if err := db.AddAppTag(app.ID, tag1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAppTag(app.ID, tag2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// ListAppTags.
+	appTags, err := db.ListAppTags(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(appTags) != 2 {
+		t.Errorf("expected 2 app tags, got %d", len(appTags))
+	}
+
+	// Remove app tag.
+	removed, err := db.RemoveAppTag(app.ID, tag1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Error("expected removal")
+	}
+	appTags, _ = db.ListAppTags(app.ID)
+	if len(appTags) != 1 {
+		t.Errorf("expected 1 app tag after removal, got %d", len(appTags))
+	}
+
+	// Delete tag.
+	deleted, err := db.DeleteTag(tag2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Error("expected tag deletion")
+	}
+}
+
+func TestListAccessibleApps(t *testing.T) {
+	db := testDB(t)
+
+	// Create apps with different owners and access types.
+	app1, _ := db.CreateApp("owned-app", "user-1")
+	app2, _ := db.CreateApp("public-app", "user-2")
+	db.UpdateApp(app2.ID, AppUpdate{AccessType: strPtr("public")})
+	db.CreateApp("private-app", "user-2")
+	app4, _ := db.CreateApp("granted-app", "user-2")
+	db.GrantAppAccess(app4.ID, "user-1", "user", "viewer", "user-2")
+	app5, _ := db.CreateApp("group-app", "user-2")
+	db.GrantAppAccess(app5.ID, "team-a", "group", "viewer", "user-2")
+
+	// user-1 should see: owned-app, public-app, granted-app, group-app
+	apps, err := db.ListAccessibleApps("user-1", []string{"team-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 4 {
+		t.Errorf("expected 4 accessible apps for user-1, got %d", len(apps))
+	}
+
+	// user-3 with no groups should see only public-app.
+	apps, err = db.ListAccessibleApps("user-3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 1 {
+		t.Errorf("expected 1 accessible app for user-3, got %d", len(apps))
+	}
+	if len(apps) > 0 && apps[0].ID != app2.ID {
+		t.Errorf("expected public-app, got %q", apps[0].Name)
+	}
+
+	// user-2 should see all their owned apps + public.
+	apps, err = db.ListAccessibleApps("user-2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// user-2 owns: public-app, private-app, granted-app, group-app (4 apps)
+	// plus public-app is also visible via access_type, but it's already owned.
+	if len(apps) != 4 {
+		t.Errorf("expected 4 accessible apps for user-2, got %d", len(apps))
+	}
+
+	_ = app1 // used above
+}
+
+func TestDeleteRoleMappingNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	deleted, err := db.DeleteRoleMapping("nonexistent-group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Error("expected false for nonexistent role mapping")
+	}
+}
+
+func TestRevokeAppAccessNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	revoked, err := db.RevokeAppAccess("nonexistent-app", "alice", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked {
+		t.Error("expected false for nonexistent app access")
+	}
+}
+
+func TestRemoveAppTagNonexistent(t *testing.T) {
+	db := testDB(t)
+
+	removed, err := db.RemoveAppTag("nonexistent-app", "nonexistent-tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed {
+		t.Error("expected false for nonexistent app tag")
+	}
+}

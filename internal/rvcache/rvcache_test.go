@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // rvTarGz returns a tar.gz archive containing a single "rv" entry with the
@@ -193,5 +194,84 @@ func TestDownloadURL_Latest(t *testing.T) {
 	}
 	if !strings.HasSuffix(url, ".tar.gz") {
 		t.Errorf("expected .tar.gz suffix, got: %s", url)
+	}
+}
+
+func TestEnsureBinary_LatestRedownloadsWhenStale(t *testing.T) {
+	oldContent := []byte("#!/bin/sh\necho old\n")
+	newContent := []byte("#!/bin/sh\necho new\n")
+	newTarball := rvTarGz(t, newContent)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(newTarball)
+	}))
+	defer srv.Close()
+	setBaseURL(t, srv.URL)
+
+	cacheDir := t.TempDir()
+	dest := filepath.Join(cacheDir, "rv-latest")
+
+	// Pre-populate with old content and set mtime to 2 hours ago.
+	if err := os.WriteFile(dest, oldContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(dest, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := EnsureBinary(context.Background(), cacheDir, "latest")
+	if err != nil {
+		t.Fatalf("EnsureBinary: %v", err)
+	}
+
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("read cached binary: %v", err)
+	}
+	if !bytes.Equal(data, newContent) {
+		t.Errorf("expected new content after stale refresh, got %q", data)
+	}
+}
+
+func TestEnsureBinary_LatestSkipsWhenFresh(t *testing.T) {
+	// Server that fails if called — we expect no download.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called for fresh latest binary")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	setBaseURL(t, srv.URL)
+
+	cacheDir := t.TempDir()
+	dest := filepath.Join(cacheDir, "rv-latest")
+
+	// Pre-populate with fresh mtime (now).
+	if err := os.WriteFile(dest, []byte("fresh-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := EnsureBinary(context.Background(), cacheDir, "latest")
+	if err != nil {
+		t.Fatalf("EnsureBinary: %v", err)
+	}
+	if got != dest {
+		t.Errorf("got %q, want %q", got, dest)
+	}
+}
+
+func TestDownload_ServerError500(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	setBaseURL(t, srv.URL)
+
+	_, err := EnsureBinary(context.Background(), t.TempDir(), "v0.0.1-test")
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention 500, got: %v", err)
 	}
 }

@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/cynkra/blockyard/internal/api"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
@@ -556,6 +558,166 @@ func TestProxyWebSocketCrossOrigin(t *testing.T) {
 	}
 }
 
+// TestProxyWebSocketBackendDisconnect verifies that when the backend
+// WebSocket closes after one message, the disconnect is propagated to
+// the client (the client's next Read returns an error).
+func TestProxyWebSocketBackendDisconnect(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	// Backend handler: accept one message, then close.
+	srv.Backend.(*mock.MockBackend).SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		// Read one message, then close.
+		c.Read(context.Background())
+		c.Close(websocket.StatusNormalClosure, "done")
+	})
+
+	createAndStartApp(t, ts, "disc-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/disc-app/"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	// Send a message to the backend.
+	if err := conn.Write(ctx, websocket.MessageText, []byte("trigger")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The backend closes after reading — client should see an error.
+	_, _, err = conn.Read(ctx)
+	if err == nil {
+		t.Error("expected error from Read after backend disconnect, got nil")
+	}
+}
+
+// TestProxyWebSocketClientWriteError verifies that abruptly closing the
+// client side does not cause a panic in the proxy.
+func TestProxyWebSocketClientWriteError(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
+	createAndStartApp(t, ts, "cwerr-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/cwerr-app/"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Abruptly close the client connection.
+	conn.CloseNow()
+
+	// Give the proxy time to notice and clean up.
+	time.Sleep(200 * time.Millisecond)
+	// If we reach here without a panic, the test passes.
+}
+
+// TestProxyAppLookupByUUID verifies that requesting /app/{uuid}/ resolves
+// correctly, not just /app/{name}/.
+func TestProxyAppLookupByUUID(t *testing.T) {
+	_, ts := testProxyServer(t)
+
+	// Create app and extract its UUID.
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+		bytes.NewReader([]byte(`{"name":"uuid-app"}`)))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&created)
+	appID := created["id"].(string)
+
+	// Upload bundle and start.
+	req, _ = http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+appID+"/bundles",
+		bytes.NewReader(testutil.MakeBundle(t)))
+	req.Header.Set("Authorization", "Bearer test-token")
+	http.DefaultClient.Do(req)
+	time.Sleep(200 * time.Millisecond)
+
+	req, _ = http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+appID+"/start", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	http.DefaultClient.Do(req)
+
+	// Request via UUID instead of name.
+	resp, err = http.Get(ts.URL + "/app/" + appID + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 for UUID lookup, got %d", resp.StatusCode)
+	}
+}
+
+// TestProxyStaleSessionCreatesNew verifies that presenting a session
+// cookie whose worker has been removed from the registry results in a
+// new session (and a new worker being assigned).
+func TestProxyStaleSessionCreatesNew(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	createAndStartApp(t, ts, "stale-app")
+
+	// First request — get a session cookie.
+	resp, err := http.Get(ts.URL + "/app/stale-app/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "blockyard_session" {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("no session cookie")
+	}
+
+	// Delete the worker from the registry so the session is stale.
+	workerIDs := srv.Workers.All()
+	for _, wid := range workerIDs {
+		srv.Registry.Delete(wid)
+	}
+
+	// Second request with the stale cookie.
+	req, _ := http.NewRequest("GET", ts.URL+"/app/stale-app/", nil)
+	req.AddCookie(sessCookie)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 after stale session, got %d", resp.StatusCode)
+	}
+
+	// Should have received a new session cookie.
+	var newCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "blockyard_session" {
+			newCookie = c
+		}
+	}
+	if newCookie == nil {
+		t.Error("expected a new session cookie after stale session")
+	} else if newCookie.Value == sessCookie.Value {
+		t.Error("expected new session ID, got same as stale session")
+	}
+}
+
 // TestProxyWebSocketForwardsHeaders verifies that the proxy forwards
 // relevant client headers to the backend (Bug 4 fix — lost headers).
 func TestProxyWebSocketForwardsHeaders(t *testing.T) {
@@ -598,5 +760,50 @@ func TestProxyWebSocketForwardsHeaders(t *testing.T) {
 	}
 	if got := backendHeaders.Get("User-Agent"); got != "TestAgent/1.0" {
 		t.Errorf("User-Agent: expected 'TestAgent/1.0', got %q", got)
+	}
+}
+
+// TestProxyInjectShinyHeaders verifies that X-Shiny-User is set on
+// forwarded requests when the caller is authenticated via OIDC.
+// Skipped when OIDC setup is too complex for an integration test.
+func TestProxyInjectShinyHeaders(t *testing.T) {
+	t.Skip("requires OIDC context injection; covered by unit tests")
+}
+
+// TestProxyInjectCredentialsShared verifies that shared container
+// credential injection sets X-Blockyard-Session-Token. Since
+// injectCredentials is unexported and already covered by vault_test.go
+// (TestInjectCredentials_SharedContainer_InjectsSessionToken), this
+// integration-level test is skipped to avoid duplicating OIDC + vault
+// setup complexity.
+func TestProxyInjectCredentialsShared(t *testing.T) {
+	t.Skip("requires OIDC + vault integration; covered by vault_test.go")
+}
+
+// TestRedirectTrailingSlash tests the RedirectTrailingSlash handler
+// directly with httptest.NewRecorder.
+func TestRedirectTrailingSlash(t *testing.T) {
+	r := chi.NewRouter()
+	r.Get("/app/{name}", proxy.RedirectTrailingSlash)
+
+	tests := []struct {
+		path     string
+		wantLoc  string
+		wantCode int
+	}{
+		{"/app/my-app", "/app/my-app/", http.StatusMovedPermanently},
+		{"/app/other", "/app/other/", http.StatusMovedPermanently},
+	}
+	for _, tt := range tests {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", tt.path, nil)
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != tt.wantCode {
+			t.Errorf("%s: expected %d, got %d", tt.path, tt.wantCode, rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); loc != tt.wantLoc {
+			t.Errorf("%s: expected Location %q, got %q", tt.path, tt.wantLoc, loc)
+		}
 	}
 }

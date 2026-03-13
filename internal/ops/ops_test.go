@@ -299,3 +299,99 @@ func TestLogRetentionCleaner(t *testing.T) {
 		t.Error("expected expired log entry to be cleaned up")
 	}
 }
+
+func TestSpawnHealthPollerStopsOnCancel(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.Config.Proxy.HealthInterval = config.Duration{Duration: 50 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		SpawnHealthPoller(ctx, srv)
+		close(done)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// SpawnHealthPoller returned — success.
+	case <-time.After(2 * time.Second):
+		t.Fatal("SpawnHealthPoller did not return after context cancel")
+	}
+}
+
+func TestPollOncePrunesRemovedWorkers(t *testing.T) {
+	srv, be := testServer(t)
+	spawnWorker(t, srv, be, "w1", "app1")
+
+	misses := make(map[string]int)
+	ctx := context.Background()
+
+	// Record a miss for w1.
+	be.HealthOK.Store(false)
+	pollOnce(ctx, srv, misses)
+	if misses["w1"] != 1 {
+		t.Fatalf("expected 1 miss for w1, got %d", misses["w1"])
+	}
+
+	// Add a stale entry for a worker that no longer exists.
+	misses["ghost-worker"] = 1
+
+	// Make w1 healthy again so it doesn't get evicted.
+	be.HealthOK.Store(true)
+	pollOnce(ctx, srv, misses)
+
+	// The ghost entry should be pruned.
+	if _, exists := misses["ghost-worker"]; exists {
+		t.Error("expected stale miss entry for ghost-worker to be pruned")
+	}
+}
+
+func TestDrainAndEvictAllWithActiveSessions(t *testing.T) {
+	srv, be := testServer(t)
+	srv.Config.Server.ShutdownTimeout = config.Duration{Duration: 100 * time.Millisecond}
+
+	spawnWorker(t, srv, be, "w1", "app1")
+	spawnWorker(t, srv, be, "w2", "app1")
+	srv.Sessions.Set("sess1", session.Entry{WorkerID: "w1"})
+	srv.Sessions.Set("sess2", session.Entry{WorkerID: "w2"})
+
+	drainAndEvictAll(context.Background(), srv, []string{"w1", "w2"})
+
+	if len(srv.Workers.All()) != 0 {
+		t.Errorf("expected all workers evicted, got %d", len(srv.Workers.All()))
+	}
+	if be.WorkerCount() != 0 {
+		t.Errorf("expected backend to have 0 workers, got %d", be.WorkerCount())
+	}
+}
+
+func TestGracefulShutdownNoWorkers(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Should not panic with no workers.
+	GracefulShutdown(context.Background(), srv)
+
+	if len(srv.Workers.All()) != 0 {
+		t.Error("expected no workers")
+	}
+}
+
+func TestLogCaptureHandlesStreamError(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Don't spawn any backend worker — Logs will still return a stream
+	// because mock.Logs doesn't check worker existence. Instead, set
+	// empty log lines so the stream closes immediately.
+	// The log should be created and marked ended.
+	SpawnLogCapture(context.Background(), srv, "no-worker", "app1")
+
+	time.Sleep(100 * time.Millisecond)
+
+	if srv.LogStore.HasActive("no-worker") {
+		t.Error("log should be marked ended after stream closes")
+	}
+}
