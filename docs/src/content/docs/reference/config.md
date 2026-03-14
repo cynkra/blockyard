@@ -31,7 +31,6 @@ Environment variables take precedence over values in the TOML file.
 ```toml
 [server]
 bind             = "0.0.0.0:8080"
-token            = "change-me-in-production"
 shutdown_timeout = "30s"
 # session_secret = "random-secret"   # required when [oidc] is configured
 # external_url   = "https://blockyard.example.com"
@@ -40,15 +39,14 @@ shutdown_timeout = "30s"
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `bind` | `string` | `0.0.0.0:8080` | No | Socket address to listen on |
-| `token` | `string` | — | When `[oidc]` is **not** set | Static bearer token for API authentication (v0 only; replaced by [Personal Access Tokens](/guides/authorization/#personal-access-tokens) when OIDC is configured) |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
 | `session_secret` | `string` | — | When `[oidc]` is set | Secret for encrypting session cookies |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 
-<Aside type="caution">
-  When running without OIDC (v0 mode), use a strong, randomly generated
-  token. When OIDC is configured, the static token is ignored — use
-  Personal Access Tokens instead.
+<Aside type="note">
+  API authentication uses [Personal Access Tokens](/guides/authorization/#personal-access-tokens)
+  (for CLI/CI access) or OIDC session cookies (for browser access). The v0
+  static bearer token (`server.token`) has been removed.
 </Aside>
 
 ## `[docker]`

@@ -6,14 +6,13 @@ description: Deploy your first Shiny app to Blockyard in under five minutes.
 This guide walks through deploying a Shiny app from scratch. It assumes
 Blockyard is already running (see [Installation](/getting-started/installation/)).
 
-Set a couple of shell variables to keep the examples concise. If you're
-running without OIDC, use the static token from your config file. With OIDC,
-create a [Personal Access Token](/guides/authorization/#personal-access-tokens)
-via the web UI first.
+Set a couple of shell variables to keep the examples concise. Create a
+[Personal Access Token](/guides/authorization/#personal-access-tokens) via the
+web UI first.
 
 ```bash
 export BLOCKYARD=http://localhost:8080
-export TOKEN=your-token   # static token (v0) or PAT (by_...)
+export TOKEN=by_...   # your Personal Access Token
 ```
 
 ## 1. Create an app

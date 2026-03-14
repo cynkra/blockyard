@@ -2,25 +2,44 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
 const readyzCheckTimeout = 5 * time.Second
 
-// isAuthenticated performs a lightweight bearer token check without
-// invoking the full auth middleware. Used to gate detailed readyz output.
+// isAuthenticated performs a lightweight auth check without invoking
+// the full auth middleware. Used to gate detailed readyz output.
+// Accepts PAT bearer tokens and session cookies.
 func isAuthenticated(r *http.Request, srv *server.Server) bool {
+	// Try PAT.
 	token := extractBearerToken(r)
-	if token == "" {
-		return false
+	if token != "" && strings.HasPrefix(token, "by_") {
+		hash := auth.HashPAT(token)
+		result, err := srv.DB.LookupPATByHash(hash)
+		if err == nil && result != nil && !result.PAT.Revoked && result.User.Active {
+			return true
+		}
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1
+
+	// Try session cookie.
+	if srv.SigningKey != nil {
+		cookieValue := extractSessionCookie(r)
+		if cookieValue != "" {
+			caller := authenticateFromCookie(srv, cookieValue)
+			if caller != nil {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func readyzHandler(srv *server.Server) http.HandlerFunc {

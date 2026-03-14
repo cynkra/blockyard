@@ -66,9 +66,8 @@ func (r Role) CanManageTags() bool {
 type AuthSource int
 
 const (
-	AuthSourceSession     AuthSource = iota // Browser session via OIDC
-	AuthSourcePAT                           // Personal Access Token
-	AuthSourceStaticToken                   // Static bearer token (v0 compat, dev mode)
+	AuthSourceSession AuthSource = iota // Browser session via OIDC
+	AuthSourcePAT                       // Personal Access Token
 )
 
 // CallerIdentity is the unified caller identity produced by auth

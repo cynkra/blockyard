@@ -26,7 +26,6 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | Field | Default | Description |
 |---|---|---|
 | `bind` | `0.0.0.0:8080` | Address and port the server listens on |
-| `token` | — | Static bearer token for the control plane API (v0 only; replaced by [Personal Access Tokens](/guides/authorization/#personal-access-tokens) when OIDC is configured) |
 | `shutdown_timeout` | `30s` | Time to drain in-flight requests on shutdown |
 | `session_secret` | — | Secret for encrypting session cookies (required when `[oidc]` is configured) |
 | `external_url` | — | Public-facing URL of the server (used for OIDC redirect URIs) |
@@ -130,7 +129,6 @@ Enable Prometheus metrics and OpenTelemetry tracing.
 ```toml
 [server]
 bind             = "0.0.0.0:8080"
-# token          = "..."   # v0 only; replaced by PATs when [oidc] is configured
 shutdown_timeout = "30s"
 
 [docker]

@@ -23,7 +23,7 @@ func buildTestDeps(t *testing.T, idp *testutil.MockIdP) *auth.Deps {
 	secret := config.NewSecret("test-session-secret")
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			Token:         config.NewSecret("test-token"),
+
 			SessionSecret: &secret,
 			ExternalURL:   "http://localhost:8080",
 		},
@@ -492,7 +492,7 @@ func TestSecureFlagHTTPS(t *testing.T) {
 	secret := config.NewSecret("test-session-secret")
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			Token:         config.NewSecret("test-token"),
+
 			SessionSecret: &secret,
 			ExternalURL:   "https://example.com",
 		},

@@ -40,7 +40,7 @@ func newTestServer(t *testing.T, cfg *config.Config) (*server.Server, *httptest.
 
 func defaultConfig() *config.Config {
 	return &config.Config{
-		Server:  config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server:  config.ServerConfig{},
 		Docker:  config.DockerConfig{Image: "test-image", ShinyPort: 3838},
 		Storage: config.StorageConfig{BundleServerPath: "/tmp", BundleWorkerPath: "/app"},
 		Proxy:   config.ProxyConfig{MaxWorkers: 100},

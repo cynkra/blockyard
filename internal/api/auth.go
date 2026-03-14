@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,8 +15,7 @@ import (
 // Authentication sources tried in order:
 //  1. Session cookie (OIDC session)
 //  2. PAT (Authorization: Bearer by_...)
-//  3. Static token fallback (v0 compat, only when OIDC is not configured)
-//  4. Reject (401)
+//  3. Reject (401)
 func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,10 +32,9 @@ func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 				}
 			}
 
-			// 2. Try bearer token (PAT or static token fallback).
+			// 2. Try bearer token (PAT).
 			token := extractBearerToken(r)
 			if token != "" {
-				// 2a. Try PAT — tokens starting with "by_".
 				if strings.HasPrefix(token, "by_") {
 					caller := authenticateFromPAT(srv, r, token)
 					if caller != nil {
@@ -45,23 +42,9 @@ func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 						next.ServeHTTP(w, r.WithContext(ctx))
 						return
 					}
-					writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or expired token")
-					return
 				}
-
-				// 2b. Static token fallback (v0 compat — only when OIDC is not configured).
-				if srv.Config.OIDC == nil && !srv.Config.Server.Token.IsEmpty() {
-					if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1 {
-						identity := &auth.CallerIdentity{
-							Sub:    "admin",
-							Role:   auth.RoleAdmin,
-							Source: auth.AuthSourceStaticToken,
-						}
-						ctx := auth.ContextWithCaller(r.Context(), identity)
-						next.ServeHTTP(w, r.WithContext(ctx))
-						return
-					}
-				}
+				writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or expired token")
+				return
 			}
 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")

@@ -46,7 +46,7 @@ func mockJWTLoginError(t *testing.T) *integration.Client {
 func vaultServer(t *testing.T, vaultClient *integration.Client) *server.Server {
 	t.Helper()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Openbao: &config.OpenbaoConfig{
 			Address:     "http://mock",
 			AdminToken:  config.NewSecret("admin-token"),

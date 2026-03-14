@@ -24,13 +24,28 @@ import (
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
+const testPAT = "by_testtoken000000000000000000000000000000000"
+
+func seedTestAdmin(t *testing.T, database *db.DB) {
+	t.Helper()
+	_, err := database.UpsertUserWithRole("admin", "admin@test", "Admin", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := auth.HashPAT(testPAT)
+	_, err = database.CreatePAT("test-pat-id", hash, "admin", "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 	t.Helper()
 	tmp := t.TempDir()
 
 	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,
@@ -54,6 +69,7 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
@@ -71,7 +87,7 @@ func createAndStartApp(t *testing.T, ts *httptest.Server, name string) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"`+name+`"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -84,13 +100,13 @@ func createAndStartApp(t *testing.T, ts *httptest.Server, name string) {
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/start", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 }
 
@@ -198,7 +214,7 @@ func TestProxyAppWithoutBundleReturns503(t *testing.T) {
 	_, ts := testProxyServer(t)
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"no-bundle"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	http.DefaultClient.Do(req)
 
@@ -216,7 +232,7 @@ func TestProxyAtCapacityReturns503(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"cap-app"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	var created map[string]interface{}
@@ -282,7 +298,7 @@ func TestProxyColdStartSpawnsWorker(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"cold-app"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	var created map[string]interface{}
@@ -292,7 +308,7 @@ func TestProxyColdStartSpawnsWorker(t *testing.T) {
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
@@ -633,7 +649,7 @@ func TestProxyAppLookupByUUID(t *testing.T) {
 	// Create app and extract its UUID.
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"uuid-app"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -647,13 +663,13 @@ func TestProxyAppLookupByUUID(t *testing.T) {
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+appID+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+appID+"/start", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 
 	// Request via UUID instead of name.
@@ -822,7 +838,7 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 
 	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,
@@ -852,6 +868,7 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)

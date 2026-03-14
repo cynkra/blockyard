@@ -39,7 +39,7 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -196,24 +196,7 @@ func TestEnrollCredential_NoVaultConfigured(t *testing.T) {
 	}
 }
 
-func TestEnrollCredential_WithStaticToken(t *testing.T) {
-	// When OIDC is not configured, static token should work.
-	_, ts := testServer(t)
 
-	body := `{"api_key":"sk-test-key"}`
-	req := authReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", strings.NewReader(body))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	// VaultClient is nil → 503
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 (no vault), got %d", resp.StatusCode)
-	}
-}
 
 func TestUserAuthWithSessionCookie(t *testing.T) {
 	idp := testutil.NewMockIdP()

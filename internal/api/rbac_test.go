@@ -22,7 +22,7 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -349,27 +349,6 @@ func TestACLGrantRevokeCycle(t *testing.T) {
 	resp.Body.Close()
 	if len(grants) != 0 {
 		t.Errorf("expected 0 grants after revoke, got %d", len(grants))
-	}
-}
-
-func TestStaticTokenFallback(t *testing.T) {
-	// No OIDC config — v0 compat mode. Static token should still work
-	// and give admin identity.
-	_, ts := testServer(t)
-
-	// Create app with static token
-	resp, _ := http.DefaultClient.Do(
-		authReq("POST", ts.URL+"/api/v1/apps",
-			strings.NewReader(`{"name":"my-app"}`)))
-	var app map[string]any
-	json.NewDecoder(resp.Body).Decode(&app)
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", resp.StatusCode)
-	}
-	if app["owner"] != "admin" {
-		t.Errorf("expected owner 'admin', got %v", app["owner"])
 	}
 }
 

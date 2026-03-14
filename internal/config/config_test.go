@@ -12,7 +12,7 @@ import (
 
 const minimalTOML = `
 [server]
-token = "test-token"
+
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -45,44 +45,8 @@ func TestParseMinimalConfig(t *testing.T) {
 	if cfg.Server.Bind != "0.0.0.0:8080" {
 		t.Errorf("expected default bind, got %q", cfg.Server.Bind)
 	}
-	if cfg.Server.Token.Expose() != "test-token" {
-		t.Errorf("expected test-token, got %q", cfg.Server.Token.Expose())
-	}
 	if cfg.Proxy.MaxWorkers != 100 {
 		t.Errorf("expected default max_workers 100, got %d", cfg.Proxy.MaxWorkers)
-	}
-}
-
-func TestEnvVarOverridesToken(t *testing.T) {
-	t.Setenv("BLOCKYARD_SERVER_TOKEN", "override-token")
-	cfg := loadFromString(t, minimalTOML)
-	if cfg.Server.Token.Expose() != "override-token" {
-		t.Errorf("expected override-token, got %q", cfg.Server.Token.Expose())
-	}
-}
-
-func TestValidationAcceptsEmptyToken(t *testing.T) {
-	tomlContent := `
-[server]
-token = ""
-
-[docker]
-image = "ghcr.io/rocker-org/r-ver:latest"
-
-[storage]
-bundle_server_path = "/tmp/blockyard-test/bundles"
-
-[database]
-path = "/tmp/blockyard-test/db/blockyard.db"
-
-[proxy]
-`
-	dir := t.TempDir()
-	path := filepath.Join(dir, "blockyard.toml")
-	os.WriteFile(path, []byte(tomlContent), 0o644)
-	_, err := Load(path)
-	if err != nil {
-		t.Errorf("empty token should be accepted, got error: %v", err)
 	}
 }
 
@@ -140,7 +104,7 @@ func TestEnvVarOverridesWsCacheTTL(t *testing.T) {
 func TestValidationRejectsEmptyImage(t *testing.T) {
 	tomlContent := `
 [server]
-token = "test-token"
+
 
 [docker]
 image = ""
@@ -169,7 +133,7 @@ func TestDefaultBundleServerPath(t *testing.T) {
 	bundlePath := filepath.Join(tmpDir, "bundles")
 	tomlContent := `
 [server]
-token = "test-token"
+
 
 [docker]
 image = "some-image"
@@ -197,7 +161,7 @@ func TestDefaultBundleServerPathUsesDataBundles(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
 	tomlContent := `
 [server]
-token = "test-token"
+
 
 [docker]
 image = "some-image"
@@ -227,7 +191,7 @@ func TestDefaultDatabasePath(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
 	tomlContent := `
 [server]
-token = "test-token"
+
 
 [docker]
 image = "some-image"
@@ -255,7 +219,7 @@ func TestDefaultDatabasePathUsesDataDb(t *testing.T) {
 	bundlePath := filepath.Join(tmpDir, "bundles")
 	tomlContent := `
 [server]
-token = "test-token"
+
 
 [docker]
 image = "some-image"
@@ -279,7 +243,7 @@ bundle_server_path = "` + bundlePath + `"
 func TestValidationRejectsNonWritableBundlePath(t *testing.T) {
 	tomlContent := `
 [server]
-token = "test-token"
+
 
 [docker]
 image = "some-image"
@@ -307,7 +271,7 @@ func TestValidationRejectsNonWritableDatabaseDir(t *testing.T) {
 	bundlePath := filepath.Join(tmpDir, "bundles")
 	tomlContent := `
 [server]
-token = "test-token"
+
 
 [docker]
 image = "some-image"
@@ -385,9 +349,9 @@ func TestSecretIsEmpty(t *testing.T) {
 }
 
 func TestSecretUnmarshalFromTOML(t *testing.T) {
-	cfg := loadFromString(t, minimalTOML)
-	if cfg.Server.Token.Expose() != "test-token" {
-		t.Errorf("Token not deserialized: got %q", cfg.Server.Token.Expose())
+	cfg := loadFromString(t, oidcTOML(t))
+	if cfg.OIDC.ClientSecret.Expose() != "my-secret" {
+		t.Errorf("Secret not deserialized: got %q", cfg.OIDC.ClientSecret.Expose())
 	}
 }
 
@@ -399,7 +363,7 @@ func oidcTOML(t *testing.T) string {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	return fmt.Sprintf(`
 [server]
-token = "test-token"
+
 session_secret = "my-session-secret"
 external_url = "https://example.com"
 
@@ -505,7 +469,7 @@ func TestOidcAutoConstructFromEnvVars(t *testing.T) {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	toml := fmt.Sprintf(`
 [server]
-token = "test-token"
+
 session_secret = "my-session-secret"
 
 [docker]
@@ -566,7 +530,7 @@ func openbaoTOML(t *testing.T) string {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	return fmt.Sprintf(`
 [server]
-token = "test-token"
+
 session_secret = "my-session-secret"
 
 [docker]
@@ -645,7 +609,7 @@ func TestValidationRejectsOpenbaoWithoutOidc(t *testing.T) {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	toml := fmt.Sprintf(`
 [server]
-token = "test-token"
+
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -708,7 +672,7 @@ func auditTOML(t *testing.T) string {
 	auditPath := filepath.Join(dir, "audit.jsonl")
 	return fmt.Sprintf(`
 [server]
-token = "test-token"
+
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -749,7 +713,7 @@ func TestValidationRejectsAuditEmptyPath(t *testing.T) {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	toml := fmt.Sprintf(`
 [server]
-token = "test-token"
+
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -791,7 +755,7 @@ func telemetryTOML(t *testing.T) string {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	return fmt.Sprintf(`
 [server]
-token = "test-token"
+
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"

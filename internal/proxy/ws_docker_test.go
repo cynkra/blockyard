@@ -155,7 +155,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 
 	// Create the server with the Docker backend.
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
 			Image:     "alpine:latest",
 			ShinyPort: 8080,

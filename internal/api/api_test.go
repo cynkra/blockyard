@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
@@ -23,12 +24,15 @@ import (
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
+// testPAT is a fixed PAT used across tests. Created by testServer via
+// seedTestAdmin.
+const testPAT = "by_testtoken000000000000000000000000000000000"
+
 func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	t.Helper()
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -45,6 +49,8 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	}
 	t.Cleanup(func() { database.Close() })
 
+	seedTestAdmin(t, database)
+
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 	handler := NewRouter(srv)
@@ -54,10 +60,25 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	return srv, ts
 }
 
-// authReq creates a request with the test bearer token.
+// seedTestAdmin creates an admin user and a PAT in the database for
+// use in tests that authenticate via bearer token.
+func seedTestAdmin(t *testing.T, database *db.DB) {
+	t.Helper()
+	_, err := database.UpsertUserWithRole("admin", "admin@test", "Admin", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := auth.HashPAT(testPAT)
+	_, err = database.CreatePAT("test-pat-id", hash, "admin", "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// authReq creates a request with the test PAT bearer token.
 func authReq(method, url string, body io.Reader) *http.Request {
 	req, _ := http.NewRequest(method, url, body)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -133,7 +154,7 @@ func TestUploadBundleReturns202(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+app["id"].(string)+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -162,7 +183,7 @@ func TestTaskLogsStreamsOutput(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	resp, _ := http.DefaultClient.Do(req)
 	var body map[string]string
 	json.NewDecoder(resp.Body).Decode(&body)
@@ -197,7 +218,7 @@ func TestListBundles(t *testing.T) {
 		req, _ := http.NewRequest("POST",
 			ts.URL+"/api/v1/apps/"+id+"/bundles",
 			bytes.NewReader(testutil.MakeBundle(t)))
-		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Authorization", "Bearer "+testPAT)
 		http.DefaultClient.Do(req)
 	}
 
@@ -390,7 +411,7 @@ func TestStartAndStopApp(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
@@ -480,7 +501,7 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
@@ -505,7 +526,7 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -517,6 +538,7 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	}
 	database, _ := db.Open(":memory:")
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 	handler := NewRouter(srv)
@@ -943,7 +965,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	// Create a server with a very small max bundle size
 	tmp := t.TempDir()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -955,6 +977,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	}
 	database, _ := db.Open(":memory:")
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 	handler := NewRouter(srv)
@@ -967,7 +990,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -987,7 +1010,7 @@ func TestUploadBundleMissingEntrypoint(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundleWithoutEntrypoint(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1025,7 +1048,7 @@ func TestUploadBundleByName(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/my-app/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1045,7 +1068,7 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 	auditPath := tmp + "/audit.jsonl"
 
 	cfg := &config.Config{
-		Server:  config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server:  config.ServerConfig{},
 		Docker:  config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -1062,6 +1085,7 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
@@ -1144,7 +1168,7 @@ func openFile(t *testing.T, path string) io.Reader {
 func TestTracingMiddlewareEnabled(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -1161,6 +1185,7 @@ func TestTracingMiddlewareEnabled(t *testing.T) {
 
 	database, _ := db.Open(":memory:")
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 	handler := NewRouter(srv)
@@ -1176,7 +1201,7 @@ func TestTracingMiddlewareEnabled(t *testing.T) {
 
 	// Metrics endpoint should be available (requires auth).
 	req = httptest.NewRequest("GET", "/metrics", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -1340,7 +1365,7 @@ func TestDeleteAppWithBundles(t *testing.T) {
 	req, _ := http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1434,7 +1459,7 @@ func testServerWithBackend(t *testing.T, be backend.Backend) (*server.Server, *h
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -1450,6 +1475,7 @@ func testServerWithBackend(t *testing.T, be backend.Backend) (*server.Server, *h
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 
 	srv := server.NewServer(cfg, be, database)
 	handler := NewRouter(srv)
@@ -1693,7 +1719,7 @@ func TestAppLogsStreamingContextCancel(t *testing.T) {
 
 	req, _ := http.NewRequestWithContext(ctx, "GET",
 		ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=w-cancel", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

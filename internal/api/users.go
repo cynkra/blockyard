@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -23,16 +22,15 @@ import (
 var serviceNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 // UserAuth returns a middleware that authenticates via session cookie or
-// JWT bearer token. Produces a CallerIdentity in context either way.
+// PAT bearer token. Produces a CallerIdentity in context either way.
 // Used for /api/v1/users/me/ routes where both app-plane and
 // control-plane users need access.
 func UserAuth(srv *server.Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Try session cookie first (app-plane users).
+			// Already authenticated by upstream middleware (shouldn't
+			// happen with current routing, but defensive).
 			if caller := auth.CallerFromContext(r.Context()); caller != nil {
-				// Already authenticated by upstream middleware (shouldn't
-				// happen with current routing, but defensive).
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -50,10 +48,10 @@ func UserAuth(srv *server.Server) func(http.Handler) http.Handler {
 				}
 			}
 
-			// Try bearer token (PAT or static token).
+			// Try bearer token (PAT).
 			token := extractBearerToken(r)
-			if token != "" {
-				caller := authenticateFromBearer(srv, r, token)
+			if token != "" && strings.HasPrefix(token, "by_") {
+				caller := authenticateFromPAT(srv, r, token)
 				if caller != nil {
 					ctx := auth.ContextWithCaller(r.Context(), caller)
 					next.ServeHTTP(w, r.WithContext(ctx))
@@ -115,27 +113,6 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 		Role:   role,
 		Source: auth.AuthSourceSession,
 	}
-}
-
-// authenticateFromBearer validates a PAT bearer token (or static token
-// in v0 compat mode) and returns a CallerIdentity.
-func authenticateFromBearer(srv *server.Server, r *http.Request, token string) *auth.CallerIdentity {
-	// Try PAT.
-	if strings.HasPrefix(token, "by_") {
-		return authenticateFromPAT(srv, r, token)
-	}
-
-	// Static token fallback (v0 compat — only when OIDC is not configured).
-	if srv.Config.OIDC == nil && !srv.Config.Server.Token.IsEmpty() {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1 {
-			return &auth.CallerIdentity{
-				Sub:    "admin",
-				Role:   auth.RoleAdmin,
-				Source: auth.AuthSourceStaticToken,
-			}
-		}
-	}
-	return nil
 }
 
 // EnrollCredential handles POST /api/v1/users/me/credentials/{service}.

@@ -248,7 +248,8 @@ Two authentication mechanisms, tried in order:
    the owning user's current role.
 
 When neither is present, the request is rejected with 401. The v0
-static bearer token is removed.
+static bearer token (`server.token` / `BLOCKYARD_SERVER_TOKEN`) has been
+superseded by PATs and is no longer supported.
 
 ## Graceful Shutdown
 

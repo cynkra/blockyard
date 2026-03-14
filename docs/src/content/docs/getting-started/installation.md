@@ -19,7 +19,6 @@ docker run -d \
   -p 8080:8080 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v blockyard-data:/data \
-  -e BLOCKYARD_SERVER_TOKEN=your-secret-token \
   -e BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.3 \
   ghcr.io/cynkra/blockyard:latest
 ```
@@ -27,10 +26,9 @@ docker run -d \
 This gives Blockyard access to Docker for spawning worker containers, and
 persists application data (bundles, database) in a named volume.
 
-The static `BLOCKYARD_SERVER_TOKEN` is used for API authentication in
-standalone mode (no OIDC). When OIDC is configured, use
-[Personal Access Tokens](/guides/authorization/#personal-access-tokens)
-instead.
+API authentication requires OIDC configuration and
+[Personal Access Tokens](/guides/authorization/#personal-access-tokens).
+See the [Authorization guide](/guides/authorization/) for details.
 
 ## Running from source
 
@@ -44,7 +42,7 @@ Copy and edit the example configuration:
 
 ```bash
 cp blockyard.toml my-config.toml
-# Edit my-config.toml — at minimum, set docker.image and server.token
+# Edit my-config.toml — at minimum, set docker.image
 ```
 
 Run the server:

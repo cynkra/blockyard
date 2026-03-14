@@ -48,7 +48,7 @@ The server is configured via a TOML file. Every value can be overridden by an
 environment variable, which takes precedence — this is the recommended approach
 for secrets in container deployments. The env var name is the config key path
 uppercased with `BLOCKYARD_` prefix and dots replaced by underscores (e.g.
-`[server].token` → `BLOCKYARD_SERVER_TOKEN`).
+`[server].session_secret` → `BLOCKYARD_SERVER_SESSION_SECRET`).
 
 **Config file location:** the server looks for `blockyard.toml` in the current
 working directory by default. Override with `--config <path>`.
@@ -61,9 +61,7 @@ require a restart; there is no hot reload.
 ```toml
 [server]
 bind             = "0.0.0.0:8080"
-token            = "..."   # bearer token for control plane auth (v0)
-                            # use BLOCKYARD_SERVER_TOKEN env var in production
-                            # removed in v1 wrap-up; replaced by Personal Access Tokens
+# token field removed — superseded by Personal Access Tokens (v1 wrap-up §2)
 shutdown_timeout = "30s"   # drain window on SIGTERM
 
 [docker]

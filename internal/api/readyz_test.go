@@ -32,19 +32,16 @@ func testServerForReadyz(t *testing.T) *server.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
 
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			Token: config.NewSecret("test-token"),
-		},
-	}
+	cfg := &config.Config{}
 	return server.NewServer(cfg, mock.New(), database)
 }
 
-// readyzReq creates a GET /readyz request with the test bearer token.
+// readyzReq creates a GET /readyz request with the test PAT bearer token.
 func readyzReq() *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	return req
 }
 
@@ -135,7 +132,7 @@ func TestMetricsEndpointEnabled(t *testing.T) {
 
 	router := NewRouter(srv)
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -232,11 +229,8 @@ func TestReadyzDockerFail(t *testing.T) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			Token: config.NewSecret("test-token"),
-		},
-	}
+	seedTestAdmin(t, database)
+	cfg := &config.Config{}
 	be := &failingBackend{MockBackend: mock.New()}
 	srv := server.NewServer(cfg, be, database)
 

@@ -35,7 +35,6 @@ type TelemetryConfig struct {
 
 type ServerConfig struct {
 	Bind            string   `toml:"bind"`
-	Token           Secret   `toml:"token"`
 	SessionSecret   *Secret  `toml:"session_secret"` // required when [oidc] is set
 	ExternalURL     string   `toml:"external_url"`
 	ShutdownTimeout Duration `toml:"shutdown_timeout"`

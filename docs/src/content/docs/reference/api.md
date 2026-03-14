@@ -6,10 +6,8 @@ description: Complete reference for the Blockyard control plane API.
 All endpoints are under `/api/v1/` and require authentication (except
 `/healthz`, `/readyz`, and `/metrics`).
 
-**Without OIDC (v0 mode):** use the static bearer token from your config file.
-
-**With OIDC:** use a [Personal Access Token](/guides/authorization/#personal-access-tokens)
-or an OIDC session cookie (browser).
+Authenticate with a [Personal Access Token](/guides/authorization/#personal-access-tokens)
+(`Authorization: Bearer by_...`) or an OIDC session cookie (browser).
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" ...

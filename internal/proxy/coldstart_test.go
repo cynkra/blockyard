@@ -21,7 +21,7 @@ func testColdstartServer(t *testing.T) *server.Server {
 
 	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,
@@ -203,7 +203,7 @@ func testColdstartServerWithBackend(t *testing.T, be backend.Backend) *server.Se
 
 	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
 			Image:        "test-image",
 			ShinyPort:    3838,

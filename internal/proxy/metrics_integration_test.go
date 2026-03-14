@@ -91,7 +91,7 @@ func TestMetricsColdStartSpawn(t *testing.T) {
 	// Create app without starting it (cold start path)
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"cold-metrics"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	var created map[string]interface{}
@@ -101,7 +101,7 @@ func TestMetricsColdStartSpawn(t *testing.T) {
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
@@ -197,7 +197,7 @@ func TestMetricsBundleUploaded(t *testing.T) {
 	// Create app
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"bundle-metrics"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	var created map[string]interface{}
@@ -209,7 +209,7 @@ func TestMetricsBundleUploaded(t *testing.T) {
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +290,7 @@ func TestMetricsCapacityDoesNotSpawn(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
 		bytes.NewReader([]byte(`{"name":"cap-metrics"}`)))
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	var created map[string]interface{}
@@ -330,7 +330,7 @@ func TestMetricsCapacityDoesNotSpawn(t *testing.T) {
 func getAppID(t *testing.T, ts *httptest.Server, name string) string {
 	t.Helper()
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Authorization", "Bearer "+testPAT)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
