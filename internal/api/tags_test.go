@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
@@ -204,8 +203,8 @@ func TestNonAdminCannotCreateTags(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	// Publisher role cannot manage tags (only admin can)
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	token := idp.IssueJWT("user-1", []string{"developers"})
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "publisher")
+	token := idp.IssueJWT("user-1", []string{})
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/tags", token,

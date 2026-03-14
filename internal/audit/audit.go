@@ -27,8 +27,7 @@ const (
 	ActionCredentialEnroll  Action = "credential.enroll"
 	ActionUserLogin         Action = "user.login"
 	ActionUserLogout        Action = "user.logout"
-	ActionRoleMappingSet    Action = "role_mapping.set"
-	ActionRoleMappingDelete Action = "role_mapping.delete"
+	ActionUserUpdate Action = "user.update"
 )
 
 // Entry is a single audit log record.

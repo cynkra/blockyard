@@ -74,8 +74,8 @@ type OidcConfig struct {
 	IssuerURL    string   `toml:"issuer_url"`
 	ClientID     string   `toml:"client_id"`
 	ClientSecret Secret   `toml:"client_secret"`
-	GroupsClaim  string   `toml:"groups_claim"`
 	CookieMaxAge Duration `toml:"cookie_max_age"`
+	InitialAdmin string   `toml:"initial_admin"`
 }
 
 type OpenbaoConfig struct {
@@ -188,9 +188,6 @@ func applyDefaults(cfg *Config) {
 }
 
 func oidcDefaults(c *OidcConfig) {
-	if c.GroupsClaim == "" {
-		c.GroupsClaim = "groups"
-	}
 	if c.CookieMaxAge.Duration == 0 {
 		c.CookieMaxAge.Duration = 24 * time.Hour
 	}

@@ -96,7 +96,6 @@ func TestCookieMalformedEmptySegments(t *testing.T) {
 func TestUserSessionStoreSetGet(t *testing.T) {
 	store := NewUserSessionStore()
 	store.Set("alice", &UserSession{
-		Groups:       []string{"admins"},
 		AccessToken:  "at-1",
 		RefreshToken: "rt-1",
 		ExpiresAt:    1700001000,
@@ -108,9 +107,6 @@ func TestUserSessionStoreSetGet(t *testing.T) {
 	}
 	if sess.AccessToken != "at-1" {
 		t.Errorf("AccessToken = %q", sess.AccessToken)
-	}
-	if len(sess.Groups) != 1 || sess.Groups[0] != "admins" {
-		t.Errorf("Groups = %v", sess.Groups)
 	}
 }
 
@@ -124,18 +120,13 @@ func TestUserSessionStoreGetReturnsNilForMissing(t *testing.T) {
 func TestUserSessionStoreGetReturnsCopy(t *testing.T) {
 	store := NewUserSessionStore()
 	store.Set("alice", &UserSession{
-		Groups:      []string{"admins"},
 		AccessToken: "at-1",
 	})
 
 	sess := store.Get("alice")
-	sess.Groups = append(sess.Groups, "mutated")
 	sess.AccessToken = "mutated"
 
 	original := store.Get("alice")
-	if len(original.Groups) != 1 {
-		t.Error("mutation leaked through to stored session")
-	}
 	if original.AccessToken != "at-1" {
 		t.Error("access token mutation leaked through to stored session")
 	}

@@ -12,7 +12,6 @@ import (
 // from a session. Stored in the request context by the auth middleware.
 type AuthenticatedUser struct {
 	Sub         string
-	Groups      []string
 	AccessToken string
 }
 
@@ -40,10 +39,7 @@ func ContextWithUser(ctx context.Context, u *AuthenticatedUser) context.Context 
 //
 // When OIDC is not configured (v0 compat), the middleware passes
 // all requests through unchanged (no identity in context).
-//
-// roleCache may be nil when OIDC is not configured; in that case,
-// CallerIdentity is not injected.
-func AppAuthMiddleware(deps *Deps, roleCache *RoleMappingCache) func(http.Handler) http.Handler {
+func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// If OIDC is not configured, pass through (v0 compat).
@@ -111,17 +107,28 @@ func AppAuthMiddleware(deps *Deps, roleCache *RoleMappingCache) func(http.Handle
 
 			user := &AuthenticatedUser{
 				Sub:         cookie.Sub,
-				Groups:      session.Groups,
 				AccessToken: session.AccessToken,
 			}
 			ctx := context.WithValue(r.Context(), userKey, user)
 
-			// Derive role and insert CallerIdentity.
-			if roleCache != nil {
+			// Look up user role from database.
+			if deps.DB != nil {
+				dbUser, err := deps.DB.GetUser(cookie.Sub)
+				if err != nil {
+					slog.Warn("failed to look up user for role",
+						"sub", cookie.Sub, "error", err)
+				}
+				role := RoleViewer // default
+				if dbUser != nil && dbUser.Active {
+					role = ParseRole(dbUser.Role)
+				} else if dbUser != nil && !dbUser.Active {
+					// Deactivated user — deny access.
+					next.ServeHTTP(w, r)
+					return
+				}
 				caller := &CallerIdentity{
 					Sub:    cookie.Sub,
-					Groups: session.Groups,
-					Role:   DeriveRole(session.Groups, roleCache),
+					Role:   role,
 					Source: AuthSourceSession,
 				}
 				ctx = ContextWithCaller(ctx, caller)

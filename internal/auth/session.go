@@ -82,7 +82,6 @@ func DecodeCookie(value string, key *SigningKey) (*CookiePayload, error) {
 
 // UserSession holds per-user session data stored server-side. Keyed by sub.
 type UserSession struct {
-	Groups       []string
 	AccessToken  string
 	RefreshToken string
 	ExpiresAt    int64 // unix timestamp
@@ -138,7 +137,6 @@ func (s *UserSessionStore) Get(sub string) *UserSession {
 	}
 	// Return a copy to avoid holding the lock.
 	cp := *sess
-	cp.Groups = append([]string(nil), sess.Groups...)
 	return &cp
 }
 

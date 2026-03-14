@@ -435,9 +435,6 @@ func TestParseOidcConfig(t *testing.T) {
 	if cfg.OIDC.ClientSecret.Expose() != "my-secret" {
 		t.Errorf("client_secret = %q", cfg.OIDC.ClientSecret.Expose())
 	}
-	if cfg.OIDC.GroupsClaim != "groups" {
-		t.Errorf("expected default groups_claim 'groups', got %q", cfg.OIDC.GroupsClaim)
-	}
 	if cfg.OIDC.CookieMaxAge.Duration != 24*time.Hour {
 		t.Errorf("expected default cookie_max_age 24h, got %v", cfg.OIDC.CookieMaxAge.Duration)
 	}
@@ -495,12 +492,8 @@ func TestValidationRejectsOidcWithoutSessionSecret(t *testing.T) {
 }
 
 func TestEnvVarOverrideOidcFields(t *testing.T) {
-	t.Setenv("BLOCKYARD_OIDC_GROUPS_CLAIM", "roles")
 	t.Setenv("BLOCKYARD_OIDC_COOKIE_MAX_AGE", "12h")
 	cfg := loadFromString(t, oidcTOML(t))
-	if cfg.OIDC.GroupsClaim != "roles" {
-		t.Errorf("groups_claim = %q, want 'roles'", cfg.OIDC.GroupsClaim)
-	}
 	if cfg.OIDC.CookieMaxAge.Duration != 12*time.Hour {
 		t.Errorf("cookie_max_age = %v, want 12h", cfg.OIDC.CookieMaxAge.Duration)
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
 )
@@ -33,13 +34,11 @@ func UserAuth(srv *server.Server) func(http.Handler) http.Handler {
 				return
 			}
 
-			deps := srv.AuthDeps()
-
 			// Try session cookie.
-			if deps.SigningKey != nil {
+			if srv.SigningKey != nil {
 				cookieValue := extractSessionCookie(r)
 				if cookieValue != "" {
-					caller := authenticateFromCookie(deps, srv.RoleCache, cookieValue)
+					caller := authenticateFromCookie(srv, cookieValue)
 					if caller != nil {
 						ctx := auth.ContextWithCaller(r.Context(), caller)
 						next.ServeHTTP(w, r.WithContext(ctx))
@@ -75,7 +74,8 @@ func extractSessionCookie(r *http.Request) string {
 }
 
 // authenticateFromCookie validates a session cookie and returns a CallerIdentity.
-func authenticateFromCookie(deps *auth.Deps, roleCache *auth.RoleMappingCache, cookieValue string) *auth.CallerIdentity {
+func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.CallerIdentity {
+	deps := srv.AuthDeps()
 	cookie, err := auth.DecodeCookie(cookieValue, deps.SigningKey)
 	if err != nil {
 		return nil
@@ -94,10 +94,22 @@ func authenticateFromCookie(deps *auth.Deps, roleCache *auth.RoleMappingCache, c
 		return nil
 	}
 
+	// Look up role from database.
+	role := auth.RoleViewer
+	if srv.DB != nil {
+		dbUser, err := srv.DB.GetUser(cookie.Sub)
+		if err != nil {
+			slog.Warn("failed to look up user role", "sub", cookie.Sub, "error", err)
+		} else if dbUser != nil && !dbUser.Active {
+			return nil // deactivated
+		} else if dbUser != nil {
+			role = auth.ParseRole(dbUser.Role)
+		}
+	}
+
 	return &auth.CallerIdentity{
 		Sub:    cookie.Sub,
-		Groups: session.Groups,
-		Role:   auth.DeriveRole(session.Groups, roleCache),
+		Role:   role,
 		Source: auth.AuthSourceSession,
 	}
 }
@@ -113,11 +125,23 @@ func authenticateFromBearer(srv *server.Server, token string) *auth.CallerIdenti
 		if err != nil {
 			return nil
 		}
-		groups := claims.ExtractGroups(srv.Config.OIDC.GroupsClaim)
+
+		// Look up role from database.
+		role := auth.RoleViewer
+		if srv.DB != nil {
+			dbUser, err := srv.DB.GetUser(claims.Subject)
+			if err != nil {
+				slog.Warn("failed to look up user role", "sub", claims.Subject, "error", err)
+			} else if dbUser != nil && !dbUser.Active {
+				return nil
+			} else if dbUser != nil {
+				role = auth.ParseRole(dbUser.Role)
+			}
+		}
+
 		return &auth.CallerIdentity{
 			Sub:    claims.Subject,
-			Groups: groups,
-			Role:   auth.DeriveRole(groups, srv.RoleCache),
+			Role:   role,
 			Source: auth.AuthSourceJWT,
 		}
 	}
@@ -126,7 +150,6 @@ func authenticateFromBearer(srv *server.Server, token string) *auth.CallerIdenti
 	if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1 {
 		return &auth.CallerIdentity{
 			Sub:    "admin",
-			Groups: nil,
 			Role:   auth.RoleAdmin,
 			Source: auth.AuthSourceStaticToken,
 		}
@@ -184,5 +207,128 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// --- User management endpoints (admin only) ---
+
+// ListUsers handles GET /api/v1/users — list all users.
+func ListUsers(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			forbidden(w, "admin only")
+			return
+		}
+
+		users, err := srv.DB.ListUsers()
+		if err != nil {
+			serverError(w, err.Error())
+			return
+		}
+
+		if users == nil {
+			users = []db.UserRow{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(users)
+	}
+}
+
+// GetUser handles GET /api/v1/users/{sub} — get a single user.
+func GetUser(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			forbidden(w, "admin only")
+			return
+		}
+
+		sub := chi.URLParam(r, "sub")
+		user, err := srv.DB.GetUser(sub)
+		if err != nil {
+			serverError(w, err.Error())
+			return
+		}
+		if user == nil {
+			notFound(w, "user not found")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(user)
+	}
+}
+
+type updateUserRequest struct {
+	Role   *string `json:"role,omitempty"`
+	Active *bool   `json:"active,omitempty"`
+}
+
+// UpdateUser handles PATCH /api/v1/users/{sub} — update a user's role or active status.
+func UpdateUser(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			forbidden(w, "admin only")
+			return
+		}
+
+		sub := chi.URLParam(r, "sub")
+
+		// Prevent self-demotion/deactivation.
+		if sub == caller.Sub {
+			badRequest(w, "cannot modify your own account")
+			return
+		}
+
+		var body updateUserRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			badRequest(w, "invalid request body")
+			return
+		}
+
+		if body.Role == nil && body.Active == nil {
+			badRequest(w, "nothing to update")
+			return
+		}
+
+		// Validate role if provided.
+		if body.Role != nil {
+			role := auth.ParseRole(*body.Role)
+			if role == auth.RoleNone {
+				badRequest(w, "invalid role '"+*body.Role+"', must be one of: admin, publisher, viewer")
+				return
+			}
+		}
+
+		update := db.UserUpdate{
+			Role:   body.Role,
+			Active: body.Active,
+		}
+
+		user, err := srv.DB.UpdateUser(sub, update)
+		if err != nil {
+			serverError(w, err.Error())
+			return
+		}
+		if user == nil {
+			notFound(w, "user not found")
+			return
+		}
+
+		if srv.AuditLog != nil {
+			detail := map[string]any{}
+			if body.Role != nil {
+				detail["role"] = *body.Role
+			}
+			if body.Active != nil {
+				detail["active"] = *body.Active
+			}
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionUserUpdate, sub, detail))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(user)
 	}
 }

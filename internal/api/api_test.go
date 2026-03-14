@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
-	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
@@ -47,7 +46,6 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
 	handler := NewRouter(srv)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
@@ -1066,7 +1064,6 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
 
 	// Create and start audit log.
 	auditLog := audit.New(auditPath)

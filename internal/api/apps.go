@@ -223,7 +223,7 @@ func ListApps(srv *server.Server) http.HandlerFunc {
 		if caller.Role.CanViewAllApps() {
 			apps, err = srv.DB.ListApps()
 		} else {
-			apps, err = srv.DB.ListAccessibleApps(caller.Sub, caller.Groups)
+			apps, err = srv.DB.ListAccessibleApps(caller.Sub)
 		}
 		if err != nil {
 			serverError(w, "db error: "+err.Error())

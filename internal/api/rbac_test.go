@@ -1,16 +1,13 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
@@ -38,7 +35,6 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 			IssuerURL:    idp.IssuerURL(),
 			ClientID:     "blockyard",
 			ClientSecret: config.NewSecret("test-secret"),
-			GroupsClaim:  "groups",
 		},
 	}
 
@@ -50,8 +46,6 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-
-	srv.RoleCache = auth.NewRoleMappingCache()
 
 	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
 	if err != nil {
@@ -80,8 +74,8 @@ func TestPublisherCanCreateApp(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	token := idp.IssueJWT("user-1", []string{"developers"})
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "publisher")
+	token := idp.IssueJWT("user-1", []string{})
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token,
@@ -108,8 +102,8 @@ func TestViewerCannotCreateApp(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("readonly", auth.RoleViewer)
-	token := idp.IssueJWT("user-2", []string{"readonly"})
+	srv.DB.UpsertUserWithRole("user-2", "user2@example.com", "User 2", "viewer")
+	token := idp.IssueJWT("user-2", []string{})
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token,
@@ -129,18 +123,18 @@ func TestAdminSeesAllApps(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("publisher-1", "pub1@example.com", "Publisher 1", "publisher")
 
 	// Publisher creates an app
-	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
+	pubToken := idp.IssueJWT("publisher-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", pubToken,
 			strings.NewReader(`{"name":"app-1"}`)))
 	resp.Body.Close()
 
 	// Admin lists all apps
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	adminToken := idp.IssueJWT("admin-1", []string{})
 	resp, err := http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", adminToken, nil))
 	if err != nil {
@@ -164,10 +158,11 @@ func TestPublisherSeesOnlyOwnAndGrantedApps(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("publisher-1", "pub1@example.com", "Publisher 1", "publisher")
+	srv.DB.UpsertUserWithRole("publisher-2", "pub2@example.com", "Publisher 2", "publisher")
 
 	// Publisher-1 creates app-1
-	token1 := idp.IssueJWT("publisher-1", []string{"developers"})
+	token1 := idp.IssueJWT("publisher-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token1,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -176,7 +171,7 @@ func TestPublisherSeesOnlyOwnAndGrantedApps(t *testing.T) {
 	resp.Body.Close()
 
 	// Publisher-2 creates app-2
-	token2 := idp.IssueJWT("publisher-2", []string{"developers"})
+	token2 := idp.IssueJWT("publisher-2", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token2,
 			strings.NewReader(`{"name":"app-2"}`)))
@@ -230,10 +225,11 @@ func TestDeleteAppRequiresOwnerOrAdmin(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("collab-1", "collab@example.com", "Collab", "publisher")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -246,7 +242,7 @@ func TestDeleteAppRequiresOwnerOrAdmin(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "collab-1", "user", "collaborator", "owner-1")
 
 	// Collaborator cannot delete (gets 404)
-	collabToken := idp.IssueJWT("collab-1", []string{"developers"})
+	collabToken := idp.IssueJWT("collab-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("DELETE", ts.URL+"/api/v1/apps/"+appID, collabToken, nil))
 	resp.Body.Close()
@@ -268,8 +264,8 @@ func TestUnmappedUserHasNoRole(t *testing.T) {
 	defer idp.Close()
 	_, ts := testServerWithOIDC(t, idp)
 
-	// User with groups not in role_mappings
-	token := idp.IssueJWT("unmapped-user", []string{"unknown-group"})
+	// User not in the users table has no role
+	token := idp.IssueJWT("unmapped-user", []string{})
 
 	// Cannot create apps (403)
 	resp, _ := http.DefaultClient.Do(
@@ -296,8 +292,8 @@ func TestACLGrantRevokeCycle(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	adminToken := idp.IssueJWT("admin-1", []string{})
 
 	// Admin creates app
 	resp, _ := http.DefaultClient.Do(
@@ -348,84 +344,6 @@ func TestACLGrantRevokeCycle(t *testing.T) {
 	}
 }
 
-func TestRoleMappingCRUD(t *testing.T) {
-	idp := testutil.NewMockIdP()
-	defer idp.Close()
-	srv, ts := testServerWithOIDC(t, idp)
-
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
-
-	// Create mapping
-	resp, _ := http.DefaultClient.Do(
-		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/developers", adminToken,
-			strings.NewReader(`{"role":"publisher"}`)))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("create mapping: expected 204, got %d", resp.StatusCode)
-	}
-
-	// List mappings
-	resp, _ = http.DefaultClient.Do(
-		jwtReq("GET", ts.URL+"/api/v1/role-mappings", adminToken, nil))
-	var mappings []map[string]any
-	json.NewDecoder(resp.Body).Decode(&mappings)
-	resp.Body.Close()
-
-	// Should have at least the "developers" mapping (plus "admins" from RoleCache,
-	// but that's only in cache, not in DB; the listing comes from DB)
-	found := false
-	for _, m := range mappings {
-		if m["group_name"] == "developers" && m["role"] == "publisher" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("developers -> publisher mapping not found in list")
-	}
-
-	// Update mapping
-	resp, _ = http.DefaultClient.Do(
-		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/developers", adminToken,
-			strings.NewReader(`{"role":"admin"}`)))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("update mapping: expected 204, got %d", resp.StatusCode)
-	}
-
-	// Delete mapping
-	resp, _ = http.DefaultClient.Do(
-		jwtReq("DELETE", ts.URL+"/api/v1/role-mappings/developers", adminToken, nil))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete mapping: expected 204, got %d", resp.StatusCode)
-	}
-
-	// Delete again — should be 404
-	resp, _ = http.DefaultClient.Do(
-		jwtReq("DELETE", ts.URL+"/api/v1/role-mappings/developers", adminToken, nil))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("delete missing: expected 404, got %d", resp.StatusCode)
-	}
-}
-
-func TestViewerCannotManageRoleMappings(t *testing.T) {
-	idp := testutil.NewMockIdP()
-	defer idp.Close()
-	srv, ts := testServerWithOIDC(t, idp)
-
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
-	token := idp.IssueJWT("user-1", []string{"viewers"})
-
-	resp, _ := http.DefaultClient.Do(
-		jwtReq("GET", ts.URL+"/api/v1/role-mappings", token, nil))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", resp.StatusCode)
-	}
-}
-
 func TestStaticTokenFallback(t *testing.T) {
 	// No OIDC config — v0 compat mode. Static token should still work
 	// and give admin identity.
@@ -452,8 +370,9 @@ func TestSetAccessType(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("collab-1", "collab@example.com", "Collab", "publisher")
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -485,7 +404,7 @@ func TestSetAccessType(t *testing.T) {
 
 	// Collaborator cannot change access_type
 	srv.DB.GrantAppAccess(appID, "collab-1", "user", "collaborator", "owner-1")
-	collabToken := idp.IssueJWT("collab-1", []string{"developers"})
+	collabToken := idp.IssueJWT("collab-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, collabToken,
 			strings.NewReader(`{"access_type":"acl"}`)))
@@ -510,10 +429,11 @@ func TestContentViewerCannotDeploy(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "publisher")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -526,7 +446,7 @@ func TestContentViewerCannotDeploy(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer attempts deploy -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{"developers"})
+	viewerToken := idp.IssueJWT("viewer-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/bundles", viewerToken,
 			strings.NewReader("fake-bundle")))
@@ -541,8 +461,8 @@ func TestSelfGrantRejected(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	adminToken := idp.IssueJWT("admin-1", []string{})
 
 	// Admin creates app
 	resp, _ := http.DefaultClient.Do(
@@ -581,8 +501,8 @@ func TestGrantAccessInvalidKind(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	adminToken := idp.IssueJWT("admin-1", []string{})
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -608,8 +528,8 @@ func TestGrantAccessInvalidRole(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	adminToken := idp.IssueJWT("admin-1", []string{})
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -635,8 +555,8 @@ func TestGrantAccessEmptyPrincipal(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	adminToken := idp.IssueJWT("admin-1", []string{})
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -662,8 +582,8 @@ func TestGrantAccessInvalidJSON(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	adminToken := idp.IssueJWT("admin-1", []string{})
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -689,8 +609,8 @@ func TestRevokeAccessNonexistent(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	adminToken := idp.IssueJWT("admin-1", []string{})
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -710,50 +630,16 @@ func TestRevokeAccessNonexistent(t *testing.T) {
 	}
 }
 
-func TestSetRoleMappingInvalidRole(t *testing.T) {
-	idp := testutil.NewMockIdP()
-	defer idp.Close()
-	srv, ts := testServerWithOIDC(t, idp)
-
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
-
-	resp, _ := http.DefaultClient.Do(
-		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/some-group", adminToken,
-			strings.NewReader(`{"role":"superuser"}`)))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", resp.StatusCode)
-	}
-}
-
-func TestSetRoleMappingInvalidJSON(t *testing.T) {
-	idp := testutil.NewMockIdP()
-	defer idp.Close()
-	srv, ts := testServerWithOIDC(t, idp)
-
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
-
-	resp, _ := http.DefaultClient.Do(
-		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/some-group", adminToken,
-			strings.NewReader(`{not json`)))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", resp.StatusCode)
-	}
-}
-
 func TestNonAdminCannotGrantAccess(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Admin creates app
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	adminToken := idp.IssueJWT("admin-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -766,7 +652,7 @@ func TestNonAdminCannotGrantAccess(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "admin-1")
 
 	// Viewer tries to grant access -> 404 (hidden)
-	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	viewerToken := idp.IssueJWT("viewer-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/access", viewerToken,
 			strings.NewReader(`{"principal":"user-2","kind":"user","role":"viewer"}`)))
@@ -781,11 +667,11 @@ func TestNonAdminCannotRevokeAccess(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Admin creates app and grants access to user-2
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	adminToken := idp.IssueJWT("admin-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -798,7 +684,7 @@ func TestNonAdminCannotRevokeAccess(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "admin-1")
 
 	// Viewer tries to revoke access -> 404 (hidden)
-	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	viewerToken := idp.IssueJWT("viewer-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("DELETE", ts.URL+"/api/v1/apps/"+appID+"/access/user/user-2", viewerToken, nil))
 	resp.Body.Close()
@@ -807,144 +693,16 @@ func TestNonAdminCannotRevokeAccess(t *testing.T) {
 	}
 }
 
-// testServerWithOIDCAndAudit creates a test server with both OIDC and audit log configured.
-func testServerWithOIDCAndAudit(t *testing.T, idp *testutil.MockIdP) (*server.Server, *httptest.Server, string) {
-	t.Helper()
-	tmp := t.TempDir()
-	auditPath := tmp + "/audit.jsonl"
-
-	cfg := &config.Config{
-		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838},
-		Storage: config.StorageConfig{
-			BundleServerPath: tmp,
-			BundleWorkerPath: "/app",
-			BundleRetention:  50,
-			MaxBundleSize:    10 * 1024 * 1024,
-		},
-		Proxy: config.ProxyConfig{MaxWorkers: 100},
-		OIDC: &config.OidcConfig{
-			IssuerURL:    idp.IssuerURL(),
-			ClientID:     "blockyard",
-			ClientSecret: config.NewSecret("test-secret"),
-			GroupsClaim:  "groups",
-		},
-		Audit: &config.AuditConfig{Path: auditPath},
-	}
-
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-
-	be := mock.New()
-	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
-
-	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.JWKSCache = jwksCache
-
-	auditLog := audit.New(auditPath)
-	srv.AuditLog = auditLog
-	ctx, cancel := context.WithCancel(context.Background())
-	go auditLog.Run(ctx, auditPath)
-	t.Cleanup(cancel)
-
-	handler := NewRouter(srv)
-	ts := httptest.NewServer(handler)
-	t.Cleanup(ts.Close)
-
-	return srv, ts, auditPath
-}
-
-func TestRoleMappingCRUDWithAudit(t *testing.T) {
-	idp := testutil.NewMockIdP()
-	defer idp.Close()
-	srv, ts, auditPath := testServerWithOIDCAndAudit(t, idp)
-
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
-
-	// Create mapping
-	resp, _ := http.DefaultClient.Do(
-		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/developers", adminToken,
-			strings.NewReader(`{"role":"publisher"}`)))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("create mapping: expected 204, got %d", resp.StatusCode)
-	}
-
-	// Update mapping
-	resp, _ = http.DefaultClient.Do(
-		jwtReq("PUT", ts.URL+"/api/v1/role-mappings/developers", adminToken,
-			strings.NewReader(`{"role":"admin"}`)))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("update mapping: expected 204, got %d", resp.StatusCode)
-	}
-
-	// Delete mapping
-	resp, _ = http.DefaultClient.Do(
-		jwtReq("DELETE", ts.URL+"/api/v1/role-mappings/developers", adminToken, nil))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete mapping: expected 204, got %d", resp.StatusCode)
-	}
-
-	// Give the background writer time to flush.
-	time.Sleep(100 * time.Millisecond)
-
-	// Read audit log and verify role_mapping.set and role_mapping.delete entries.
-	data, err := io.ReadAll(openFile(t, auditPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	actions := make([]string, len(lines))
-	for i, line := range lines {
-		var entry map[string]any
-		json.Unmarshal([]byte(line), &entry)
-		if a, ok := entry["action"].(string); ok {
-			actions[i] = a
-		}
-	}
-
-	found := map[string]bool{}
-	for _, a := range actions {
-		found[a] = true
-	}
-	for _, expected := range []string{"role_mapping.set", "role_mapping.delete"} {
-		if !found[expected] {
-			t.Errorf("missing audit action %q in %v", expected, actions)
-		}
-	}
-
-	// Verify role_mapping.set appears at least twice (create + update).
-	setCount := 0
-	for _, a := range actions {
-		if a == "role_mapping.set" {
-			setCount++
-		}
-	}
-	if setCount < 2 {
-		t.Errorf("expected at least 2 role_mapping.set entries, got %d", setCount)
-	}
-}
-
 func TestPublicAppInUnfilteredList(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("other-user", "other@example.com", "Other", "publisher")
 
 	// Publisher creates app and makes it public
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"public-app"}`)))
@@ -959,7 +717,7 @@ func TestPublicAppInUnfilteredList(t *testing.T) {
 	resp.Body.Close()
 
 	// Another publisher (not owner, no grant) should see the public app
-	otherToken := idp.IssueJWT("other-user", []string{"developers"})
+	otherToken := idp.IssueJWT("other-user", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", otherToken, nil))
 	var apps []map[string]any
@@ -982,11 +740,11 @@ func TestViewerCannotStartApp(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -999,7 +757,7 @@ func TestViewerCannotStartApp(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer tries to start the app -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	viewerToken := idp.IssueJWT("viewer-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/start", viewerToken, nil))
 	resp.Body.Close()
@@ -1013,11 +771,11 @@ func TestViewerCannotStopApp(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -1030,7 +788,7 @@ func TestViewerCannotStopApp(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer tries to stop the app -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	viewerToken := idp.IssueJWT("viewer-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/stop", viewerToken, nil))
 	resp.Body.Close()
@@ -1044,10 +802,11 @@ func TestCollaboratorCanUpdateConfig(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("collab-1", "collab@example.com", "Collab", "publisher")
 
 	// Owner creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -1060,7 +819,7 @@ func TestCollaboratorCanUpdateConfig(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "collab-1", "user", "collaborator", "owner-1")
 
 	// Collaborator updates memory_limit -> 200
-	collabToken := idp.IssueJWT("collab-1", []string{"developers"})
+	collabToken := idp.IssueJWT("collab-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, collabToken,
 			strings.NewReader(`{"memory_limit":"512m"}`)))
@@ -1075,11 +834,11 @@ func TestViewerCannotUpdateConfig(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Owner creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -1092,7 +851,7 @@ func TestViewerCannotUpdateConfig(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer tries to update memory_limit -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	viewerToken := idp.IssueJWT("viewer-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, viewerToken,
 			strings.NewReader(`{"memory_limit":"512m"}`)))
@@ -1107,11 +866,11 @@ func TestNonAdminCannotDeleteTag(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("publisher-1", "pub@example.com", "Publisher", "publisher")
 
 	// Admin creates a tag
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	adminToken := idp.IssueJWT("admin-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/tags", adminToken,
 			strings.NewReader(`{"name":"production"}`)))
@@ -1124,7 +883,7 @@ func TestNonAdminCannotDeleteTag(t *testing.T) {
 	tagID := tag["id"].(string)
 
 	// Publisher tries to delete the tag -> 404
-	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
+	pubToken := idp.IssueJWT("publisher-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("DELETE", ts.URL+"/api/v1/tags/"+tagID, pubToken, nil))
 	resp.Body.Close()
@@ -1138,11 +897,11 @@ func TestViewerCanReadApp(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
+	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	ownerToken := idp.IssueJWT("owner-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -1155,7 +914,7 @@ func TestViewerCanReadApp(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer can GET the app -> 200
-	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	viewerToken := idp.IssueJWT("viewer-1", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps/"+appID, viewerToken, nil))
 	resp.Body.Close()

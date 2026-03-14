@@ -97,7 +97,6 @@ func TestCanManageRoles(t *testing.T) {
 func TestCallerContextRoundTrip(t *testing.T) {
 	caller := &auth.CallerIdentity{
 		Sub:    "user-1",
-		Groups: []string{"developers"},
 		Role:   auth.RolePublisher,
 		Source: auth.AuthSourceJWT,
 	}
@@ -122,44 +121,3 @@ func TestCallerFromContextNil(t *testing.T) {
 	}
 }
 
-func TestDeriveRoleNoMatches(t *testing.T) {
-	cache := auth.NewRoleMappingCache()
-	cache.Set("admins", auth.RoleAdmin)
-
-	role := auth.DeriveRole([]string{"developers"}, cache)
-	if role != auth.RoleNone {
-		t.Errorf("DeriveRole with no matches = %v, want RoleNone", role)
-	}
-}
-
-func TestDeriveRoleSingleMatch(t *testing.T) {
-	cache := auth.NewRoleMappingCache()
-	cache.Set("developers", auth.RolePublisher)
-
-	role := auth.DeriveRole([]string{"developers"}, cache)
-	if role != auth.RolePublisher {
-		t.Errorf("DeriveRole = %v, want RolePublisher", role)
-	}
-}
-
-func TestDeriveRoleHighestWins(t *testing.T) {
-	cache := auth.NewRoleMappingCache()
-	cache.Set("viewers", auth.RoleViewer)
-	cache.Set("admins", auth.RoleAdmin)
-	cache.Set("developers", auth.RolePublisher)
-
-	role := auth.DeriveRole([]string{"viewers", "developers", "admins"}, cache)
-	if role != auth.RoleAdmin {
-		t.Errorf("DeriveRole with multiple matches = %v, want RoleAdmin", role)
-	}
-}
-
-func TestDeriveRoleEmptyGroups(t *testing.T) {
-	cache := auth.NewRoleMappingCache()
-	cache.Set("admins", auth.RoleAdmin)
-
-	role := auth.DeriveRole(nil, cache)
-	if role != auth.RoleNone {
-		t.Errorf("DeriveRole with nil groups = %v, want RoleNone", role)
-	}
-}

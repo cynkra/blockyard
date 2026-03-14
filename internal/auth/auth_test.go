@@ -12,6 +12,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
@@ -30,7 +31,6 @@ func buildTestDeps(t *testing.T, idp *testutil.MockIdP) *auth.Deps {
 			IssuerURL:    idp.IssuerURL(),
 			ClientID:     "test-client",
 			ClientSecret: config.NewSecret("test-client-secret"),
-			GroupsClaim:  "groups",
 			CookieMaxAge: config.Duration{Duration: 24 * 60 * 60 * 1e9}, // 24h
 		},
 	}
@@ -41,7 +41,6 @@ func buildTestDeps(t *testing.T, idp *testutil.MockIdP) *auth.Deps {
 		cfg.OIDC.ClientID,
 		cfg.OIDC.ClientSecret.Expose(),
 		cfg.Server.ExternalURL+"/callback",
-		cfg.OIDC.GroupsClaim,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +61,7 @@ func buildTestRouter(deps *auth.Deps) http.Handler {
 	r.Get("/callback", auth.CallbackHandler(deps))
 	r.Post("/logout", auth.LogoutHandler(deps))
 	r.Route("/app", func(sub chi.Router) {
-		sub.Use(auth.AppAuthMiddleware(deps, nil))
+		sub.Use(auth.AppAuthMiddleware(deps))
 		sub.Get("/{name}/*", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("app content"))
@@ -262,9 +261,6 @@ func TestFullAuthFlow(t *testing.T) {
 	if sess.AccessToken != "mock-access-token" {
 		t.Errorf("AccessToken = %q", sess.AccessToken)
 	}
-	if len(sess.Groups) != 1 || sess.Groups[0] != "testers" {
-		t.Errorf("Groups = %v", sess.Groups)
-	}
 
 	// 4. Access /app/test/ with session cookie — should succeed.
 	req = httptest.NewRequest("GET", "/app/test/page", nil)
@@ -406,7 +402,6 @@ func TestMiddlewareContextCarriesUser(t *testing.T) {
 
 	// Set up session.
 	deps.UserSessions.Set("ctx-user", &auth.UserSession{
-		Groups:      []string{"admin"},
 		AccessToken: "at-ctx",
 		ExpiresAt:   nowUnix() + 3600,
 	})
@@ -417,7 +412,7 @@ func TestMiddlewareContextCarriesUser(t *testing.T) {
 
 	r := chi.NewRouter()
 	r.Route("/app", func(sub chi.Router) {
-		sub.Use(auth.AppAuthMiddleware(deps, nil))
+		sub.Use(auth.AppAuthMiddleware(deps))
 		sub.Get("/{name}/*", func(w http.ResponseWriter, r *http.Request) {
 			captured = auth.UserFromContext(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -440,9 +435,6 @@ func TestMiddlewareContextCarriesUser(t *testing.T) {
 	}
 	if captured.AccessToken != "at-ctx" {
 		t.Errorf("AccessToken = %q", captured.AccessToken)
-	}
-	if len(captured.Groups) != 1 || captured.Groups[0] != "admin" {
-		t.Errorf("Groups = %v", captured.Groups)
 	}
 }
 
@@ -508,7 +500,6 @@ func TestSecureFlagHTTPS(t *testing.T) {
 			IssuerURL:    idp.IssuerURL(),
 			ClientID:     "test-client",
 			ClientSecret: config.NewSecret("test-client-secret"),
-			GroupsClaim:  "groups",
 			CookieMaxAge: config.Duration{Duration: 24 * 60 * 60 * 1e9},
 		},
 	}
@@ -519,7 +510,6 @@ func TestSecureFlagHTTPS(t *testing.T) {
 		cfg.OIDC.ClientID,
 		cfg.OIDC.ClientSecret.Expose(),
 		cfg.Server.ExternalURL+"/callback",
-		cfg.OIDC.GroupsClaim,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -661,7 +651,6 @@ func TestMiddlewareTokenRefresh(t *testing.T) {
 
 	// Set up a session with near-expiry access token (ExpiresAt within 60s).
 	deps.UserSessions.Set("refresh-user", &auth.UserSession{
-		Groups:       []string{"testers"},
 		AccessToken:  "old-access-token",
 		RefreshToken: "mock-refresh-token",
 		ExpiresAt:    nowUnix() + 30, // within 60s threshold
@@ -674,7 +663,7 @@ func TestMiddlewareTokenRefresh(t *testing.T) {
 
 	r := chi.NewRouter()
 	r.Route("/app", func(sub chi.Router) {
-		sub.Use(auth.AppAuthMiddleware(deps, nil))
+		sub.Use(auth.AppAuthMiddleware(deps))
 		sub.Get("/{name}/*", func(w http.ResponseWriter, r *http.Request) {
 			captured = auth.UserFromContext(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -712,7 +701,6 @@ func TestMiddlewareTokenRefreshFailure(t *testing.T) {
 	// Set up a session that needs refresh, but with an invalid refresh token.
 	// The MockIdP will still succeed — so we close the IdP to force failure.
 	deps.UserSessions.Set("fail-refresh-user", &auth.UserSession{
-		Groups:       []string{"testers"},
 		AccessToken:  "old-access-token",
 		RefreshToken: "invalid-refresh-token",
 		ExpiresAt:    nowUnix() + 30, // within 60s threshold
@@ -728,7 +716,7 @@ func TestMiddlewareTokenRefreshFailure(t *testing.T) {
 
 	r := chi.NewRouter()
 	r.Route("/app", func(sub chi.Router) {
-		sub.Use(auth.AppAuthMiddleware(deps, nil))
+		sub.Use(auth.AppAuthMiddleware(deps))
 		sub.Get("/{name}/*", func(w http.ResponseWriter, r *http.Request) {
 			captured = auth.UserFromContext(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -787,7 +775,7 @@ func TestMiddlewareInvalidCookieSignature(t *testing.T) {
 
 	r := chi.NewRouter()
 	r.Route("/app", func(sub chi.Router) {
-		sub.Use(auth.AppAuthMiddleware(deps, nil))
+		sub.Use(auth.AppAuthMiddleware(deps))
 		sub.Get("/{name}/*", func(w http.ResponseWriter, r *http.Request) {
 			captured = auth.UserFromContext(r.Context())
 			w.WriteHeader(http.StatusOK)
@@ -814,24 +802,32 @@ func TestMiddlewareWithRoleCache(t *testing.T) {
 
 	deps := buildTestDeps(t, idp)
 
-	// Set up session with groups.
+	// Open an in-memory database and create a user with publisher role.
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	deps.DB = database
+
+	_, err = database.UpsertUserWithRole("role-user", "role@example.com", "Role User", "publisher")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up session.
 	deps.UserSessions.Set("role-user", &auth.UserSession{
-		Groups:      []string{"deployers"},
 		AccessToken: "at-role",
 		ExpiresAt:   nowUnix() + 3600,
 	})
 	cookie := &auth.CookiePayload{Sub: "role-user", IssuedAt: nowUnix()}
 	cookieValue, _ := cookie.Encode(deps.SigningKey)
 
-	// Set up role mapping cache.
-	roleCache := auth.NewRoleMappingCache()
-	roleCache.Set("deployers", auth.RolePublisher)
-
 	var captured *auth.CallerIdentity
 
 	r := chi.NewRouter()
 	r.Route("/app", func(sub chi.Router) {
-		sub.Use(auth.AppAuthMiddleware(deps, roleCache))
+		sub.Use(auth.AppAuthMiddleware(deps))
 		sub.Get("/{name}/*", func(w http.ResponseWriter, r *http.Request) {
 			captured = auth.CallerFromContext(r.Context())
 			w.WriteHeader(http.StatusOK)

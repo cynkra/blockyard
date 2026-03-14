@@ -29,11 +29,12 @@ type AccessGrant struct {
 //	0. Public app + nil caller -> RelationAnonymous
 //	1. System admin -> RelationAdmin (overrides all)
 //	2. App owner -> RelationOwner
-//	3. Explicit ACL grants (user + group) -> highest content role
-//	4. Public app + authenticated caller with no grants -> RelationAnonymous
-//	5. No match -> RelationNone
+//	3. Explicit user ACL grants -> highest content role
+//	4. logged_in app + authenticated caller -> RelationContentViewer
+//	5. Public app + authenticated caller with no grants -> RelationAnonymous
+//	6. No match -> RelationNone
 //
-// accessType is the app's access_type column ("acl" or "public").
+// accessType is the app's access_type column ("acl", "logged_in", or "public").
 // caller may be nil for unauthenticated requests to public apps.
 func EvaluateAccess(
 	caller *auth.CallerIdentity,
@@ -59,25 +60,15 @@ func EvaluateAccess(
 		return RelationOwner
 	}
 
-	// 3. ACL grants — collect all matching grants and take max role
+	// 3. User ACL grants — collect matching user grants and take max role
 	best := ContentRole(-1) // sentinel below ContentRoleViewer
 	found := false
 	for _, g := range grants {
-		match := false
-		switch g.Kind {
-		case AccessKindUser:
-			match = g.Principal == caller.Sub
-		case AccessKindGroup:
-			for _, cg := range caller.Groups {
-				if cg == g.Principal {
-					match = true
-					break
-				}
+		if g.Kind == AccessKindUser && g.Principal == caller.Sub {
+			if g.Role > best {
+				best = g.Role
+				found = true
 			}
-		}
-		if match && g.Role > best {
-			best = g.Role
-			found = true
 		}
 	}
 
@@ -90,7 +81,12 @@ func EvaluateAccess(
 		}
 	}
 
-	// 4. Public app — authenticated caller with no explicit grants
+	// 4. logged_in app — any authenticated user gets viewer access
+	if accessType == "logged_in" {
+		return RelationContentViewer
+	}
+
+	// 5. Public app — authenticated caller with no explicit grants
 	if accessType == "public" {
 		return RelationAnonymous
 	}

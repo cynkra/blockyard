@@ -13,11 +13,9 @@ import (
 // APIAuth returns a chi middleware that authenticates control-plane requests.
 //
 // When OIDC is configured:
-//  1. Extract Bearer token from Authorization header
-//  2. Validate as JWT against the IdP's JWKS
-//  3. Extract sub + groups from claims
-//  4. Derive role from groups via RoleCache
-//  5. Store CallerIdentity in request context
+//  1. Try session cookie first
+//  2. Try JWT bearer token against the IdP's JWKS
+//  3. Reject
 //
 // When OIDC is not configured (v0 compat / dev mode):
 //  1. Extract Bearer token
@@ -26,6 +24,19 @@ import (
 func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Try session cookie first (when OIDC is configured).
+			if srv.Config.OIDC != nil && srv.SigningKey != nil {
+				cookieValue := extractSessionCookie(r)
+				if cookieValue != "" {
+					caller := authenticateFromCookie(srv, cookieValue)
+					if caller != nil {
+						ctx := auth.ContextWithCaller(r.Context(), caller)
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
+				}
+			}
+
 			token := extractBearerToken(r)
 			if token == "" {
 				writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
@@ -47,12 +58,22 @@ func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 					return
 				}
 
-				groups := claims.ExtractGroups(srv.Config.OIDC.GroupsClaim)
-				role := auth.DeriveRole(groups, srv.RoleCache)
+				// Look up user role from database.
+				role := auth.RoleViewer
+				if srv.DB != nil {
+					dbUser, err := srv.DB.GetUser(claims.Subject)
+					if err != nil {
+						slog.Warn("failed to look up user role", "sub", claims.Subject, "error", err)
+					} else if dbUser != nil && !dbUser.Active {
+						writeError(w, http.StatusForbidden, "forbidden", "account deactivated")
+						return
+					} else if dbUser != nil {
+						role = auth.ParseRole(dbUser.Role)
+					}
+				}
 
 				identity = &auth.CallerIdentity{
 					Sub:    claims.Subject,
-					Groups: groups,
 					Role:   role,
 					Source: auth.AuthSourceJWT,
 				}
@@ -65,7 +86,6 @@ func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 
 				identity = &auth.CallerIdentity{
 					Sub:    "admin",
-					Groups: nil,
 					Role:   auth.RoleAdmin,
 					Source: auth.AuthSourceStaticToken,
 				}

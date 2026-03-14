@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
@@ -17,24 +16,25 @@ func TestCatalogAdminSeesAllApps(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("admins", auth.RoleAdmin)
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("publisher-1", "pub1@example.com", "Publisher 1", "publisher")
+	srv.DB.UpsertUserWithRole("publisher-2", "pub2@example.com", "Publisher 2", "publisher")
 
 	// Two different publishers create apps
-	pub1Token := idp.IssueJWT("publisher-1", []string{"developers"})
+	pub1Token := idp.IssueJWT("publisher-1", []string{})
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", pub1Token,
 			strings.NewReader(`{"name":"app-one"}`)))
 	resp.Body.Close()
 
-	pub2Token := idp.IssueJWT("publisher-2", []string{"developers"})
+	pub2Token := idp.IssueJWT("publisher-2", []string{})
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", pub2Token,
 			strings.NewReader(`{"name":"app-two"}`)))
 	resp.Body.Close()
 
 	// Admin queries catalog — should see both
-	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	adminToken := idp.IssueJWT("admin-1", []string{})
 	resp, err := http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/catalog", adminToken, nil))
 	if err != nil {

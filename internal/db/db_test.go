@@ -496,20 +496,18 @@ func TestListCatalogTagFilter(t *testing.T) {
 	}
 }
 
-func TestListCatalogWithGroups(t *testing.T) {
+func TestListCatalogLoggedIn(t *testing.T) {
 	database := testDB(t)
 
-	app1, _ := database.CreateApp("group-app", "owner-1")
+	app1, _ := database.CreateApp("logged-in-app", "owner-1")
+	database.UpdateApp(app1.ID, AppUpdate{AccessType: strPtr("logged_in")})
 	database.CreateApp("private-app", "owner-2")
 
-	// Grant group access
-	database.GrantAppAccess(app1.ID, "team-a", "group", "viewer", "owner-1")
-
+	// Authenticated user sees logged_in apps even without explicit grant.
 	apps, total, err := database.ListCatalog(CatalogParams{
-		CallerSub:    "user-x",
-		CallerGroups: []string{"team-a"},
-		Page:         1,
-		PerPage:      10,
+		CallerSub: "user-x",
+		Page:      1,
+		PerPage:   10,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -633,49 +631,116 @@ func TestDeleteTagNonexistent(t *testing.T) {
 	}
 }
 
-func TestRoleMappings(t *testing.T) {
+func TestUserCRUD(t *testing.T) {
 	db := testDB(t)
 
-	// Create a role mapping.
-	if err := db.UpsertRoleMapping("admins", "admin"); err != nil {
-		t.Fatal(err)
-	}
-
-	// List and verify.
-	mappings, err := db.ListRoleMappings()
+	// UpsertUser creates a new user with default role.
+	user, err := db.UpsertUser("sub-1", "alice@example.com", "Alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mappings) != 1 {
-		t.Fatalf("expected 1 mapping, got %d", len(mappings))
+	if user.Sub != "sub-1" {
+		t.Errorf("expected sub-1, got %q", user.Sub)
 	}
-	if mappings[0].GroupName != "admins" || mappings[0].Role != "admin" {
-		t.Errorf("got mapping %+v", mappings[0])
+	if user.Email != "alice@example.com" {
+		t.Errorf("expected alice@example.com, got %q", user.Email)
 	}
-
-	// Update (upsert) the role.
-	if err := db.UpsertRoleMapping("admins", "viewer"); err != nil {
-		t.Fatal(err)
+	if user.Role != "viewer" {
+		t.Errorf("expected default role viewer, got %q", user.Role)
 	}
-	mappings, _ = db.ListRoleMappings()
-	if len(mappings) != 1 {
-		t.Fatalf("expected 1 mapping after upsert, got %d", len(mappings))
-	}
-	if mappings[0].Role != "viewer" {
-		t.Errorf("expected role viewer after upsert, got %q", mappings[0].Role)
+	if !user.Active {
+		t.Error("expected new user to be active")
 	}
 
-	// Delete.
-	deleted, err := db.DeleteRoleMapping("admins")
+	// GetUser retrieves the user.
+	fetched, err := db.GetUser("sub-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !deleted {
-		t.Error("expected deletion")
+	if fetched == nil || fetched.Sub != "sub-1" {
+		t.Errorf("expected user sub-1, got %v", fetched)
 	}
-	mappings, _ = db.ListRoleMappings()
-	if len(mappings) != 0 {
-		t.Errorf("expected 0 mappings after delete, got %d", len(mappings))
+
+	// GetUser returns nil for nonexistent user.
+	missing, err := db.GetUser("nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing != nil {
+		t.Error("expected nil for nonexistent user")
+	}
+
+	// UpsertUser on existing user preserves role and active.
+	db.UpdateUser("sub-1", UserUpdate{Role: strPtr("admin")})
+	user, err = db.UpsertUser("sub-1", "alice-new@example.com", "Alice Updated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Email != "alice-new@example.com" {
+		t.Errorf("expected updated email, got %q", user.Email)
+	}
+	if user.Name != "Alice Updated" {
+		t.Errorf("expected updated name, got %q", user.Name)
+	}
+	if user.Role != "admin" {
+		t.Errorf("expected preserved role admin, got %q", user.Role)
+	}
+
+	// ListUsers returns all users.
+	db.UpsertUser("sub-2", "bob@example.com", "Bob")
+	users, err := db.ListUsers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 2 {
+		t.Errorf("expected 2 users, got %d", len(users))
+	}
+
+	// UpdateUser changes role and active.
+	active := false
+	updated, err := db.UpdateUser("sub-2", UserUpdate{Role: strPtr("publisher"), Active: &active})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Role != "publisher" {
+		t.Errorf("expected publisher, got %q", updated.Role)
+	}
+	if updated.Active {
+		t.Error("expected inactive after update")
+	}
+
+	// UpdateUser for nonexistent user returns nil.
+	result, err := db.UpdateUser("nonexistent", UserUpdate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != nil {
+		t.Error("expected nil for nonexistent user update")
+	}
+}
+
+func TestUpsertUserWithRole(t *testing.T) {
+	db := testDB(t)
+
+	// UpsertUserWithRole sets a specific role on creation.
+	user, err := db.UpsertUserWithRole("admin-sub", "admin@example.com", "Admin", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Role != "admin" {
+		t.Errorf("expected admin role, got %q", user.Role)
+	}
+
+	// Subsequent UpsertUserWithRole does NOT overwrite the role.
+	user, err = db.UpsertUserWithRole("admin-sub", "admin-new@example.com", "Admin New", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Email != "admin-new@example.com" {
+		t.Errorf("expected updated email, got %q", user.Email)
+	}
+	if user.Role != "admin" {
+		t.Errorf("expected preserved role admin, got %q", user.Role)
 	}
 }
 
@@ -797,11 +862,11 @@ func TestListAccessibleApps(t *testing.T) {
 	db.CreateApp("private-app", "user-2")
 	app4, _ := db.CreateApp("granted-app", "user-2")
 	db.GrantAppAccess(app4.ID, "user-1", "user", "viewer", "user-2")
-	app5, _ := db.CreateApp("group-app", "user-2")
-	db.GrantAppAccess(app5.ID, "team-a", "group", "viewer", "user-2")
+	app5, _ := db.CreateApp("logged-in-app", "user-2")
+	db.UpdateApp(app5.ID, AppUpdate{AccessType: strPtr("logged_in")})
 
-	// user-1 should see: owned-app, public-app, granted-app, group-app
-	apps, err := db.ListAccessibleApps("user-1", []string{"team-a"})
+	// user-1 should see: owned-app, public-app, granted-app, logged-in-app
+	apps, err := db.ListAccessibleApps("user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,42 +874,27 @@ func TestListAccessibleApps(t *testing.T) {
 		t.Errorf("expected 4 accessible apps for user-1, got %d", len(apps))
 	}
 
-	// user-3 with no groups should see only public-app.
-	apps, err = db.ListAccessibleApps("user-3", nil)
+	// user-3 should see public-app and logged-in-app.
+	apps, err = db.ListAccessibleApps("user-3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(apps) != 1 {
-		t.Errorf("expected 1 accessible app for user-3, got %d", len(apps))
-	}
-	if len(apps) > 0 && apps[0].ID != app2.ID {
-		t.Errorf("expected public-app, got %q", apps[0].Name)
+	if len(apps) != 2 {
+		t.Errorf("expected 2 accessible apps for user-3, got %d", len(apps))
 	}
 
-	// user-2 should see all their owned apps + public.
-	apps, err = db.ListAccessibleApps("user-2", nil)
+	// user-2 should see all their owned apps + public + logged_in (deduplicated).
+	apps, err = db.ListAccessibleApps("user-2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// user-2 owns: public-app, private-app, granted-app, group-app (4 apps)
-	// plus public-app is also visible via access_type, but it's already owned.
+	// user-2 owns: public-app, private-app, granted-app, logged-in-app (4 apps)
+	// plus public-app and logged-in-app are also visible via access_type, but already owned.
 	if len(apps) != 4 {
 		t.Errorf("expected 4 accessible apps for user-2, got %d", len(apps))
 	}
 
 	_ = app1 // used above
-}
-
-func TestDeleteRoleMappingNonexistent(t *testing.T) {
-	db := testDB(t)
-
-	deleted, err := db.DeleteRoleMapping("nonexistent-group")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if deleted {
-		t.Error("expected false for nonexistent role mapping")
-	}
 }
 
 func TestRevokeAppAccessNonexistent(t *testing.T) {

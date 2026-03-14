@@ -32,10 +32,7 @@ type Server struct {
 	OIDCClient   *auth.OIDCClient
 	SigningKey    *auth.SigningKey
 	UserSessions *auth.UserSessionStore
-
-	// Authorization — always initialized (used in both OIDC and static-token modes).
-	RoleCache *auth.RoleMappingCache
-	JWKSCache *auth.JWKSCache // nil when OIDC is not configured
+	JWKSCache    *auth.JWKSCache // nil when OIDC is not configured
 
 	// Session token signing key — for credential exchange tokens.
 	// Derived from session_secret with a different domain string.
@@ -73,6 +70,7 @@ func (s *Server) AuthDeps() *auth.Deps {
 		SigningKey:    s.SigningKey,
 		UserSessions: s.UserSessions,
 		AuditLog:     s.AuditLog,
+		DB:           s.DB,
 	}
 }
 

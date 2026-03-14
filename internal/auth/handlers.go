@@ -17,6 +17,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/db"
 )
 
 // nowUnix returns the current time as a unix timestamp. Declared as a
@@ -37,6 +38,7 @@ type Deps struct {
 	SigningKey    *SigningKey
 	UserSessions *UserSessionStore
 	AuditLog     *audit.Log
+	DB           *db.DB
 }
 
 // secureFlag returns "; Secure" if external_url is HTTPS, empty
@@ -128,7 +130,6 @@ func LoginHandler(deps *Deps) http.HandlerFunc {
 		authURL := deps.OIDCClient.AuthCodeURL(state, nonce)
 
 		// Validate return_url to prevent open redirect attacks.
-		// Validate return_url to prevent open redirect attacks.
 		// Must be a path-only relative URL starting with "/" but not "//".
 		returnURL := r.URL.Query().Get("return_url")
 		parsed, err := url.Parse(returnURL)
@@ -192,7 +193,7 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			return
 		}
 
-		// 4. Extract sub and groups.
+		// 4. Extract sub, email, and name from ID token claims.
 		var subClaim string
 		if raw, ok := allClaims["sub"]; ok {
 			_ = json.Unmarshal(raw, &subClaim)
@@ -202,22 +203,61 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			return
 		}
-		groups := deps.OIDCClient.ExtractGroups(allClaims)
 
-		// 5. Store session server-side.
+		var emailClaim string
+		if raw, ok := allClaims["email"]; ok {
+			_ = json.Unmarshal(raw, &emailClaim)
+		}
+
+		var nameClaim string
+		if raw, ok := allClaims["name"]; ok {
+			_ = json.Unmarshal(raw, &nameClaim)
+		}
+
+		// 5. Upsert user in database.
+		if deps.DB != nil {
+			// Check if this is the initial_admin on first login.
+			if deps.Config.OIDC != nil && deps.Config.OIDC.InitialAdmin == subClaim {
+				existing, _ := deps.DB.GetUser(subClaim)
+				if existing == nil {
+					// First login — create as admin.
+					if _, err := deps.DB.UpsertUserWithRole(subClaim, emailClaim, nameClaim, "admin"); err != nil {
+						slog.Error("failed to upsert initial admin", "sub", subClaim, "error", err)
+					}
+				} else {
+					// Already exists — just update login info.
+					if _, err := deps.DB.UpsertUser(subClaim, emailClaim, nameClaim); err != nil {
+						slog.Error("failed to upsert user", "sub", subClaim, "error", err)
+					}
+				}
+			} else {
+				if _, err := deps.DB.UpsertUser(subClaim, emailClaim, nameClaim); err != nil {
+					slog.Error("failed to upsert user", "sub", subClaim, "error", err)
+				}
+			}
+
+			// Check if user is active.
+			dbUser, _ := deps.DB.GetUser(subClaim)
+			if dbUser != nil && !dbUser.Active {
+				slog.Warn("deactivated user attempted login", "sub", subClaim)
+				http.Error(w, "account deactivated", http.StatusForbidden)
+				return
+			}
+		}
+
+		// 6. Store session server-side.
 		expiresAt := nowUnix() + 300 // default 5 min
 		if !oauth2Token.Expiry.IsZero() {
 			expiresAt = oauth2Token.Expiry.Unix()
 		}
 
 		deps.UserSessions.Set(subClaim, &UserSession{
-			Groups:       groups,
 			AccessToken:  oauth2Token.AccessToken,
 			RefreshToken: oauth2Token.RefreshToken,
 			ExpiresAt:    expiresAt,
 		})
 
-		// 6. Build signed session cookie.
+		// 7. Build signed session cookie.
 		cookiePayload := &CookiePayload{
 			Sub:      subClaim,
 			IssuedAt: nowUnix(),
@@ -240,12 +280,12 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			cookieValue, secure, cookieMaxAge,
 		)
 
-		// 7. Clear the OIDC state cookie.
+		// 8. Clear the OIDC state cookie.
 		clearState := fmt.Sprintf(
 			"blockyard_oidc_state=; Path=/; HttpOnly%s; Max-Age=0", secure,
 		)
 
-		// 8. Emit audit event.
+		// 9. Emit audit event.
 		if deps.AuditLog != nil {
 			deps.AuditLog.Emit(audit.Entry{
 				Action:   audit.ActionUserLogin,
@@ -255,7 +295,7 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			})
 		}
 
-		// 9. Redirect to return_url.
+		// 10. Redirect to return_url.
 		w.Header().Add("Set-Cookie", sessionCookie)
 		w.Header().Add("Set-Cookie", clearState)
 		http.Redirect(w, r, statePayload.ReturnURL, http.StatusFound)

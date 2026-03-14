@@ -843,7 +843,6 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 			IssuerURL:    idp.IssuerURL(),
 			ClientID:     "blockyard",
 			ClientSecret: config.NewSecret("test-secret"),
-			GroupsClaim:  "groups",
 			CookieMaxAge: config.Duration{Duration: 24 * time.Hour},
 		},
 	}
@@ -856,8 +855,6 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-
-	srv.RoleCache = auth.NewRoleMappingCache()
 
 	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
 	if err != nil {
@@ -910,13 +907,12 @@ func createAndStartAppWithJWT(t *testing.T, ts *httptest.Server, name, token str
 }
 
 // makeSessionCookie creates a signed session cookie for the given sub
-// and registers a server-side session with the given groups.
-func makeSessionCookie(t *testing.T, srv *server.Server, sub string, groups []string) *http.Cookie {
+// and registers a server-side session.
+func makeSessionCookie(t *testing.T, srv *server.Server, sub string) *http.Cookie {
 	t.Helper()
 
 	// Register the server-side session.
 	srv.UserSessions.Set(sub, &auth.UserSession{
-		Groups:      groups,
 		AccessToken: "mock-access-token",
 		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	})
@@ -942,7 +938,7 @@ func TestProxyOIDCRedirectsUnauthenticated(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testProxyServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("publisher-1", "publisher-1@example.com", "Publisher", "publisher")
 	token := idp.IssueJWT("publisher-1", []string{"developers"})
 
 	createAndStartAppWithJWT(t, ts, "oidc-app", token)
@@ -971,15 +967,15 @@ func TestProxyOIDCDeniesUnauthorizedUser(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testProxyServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	srv.RoleCache.Set("viewers", auth.RoleViewer)
+	srv.DB.UpsertUserWithRole("publisher-1", "publisher-1@example.com", "Publisher", "publisher")
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer-1@example.com", "Viewer", "viewer")
 
 	// Publisher creates and starts app (access_type defaults to "acl").
 	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
 	createAndStartAppWithJWT(t, ts, "acl-app", pubToken)
 
 	// Another user with a mapped role but NO grant on this app.
-	cookie := makeSessionCookie(t, srv, "viewer-1", []string{"viewers"})
+	cookie := makeSessionCookie(t, srv, "viewer-1")
 
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -1002,7 +998,7 @@ func TestProxyOIDCAllowsPublicApp(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testProxyServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.DB.UpsertUserWithRole("publisher-1", "publisher-1@example.com", "Publisher", "publisher")
 
 	// Publisher creates and starts app.
 	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
@@ -1023,7 +1019,8 @@ func TestProxyOIDCAllowsPublicApp(t *testing.T) {
 	}
 
 	// Any authenticated user (even without a grant) should get 200.
-	cookie := makeSessionCookie(t, srv, "random-user", []string{"some-group"})
+	srv.DB.UpsertUserWithRole("random-user", "random@example.com", "Random", "viewer")
+	cookie := makeSessionCookie(t, srv, "random-user")
 	req, _ = http.NewRequest("GET", ts.URL+"/app/public-app/", nil)
 	req.AddCookie(cookie)
 	resp, err = http.DefaultClient.Do(req)

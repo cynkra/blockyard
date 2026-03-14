@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS apps (
     id                      TEXT PRIMARY KEY,
     name                    TEXT NOT NULL UNIQUE,
     owner                   TEXT NOT NULL DEFAULT 'admin',
-    access_type             TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'public')),
+    access_type             TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'logged_in', 'public')),
     active_bundle           TEXT REFERENCES bundles(id),
     max_workers_per_app     INTEGER,
     max_sessions_per_worker INTEGER DEFAULT 1,
@@ -49,10 +49,13 @@ CREATE TABLE IF NOT EXISTS app_access (
     PRIMARY KEY (app_id, principal, kind)
 );
 
-CREATE TABLE IF NOT EXISTS role_mappings (
-    group_name  TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('admin', 'publisher', 'viewer')),
-    PRIMARY KEY (group_name)
+CREATE TABLE IF NOT EXISTS users (
+    sub        TEXT PRIMARY KEY,
+    email      TEXT NOT NULL DEFAULT '',
+    name       TEXT NOT NULL DEFAULT '',
+    role       TEXT NOT NULL DEFAULT 'viewer',
+    active     INTEGER NOT NULL DEFAULT 1,
+    last_login TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -175,37 +178,20 @@ func (db *DB) ListApps() ([]AppRow, error) {
 }
 
 // ListAccessibleApps returns apps the caller can see: owned apps + apps
-// with an ACL grant matching the caller's sub or any of their groups +
-// public apps.
-func (db *DB) ListAccessibleApps(sub string, groups []string) ([]AppRow, error) {
-	args := []any{sub, sub} // owner check + direct user grant
-
-	groupClause := "SELECT 1 WHERE 0" // no groups -> never matches
-	if len(groups) > 0 {
-		placeholders := make([]string, len(groups))
-		for i, g := range groups {
-			placeholders[i] = "?"
-			args = append(args, g)
-		}
-		groupClause = strings.Join(placeholders, ", ")
-	}
-
+// with a user ACL grant + logged_in apps + public apps.
+func (db *DB) ListAccessibleApps(sub string) ([]AppRow, error) {
 	query := fmt.Sprintf(
 		`SELECT DISTINCT a.%s
 		 FROM apps a
 		 LEFT JOIN app_access aa ON a.id = aa.app_id
-		 WHERE a.access_type = 'public'
+		 WHERE a.access_type IN ('public', 'logged_in')
 		    OR a.owner = ?
-		    OR (aa.kind = 'user'  AND aa.principal = ?)
-		    OR (aa.kind = 'group' AND aa.principal IN (%s))
+		    OR (aa.kind = 'user' AND aa.principal = ?)
 		 ORDER BY a.created_at DESC`,
 		strings.ReplaceAll(appColumns, "\n\t\t", " "),
-		groupClause,
 	)
 
-	// Reorder args: the query uses owner=? then principal=? then group IN(?)
-	// which matches our args order: sub, sub, groups...
-	rows, err := db.Query(query, args...)
+	rows, err := db.Query(query, sub, sub)
 	if err != nil {
 		return nil, err
 	}
@@ -419,50 +405,122 @@ func scanApps(rows *sql.Rows) ([]AppRow, error) {
 	return apps, rows.Err()
 }
 
-// --- Role mappings ---
+// --- Users ---
 
-// RoleMappingRow represents a row from the role_mappings table.
-type RoleMappingRow struct {
-	GroupName string
-	Role      string
+// UserRow represents a row from the users table.
+type UserRow struct {
+	Sub       string `json:"sub"`
+	Email     string `json:"email"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	Active    bool   `json:"active"`
+	LastLogin string `json:"last_login"`
 }
 
-func (db *DB) ListRoleMappings() ([]RoleMappingRow, error) {
-	rows, err := db.Query("SELECT group_name, role FROM role_mappings")
+// UpsertUser creates or updates a user record on OIDC login.
+// On conflict (existing user), updates email, name, and last_login
+// but preserves role and active status set by admins.
+func (db *DB) UpsertUser(sub, email, name string) (*UserRow, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`INSERT INTO users (sub, email, name, last_login)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT (sub) DO UPDATE SET
+		     email = excluded.email,
+		     name = excluded.name,
+		     last_login = excluded.last_login`,
+		sub, email, name, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upsert user: %w", err)
+	}
+	return db.GetUser(sub)
+}
+
+// UpsertUserWithRole creates a user with a specific role (used for initial_admin).
+// If the user already exists, only updates email, name, and last_login.
+func (db *DB) UpsertUserWithRole(sub, email, name, role string) (*UserRow, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`INSERT INTO users (sub, email, name, role, last_login)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (sub) DO UPDATE SET
+		     email = excluded.email,
+		     name = excluded.name,
+		     last_login = excluded.last_login`,
+		sub, email, name, role, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upsert user with role: %w", err)
+	}
+	return db.GetUser(sub)
+}
+
+func (db *DB) GetUser(sub string) (*UserRow, error) {
+	var u UserRow
+	err := db.QueryRow(
+		"SELECT sub, email, name, role, active, last_login FROM users WHERE sub = ?", sub,
+	).Scan(&u.Sub, &u.Email, &u.Name, &u.Role, &u.Active, &u.LastLogin)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (db *DB) ListUsers() ([]UserRow, error) {
+	rows, err := db.Query(
+		"SELECT sub, email, name, role, active, last_login FROM users ORDER BY last_login DESC",
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var mappings []RoleMappingRow
+	var users []UserRow
 	for rows.Next() {
-		var m RoleMappingRow
-		if err := rows.Scan(&m.GroupName, &m.Role); err != nil {
+		var u UserRow
+		if err := rows.Scan(&u.Sub, &u.Email, &u.Name, &u.Role, &u.Active, &u.LastLogin); err != nil {
 			return nil, err
 		}
-		mappings = append(mappings, m)
+		users = append(users, u)
 	}
-	return mappings, rows.Err()
+	return users, rows.Err()
 }
 
-func (db *DB) UpsertRoleMapping(groupName, role string) error {
-	_, err := db.Exec(
-		`INSERT INTO role_mappings (group_name, role) VALUES (?, ?)
-		 ON CONFLICT (group_name) DO UPDATE SET role = excluded.role`,
-		groupName, role,
-	)
-	return err
+// UserUpdate holds optional fields for updating a user.
+type UserUpdate struct {
+	Role   *string
+	Active *bool
 }
 
-func (db *DB) DeleteRoleMapping(groupName string) (bool, error) {
-	result, err := db.Exec(
-		"DELETE FROM role_mappings WHERE group_name = ?", groupName,
+func (db *DB) UpdateUser(sub string, u UserUpdate) (*UserRow, error) {
+	user, err := db.GetUser(sub)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, nil
+	}
+
+	if u.Role != nil {
+		user.Role = *u.Role
+	}
+	if u.Active != nil {
+		user.Active = *u.Active
+	}
+
+	_, err = db.Exec(
+		"UPDATE users SET role = ?, active = ? WHERE sub = ?",
+		user.Role, user.Active, sub,
 	)
 	if err != nil {
-		return false, err
+		return nil, fmt.Errorf("update user: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	return n > 0, nil
+
+	return db.GetUser(sub)
 }
 
 // --- App access (ACL) ---
@@ -633,13 +691,12 @@ func (db *DB) ListAppTags(appID string) ([]TagRow, error) {
 
 // CatalogParams holds query parameters for the catalog listing.
 type CatalogParams struct {
-	CallerSub    string
-	CallerGroups []string
-	CallerRole   string // "admin", "publisher", "viewer", or ""
-	Tag          string
-	Search       string
-	Page         int
-	PerPage      int
+	CallerSub  string
+	CallerRole string // "admin", "publisher", "viewer", or ""
+	Tag        string
+	Search     string
+	Page       int
+	PerPage    int
 }
 
 // ListCatalog returns apps visible to the caller with access control,
@@ -652,32 +709,19 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 	if params.CallerRole == "admin" {
 		// Admin sees everything — no filter
 	} else if params.CallerSub != "" {
-		groupPlaceholders := "''" // no groups — will never match
-		if len(params.CallerGroups) > 0 {
-			ph := make([]string, len(params.CallerGroups))
-			for i := range ph {
-				ph[i] = "?"
-			}
-			groupPlaceholders = strings.Join(ph, ", ")
-		}
-		accessFilter := fmt.Sprintf(`(
+		accessFilter := `(
 			apps.owner = ?
-			OR apps.access_type = 'public'
+			OR apps.access_type IN ('public', 'logged_in')
 			OR EXISTS (
 				SELECT 1 FROM app_access
 				WHERE app_access.app_id = apps.id
-				AND (
-					(app_access.kind = 'user' AND app_access.principal = ?)
-					OR (app_access.kind = 'group' AND app_access.principal IN (%s))
-				)
+				AND app_access.kind = 'user'
+				AND app_access.principal = ?
 			)
-		)`, groupPlaceholders)
+		)`
 
 		conditions = append(conditions, accessFilter)
 		args = append(args, params.CallerSub, params.CallerSub)
-		for _, g := range params.CallerGroups {
-			args = append(args, g)
-		}
 	} else {
 		// Unauthenticated — public apps only
 		conditions = append(conditions, "apps.access_type = 'public'")

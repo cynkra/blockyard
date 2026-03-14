@@ -55,7 +55,7 @@ func NewRouter(srv *server.Server) http.Handler {
 	// UI routes — soft auth populates session context if available.
 	uiHandler := ui.New()
 	r.Group(func(r chi.Router) {
-		r.Use(auth.AppAuthMiddleware(authDeps, srv.RoleCache))
+		r.Use(auth.AppAuthMiddleware(authDeps))
 		uiHandler.RegisterRoutes(r, srv)
 	})
 
@@ -76,7 +76,7 @@ func NewRouter(srv *server.Server) http.Handler {
 	// Proxy routes with app-plane auth middleware (authenticate if possible).
 	r.Route("/app", func(sub chi.Router) {
 		sub.Use(httprate.LimitByIP(200, time.Minute))
-		sub.Use(auth.AppAuthMiddleware(authDeps, srv.RoleCache))
+		sub.Use(auth.AppAuthMiddleware(authDeps))
 		sub.Get("/{name}", proxy.RedirectTrailingSlash)
 		sub.Handle("/{name}/*", proxy.Handler(srv))
 	})
@@ -114,10 +114,10 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Get("/apps/{id}/access", ListAccess(srv))
 		r.Delete("/apps/{id}/access/{kind}/{principal}", RevokeAccess(srv))
 
-		// Role mapping management
-		r.Get("/role-mappings", ListRoleMappings(srv))
-		r.Put("/role-mappings/{group_name}", SetRoleMapping(srv))
-		r.Delete("/role-mappings/{group_name}", DeleteRoleMapping(srv))
+		// User management
+		r.Get("/users", ListUsers(srv))
+		r.Get("/users/{sub}", GetUser(srv))
+		r.Patch("/users/{sub}", UpdateUser(srv))
 
 		// Tag management
 		r.Get("/tags", ListTags(srv))

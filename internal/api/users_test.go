@@ -52,7 +52,6 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 			IssuerURL:    idp.IssuerURL(),
 			ClientID:     "blockyard",
 			ClientSecret: config.NewSecret("test-secret"),
-			GroupsClaim:  "groups",
 		},
 		Openbao: &config.OpenbaoConfig{
 			Address:     "http://mock-vault",
@@ -69,7 +68,6 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
 
 	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
 	if err != nil {
@@ -231,7 +229,6 @@ func TestUserAuthWithSessionCookie(t *testing.T) {
 
 	// Create a session.
 	srv.UserSessions.Set("cookie-user", &auth.UserSession{
-		Groups:      []string{"testers"},
 		AccessToken: "access-token",
 		ExpiresAt:   time.Now().Unix() + 3600,
 	})
@@ -275,7 +272,6 @@ func TestUserAuthWithExpiredCookie(t *testing.T) {
 	srv.UserSessions = auth.NewUserSessionStore()
 
 	srv.UserSessions.Set("expired-user", &auth.UserSession{
-		Groups:      []string{"testers"},
 		AccessToken: "access-token",
 		ExpiresAt:   time.Now().Unix() + 3600,
 	})
@@ -360,8 +356,8 @@ func TestEnrollCredentialNoVault(t *testing.T) {
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
 
-	srv.RoleCache.Set("developers", auth.RolePublisher)
-	token := idp.IssueJWT("user-1", []string{"developers"})
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "publisher")
+	token := idp.IssueJWT("user-1", []string{})
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/test-svc", token,

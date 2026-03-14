@@ -47,8 +47,8 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		if body.Kind != "user" && body.Kind != "group" {
-			badRequest(w, "kind must be 'user' or 'group'")
+		if body.Kind != "user" {
+			badRequest(w, "kind must be 'user'")
 			return
 		}
 

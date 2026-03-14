@@ -8,7 +8,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"strings"
 	"time"
 
 	"github.com/cynkra/blockyard/internal/auth"
@@ -61,10 +60,17 @@ func Handler(srv *server.Server) http.Handler {
 			return
 		}
 
-		// 1b. ACL check — when OIDC is configured, enforce access control.
-		if srv.Config.OIDC != nil {
-			caller := auth.CallerFromContext(r.Context())
+		// Resolve caller identity (may be nil when OIDC is not configured).
+		caller := auth.CallerFromContext(r.Context())
+		callerSub := ""
+		if caller != nil {
+			callerSub = caller.Sub
+		}
 
+		// 1b. ACL check — when OIDC is configured, enforce access control.
+		// Also compute the effective access relation for X-Shiny-Access.
+		var relation authz.AppRelation
+		if srv.Config.OIDC != nil {
 			rows, dbErr := srv.DB.ListAppAccess(app.ID)
 			if dbErr != nil {
 				rows = nil // treat as no grants (fail closed)
@@ -83,7 +89,7 @@ func Handler(srv *server.Server) http.Handler {
 				}
 			}
 
-			relation := authz.EvaluateAccess(caller, app.Owner, grants, app.AccessType)
+			relation = authz.EvaluateAccess(caller, app.Owner, grants, app.AccessType)
 			if !relation.CanAccessProxy() {
 				if caller == nil {
 					http.Redirect(w, r, "/login?return_url="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
@@ -92,13 +98,6 @@ func Handler(srv *server.Server) http.Handler {
 				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
-		}
-
-		// Resolve caller identity (may be nil when OIDC is not configured).
-		caller := auth.CallerFromContext(r.Context())
-		callerSub := ""
-		if caller != nil {
-			callerSub = caller.Sub
 		}
 
 		// 2. Session resolution
@@ -170,17 +169,16 @@ func Handler(srv *server.Server) http.Handler {
 		}
 
 		// 4. Inject identity headers when caller is authenticated.
-		// Shiny apps read X-Shiny-User and X-Shiny-Groups to identify
-		// the logged-in user. Always strip first to prevent spoofing by
-		// unauthenticated clients, then re-add from verified identity.
+		// Shiny apps read X-Shiny-User and X-Shiny-Access to identify
+		// the logged-in user and their effective access level. Always
+		// strip first to prevent spoofing by unauthenticated clients,
+		// then re-add from verified identity.
 		r.Header.Del("X-Shiny-User")
-		r.Header.Del("X-Shiny-Groups")
+		r.Header.Del("X-Shiny-Access")
 		if caller != nil {
 			r.Header.Set("X-Shiny-User", caller.Sub)
-			if len(caller.Groups) > 0 {
-				r.Header.Set("X-Shiny-Groups", strings.Join(caller.Groups, ","))
-			}
 		}
+		r.Header.Set("X-Shiny-Access", relationToAccessLevel(relation))
 
 			// 4b. Inject credentials when configured.
 		// Single-tenant: injects raw vault token (X-Blockyard-Vault-Token).
@@ -257,6 +255,23 @@ func injectCredentials(r *http.Request, srv *server.Server, appID, workerID stri
 		srv.VaultTokenCache.Set(user.Sub, token, ttl)
 	}
 	r.Header.Set("X-Blockyard-Vault-Token", token)
+}
+
+// relationToAccessLevel converts an AppRelation to the X-Shiny-Access
+// header value. See the wrap-up design doc for the value table.
+func relationToAccessLevel(r authz.AppRelation) string {
+	switch r {
+	case authz.RelationAdmin, authz.RelationOwner:
+		return "owner"
+	case authz.RelationContentCollaborator:
+		return "collaborator"
+	case authz.RelationContentViewer:
+		return "viewer"
+	case authz.RelationAnonymous:
+		return "anonymous"
+	default:
+		return "anonymous"
+	}
 }
 
 // RedirectTrailingSlash redirects /app/{name} to /app/{name}/. Shiny

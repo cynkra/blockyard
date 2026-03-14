@@ -2,7 +2,7 @@ package auth
 
 import "context"
 
-// Role is a system-level role derived from IdP groups via role_mappings.
+// Role is a system-level role managed directly in blockyard's users table.
 // Ordered by privilege — higher value means more privilege.
 type Role int
 
@@ -52,7 +52,7 @@ func (r Role) CanViewAllApps() bool {
 	return r >= RoleAdmin
 }
 
-// CanManageRoles reports whether this role can manage role mappings.
+// CanManageRoles reports whether this role can manage users.
 func (r Role) CanManageRoles() bool {
 	return r >= RoleAdmin
 }
@@ -71,11 +71,10 @@ const (
 	AuthSourceStaticToken                  // Static bearer token (v0 compat, dev mode)
 )
 
-// CallerIdentity is the unified caller identity produced by both auth
+// CallerIdentity is the unified caller identity produced by auth
 // middlewares. Stored in request context for use by authorization checks.
 type CallerIdentity struct {
 	Sub    string
-	Groups []string
 	Role   Role
 	Source AuthSource
 }
@@ -94,16 +93,4 @@ func ContextWithCaller(ctx context.Context, c *CallerIdentity) context.Context {
 func CallerFromContext(ctx context.Context) *CallerIdentity {
 	c, _ := ctx.Value(callerKey).(*CallerIdentity)
 	return c
-}
-
-// DeriveRole determines the effective role for a set of groups by looking
-// up each group in the role mapping cache and taking the highest-privilege match.
-func DeriveRole(groups []string, cache *RoleMappingCache) Role {
-	best := RoleNone
-	for _, g := range groups {
-		if r, ok := cache.Get(g); ok && r > best {
-			best = r
-		}
-	}
-	return best
 }

@@ -36,7 +36,6 @@ func CatalogHandler(srv *server.Server) http.HandlerFunc {
 		}
 		if caller != nil {
 			params.CallerSub = caller.Sub
-			params.CallerGroups = caller.Groups
 			params.CallerRole = caller.Role.String()
 		}
 

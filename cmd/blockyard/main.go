@@ -56,13 +56,6 @@ func main() {
 	// Build shared state and router
 	srv := server.NewServer(cfg, be, database)
 
-	// Initialize role mapping cache (always — used in both OIDC and static-token modes).
-	srv.RoleCache = auth.NewRoleMappingCache()
-	if err := srv.RoleCache.Load(database); err != nil {
-		slog.Error("failed to load role mappings", "error", err)
-		os.Exit(1)
-	}
-
 	// Initialize OIDC if configured.
 	if cfg.OIDC != nil {
 		baseURL := cfg.Server.ExternalURL
@@ -77,7 +70,6 @@ func main() {
 			cfg.OIDC.ClientID,
 			cfg.OIDC.ClientSecret.Expose(),
 			redirectURL,
-			cfg.OIDC.GroupsClaim,
 		)
 		if err != nil {
 			slog.Error("OIDC discovery failed", "error", err)

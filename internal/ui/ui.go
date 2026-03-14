@@ -155,7 +155,6 @@ func (ui *UI) renderDashboard(w http.ResponseWriter, r *http.Request, srv *serve
 	}
 	if caller != nil {
 		params.CallerSub = caller.Sub
-		params.CallerGroups = caller.Groups
 		params.CallerRole = caller.Role.String()
 	}
 

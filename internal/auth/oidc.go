@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -16,12 +15,11 @@ type OIDCClient struct {
 	provider     *oidc.Provider
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
-	groupsClaim  string
 }
 
 // Discover performs OIDC discovery against the issuer URL and returns
 // a configured client ready for the authorization code flow.
-func Discover(ctx context.Context, issuerURL, clientID, clientSecret, redirectURL, groupsClaim string) (*OIDCClient, error) {
+func Discover(ctx context.Context, issuerURL, clientID, clientSecret, redirectURL string) (*OIDCClient, error) {
 	provider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
@@ -32,7 +30,7 @@ func Discover(ctx context.Context, issuerURL, clientID, clientSecret, redirectUR
 		ClientSecret: clientSecret,
 		Endpoint:     provider.Endpoint(),
 		RedirectURL:  redirectURL,
-		Scopes:       []string{oidc.ScopeOpenID, "profile"},
+		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 	}
 
 	verifier := provider.Verifier(&oidc.Config{
@@ -43,7 +41,6 @@ func Discover(ctx context.Context, issuerURL, clientID, clientSecret, redirectUR
 		provider:     provider,
 		oauth2Config: oauth2Cfg,
 		verifier:     verifier,
-		groupsClaim:  groupsClaim,
 	}, nil
 }
 
@@ -87,24 +84,6 @@ func (c *OIDCClient) RefreshToken(ctx context.Context, refreshToken string) (*oa
 		return nil, fmt.Errorf("token refresh: %w", err)
 	}
 	return newToken, nil
-}
-
-// ExtractGroups reads the configured groups claim from the ID token's
-// extra claims. Returns nil if the claim is missing or not an array.
-func (c *OIDCClient) ExtractGroups(claims map[string]json.RawMessage) []string {
-	raw, ok := claims[c.groupsClaim]
-	if !ok {
-		slog.Debug("groups claim not present in ID token", "claim", c.groupsClaim)
-		return nil
-	}
-
-	var groups []string
-	if err := json.Unmarshal(raw, &groups); err != nil {
-		slog.Warn("groups claim is not a string array — ignoring",
-			"claim", c.groupsClaim, "error", err)
-		return nil
-	}
-	return groups
 }
 
 // EndSessionEndpoint returns the IdP's end_session_endpoint if

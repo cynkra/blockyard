@@ -28,7 +28,6 @@ func newTestServer(t *testing.T, cfg *config.Config) (*server.Server, *httptest.
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
 
 	r := chi.NewRouter()
 	uiHandler := New()
@@ -71,18 +70,15 @@ func dashboardServer(t *testing.T, cfg *config.Config, sub string, role auth.Rol
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
 
 	uiHandler := New()
 	r := chi.NewRouter()
 	r.Get("/", func(w http.ResponseWriter, req *http.Request) {
 		ctx := auth.ContextWithUser(req.Context(), &auth.AuthenticatedUser{
-			Sub:    sub,
-			Groups: []string{"group"},
+			Sub: sub,
 		})
 		ctx = auth.ContextWithCaller(ctx, &auth.CallerIdentity{
 			Sub:    sub,
-			Groups: []string{"group"},
 			Role:   role,
 			Source: auth.AuthSourceSession,
 		})
@@ -554,7 +550,6 @@ func TestDashboardNoCaller(t *testing.T) {
 	cfg := oidcConfig()
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
 
 	uiHandler := New()
 	r := chi.NewRouter()
@@ -715,7 +710,6 @@ func TestBuildServiceEntriesWithVaultMock(t *testing.T) {
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	srv.RoleCache = auth.NewRoleMappingCache()
 	srv.VaultClient = integration.NewClient(vaultSrv.URL, func() string { return "root" })
 
 	entries := buildServiceEntries(srv, "test-user")

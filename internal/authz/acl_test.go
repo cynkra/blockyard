@@ -68,35 +68,31 @@ func TestEvaluateAccessUserCollaboratorGrant(t *testing.T) {
 	}
 }
 
-func TestEvaluateAccessGroupViewerGrant(t *testing.T) {
-	caller := &auth.CallerIdentity{
-		Sub:    "user-2",
-		Groups: []string{"team-a"},
-		Role:   auth.RoleNone,
-	}
-	grants := []authz.AccessGrant{
-		{Principal: "team-a", Kind: authz.AccessKindGroup, Role: authz.ContentRoleViewer},
-	}
-	rel := authz.EvaluateAccess(caller, "user-1", grants, "acl")
-	if rel != authz.RelationContentViewer {
-		t.Errorf("group viewer grant = %v, want RelationContentViewer", rel)
-	}
-}
-
-func TestEvaluateAccessMaxGrantWins(t *testing.T) {
-	// User has viewer grant (direct) + collaborator grant (via group) -> collaborator wins
-	caller := &auth.CallerIdentity{
-		Sub:    "user-2",
-		Groups: []string{"team-a"},
-		Role:   auth.RoleNone,
-	}
+func TestEvaluateAccessMaxUserGrantWins(t *testing.T) {
+	// User has both viewer and collaborator grants -> collaborator wins
+	caller := &auth.CallerIdentity{Sub: "user-2", Role: auth.RoleNone}
 	grants := []authz.AccessGrant{
 		{Principal: "user-2", Kind: authz.AccessKindUser, Role: authz.ContentRoleViewer},
-		{Principal: "team-a", Kind: authz.AccessKindGroup, Role: authz.ContentRoleCollaborator},
+		{Principal: "user-2", Kind: authz.AccessKindUser, Role: authz.ContentRoleCollaborator},
 	}
 	rel := authz.EvaluateAccess(caller, "user-1", grants, "acl")
 	if rel != authz.RelationContentCollaborator {
 		t.Errorf("max grant = %v, want RelationContentCollaborator", rel)
+	}
+}
+
+func TestEvaluateAccessLoggedInAuthenticated(t *testing.T) {
+	caller := &auth.CallerIdentity{Sub: "user-2", Role: auth.RoleViewer}
+	rel := authz.EvaluateAccess(caller, "user-1", nil, "logged_in")
+	if rel != authz.RelationContentViewer {
+		t.Errorf("logged_in + authenticated = %v, want RelationContentViewer", rel)
+	}
+}
+
+func TestEvaluateAccessLoggedInUnauthenticated(t *testing.T) {
+	rel := authz.EvaluateAccess(nil, "owner-1", nil, "logged_in")
+	if rel != authz.RelationNone {
+		t.Errorf("logged_in + unauthenticated = %v, want RelationNone", rel)
 	}
 }
 
