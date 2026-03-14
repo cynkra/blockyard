@@ -468,3 +468,72 @@ const (
 7. **Web UI** — Token management page under user settings: create
    with name/expiry (show plaintext once), list active tokens with
    created/last-used dates, revoke individual or all.
+
+---
+
+## 3. Operational Endpoints and Untrusted Workloads
+
+### Problem
+
+Blockyard exposes operational endpoints (`/metrics`, `/healthz`,
+`/readyz`) on the same HTTP listener as the application proxy and
+control-plane API. This creates a tension: operational endpoints are
+typically unauthenticated so that monitoring infrastructure (Prometheus
+scrapers, load balancer health checks) can reach them without managing
+credentials. But blockyard runs **arbitrary user-supplied code** inside
+Shiny app containers, and those containers can reach the host listener.
+
+The current architecture routes all traffic through a single
+`http.Server` bound to `cfg.Server.Bind`. Workers run on per-container
+bridge networks with access to the host — they already use this path
+to call `POST /api/v1/credentials/vault` via `BLOCKYARD_API_URL`. Any
+endpoint reachable without authentication is therefore also reachable
+by every running Shiny app.
+
+For `/healthz` and `/readyz` this is harmless — the response is a
+static string. For `/metrics`, the Prometheus exposition format leaks
+operational data: request rates, error counts, active worker counts,
+audit buffer depth, and any custom metrics added in the future. On a
+deployment with public apps (`access_type = 'public'`), the app author
+is untrusted, and exposing this data is an information leak.
+
+### Current State
+
+The v1 implementation places `/metrics` behind `APIAuth` — requiring
+either a valid session cookie or a PAT. This deviates from the
+phase-1-6 design (which specified unauthenticated access) but is the
+safer default given the threat model above. The trade-off is that
+Prometheus must be configured with a PAT bearer token to scrape
+metrics, which is operationally inconvenient but not blocking.
+
+### Proper Fix
+
+The clean solution is a **separate management listener** bound to an
+internal-only address (e.g. `127.0.0.1:9100` or a Unix socket):
+
+```toml
+[server]
+bind = "0.0.0.0:3838"            # public listener (proxy + API)
+management_bind = "127.0.0.1:9100"  # internal listener (metrics, health)
+```
+
+The management listener serves `/metrics`, `/healthz`, and `/readyz`
+without authentication. Because it binds to `127.0.0.1`, it is not
+reachable from container bridge networks — only from the host itself
+and any co-located monitoring agents. In Kubernetes (v2), the
+management port maps to a pod port with a `Service` that only the
+in-cluster Prometheus can reach.
+
+This is a standard pattern (Kubernetes API server uses `--secure-port`
+vs `--bind-address` for exactly this reason) and cleanly separates the
+trust boundaries: the public listener handles untrusted traffic with
+full auth, the management listener handles trusted infrastructure
+traffic without auth.
+
+### Status
+
+The auth-gated `/metrics` endpoint is an acceptable interim solution.
+The separate management listener is deferred — it is not clear whether
+it belongs in v1 hardening or v2 (which introduces Kubernetes and
+changes the networking model significantly). This section documents
+the problem so it is not lost.
