@@ -50,7 +50,7 @@ func fullMockBaoWithPolicy(t *testing.T, policy string) *Client {
 		})
 	})
 
-	mux.HandleFunc("GET /v1/sys/policy/blockyard-user", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/sys/policies/acl/blockyard-user", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{"policy": policy},
 		})
@@ -136,23 +136,28 @@ func TestBootstrap_RoleMissing(t *testing.T) {
 }
 
 func TestCheckPolicyScoping_Scoped(t *testing.T) {
-	// Should not warn — policy contains identity templating.
+	// Should succeed — policy contains identity templating.
 	client := fullMockBao(t)
-	// checkPolicyScoping only logs warnings, doesn't return errors.
-	// We verify it doesn't panic and completes.
-	checkPolicyScoping(context.Background(), client, "jwt")
+	if err := checkPolicyScoping(context.Background(), client, "jwt"); err != nil {
+		t.Fatalf("expected no error for scoped policy, got: %v", err)
+	}
 }
 
 func TestCheckPolicyScoping_Unscoped(t *testing.T) {
-	// Should log a warning — policy is missing identity templating.
+	// Should return error — policy is missing identity templating.
 	client := fullMockBaoWithPolicy(t, unscopedPolicy)
-	// This will log a warning but not fail. We verify it doesn't panic.
-	checkPolicyScoping(context.Background(), client, "jwt")
+	err := checkPolicyScoping(context.Background(), client, "jwt")
+	if err == nil {
+		t.Fatal("expected error for unscoped policy")
+	}
+	if !strings.Contains(err.Error(), "no attached policy uses per-user path scoping") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 func TestCheckPolicyScoping_PolicyReadFails(t *testing.T) {
 	// Role returns policies but the policy endpoint 404s.
-	// Should log a warning, not panic.
+	// Should return error since no scoped policy was found.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/auth/jwt/role/blockyard-user", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -161,7 +166,7 @@ func TestCheckPolicyScoping_PolicyReadFails(t *testing.T) {
 			},
 		})
 	})
-	mux.HandleFunc("GET /v1/sys/policy/nonexistent-policy", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/sys/policies/acl/nonexistent-policy", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 
@@ -169,7 +174,10 @@ func TestCheckPolicyScoping_PolicyReadFails(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	checkPolicyScoping(context.Background(), client, "jwt")
+	err := checkPolicyScoping(context.Background(), client, "jwt")
+	if err == nil {
+		t.Fatal("expected error when policy read fails")
+	}
 }
 
 func TestBootstrap_KVMountMissing(t *testing.T) {

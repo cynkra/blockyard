@@ -183,14 +183,17 @@ func checkPolicyScoping(ctx context.Context, client *Client, jwtAuthPath string)
 }
 
 // policyResponse is the subset of the policy read response we need.
+// OpenBao returns the policy text in data.policy (v2 API at /sys/policies/acl/)
+// or in the top-level rules field (v1 API at /sys/policy/).
 type policyResponse struct {
-	Data struct {
-		Policy string `json:"policy"` // raw HCL/JSON policy text
+	Rules string `json:"rules"` // old /v1/sys/policy/ API
+	Data  struct {
+		Policy string `json:"policy"` // /v1/sys/policies/acl/ API
 	} `json:"data"`
 }
 
 func readPolicy(ctx context.Context, client *Client, name string) (string, error) {
-	url := fmt.Sprintf("%s/v1/sys/policy/%s", client.addr, name)
+	url := fmt.Sprintf("%s/v1/sys/policies/acl/%s", client.addr, name)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("read policy %s: %w", name, err)
@@ -212,5 +215,9 @@ func readPolicy(ctx context.Context, client *Client, name string) (string, error
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("read policy %s: decode: %w", name, err)
 	}
-	return result.Data.Policy, nil
+	// Prefer data.policy (v2 API), fall back to rules (v1 API).
+	if result.Data.Policy != "" {
+		return result.Data.Policy, nil
+	}
+	return result.Rules, nil
 }
