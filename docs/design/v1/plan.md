@@ -23,8 +23,7 @@ internal/
 ├── auth/
 │   ├── oidc.go              # OIDC discovery, authorization code flow
 │   ├── session.go           # signed session cookie (encode/decode), server-side store
-│   ├── jwt.go               # JWT validation against JWKS (control plane)
-│   └── middleware.go         # app-plane + control-plane auth middleware
+│   └── middleware.go         # app-plane auth middleware
 ├── authz/
 │   ├── rbac.go              # role definitions, permission checks
 │   └── acl.go               # per-content access control lists
@@ -52,7 +51,7 @@ internal/
 │   └── catalog.go           # catalog + tag endpoints
 ├── proxy/
 │   ├── ... (existing)
-│   ├── identity.go          # X-Shiny-User / X-Shiny-Groups injection
+│   ├── identity.go          # X-Shiny-User / X-Shiny-Access injection
 │   ├── loadbalancer.go      # least-loaded worker assignment
 │   └── autoscaler.go        # connection-based auto-scaling loop
 └── db/
@@ -70,7 +69,6 @@ require (
     github.com/coreos/go-oidc/v3   v3.x  // OIDC discovery, ID token verification
     golang.org/x/oauth2            v0.x  // OAuth 2.0 flows (authorization code, client credentials)
     github.com/go-jose/go-jose/v4  v4.x  // JWKS fetching, JWT parsing (used by go-oidc internally)
-    github.com/golang-jwt/jwt/v5   v5.x  // Control-plane JWT validation (phase 1-2)
 )
 
 // Telemetry
@@ -89,7 +87,7 @@ require (
 - **golang.org/x/oauth2** — OAuth 2.0 authorization code flow and client
   credentials flow. Manages token exchange and refresh.
 - **go-jose** — low-level JWKS and JWT operations. Used by `go-oidc`
-  internally; exposed for control-plane JWT validation in phase 1-2.
+  internally.
 - **prometheus/client_golang** — Prometheus-compatible metrics registry and
   HTTP handler. The standard Go metrics library.
 - **opentelemetry** — connects `log/slog` structured logging to an OTel
@@ -111,7 +109,7 @@ and OpenBao integration all require a logged-in user.
 3. Minimal signed session cookie — HMAC-SHA256 signed, carries only `sub` +
    `issued_at` (~100-150 bytes)
 4. Server-side session store — `sync.RWMutex`-protected
-   `map[string]*UserSession` keyed by `sub`, holds groups, access token,
+   `map[string]*UserSession` keyed by `sub`, holds access token,
    refresh token
 5. Transparent access token refresh — on each request, if access token is
    near expiry, exchange refresh token and update server-side session
@@ -127,7 +125,7 @@ type OIDCConfig struct {
     IssuerURL    string        `toml:"issuer_url"`
     ClientID     string        `toml:"client_id"`
     ClientSecret Secret        `toml:"client_secret"`
-    GroupsClaim  string        `toml:"groups_claim"`  // default: "groups"
+    InitialAdmin string        `toml:"initial_admin"` // OIDC sub of first admin; checked on first login only
     CookieMaxAge time.Duration `toml:"cookie_max_age"` // default: 24h
 }
 ```
@@ -142,7 +140,7 @@ the cookie max-age. Operators should align both values.
 **Session architecture: minimal cookie + server-side store.**
 
 The cookie carries only `sub` and `issued_at`, signed with HMAC-SHA256. All
-sensitive/bulky data (groups, access token, refresh token) lives server-side
+sensitive/bulky data (access token, refresh token) lives server-side
 in a mutex-protected map. This avoids cookie size issues (IdP JWTs can be
 1-2KB, easily exceeding the 4KB browser limit), eliminates the need for
 refresh token encryption, and enables immediate session invalidation on logout.
@@ -156,7 +154,6 @@ type CookiePayload struct {
 
 // UserSession is server-side session data, keyed by sub.
 type UserSession struct {
-    Groups       []string
     AccessToken  string
     RefreshToken string
     ExpiresAt    time.Time
@@ -181,12 +178,12 @@ session state.
 GET /login
   → 302 to IdP authorize endpoint with:
     response_type=code, client_id, redirect_uri=/callback,
-    scope=openid+groups, state=random+return_url
+    scope=openid+email+profile, state=random+return_url
 
 GET /callback?code=...&state=...
   → Exchange code for tokens at IdP token endpoint
   → Validate ID token signature against JWKS (via go-oidc verifier)
-  → Extract sub + groups from ID token claims
+  → Extract sub, email, name from ID token claims
   → Store UserSession server-side, set signed cookie (sub + issued_at)
   → 302 to return_url from state (default: /)
 
@@ -200,7 +197,8 @@ POST /logout
 The v0 proxy serves apps without authentication. v1 adds a middleware layer
 that verifies the signed session cookie, looks up the server-side session,
 and stores the authenticated user in the request context. The control plane
-API continues to use bearer token auth (upgraded to JWT in phase 1-2).
+API continues to use bearer token auth (replaced by session cookie and
+PATs in phase 1-8).
 
 ```go
 // AppAuthMiddleware protects /app/ proxy routes.
@@ -226,108 +224,65 @@ func AppAuthMiddleware(store *SessionStore) func(http.Handler) http.Handler {
 }
 ```
 
-### Phase 1-2: IdP Client Credentials + RBAC + Per-Content ACL ([detailed plan](phase-1-2.md))
+### Phase 1-2: RBAC + Per-Content ACL ([detailed plan](phase-1-2.md))
 
-Replace the static bearer token with JWT-based machine auth. Add role-based
-access control, per-content permissions, and public (anonymous) app access.
+Add role-based access control, per-content permissions, and public/logged-in
+app access.
 
 **Deliverables:**
 
-1. JWT validation middleware for the control plane — validate bearer tokens
-   as JWTs against the IdP's JWKS (same keys as OIDC)
-2. OAuth 2.0 client credentials support — clients authenticate with
-   `client_id` + `client_secret` at the IdP's token endpoint
-3. Role system — three roles: `admin`, `publisher`, `viewer`
-4. Role assignment — mapped from IdP groups claim
-5. Per-content ACL — owners and explicit viewer/collaborator grants per app
-6. Public (anonymous) access — apps with `access_type = 'public'` are
-   accessible without authentication; identity headers injected when the
-   user happens to be logged in, absent otherwise
+1. Role system — three roles: `admin`, `publisher`, `viewer` — assigned
+   directly on user records by admins
+2. `users` table — tracks OIDC-authenticated users with `sub`, `email`,
+   `name`, `role`, `active`, `last_login`
+3. `initial_admin` bootstrap — first login with matching sub gets admin role
+4. Per-content ACL — user-to-resource grants (owner, collaborator, viewer)
+   per app. No group-based grants.
+5. App visibility — three access types: `acl`, `logged_in`, `public`
+6. User management API — `GET/PATCH /api/v1/users` (admin-only)
 7. Authorization checks on all API and proxy endpoints
-8. Schema additions: roles, ACL tables, `access_type` column on apps
 
 **Roles and permissions:**
 
-| Permission | admin | publisher | viewer | anonymous |
-|---|---|---|---|---|
-| Create apps | yes | yes | no | no |
-| Deploy bundles | yes | own apps | no | no |
-| Start/stop apps | yes | own apps | no | no |
-| Update app config | yes | own apps | no | no |
-| Delete apps | yes | own apps | no | no |
-| View all apps | yes | no | no | no |
-| View accessible apps | yes | yes | yes | public only |
-| Access app (proxy) | yes | own + granted | granted only | public only |
-| Manage users/roles | yes | no | no | no |
+| Permission | admin | publisher | viewer |
+|---|---|---|---|
+| Create apps | yes | yes | no |
+| Deploy bundles | yes | own apps | no |
+| Start/stop apps | yes | own apps | no |
+| Update app config | yes | own apps | no |
+| Delete apps | yes | own apps | no |
+| View all apps | yes | no | no |
+| View accessible apps | yes | yes | yes |
+| Access app (proxy) | yes | own + granted | granted only |
+| Manage users/roles | yes | no | no |
 
 "Own apps" = apps where the user is the `owner` (set at creation time to the
-authenticated user's `sub`). "Public only" = apps with `access_type = 'public'`.
+authenticated user's `sub`).
 
 **Per-content ACL:**
 
 ```sql
 CREATE TABLE app_access (
     app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    principal   TEXT NOT NULL,    -- user sub or group name
-    kind        TEXT NOT NULL,    -- 'user' | 'group'
-    role        TEXT NOT NULL,    -- 'viewer' | 'collaborator'
-    granted_by  TEXT NOT NULL,    -- sub of the granting user
+    user_sub    TEXT NOT NULL,
+    role        TEXT NOT NULL CHECK (role IN ('viewer', 'collaborator')),
+    granted_by  TEXT NOT NULL,
     granted_at  TEXT NOT NULL,
-    PRIMARY KEY (app_id, principal, kind)
+    PRIMARY KEY (app_id, user_sub)
 );
 ```
 
 Access evaluation order: public app + unauthenticated → anonymous access;
 admin overrides all → owner has full access → explicit ACL grants →
-public app + authenticated → anonymous access (with identity headers) →
-deny.
-
-**ACL conflict resolution:** a principal may have multiple grants for the same
-app (e.g., a direct `viewer` grant and a `collaborator` grant via group
-membership). The effective role is the highest-privilege grant across all
-matching entries. The access check collects all grants for the user's `sub`
-(kind=user) plus all their group names (kind=group), then takes the max.
-Role ordering is defined as a simple constant mapping (`collaborator > viewer`).
+logged-in app + authenticated → access granted → deny.
 
 **ACL enforcement on active sessions:** ACL checks run on HTTP requests only,
 not on individual WebSocket frames. When a user's access is revoked, it takes
 effect on their next HTTP request or WebSocket reconnect — active WS
 connections continue until the next reconnect. This avoids per-frame database
 or cache lookups on the hot path. If per-request ACL checks become a
-performance concern, an in-memory ACL cache with short TTL (30–60s) can be
+performance concern, an in-memory ACL cache with short TTL (30-60s) can be
 added as an optimization.
-
-**JWT validation for control plane:**
-
-```go
-// APIAuthMiddleware replaces the v0 static bearer token check.
-// Validates JWT signature against JWKS, checks expiry and issuer.
-// Falls back to static token if [oidc] is not configured (dev mode).
-func APIAuthMiddleware(srv *server.Server) func(http.Handler) http.Handler {
-    return func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            token := extractBearerToken(r)
-
-            if srv.Config.OIDC != nil {
-                claims, err := validateJWT(r.Context(), token, srv.JWKSKeySet, srv.Config.OIDC)
-                if err != nil {
-                    http.Error(w, "unauthorized", http.StatusUnauthorized)
-                    return
-                }
-                ctx := WithCallerIdentity(r.Context(), claims)
-                next.ServeHTTP(w, r.WithContext(ctx))
-            } else {
-                // Fallback: static token comparison (v0 compat / dev mode)
-                if token != srv.Config.Server.Token {
-                    http.Error(w, "unauthorized", http.StatusUnauthorized)
-                    return
-                }
-                next.ServeHTTP(w, r)
-            }
-        })
-    }
-}
-```
 
 **Schema additions:**
 
@@ -335,24 +290,16 @@ func APIAuthMiddleware(srv *server.Server) func(http.Handler) http.Handler {
 -- Add owner and access_type to apps table.
 -- Pre-release migration consolidation means no existing rows need migration.
 ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL;
-ALTER TABLE apps ADD COLUMN access_type TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'public'));
+ALTER TABLE apps ADD COLUMN access_type TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'logged_in', 'public'));
 
 -- Per-content access grants
 CREATE TABLE app_access (
     app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    principal   TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('user', 'group')),
+    user_sub    TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('viewer', 'collaborator')),
     granted_by  TEXT NOT NULL,
     granted_at  TEXT NOT NULL,
-    PRIMARY KEY (app_id, principal, kind)
-);
-
--- Role-to-group mapping (admin-managed)
-CREATE TABLE role_mappings (
-    group_name  TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('admin', 'publisher', 'viewer')),
-    PRIMARY KEY (group_name)
+    PRIMARY KEY (app_id, user_sub)
 );
 ```
 
@@ -363,7 +310,7 @@ at runtime.
 
 **Deliverables:**
 
-1. Identity header injection — `X-Shiny-User` and `X-Shiny-Groups` headers
+1. Identity header injection — `X-Shiny-User` and `X-Shiny-Access` headers
    on every proxied request
 2. OpenBao client — HTTP client for OpenBao's KV v2 and auth APIs
 3. OpenBao JWT auth setup — on server startup, configure OpenBao's JWT auth
@@ -383,18 +330,18 @@ at runtime.
 **Identity injection (proxy middleware):**
 
 ```go
-// InjectIdentityHeaders adds X-Shiny-User and X-Shiny-Groups to the
+// InjectIdentityHeaders adds X-Shiny-User and X-Shiny-Access to the
 // outgoing request. Strips any client-supplied values to prevent spoofing.
-func InjectIdentityHeaders(r *http.Request, user *AuthenticatedUser) {
+func InjectIdentityHeaders(r *http.Request, user *AuthenticatedUser, access string) {
     r.Header.Del("X-Shiny-User")
-    r.Header.Del("X-Shiny-Groups")
+    r.Header.Del("X-Shiny-Access")
     r.Header.Set("X-Shiny-User", user.Sub)
-    r.Header.Set("X-Shiny-Groups", strings.Join(user.Groups, ","))
+    r.Header.Set("X-Shiny-Access", access)
 }
 ```
 
 Headers are injected by the proxy, never by the client. The proxy strips
-any client-supplied `X-Shiny-User` or `X-Shiny-Groups` headers before
+any client-supplied `X-Shiny-User` or `X-Shiny-Access` headers before
 forwarding.
 
 **Per-request credential injection (single-tenant mode):**
@@ -1011,7 +958,7 @@ or shows what's available after login.
 ```
 1. Valid session cookie → query catalog (RBAC-filtered)
 2. Render dashboard:
-   - User identity (sub or display name from groups) + "Sign out" link
+   - User identity (name or sub) + "Sign out" link
    - App cards: name, title (if set), status indicator, direct link
    - Search box (server-side filtering via query param — no JS needed)
    - Tag filter (if tags exist)
@@ -1181,6 +1128,31 @@ func NewRouter(srv *server.Server) *chi.Mux {
 }
 ```
 
+### Phase 1-8: Direct Role Management + Personal Access Tokens
+
+Simplify the authorization model and replace the static bearer token with
+identity-aware API credentials. This phase implements the changes described
+in [wrap-up.md](wrap-up.md).
+
+**Deliverables:**
+
+1. Replace role mapping with direct role management — remove `role_mappings`
+   table, `RoleMappingCache`, CRUD endpoints, and admin UI. Roles are read
+   directly from the `users` table.
+2. `X-Shiny-Access` header — replace `X-Shiny-Groups` with effective access
+   level (`owner`, `collaborator`, `viewer`, `anonymous`)
+3. User management API — `GET /api/v1/users`, `GET /api/v1/users/{sub}`,
+   `PATCH /api/v1/users/{sub}` (admin-only)
+4. User management UI — admin page for role assignment and user deactivation
+5. `personal_access_tokens` table and DB methods
+6. Token generation — `by_`-prefixed, SHA-256 hashed
+7. PAT API — `POST/GET/DELETE /api/v1/users/me/tokens` (session-only auth)
+8. Rewrite `APIAuth` — session cookie → PAT → reject. Remove JWT validation
+   and static token logic.
+9. Remove static bearer token from config, docker-compose, examples
+10. Update hello-auth example — demonstrate PAT workflow, remove role mapping
+    setup
+
 ## Config Summary
 
 v1 config additions alongside v0 fields (v0 fields shown for context;
@@ -1190,7 +1162,7 @@ roadmap for the complete v0 config):
 ```toml
 [server]
 bind             = "0.0.0.0:8080"
-token            = "..."               # static token (v0 compat / dev mode)
+# token — removed in phase 1-8; replaced by PATs
 shutdown_timeout = "30s"
 session_secret   = "..."               # HMAC key for cookie signing
                                        # use BLOCKYARD_SERVER_SESSION_SECRET env var
@@ -1221,7 +1193,7 @@ max_workers             = 100
 issuer_url    = "https://auth.example.com/realms/myrealm"
 client_id     = "blockyard"
 client_secret = "..."                  # use BLOCKYARD_OIDC_CLIENT_SECRET env var
-groups_claim  = "groups"
+initial_admin = "..."                  # OIDC sub of first admin
 cookie_max_age = "24h"
 
 [openbao]
@@ -1265,7 +1237,7 @@ BLOCKYARD_SERVER_EXTERNAL_URL
 BLOCKYARD_OIDC_ISSUER_URL
 BLOCKYARD_OIDC_CLIENT_ID
 BLOCKYARD_OIDC_CLIENT_SECRET
-BLOCKYARD_OIDC_GROUPS_CLAIM
+BLOCKYARD_OIDC_INITIAL_ADMIN
 BLOCKYARD_OIDC_COOKIE_MAX_AGE
 BLOCKYARD_OPENBAO_ADDRESS
 BLOCKYARD_OPENBAO_ADMIN_TOKEN
@@ -1288,7 +1260,7 @@ default struct when any env var in the section's prefix is set:
 ```go
 // Before applying individual overrides:
 if cfg.OIDC == nil && envPrefixExists("BLOCKYARD_OIDC_") {
-    cfg.OIDC = &OIDCConfig{GroupsClaim: "groups", CookieMaxAge: 24 * time.Hour}
+    cfg.OIDC = &OIDCConfig{CookieMaxAge: 24 * time.Hour}
 }
 // Repeat for Openbao, Telemetry, Audit
 ```
@@ -1306,7 +1278,7 @@ there is no upgrade path to maintain. After v0.1.0, migrations are append-only
 and immutable. Migration numbers below are relative to the v0.1.0 baseline and
 will be assigned final numbers at implementation time.
 
-v1 adds three migrations:
+v1 adds four migrations:
 
 ```sql
 -- 002_add_owner_access_type.sql
@@ -1314,25 +1286,18 @@ v1 adds three migrations:
 -- Since v0 migrations are consolidated pre-release, no existing rows
 -- need migration.
 ALTER TABLE apps ADD COLUMN owner TEXT NOT NULL;
-ALTER TABLE apps ADD COLUMN access_type TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'public'));
+ALTER TABLE apps ADD COLUMN access_type TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'logged_in', 'public'));
 ALTER TABLE apps ADD COLUMN title TEXT;
 ALTER TABLE apps ADD COLUMN description TEXT;
 
 -- 003_access_control.sql
 CREATE TABLE app_access (
     app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    principal   TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('user', 'group')),
+    user_sub    TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('viewer', 'collaborator')),
     granted_by  TEXT NOT NULL,
     granted_at  TEXT NOT NULL,
-    PRIMARY KEY (app_id, principal, kind)
-);
-
-CREATE TABLE role_mappings (
-    group_name  TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('admin', 'publisher', 'viewer')),
-    PRIMARY KEY (group_name)
+    PRIMARY KEY (app_id, user_sub)
 );
 
 -- 004_tags.sql
@@ -1347,6 +1312,30 @@ CREATE TABLE app_tags (
     tag_id      TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY (app_id, tag_id)
 );
+
+-- 005_users_and_pats.sql
+CREATE TABLE users (
+    sub          TEXT PRIMARY KEY,
+    email        TEXT NOT NULL DEFAULT '',
+    name         TEXT NOT NULL DEFAULT '',
+    role         TEXT NOT NULL DEFAULT 'viewer',
+    active       INTEGER NOT NULL DEFAULT 1,
+    last_login   TEXT NOT NULL
+);
+
+CREATE TABLE personal_access_tokens (
+    id           TEXT PRIMARY KEY,
+    token_hash   BLOB NOT NULL UNIQUE,
+    user_sub     TEXT NOT NULL REFERENCES users(sub),
+    name         TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT,
+    last_used_at TEXT,
+    revoked      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_pat_token_hash ON personal_access_tokens(token_hash);
+CREATE INDEX idx_pat_user_sub ON personal_access_tokens(user_sub);
 ```
 
 ## Build Order and Dependency Graph
@@ -1359,14 +1348,15 @@ Phase 1-1: OIDC + User Sessions
   ├── Token refresh middleware
   └── App-plane auth middleware
 
-Phase 1-2: IdP Client Credentials + RBAC
-  ├── JWT validation (control plane)
-  ├── Role system + group mapping
+Phase 1-2: RBAC + Per-Content ACL
+  ├── Role system (direct assignment)
+  ├── Users table
+  ├── User management API
   ├── Per-content ACL
-  └── depends on: Phase 1-1 (JWKS cache, JWT validation infra)
+  └── depends on: Phase 1-1 (user sessions)
 
 Phase 1-3: Identity Injection + OpenBao
-  ├── X-Shiny-User / X-Shiny-Groups headers
+  ├── X-Shiny-User / X-Shiny-Access headers
   ├── OpenBao client + JWT auth
   ├── Session-scoped token issuance
   ├── Credential enrollment API
@@ -1400,6 +1390,15 @@ Phase 1-7: User-Facing Web UI
   ├── v0-compatible fallback (no OIDC)
   └── depends on: Phase 1-1 (auth middleware), Phase 1-2 (RBAC),
       Phase 1-5 (catalog queries)
+
+Phase 1-8: Direct Role Management + PATs
+  ├── Remove role_mappings, DeriveRole
+  ├── X-Shiny-Access replaces X-Shiny-Groups
+  ├── User management API + UI
+  ├── Personal access tokens (schema, generation, API)
+  ├── Rewrite APIAuth (session → PAT → reject)
+  ├── Remove static bearer token
+  └── depends on: Phase 1-2 (RBAC), Phase 1-7 (UI)
 ```
 
 Phases 1-5, 1-6, and 1-7 are independent of each other in terms of
@@ -1418,14 +1417,17 @@ critical path is 1-1 → 1-2 → 1-3 → 1-4.
   rejection.
 - **Session cookie tests:** sign/verify round-trip, tampered cookie
   rejection, expired cookie handling.
-- **RBAC tests:** role derivation from groups, permission checks for each
-  role, ACL evaluation with user grants, group grants, owner override.
+- **RBAC tests:** role assignment and lookup from users table, permission
+  checks for each role, ACL evaluation with user grants, owner override.
 - **Load balancer tests:** least-loaded assignment, capacity exhaustion
   (503), scale-up trigger, scale-down with idle workers.
 - **Audit log tests:** entry serialization, write ordering.
 - **UI template tests:** render landing page, render dashboard with mock
   catalog data, verify correct links and status indicators, verify empty
   state messaging per role.
+- **PAT tests:** token generation, hash verification, validation flow
+  (active user, expired token, revoked token, inactive user),
+  last_used_at update.
 
 ### Integration tests
 
@@ -1435,7 +1437,7 @@ server):
 - **Auth flow tests:** full login → callback → session cookie → authenticated
   request → logout cycle. Uses a mock IdP (static JWKS + token endpoint).
 - **RBAC integration tests:** create app as publisher, verify viewer cannot
-  deploy, verify admin can access all, verify ACL grants work.
+  deploy, verify admin can access all, verify ACL user grants work.
 - **Proxy auth tests:** unauthenticated request redirects to `/login`,
   authenticated request is proxied, identity headers are injected.
 - **Load balancing tests:** configure `max_sessions_per_worker = 2`, send 3
@@ -1451,6 +1453,8 @@ server):
   (with app list matching RBAC), and v0 fallback page when OIDC is not
   configured. Verify public apps appear on the unauthenticated landing
   page.
+- **PAT integration tests:** create PAT via session, use PAT for API
+  access, revoke PAT, verify rejected.
 
 ### Mock IdP
 
@@ -1468,7 +1472,7 @@ type MockIdP struct {
 }
 
 func NewMockIdP() *MockIdP
-func (m *MockIdP) IssueToken(sub string, groups []string) string
+func (m *MockIdP) IssueToken(sub string) string
 func (m *MockIdP) Close()
 ```
 
@@ -1484,10 +1488,10 @@ Extended with:
 
 1. **Minimal cookie + server-side session store.** The signed cookie carries
    only `sub` and `issued_at` (~100-150 bytes). All sensitive/bulky data
-   (groups, access token, refresh token) lives server-side in a
+   (access token, refresh token) lives server-side in a
    mutex-protected `map[string]*UserSession` keyed by `sub`. This avoids
-   cookie size issues (IdP JWT access tokens are 1-2KB; combined with groups
-   and encrypted refresh tokens the cookie easily exceeds the 4KB browser
+   cookie size issues (IdP JWT access tokens are 1-2KB; combined with
+   encrypted refresh tokens the cookie easily exceeds the 4KB browser
    limit), removes the need for AES-GCM encryption, and enables immediate
    session invalidation on logout. Trade-off: sessions are lost on server
    restart, but this matches all other in-memory state in v1 (workers,
@@ -1496,16 +1500,15 @@ Extended with:
 
 2. **Static token fallback when OIDC is not configured.** The `[oidc]`
    section is optional. When absent, the server runs in v0-compatible mode
-   with static bearer token auth and no app-plane authentication. This
-   supports development and single-operator deployments without requiring an
-   IdP.
+   with no auth. The static bearer token is removed in phase 1-8, replaced
+   by personal access tokens (PATs). When OIDC is not configured, the
+   server runs in v0-compatible mode with no auth.
 
-3. **Roles mapped from IdP groups, not stored in blockyard's DB.** Role
-   assignment is driven by the `groups` claim in the IdP token. A
-   `role_mappings` table maps group names to blockyard roles. This means
-   role changes happen in the IdP (group membership) and are reflected on
-   next login — no sync protocol needed. The trade-off: operators must
-   manage group-to-role mappings.
+3. **Roles managed directly in blockyard, not derived from IdP groups.**
+   Blockyard handles authorization end-to-end. The IdP authenticates
+   (OIDC); blockyard assigns roles directly on user records. This avoids
+   split authority (changes in one place, not two), eliminates the need for
+   per-IdP directory sync adapters, and keeps blockyard IdP-agnostic.
 
 4. **Least-loaded (not round-robin) load balancing.** Shiny sessions are
    long-lived and vary in resource consumption. Round-robin could overload
@@ -1591,3 +1594,13 @@ Extended with:
     and a full-screen toggle mechanism. This is meaningful frontend
     complexity for a feature that is not strictly required — users can
     navigate back to the dashboard via browser navigation. Deferred to v2.
+
+15. **Per-content ACL is user-to-resource only, no group-based grants.**
+    Authorization is managed per-user in blockyard. IdP groups play no role
+    in blockyard's authorization model.
+
+16. **X-Shiny-Access replaces X-Shiny-Groups.** The proxy injects the
+    user's effective access level for the specific app (`owner`,
+    `collaborator`, `viewer`, `anonymous`) rather than raw IdP groups. Apps
+    get a single actionable value to branch on, derived from blockyard's
+    authorization model.

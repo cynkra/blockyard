@@ -209,7 +209,7 @@ In both cases all active user sessions are lost. Simplicity over resilience.
 
 ## Database Schema
 
-Two tables — everything else lives in OpenBao, the IdP, Docker, or in-memory.
+Four tables — everything else lives in OpenBao, the IdP, Docker, or in-memory.
 
 **Storage backend:** SQLite (`modernc.org/sqlite`, pure Go) for single-host
 Docker deployments — zero operational overhead and sufficient for the write
@@ -240,7 +240,33 @@ CREATE TABLE bundles (
     path        TEXT NOT NULL,        -- path to tar.gz on disk
     uploaded_at TEXT NOT NULL
 );
+
+-- v1 additions: user management and personal access tokens
+
+CREATE TABLE users (
+    sub          TEXT PRIMARY KEY,
+    email        TEXT NOT NULL DEFAULT '',
+    name         TEXT NOT NULL DEFAULT '',
+    role         TEXT NOT NULL DEFAULT 'viewer',
+    active       INTEGER NOT NULL DEFAULT 1,
+    last_login   TEXT NOT NULL
+);
+
+CREATE TABLE personal_access_tokens (
+    id           TEXT PRIMARY KEY,
+    token_hash   BLOB NOT NULL UNIQUE,
+    user_sub     TEXT NOT NULL REFERENCES users(sub),
+    name         TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT,
+    last_used_at TEXT,
+    revoked      INTEGER NOT NULL DEFAULT 0
+);
 ```
+
+`users` tracks every OIDC-authenticated user. Roles are managed directly by
+blockyard admins — not derived from IdP groups. `personal_access_tokens`
+provides identity-aware API access, replacing the v0 static bearer token.
 
 `active_bundle` only ever references a `ready` bundle; enforced in application
 logic. `max_workers_per_app` defaults to NULL (unlimited, capped by the global
@@ -252,8 +278,9 @@ values are rejected.
 | Concern | Where |
 |---|---|
 | Per-user credentials (OAuth tokens, API keys) | OpenBao (v1) |
-| User identity, groups, auth tokens | IdP (v1) |
-| Session state (sub, groups, access + refresh token) | Signed cookie (v1) |
+| User identity (authentication) | IdP via OIDC (v1) |
+| Session state (sub, access + refresh token) | Server-side session store (v1) |
+| User roles and active status | blockyard `users` table (v1) |
 | App status (running/stopped) | In-memory (inferred from worker existence) |
 | Runtime worker state (container ID ↔ session) | In-memory |
 | App logs | Docker log stream + persisted files |
@@ -320,8 +347,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - blockyard-bundles:/data/bundles
       - blockyard-db:/data/db
-    environment:
-      BLOCKYARD_SERVER_TOKEN: "${BLOCKYARD_SERVER_TOKEN}"
     networks:
       - blockyard-net
 

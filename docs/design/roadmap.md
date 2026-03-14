@@ -63,6 +63,7 @@ require a restart; there is no hot reload.
 bind             = "0.0.0.0:8080"
 token            = "..."   # bearer token for control plane auth (v0)
                             # use BLOCKYARD_SERVER_TOKEN env var in production
+                            # removed in v1 wrap-up; replaced by Personal Access Tokens
 shutdown_timeout = "30s"   # drain window on SIGTERM
 
 [docker]
@@ -105,7 +106,8 @@ external_url   = "https://blockyard.example.com"    # public URL for OIDC redire
 issuer_url    = "https://auth.example.com/realms/myrealm"
 client_id     = "blockyard"
 client_secret = "..."    # use BLOCKYARD_OIDC_CLIENT_SECRET env var
-groups_claim  = "groups" # optional, default: "groups"
+initial_admin  = "..."    # OIDC sub of the first admin user
+                           # checked only on first login; use BLOCKYARD_OIDC_INITIAL_ADMIN env var
 cookie_max_age = "24h"   # optional, default: 24h
 
 [openbao]
@@ -340,7 +342,8 @@ plane protected by a single static bearer token in config.
 - **Control plane authentication (static token).** A single bearer token
   configured in the server config file. No database storage, no issuance
   logic. Sufficient for development and single-operator deployments where
-  network-level access control is acceptable.
+  network-level access control is acceptable. Replaced by Personal Access
+  Tokens in the v1 wrap-up.
 
 - **App log capture.** Capture stdout/stderr from each container and make it
   available via the REST API (`GET /api/v1/apps/{id}/logs`). Logs must be
@@ -397,22 +400,23 @@ infrastructure.
 - **OIDC authentication.** Delegate user authentication to an external identity
   provider via OpenID Connect. Implement against OIDC Discovery, which
   auto-discovers all endpoints. The only configuration required is the issuer
-  URL, client credentials, and an optional groups claim name (default:
-  `"groups"`). Any compliant IdP works without IdP-specific code: Keycloak,
+  URL and client credentials. Any compliant IdP works without IdP-specific code: Keycloak,
   Authentik, Auth0, Okta, Azure AD, Google Workspace.
 
-- **IdP client credentials.** Replaces static token for machine-to-machine
-  auth via the OAuth 2.0 client credentials flow. A CI/CD pipeline
-  authenticates with a `client_id` + `client_secret` against the IdP's token
-  endpoint and receives a short-lived JWT, validated against the IdP's JWKS
-  endpoint — the same path used for human OIDC sessions. No API key storage
-  in the database; token rotation, revocation, and expiry are handled by the
-  IdP.
+- **Personal Access Tokens.** PATs replace the static bearer token for
+  non-browser API access (CLI, CI/CD, scripts). Each PAT is identity-aware
+  (tied to a user in the `users` table), per-user, and individually
+  revocable. PATs are created via an OIDC session (browser login) and used
+  as `Authorization: Bearer <token>` for API calls. The token format uses a
+  `by_` prefix for secret scanning, and only the SHA-256 hash is stored.
+  Deactivating a user immediately invalidates all their PATs. The static
+  bearer token (`[server] token`) is removed.
 
 - **User sessions.** After a successful OIDC callback, the server stores
-  the user's groups, access token, and refresh token in a server-side
-  session store (`sync.RWMutex`-protected `map[string]*UserSession` keyed
-  by `sub`). The browser receives a signed cookie carrying only the user's
+  the user's access token and refresh token in a server-side session store
+  (`sync.RWMutex`-protected `map[string]*UserSession` keyed by `sub`).
+  Groups are not stored — they play no role in blockyard's authorization
+  model. The browser receives a signed cookie carrying only the user's
   `sub` and `issued_at` (~100-150 bytes, HMAC-SHA256 signed). Access tokens
   have a short TTL (5–15 minutes, configured on the IdP). On each request,
   if the access token is near expiry the server transparently exchanges the
@@ -426,17 +430,24 @@ infrastructure.
   (workers, proxy sessions, task store).
 
 - **RBAC + per-content ACL.** Three system roles (`admin`, `publisher`,
-  `viewer`) mapped from IdP groups. Per-content ACLs grant individual users
-  or groups `viewer` or `collaborator` access to specific apps. Apps have an
-  `access_type` (`acl` or `public`): public apps are accessible without
-  authentication (the Anonymous level in Posit Connect's four-level model).
-  Identity headers are injected when the user is authenticated, absent for
-  anonymous access.
+  `viewer`) managed directly by blockyard admins on user records — not
+  mapped from IdP groups. The IdP handles authentication (OIDC); blockyard
+  handles authorization. Per-content ACLs are user-to-resource grants
+  (no group-based grants): individual users are granted `owner`,
+  `collaborator`, or `viewer` access to specific apps. Apps have an
+  `access_type` that controls visibility: `acl` (only users with explicit
+  grants), `logged_in` (any authenticated user), or `public` (anyone
+  including anonymous/unauthenticated users).
 
 - **Identity injection.** On each proxied request, inject the authenticated
-  user's identity into the Shiny process via HTTP headers (`X-Shiny-User`,
-  `X-Shiny-Groups`). The Shiny app reads these headers to personalise content
-  without implementing its own auth. For public apps the headers are absent.
+  user's identity into the Shiny process via HTTP headers: `X-Shiny-User`
+  (the user's OIDC `sub`) and `X-Shiny-Access` (the user's effective access
+  level for the specific app: `owner`, `collaborator`, `viewer`, or
+  `anonymous`). The access level is derived from blockyard's authorization
+  model (system role + per-content ACL + app `access_type`). The Shiny app
+  reads these headers to personalise content without implementing its own
+  auth. For public apps accessed without authentication, `X-Shiny-User` is
+  empty and `X-Shiny-Access` is `anonymous`.
 
 - **Integration system (per-user credentials).** Allows each user to register
   credentials for external services (AI providers, S3, databases, etc.) once;
@@ -560,8 +571,10 @@ infrastructure.
   same catalog queries as the content discovery API, filtered by RBAC).
   Rendered with Go's `html/template` and embedded via `embed.FS` — no
   JavaScript framework, no build step. Credential enrollment forms for
-  operator-defined services (OpenBao) are inline on the dashboard. In v0
-  mode (no OIDC), the root page shows all deployed apps without auth.
+  operator-defined services (OpenBao) are inline on the dashboard. User
+  management (admin UI for role assignment and activation/deactivation)
+  and PAT management (create, list, and revoke tokens) are also provided.
+  In v0 mode (no OIDC), the root page shows all deployed apps without auth.
   In-app navigation chrome (navbar, app switcher) is deferred to v2.
 
 ### v2
