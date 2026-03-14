@@ -323,9 +323,6 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 }
 
 func validate(cfg *Config) error {
-	if cfg.Server.Token.IsEmpty() {
-		return fmt.Errorf("config: server.token must not be empty")
-	}
 	if cfg.Docker.Image == "" {
 		return fmt.Errorf("config: docker.image must not be empty")
 	}

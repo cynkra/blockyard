@@ -204,7 +204,7 @@ func TestNonAdminCannotCreateTags(t *testing.T) {
 
 	// Publisher role cannot manage tags (only admin can)
 	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "publisher")
-	token := idp.IssueJWT("user-1", []string{})
+	token := createTestPAT(t, srv.DB, "user-1")
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/tags", token,

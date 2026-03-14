@@ -21,20 +21,20 @@ func TestCatalogAdminSeesAllApps(t *testing.T) {
 	srv.DB.UpsertUserWithRole("publisher-2", "pub2@example.com", "Publisher 2", "publisher")
 
 	// Two different publishers create apps
-	pub1Token := idp.IssueJWT("publisher-1", []string{})
+	pub1Token := createTestPAT(t, srv.DB, "publisher-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", pub1Token,
 			strings.NewReader(`{"name":"app-one"}`)))
 	resp.Body.Close()
 
-	pub2Token := idp.IssueJWT("publisher-2", []string{})
+	pub2Token := createTestPAT(t, srv.DB, "publisher-2")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", pub2Token,
 			strings.NewReader(`{"name":"app-two"}`)))
 	resp.Body.Close()
 
 	// Admin queries catalog — should see both
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 	resp, err := http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/catalog", adminToken, nil))
 	if err != nil {

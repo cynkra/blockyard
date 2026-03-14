@@ -98,7 +98,7 @@ func TestCallerContextRoundTrip(t *testing.T) {
 	caller := &auth.CallerIdentity{
 		Sub:    "user-1",
 		Role:   auth.RolePublisher,
-		Source: auth.AuthSourceJWT,
+		Source: auth.AuthSourcePAT,
 	}
 
 	ctx := auth.ContextWithCaller(context.Background(), caller)

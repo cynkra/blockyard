@@ -58,6 +58,22 @@ CREATE TABLE IF NOT EXISTS users (
     last_login TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS personal_access_tokens (
+    id           TEXT PRIMARY KEY,
+    token_hash   BLOB NOT NULL UNIQUE,
+    user_sub     TEXT NOT NULL REFERENCES users(sub),
+    name         TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT,
+    last_used_at TEXT,
+    revoked      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_pat_token_hash
+    ON personal_access_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_pat_user_sub
+    ON personal_access_tokens(user_sub);
+
 CREATE TABLE IF NOT EXISTS tags (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL UNIQUE,
@@ -776,4 +792,121 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 	}
 
 	return apps, total, nil
+}
+
+// --- Personal Access Tokens ---
+
+// PATRow represents a row from the personal_access_tokens table.
+type PATRow struct {
+	ID         string  `json:"id"`
+	UserSub    string  `json:"user_sub,omitempty"`
+	Name       string  `json:"name"`
+	CreatedAt  string  `json:"created_at"`
+	ExpiresAt  *string `json:"expires_at"`
+	LastUsedAt *string `json:"last_used_at"`
+	Revoked    bool    `json:"revoked"`
+}
+
+// PATLookupResult is the result of looking up a PAT by hash,
+// joined with the owning user.
+type PATLookupResult struct {
+	PAT  PATRow
+	User UserRow
+}
+
+func (db *DB) CreatePAT(id string, tokenHash []byte, userSub, name string, expiresAt *string) (*PATRow, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(
+		`INSERT INTO personal_access_tokens (id, token_hash, user_sub, name, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, tokenHash, userSub, name, now, expiresAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create PAT: %w", err)
+	}
+	return &PATRow{
+		ID:        id,
+		UserSub:   userSub,
+		Name:      name,
+		CreatedAt: now,
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+// LookupPATByHash looks up a PAT by its SHA-256 hash, joined with the
+// owning user. Returns nil if not found.
+func (db *DB) LookupPATByHash(tokenHash []byte) (*PATLookupResult, error) {
+	var pat PATRow
+	var user UserRow
+	err := db.QueryRow(
+		`SELECT p.id, p.user_sub, p.name, p.created_at, p.expires_at, p.last_used_at, p.revoked,
+		        u.sub, u.email, u.name, u.role, u.active, u.last_login
+		 FROM personal_access_tokens p
+		 JOIN users u ON p.user_sub = u.sub
+		 WHERE p.token_hash = ?`,
+		tokenHash,
+	).Scan(&pat.ID, &pat.UserSub, &pat.Name, &pat.CreatedAt, &pat.ExpiresAt, &pat.LastUsedAt, &pat.Revoked,
+		&user.Sub, &user.Email, &user.Name, &user.Role, &user.Active, &user.LastLogin)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &PATLookupResult{PAT: pat, User: user}, nil
+}
+
+func (db *DB) ListPATsByUser(userSub string) ([]PATRow, error) {
+	rows, err := db.Query(
+		`SELECT id, name, created_at, expires_at, last_used_at, revoked
+		 FROM personal_access_tokens
+		 WHERE user_sub = ?
+		 ORDER BY created_at DESC`,
+		userSub,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pats []PATRow
+	for rows.Next() {
+		var p PATRow
+		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedAt, &p.ExpiresAt, &p.LastUsedAt, &p.Revoked); err != nil {
+			return nil, err
+		}
+		pats = append(pats, p)
+	}
+	return pats, rows.Err()
+}
+
+func (db *DB) RevokePAT(id, userSub string) (bool, error) {
+	result, err := db.Exec(
+		"UPDATE personal_access_tokens SET revoked = 1 WHERE id = ? AND user_sub = ?",
+		id, userSub,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+func (db *DB) RevokeAllPATs(userSub string) (int64, error) {
+	result, err := db.Exec(
+		"UPDATE personal_access_tokens SET revoked = 1 WHERE user_sub = ? AND revoked = 0",
+		userSub,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (db *DB) UpdatePATLastUsed(ctx context.Context, id string) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = db.ExecContext(ctx,
+		"UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?",
+		now, id,
+	)
 }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/server"
@@ -12,19 +13,15 @@ import (
 
 // APIAuth returns a chi middleware that authenticates control-plane requests.
 //
-// When OIDC is configured:
-//  1. Try session cookie first
-//  2. Try JWT bearer token against the IdP's JWKS
-//  3. Reject
-//
-// When OIDC is not configured (v0 compat / dev mode):
-//  1. Extract Bearer token
-//  2. Compare against static config token
-//  3. Store CallerIdentity with Sub="admin", Role=RoleAdmin
+// Authentication sources tried in order:
+//  1. Session cookie (OIDC session)
+//  2. PAT (Authorization: Bearer by_...)
+//  3. Static token fallback (v0 compat, only when OIDC is not configured)
+//  4. Reject (401)
 func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Try session cookie first (when OIDC is configured).
+			// 1. Try session cookie (when OIDC is configured).
 			if srv.Config.OIDC != nil && srv.SigningKey != nil {
 				cookieValue := extractSessionCookie(r)
 				if cookieValue != "" {
@@ -37,63 +34,78 @@ func APIAuth(srv *server.Server) func(http.Handler) http.Handler {
 				}
 			}
 
+			// 2. Try bearer token (PAT or static token fallback).
 			token := extractBearerToken(r)
-			if token == "" {
-				writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
-				return
-			}
-
-			var identity *auth.CallerIdentity
-
-			if srv.Config.OIDC != nil && srv.JWKSCache != nil {
-				// JWT validation path
-				claims, err := srv.JWKSCache.Validate(
-					token,
-					srv.Config.OIDC.IssuerURL,
-					srv.Config.OIDC.ClientID,
-				)
-				if err != nil {
-					slog.Debug("JWT validation failed", "error", err)
-					writeError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
+			if token != "" {
+				// 2a. Try PAT — tokens starting with "by_".
+				if strings.HasPrefix(token, "by_") {
+					caller := authenticateFromPAT(srv, r, token)
+					if caller != nil {
+						ctx := auth.ContextWithCaller(r.Context(), caller)
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
+					writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or expired token")
 					return
 				}
 
-				// Look up user role from database.
-				role := auth.RoleViewer
-				if srv.DB != nil {
-					dbUser, err := srv.DB.GetUser(claims.Subject)
-					if err != nil {
-						slog.Warn("failed to look up user role", "sub", claims.Subject, "error", err)
-					} else if dbUser != nil && !dbUser.Active {
-						writeError(w, http.StatusForbidden, "forbidden", "account deactivated")
+				// 2b. Static token fallback (v0 compat — only when OIDC is not configured).
+				if srv.Config.OIDC == nil && !srv.Config.Server.Token.IsEmpty() {
+					if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1 {
+						identity := &auth.CallerIdentity{
+							Sub:    "admin",
+							Role:   auth.RoleAdmin,
+							Source: auth.AuthSourceStaticToken,
+						}
+						ctx := auth.ContextWithCaller(r.Context(), identity)
+						next.ServeHTTP(w, r.WithContext(ctx))
 						return
-					} else if dbUser != nil {
-						role = auth.ParseRole(dbUser.Role)
 					}
 				}
-
-				identity = &auth.CallerIdentity{
-					Sub:    claims.Subject,
-					Role:   role,
-					Source: auth.AuthSourceJWT,
-				}
-			} else {
-				// Static token fallback
-				if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) != 1 {
-					writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
-					return
-				}
-
-				identity = &auth.CallerIdentity{
-					Sub:    "admin",
-					Role:   auth.RoleAdmin,
-					Source: auth.AuthSourceStaticToken,
-				}
 			}
 
-			ctx := auth.ContextWithCaller(r.Context(), identity)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 		})
+	}
+}
+
+// authenticateFromPAT validates a PAT bearer token and returns a CallerIdentity.
+func authenticateFromPAT(srv *server.Server, r *http.Request, token string) *auth.CallerIdentity {
+	hash := auth.HashPAT(token)
+	result, err := srv.DB.LookupPATByHash(hash)
+	if err != nil {
+		slog.Warn("PAT lookup error", "error", err)
+		return nil
+	}
+	if result == nil {
+		return nil
+	}
+
+	// Check revoked.
+	if result.PAT.Revoked {
+		return nil
+	}
+
+	// Check expired.
+	if result.PAT.ExpiresAt != nil {
+		expiry, err := time.Parse(time.RFC3339, *result.PAT.ExpiresAt)
+		if err == nil && time.Now().After(expiry) {
+			return nil
+		}
+	}
+
+	// Check user is active.
+	if !result.User.Active {
+		return nil
+	}
+
+	// Update last_used_at asynchronously.
+	go srv.DB.UpdatePATLastUsed(r.Context(), result.PAT.ID)
+
+	return &auth.CallerIdentity{
+		Sub:    result.User.Sub,
+		Role:   auth.ParseRole(result.User.Role),
+		Source: auth.AuthSourcePAT,
 	}
 }
 

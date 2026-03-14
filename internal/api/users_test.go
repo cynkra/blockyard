@@ -69,11 +69,6 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 
-	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.JWKSCache = jwksCache
 	srv.VaultClient = mockVaultForEnrollment(t)
 	srv.VaultTokenCache = integration.NewVaultTokenCache()
 
@@ -84,15 +79,16 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 	return srv, ts
 }
 
-func TestEnrollCredential_WithJWT(t *testing.T) {
+func TestEnrollCredential_WithPAT(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	_, ts := testServerWithVault(t, idp)
+	srv, ts := testServerWithVault(t, idp)
 
-	jwt := idp.IssueJWT("test-user", []string{"testers"})
+	srv.DB.UpsertUserWithRole("test-user", "test@example.com", "Test User", "viewer")
+	pat := createTestPAT(t, srv.DB, "test-user")
 	body := `{"api_key":"sk-test-key"}`
-	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", jwt, strings.NewReader(body))
+	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", pat, strings.NewReader(body))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -130,13 +126,14 @@ func TestEnrollCredential_InvalidServiceName(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	_, ts := testServerWithVault(t, idp)
+	srv, ts := testServerWithVault(t, idp)
 
-	jwt := idp.IssueJWT("test-user", []string{"testers"})
+	srv.DB.UpsertUserWithRole("test-user", "test@example.com", "Test User", "viewer")
+	pat := createTestPAT(t, srv.DB, "test-user")
 	body := `{"api_key":"sk-test-key"}`
 
 	// Service name with spaces.
-	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/bad service", jwt, strings.NewReader(body))
+	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/bad service", pat, strings.NewReader(body))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -158,11 +155,12 @@ func TestEnrollCredential_MissingAPIKey(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	_, ts := testServerWithVault(t, idp)
+	srv, ts := testServerWithVault(t, idp)
 
-	jwt := idp.IssueJWT("test-user", []string{"testers"})
+	srv.DB.UpsertUserWithRole("test-user", "test@example.com", "Test User", "viewer")
+	pat := createTestPAT(t, srv.DB, "test-user")
 	body := `{"api_key":""}`
-	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", jwt, strings.NewReader(body))
+	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", pat, strings.NewReader(body))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -180,11 +178,12 @@ func TestEnrollCredential_NoVaultConfigured(t *testing.T) {
 	defer idp.Close()
 
 	// Use testServerWithOIDC (no vault).
-	_, ts := testServerWithOIDC(t, idp)
+	srv, ts := testServerWithOIDC(t, idp)
 
-	jwt := idp.IssueJWT("test-user", []string{"testers"})
+	srv.DB.UpsertUserWithRole("test-user", "test@example.com", "Test User", "viewer")
+	pat := createTestPAT(t, srv.DB, "test-user")
 	body := `{"api_key":"sk-test-key"}`
-	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", jwt, strings.NewReader(body))
+	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", pat, strings.NewReader(body))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -326,11 +325,12 @@ func TestEnrollCredentialInvalidJSON(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	_, ts := testServerWithVault(t, idp)
+	srv, ts := testServerWithVault(t, idp)
 
-	jwt := idp.IssueJWT("test-user", []string{"testers"})
+	srv.DB.UpsertUserWithRole("test-user", "test@example.com", "Test User", "viewer")
+	pat := createTestPAT(t, srv.DB, "test-user")
 	// Send invalid JSON.
-	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", jwt, strings.NewReader(`{invalid-json`))
+	req := jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/openai", pat, strings.NewReader(`{invalid-json`))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -357,7 +357,7 @@ func TestEnrollCredentialNoVault(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "publisher")
-	token := idp.IssueJWT("user-1", []string{})
+	token := createTestPAT(t, srv.DB, "user-1")
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/test-svc", token,
@@ -378,8 +378,9 @@ func TestEnrollCredentialInvalidServiceNameSpecialChars(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	_, ts := testServerWithVault(t, idp)
-	token := idp.IssueJWT("user-1", []string{"developers"})
+	srv, ts := testServerWithVault(t, idp)
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	token := createTestPAT(t, srv.DB, "user-1")
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/invalid!!!", token,
@@ -400,8 +401,9 @@ func TestEnrollCredentialBadJSON(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	_, ts := testServerWithVault(t, idp)
-	token := idp.IssueJWT("user-1", []string{"developers"})
+	srv, ts := testServerWithVault(t, idp)
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	token := createTestPAT(t, srv.DB, "user-1")
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/test-svc", token,
@@ -422,8 +424,9 @@ func TestEnrollCredentialEmptyAPIKey(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 
-	_, ts := testServerWithVault(t, idp)
-	token := idp.IssueJWT("user-1", []string{"developers"})
+	srv, ts := testServerWithVault(t, idp)
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	token := createTestPAT(t, srv.DB, "user-1")
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/test-svc", token,

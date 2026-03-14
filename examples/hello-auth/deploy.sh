@@ -6,16 +6,19 @@
 #   # 1. Start the stack
 #   docker compose up -d
 #
-#   # 2. Deploy the app
+#   # 2. Log in via browser, create a PAT at /api/v1/users/me/tokens
+#   export BLOCKYARD_TOKEN=by_...
+#
+#   # 3. Deploy the app
 #   ./deploy.sh
 #
-#   # 3. Open in browser (requires "dex" in /etc/hosts)
+#   # 4. Open in browser (requires "dex" in /etc/hosts)
 #   open http://localhost:8080/app/hello-shiny/
 #
 set -euo pipefail
 
 BASE_URL="${BLOCKYARD_URL:-http://localhost:8080}"
-TOKEN="${BLOCKYARD_TOKEN:-my-secret-token}"
+TOKEN="${BLOCKYARD_TOKEN:?Set BLOCKYARD_TOKEN to a Personal Access Token (by_...)}"
 APP_NAME="hello-shiny"
 
 # Resolve the app directory (reuse hello-shiny example app).

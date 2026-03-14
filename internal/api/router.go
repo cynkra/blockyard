@@ -81,11 +81,15 @@ func NewRouter(srv *server.Server) http.Handler {
 		sub.Handle("/{name}/*", proxy.Handler(srv))
 	})
 
-	// User-facing API with dual auth (session cookie or JWT bearer).
+	// User-facing API with dual auth (session cookie or bearer token).
 	r.Route("/api/v1/users/me", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(20, time.Minute))
 		r.Use(UserAuth(srv))
 		r.Post("/credentials/{service}", EnrollCredential(srv))
+		r.Post("/tokens", CreateToken(srv))
+		r.Get("/tokens", ListTokens(srv))
+		r.Delete("/tokens", RevokeAllTokens(srv))
+		r.Delete("/tokens/{tokenID}", RevokeToken(srv))
 	})
 
 	// Authenticated API — general rate limit.

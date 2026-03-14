@@ -16,7 +16,7 @@ import (
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
-// testServerWithOIDC creates a test server with OIDC (JWT auth) configured.
+// testServerWithOIDC creates a test server with OIDC configured.
 func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *httptest.Server) {
 	t.Helper()
 	tmp := t.TempDir()
@@ -47,17 +47,24 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 
-	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.JWKSCache = jwksCache
-
 	handler := NewRouter(srv)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
 	return srv, ts
+}
+
+// createTestPAT creates a PAT for the given user and returns the plaintext bearer token.
+func createTestPAT(t *testing.T, database *db.DB, sub string) string {
+	t.Helper()
+	plaintext, hash, err := auth.GeneratePAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreatePAT(plaintext[3:9], hash, sub, "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	return plaintext
 }
 
 func jwtReq(method, url, token string, body io.Reader) *http.Request {
@@ -75,7 +82,7 @@ func TestPublisherCanCreateApp(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "publisher")
-	token := idp.IssueJWT("user-1", []string{})
+	token := createTestPAT(t, srv.DB, "user-1")
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token,
@@ -103,7 +110,7 @@ func TestViewerCannotCreateApp(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("user-2", "user2@example.com", "User 2", "viewer")
-	token := idp.IssueJWT("user-2", []string{})
+	token := createTestPAT(t, srv.DB, "user-2")
 
 	resp, err := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token,
@@ -127,14 +134,14 @@ func TestAdminSeesAllApps(t *testing.T) {
 	srv.DB.UpsertUserWithRole("publisher-1", "pub1@example.com", "Publisher 1", "publisher")
 
 	// Publisher creates an app
-	pubToken := idp.IssueJWT("publisher-1", []string{})
+	pubToken := createTestPAT(t, srv.DB, "publisher-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", pubToken,
 			strings.NewReader(`{"name":"app-1"}`)))
 	resp.Body.Close()
 
 	// Admin lists all apps
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 	resp, err := http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", adminToken, nil))
 	if err != nil {
@@ -162,7 +169,7 @@ func TestPublisherSeesOnlyOwnAndGrantedApps(t *testing.T) {
 	srv.DB.UpsertUserWithRole("publisher-2", "pub2@example.com", "Publisher 2", "publisher")
 
 	// Publisher-1 creates app-1
-	token1 := idp.IssueJWT("publisher-1", []string{})
+	token1 := createTestPAT(t, srv.DB, "publisher-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token1,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -171,7 +178,7 @@ func TestPublisherSeesOnlyOwnAndGrantedApps(t *testing.T) {
 	resp.Body.Close()
 
 	// Publisher-2 creates app-2
-	token2 := idp.IssueJWT("publisher-2", []string{})
+	token2 := createTestPAT(t, srv.DB, "publisher-2")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", token2,
 			strings.NewReader(`{"name":"app-2"}`)))
@@ -229,7 +236,7 @@ func TestDeleteAppRequiresOwnerOrAdmin(t *testing.T) {
 	srv.DB.UpsertUserWithRole("collab-1", "collab@example.com", "Collab", "publisher")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -242,7 +249,7 @@ func TestDeleteAppRequiresOwnerOrAdmin(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "collab-1", "user", "collaborator", "owner-1")
 
 	// Collaborator cannot delete (gets 404)
-	collabToken := idp.IssueJWT("collab-1", []string{})
+	collabToken := createTestPAT(t, srv.DB, "collab-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("DELETE", ts.URL+"/api/v1/apps/"+appID, collabToken, nil))
 	resp.Body.Close()
@@ -262,10 +269,11 @@ func TestDeleteAppRequiresOwnerOrAdmin(t *testing.T) {
 func TestUnmappedUserHasNoRole(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
-	_, ts := testServerWithOIDC(t, idp)
+	srv, ts := testServerWithOIDC(t, idp)
 
-	// User not in the users table has no role
-	token := idp.IssueJWT("unmapped-user", []string{})
+	// User with viewer role has no create/write permissions
+	srv.DB.UpsertUserWithRole("unmapped-user", "unmapped@example.com", "Unmapped", "viewer")
+	token := createTestPAT(t, srv.DB, "unmapped-user")
 
 	// Cannot create apps (403)
 	resp, _ := http.DefaultClient.Do(
@@ -293,7 +301,7 @@ func TestACLGrantRevokeCycle(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 
 	// Admin creates app
 	resp, _ := http.DefaultClient.Do(
@@ -372,7 +380,7 @@ func TestSetAccessType(t *testing.T) {
 
 	srv.DB.UpsertUserWithRole("owner-1", "owner@example.com", "Owner", "publisher")
 	srv.DB.UpsertUserWithRole("collab-1", "collab@example.com", "Collab", "publisher")
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -404,7 +412,7 @@ func TestSetAccessType(t *testing.T) {
 
 	// Collaborator cannot change access_type
 	srv.DB.GrantAppAccess(appID, "collab-1", "user", "collaborator", "owner-1")
-	collabToken := idp.IssueJWT("collab-1", []string{})
+	collabToken := createTestPAT(t, srv.DB, "collab-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, collabToken,
 			strings.NewReader(`{"access_type":"acl"}`)))
@@ -433,7 +441,7 @@ func TestContentViewerCannotDeploy(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "publisher")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -446,7 +454,7 @@ func TestContentViewerCannotDeploy(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer attempts deploy -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{})
+	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/bundles", viewerToken,
 			strings.NewReader("fake-bundle")))
@@ -462,7 +470,7 @@ func TestSelfGrantRejected(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 
 	// Admin creates app
 	resp, _ := http.DefaultClient.Do(
@@ -483,7 +491,7 @@ func TestSelfGrantRejected(t *testing.T) {
 	}
 }
 
-func TestInvalidJWTReturns401(t *testing.T) {
+func TestInvalidTokenReturns401(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 	_, ts := testServerWithOIDC(t, idp)
@@ -502,7 +510,7 @@ func TestGrantAccessInvalidKind(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -529,7 +537,7 @@ func TestGrantAccessInvalidRole(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -556,7 +564,7 @@ func TestGrantAccessEmptyPrincipal(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -583,7 +591,7 @@ func TestGrantAccessInvalidJSON(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -610,7 +618,7 @@ func TestRevokeAccessNonexistent(t *testing.T) {
 	srv, ts := testServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 
 	// Create app
 	resp, _ := http.DefaultClient.Do(
@@ -639,7 +647,7 @@ func TestNonAdminCannotGrantAccess(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Admin creates app
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -652,7 +660,7 @@ func TestNonAdminCannotGrantAccess(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "admin-1")
 
 	// Viewer tries to grant access -> 404 (hidden)
-	viewerToken := idp.IssueJWT("viewer-1", []string{})
+	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/access", viewerToken,
 			strings.NewReader(`{"principal":"user-2","kind":"user","role":"viewer"}`)))
@@ -671,7 +679,7 @@ func TestNonAdminCannotRevokeAccess(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Admin creates app and grants access to user-2
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", adminToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -684,7 +692,7 @@ func TestNonAdminCannotRevokeAccess(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "admin-1")
 
 	// Viewer tries to revoke access -> 404 (hidden)
-	viewerToken := idp.IssueJWT("viewer-1", []string{})
+	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("DELETE", ts.URL+"/api/v1/apps/"+appID+"/access/user/user-2", viewerToken, nil))
 	resp.Body.Close()
@@ -702,7 +710,7 @@ func TestPublicAppInUnfilteredList(t *testing.T) {
 	srv.DB.UpsertUserWithRole("other-user", "other@example.com", "Other", "publisher")
 
 	// Publisher creates app and makes it public
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"public-app"}`)))
@@ -717,7 +725,7 @@ func TestPublicAppInUnfilteredList(t *testing.T) {
 	resp.Body.Close()
 
 	// Another publisher (not owner, no grant) should see the public app
-	otherToken := idp.IssueJWT("other-user", []string{})
+	otherToken := createTestPAT(t, srv.DB, "other-user")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", otherToken, nil))
 	var apps []map[string]any
@@ -744,7 +752,7 @@ func TestViewerCannotStartApp(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -757,7 +765,7 @@ func TestViewerCannotStartApp(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer tries to start the app -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{})
+	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/start", viewerToken, nil))
 	resp.Body.Close()
@@ -775,7 +783,7 @@ func TestViewerCannotStopApp(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -788,7 +796,7 @@ func TestViewerCannotStopApp(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer tries to stop the app -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{})
+	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/stop", viewerToken, nil))
 	resp.Body.Close()
@@ -806,7 +814,7 @@ func TestCollaboratorCanUpdateConfig(t *testing.T) {
 	srv.DB.UpsertUserWithRole("collab-1", "collab@example.com", "Collab", "publisher")
 
 	// Owner creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -819,7 +827,7 @@ func TestCollaboratorCanUpdateConfig(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "collab-1", "user", "collaborator", "owner-1")
 
 	// Collaborator updates memory_limit -> 200
-	collabToken := idp.IssueJWT("collab-1", []string{})
+	collabToken := createTestPAT(t, srv.DB, "collab-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, collabToken,
 			strings.NewReader(`{"memory_limit":"512m"}`)))
@@ -838,7 +846,7 @@ func TestViewerCannotUpdateConfig(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Owner creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -851,7 +859,7 @@ func TestViewerCannotUpdateConfig(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer tries to update memory_limit -> 404
-	viewerToken := idp.IssueJWT("viewer-1", []string{})
+	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, viewerToken,
 			strings.NewReader(`{"memory_limit":"512m"}`)))
@@ -870,7 +878,7 @@ func TestNonAdminCannotDeleteTag(t *testing.T) {
 	srv.DB.UpsertUserWithRole("publisher-1", "pub@example.com", "Publisher", "publisher")
 
 	// Admin creates a tag
-	adminToken := idp.IssueJWT("admin-1", []string{})
+	adminToken := createTestPAT(t, srv.DB, "admin-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/tags", adminToken,
 			strings.NewReader(`{"name":"production"}`)))
@@ -883,7 +891,7 @@ func TestNonAdminCannotDeleteTag(t *testing.T) {
 	tagID := tag["id"].(string)
 
 	// Publisher tries to delete the tag -> 404
-	pubToken := idp.IssueJWT("publisher-1", []string{})
+	pubToken := createTestPAT(t, srv.DB, "publisher-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("DELETE", ts.URL+"/api/v1/tags/"+tagID, pubToken, nil))
 	resp.Body.Close()
@@ -901,7 +909,7 @@ func TestViewerCanReadApp(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer@example.com", "Viewer", "viewer")
 
 	// Publisher creates app
-	ownerToken := idp.IssueJWT("owner-1", []string{})
+	ownerToken := createTestPAT(t, srv.DB, "owner-1")
 	resp, _ := http.DefaultClient.Do(
 		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
 			strings.NewReader(`{"name":"app-1"}`)))
@@ -914,7 +922,7 @@ func TestViewerCanReadApp(t *testing.T) {
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
 	// Viewer can GET the app -> 200
-	viewerToken := idp.IssueJWT("viewer-1", []string{})
+	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps/"+appID, viewerToken, nil))
 	resp.Body.Close()

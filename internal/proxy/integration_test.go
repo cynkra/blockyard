@@ -815,7 +815,7 @@ func TestRedirectTrailingSlash(t *testing.T) {
 
 // testProxyServerWithOIDC creates a test proxy server with OIDC configured.
 // It returns the server, httptest.Server, and the MockIdP so callers can
-// issue JWTs and create sessions.
+// create sessions.
 func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *httptest.Server) {
 	t.Helper()
 	tmp := t.TempDir()
@@ -856,12 +856,6 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 
-	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.JWKSCache = jwksCache
-
 	// Set up signing key and user session store so AppAuthMiddleware works.
 	srv.SigningKey = auth.DeriveSigningKey("test-session-secret")
 	srv.UserSessions = auth.NewUserSessionStore()
@@ -873,9 +867,23 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 	return srv, ts
 }
 
-// createAndStartAppWithJWT creates an app using a JWT bearer token, uploads
+// createTestPAT creates a Personal Access Token for the given user subject
+// and returns the plaintext token string.
+func createTestPAT(t *testing.T, database *db.DB, sub string) string {
+	t.Helper()
+	plaintext, hash, err := auth.GeneratePAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreatePAT(plaintext[3:9], hash, sub, "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	return plaintext
+}
+
+// createAndStartAppWithPAT creates an app using a PAT bearer token, uploads
 // a bundle, and starts the app. Returns the app ID.
-func createAndStartAppWithJWT(t *testing.T, ts *httptest.Server, name, token string) string {
+func createAndStartAppWithPAT(t *testing.T, ts *httptest.Server, name, token string) string {
 	t.Helper()
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
@@ -939,9 +947,9 @@ func TestProxyOIDCRedirectsUnauthenticated(t *testing.T) {
 	srv, ts := testProxyServerWithOIDC(t, idp)
 
 	srv.DB.UpsertUserWithRole("publisher-1", "publisher-1@example.com", "Publisher", "publisher")
-	token := idp.IssueJWT("publisher-1", []string{"developers"})
+	token := createTestPAT(t, srv.DB, "publisher-1")
 
-	createAndStartAppWithJWT(t, ts, "oidc-app", token)
+	createAndStartAppWithPAT(t, ts, "oidc-app", token)
 
 	// Make an unauthenticated request (no cookies, no auth header).
 	client := &http.Client{
@@ -971,8 +979,8 @@ func TestProxyOIDCDeniesUnauthorizedUser(t *testing.T) {
 	srv.DB.UpsertUserWithRole("viewer-1", "viewer-1@example.com", "Viewer", "viewer")
 
 	// Publisher creates and starts app (access_type defaults to "acl").
-	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
-	createAndStartAppWithJWT(t, ts, "acl-app", pubToken)
+	pubToken := createTestPAT(t, srv.DB, "publisher-1")
+	createAndStartAppWithPAT(t, ts, "acl-app", pubToken)
 
 	// Another user with a mapped role but NO grant on this app.
 	cookie := makeSessionCookie(t, srv, "viewer-1")
@@ -1001,8 +1009,8 @@ func TestProxyOIDCAllowsPublicApp(t *testing.T) {
 	srv.DB.UpsertUserWithRole("publisher-1", "publisher-1@example.com", "Publisher", "publisher")
 
 	// Publisher creates and starts app.
-	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
-	appID := createAndStartAppWithJWT(t, ts, "public-app", pubToken)
+	pubToken := createTestPAT(t, srv.DB, "publisher-1")
+	appID := createAndStartAppWithPAT(t, ts, "public-app", pubToken)
 
 	// Set access_type to "public".
 	req, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/apps/"+appID,

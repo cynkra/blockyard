@@ -27,7 +27,10 @@ const (
 	ActionCredentialEnroll  Action = "credential.enroll"
 	ActionUserLogin         Action = "user.login"
 	ActionUserLogout        Action = "user.logout"
-	ActionUserUpdate Action = "user.update"
+	ActionUserUpdate        Action = "user.update"
+	ActionTokenCreate       Action = "token.create"
+	ActionTokenRevoke       Action = "token.revoke"
+	ActionTokenRevokeAll    Action = "token.revoke_all"
 )
 
 // Entry is a single audit log record.

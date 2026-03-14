@@ -61,7 +61,7 @@ func TestEnvVarOverridesToken(t *testing.T) {
 	}
 }
 
-func TestValidationRejectsEmptyToken(t *testing.T) {
+func TestValidationAcceptsEmptyToken(t *testing.T) {
 	tomlContent := `
 [server]
 token = ""
@@ -81,8 +81,8 @@ path = "/tmp/blockyard-test/db/blockyard.db"
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(tomlContent), 0o644)
 	_, err := Load(path)
-	if err == nil {
-		t.Error("expected validation error for empty token")
+	if err != nil {
+		t.Errorf("empty token should be accepted, got error: %v", err)
 	}
 }
 

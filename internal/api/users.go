@@ -6,8 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
@@ -47,10 +50,10 @@ func UserAuth(srv *server.Server) func(http.Handler) http.Handler {
 				}
 			}
 
-			// Try JWT bearer token.
+			// Try bearer token (PAT or static token).
 			token := extractBearerToken(r)
 			if token != "" {
-				caller := authenticateFromBearer(srv, token)
+				caller := authenticateFromBearer(srv, r, token)
 				if caller != nil {
 					ctx := auth.ContextWithCaller(r.Context(), caller)
 					next.ServeHTTP(w, r.WithContext(ctx))
@@ -114,44 +117,22 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 	}
 }
 
-// authenticateFromBearer validates a JWT bearer token and returns a CallerIdentity.
-func authenticateFromBearer(srv *server.Server, token string) *auth.CallerIdentity {
-	if srv.Config.OIDC != nil && srv.JWKSCache != nil {
-		claims, err := srv.JWKSCache.Validate(
-			token,
-			srv.Config.OIDC.IssuerURL,
-			srv.Config.OIDC.ClientID,
-		)
-		if err != nil {
-			return nil
-		}
-
-		// Look up role from database.
-		role := auth.RoleViewer
-		if srv.DB != nil {
-			dbUser, err := srv.DB.GetUser(claims.Subject)
-			if err != nil {
-				slog.Warn("failed to look up user role", "sub", claims.Subject, "error", err)
-			} else if dbUser != nil && !dbUser.Active {
-				return nil
-			} else if dbUser != nil {
-				role = auth.ParseRole(dbUser.Role)
-			}
-		}
-
-		return &auth.CallerIdentity{
-			Sub:    claims.Subject,
-			Role:   role,
-			Source: auth.AuthSourceJWT,
-		}
+// authenticateFromBearer validates a PAT bearer token (or static token
+// in v0 compat mode) and returns a CallerIdentity.
+func authenticateFromBearer(srv *server.Server, r *http.Request, token string) *auth.CallerIdentity {
+	// Try PAT.
+	if strings.HasPrefix(token, "by_") {
+		return authenticateFromPAT(srv, r, token)
 	}
 
-	// Static token fallback.
-	if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1 {
-		return &auth.CallerIdentity{
-			Sub:    "admin",
-			Role:   auth.RoleAdmin,
-			Source: auth.AuthSourceStaticToken,
+	// Static token fallback (v0 compat — only when OIDC is not configured).
+	if srv.Config.OIDC == nil && !srv.Config.Server.Token.IsEmpty() {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1 {
+			return &auth.CallerIdentity{
+				Sub:    "admin",
+				Role:   auth.RoleAdmin,
+				Source: auth.AuthSourceStaticToken,
+			}
 		}
 	}
 	return nil
@@ -330,5 +311,183 @@ func UpdateUser(srv *server.Server) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(user)
+	}
+}
+
+// --- Personal Access Token endpoints ---
+
+// durationRe parses duration strings like "90d", "24h", "30m".
+var durationRe = regexp.MustCompile(`^(\d+)([dhm])$`)
+
+func parseDuration(s string) (time.Duration, bool) {
+	m := durationRe.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
+	}
+	n := 0
+	for _, c := range m[1] {
+		n = n*10 + int(c-'0')
+	}
+	switch m[2] {
+	case "d":
+		return time.Duration(n) * 24 * time.Hour, true
+	case "h":
+		return time.Duration(n) * time.Hour, true
+	case "m":
+		return time.Duration(n) * time.Minute, true
+	}
+	return 0, false
+}
+
+type createTokenRequest struct {
+	Name      string `json:"name"`
+	ExpiresIn string `json:"expires_in,omitempty"` // e.g. "90d"
+}
+
+type createTokenResponse struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Token     string  `json:"token"`
+	CreatedAt string  `json:"created_at"`
+	ExpiresAt *string `json:"expires_at"`
+}
+
+// CreateToken handles POST /api/v1/users/me/tokens — create a new PAT.
+// Session-only: PATs cannot create other PATs.
+func CreateToken(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+		if caller.Source != auth.AuthSourceSession {
+			forbidden(w, "tokens can only be created via browser session")
+			return
+		}
+
+		var body createTokenRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			badRequest(w, "invalid request body")
+			return
+		}
+		if body.Name == "" {
+			badRequest(w, "name is required")
+			return
+		}
+
+		var expiresAt *string
+		if body.ExpiresIn != "" {
+			dur, ok := parseDuration(body.ExpiresIn)
+			if !ok {
+				badRequest(w, "invalid expires_in format, use e.g. '90d', '24h'")
+				return
+			}
+			exp := time.Now().Add(dur).UTC().Format(time.RFC3339)
+			expiresAt = &exp
+		}
+
+		plaintext, hash, err := auth.GeneratePAT()
+		if err != nil {
+			serverError(w, "failed to generate token")
+			return
+		}
+
+		id := uuid.New().String()
+		pat, err := srv.DB.CreatePAT(id, hash, caller.Sub, body.Name, expiresAt)
+		if err != nil {
+			serverError(w, err.Error())
+			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionTokenCreate, pat.ID,
+				map[string]any{"name": body.Name}))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(createTokenResponse{
+			ID:        pat.ID,
+			Name:      pat.Name,
+			Token:     plaintext,
+			CreatedAt: pat.CreatedAt,
+			ExpiresAt: pat.ExpiresAt,
+		})
+	}
+}
+
+// ListTokens handles GET /api/v1/users/me/tokens — list caller's PATs.
+func ListTokens(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+
+		pats, err := srv.DB.ListPATsByUser(caller.Sub)
+		if err != nil {
+			serverError(w, err.Error())
+			return
+		}
+
+		if pats == nil {
+			pats = []db.PATRow{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(pats)
+	}
+}
+
+// RevokeToken handles DELETE /api/v1/users/me/tokens/{id} — revoke a single PAT.
+func RevokeToken(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+
+		tokenID := chi.URLParam(r, "tokenID")
+		revoked, err := srv.DB.RevokePAT(tokenID, caller.Sub)
+		if err != nil {
+			serverError(w, err.Error())
+			return
+		}
+		if !revoked {
+			notFound(w, "token not found")
+			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionTokenRevoke, tokenID, nil))
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// RevokeAllTokens handles DELETE /api/v1/users/me/tokens — revoke all PATs.
+func RevokeAllTokens(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+
+		n, err := srv.DB.RevokeAllPATs(caller.Sub)
+		if err != nil {
+			serverError(w, err.Error())
+			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionTokenRevokeAll, caller.Sub,
+				map[string]any{"count": n}))
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }

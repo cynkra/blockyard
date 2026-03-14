@@ -81,16 +81,6 @@ func main() {
 		srv.SessionTokenKey = auth.DeriveSessionTokenKey(cfg.Server.SessionSecret.Expose())
 		srv.UserSessions = auth.NewUserSessionStore()
 
-		// Initialize JWKS cache for control-plane JWT validation.
-		jwksURI := oidcClient.JWKSURI()
-		if jwksURI != "" {
-			jwksCache, err := auth.NewJWKSCache(jwksURI)
-			if err != nil {
-				slog.Error("failed to initialize JWKS cache", "error", err)
-				os.Exit(1)
-			}
-			srv.JWKSCache = jwksCache
-		}
 	}
 
 	// Initialize OpenBao if configured.
