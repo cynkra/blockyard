@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS app_tags (
 
 type DB struct {
 	*sql.DB
+	tempPath string // non-empty when using a temp file for :memory:
 }
 
 // IsUniqueConstraintError reports whether err is a SQLite UNIQUE
@@ -98,13 +99,26 @@ func IsUniqueConstraintError(err error) bool {
 }
 
 func Open(path string) (*DB, error) {
-	if dir := filepath.Dir(path); dir != "." {
+	var tempPath string
+	dsn := path + "?_pragma=foreign_keys(1)"
+	if path == ":memory:" {
+		// Plain ":memory:" gives each driver connection its own database;
+		// if the sql pool ever closes and reopens the connection the data
+		// is lost. Use a temp file instead — it is deleted on Close().
+		f, err := os.CreateTemp("", "blockyard-*.db")
+		if err != nil {
+			return nil, fmt.Errorf("create temp db: %w", err)
+		}
+		tempPath = f.Name()
+		f.Close()
+		dsn = tempPath + "?_pragma=foreign_keys(1)"
+	} else if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create db directory: %w", err)
 		}
 	}
 
-	sqlDB, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -123,7 +137,16 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
 
-	return &DB{sqlDB}, nil
+	return &DB{DB: sqlDB, tempPath: tempPath}, nil
+}
+
+// Close closes the database and removes any temp file created for :memory:.
+func (db *DB) Close() error {
+	err := db.DB.Close()
+	if db.tempPath != "" {
+		os.Remove(db.tempPath)
+	}
+	return err
 }
 
 type AppRow struct {
