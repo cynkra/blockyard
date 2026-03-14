@@ -352,3 +352,115 @@ func TestEnrollCredentialInvalidJSON(t *testing.T) {
 		t.Errorf("expected 'invalid request body' in message, got %q", errResp.Message)
 	}
 }
+
+// TestEnrollCredentialNoVault covers lines 147-150 of users.go:
+// server without vault returns 503 "credential storage not configured".
+func TestEnrollCredentialNoVault(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+	token := idp.IssueJWT("user-1", []string{"developers"})
+
+	resp, err := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/test-svc", token,
+			strings.NewReader(`{"api_key":"my-key"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+}
+
+// TestEnrollCredentialInvalidServiceNameSpecialChars covers lines 153-156 of users.go:
+// service name with special characters is rejected with 400.
+func TestEnrollCredentialInvalidServiceNameSpecialChars(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	_, ts := testServerWithVault(t, idp)
+	token := idp.IssueJWT("user-1", []string{"developers"})
+
+	resp, err := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/invalid!!!", token,
+			strings.NewReader(`{"api_key":"my-key"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestEnrollCredentialBadJSON covers lines 161-163 of users.go:
+// POST with bad JSON body returns 400.
+func TestEnrollCredentialBadJSON(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	_, ts := testServerWithVault(t, idp)
+	token := idp.IssueJWT("user-1", []string{"developers"})
+
+	resp, err := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/test-svc", token,
+			strings.NewReader(`{not json`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestEnrollCredentialEmptyAPIKey covers lines 165-167 of users.go:
+// POST with empty api_key returns 400.
+func TestEnrollCredentialEmptyAPIKey(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	_, ts := testServerWithVault(t, idp)
+	token := idp.IssueJWT("user-1", []string{"developers"})
+
+	resp, err := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/users/me/credentials/test-svc", token,
+			strings.NewReader(`{"api_key":""}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestEnrollCredentialUnauthenticated covers the UserAuth middleware
+// no-auth-at-all path: no cookie, no token returns 401.
+func TestEnrollCredentialUnauthenticated(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	_, ts := testServerWithOIDC(t, idp)
+
+	req, _ := http.NewRequest("POST",
+		ts.URL+"/api/v1/users/me/credentials/test-svc",
+		strings.NewReader(`{"api_key":"my-key"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}

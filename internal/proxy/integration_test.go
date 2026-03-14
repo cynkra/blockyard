@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/cynkra/blockyard/internal/api"
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
@@ -809,5 +810,227 @@ func TestRedirectTrailingSlash(t *testing.T) {
 		if loc := rec.Header().Get("Location"); loc != tt.wantLoc {
 			t.Errorf("%s: expected Location %q, got %q", tt.path, tt.wantLoc, loc)
 		}
+	}
+}
+
+// testProxyServerWithOIDC creates a test proxy server with OIDC configured.
+// It returns the server, httptest.Server, and the MockIdP so callers can
+// issue JWTs and create sessions.
+func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *httptest.Server) {
+	t.Helper()
+	tmp := t.TempDir()
+
+	rvBin := testutil.FakeRvBinary(t)
+	cfg := &config.Config{
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Docker: config.DockerConfig{
+			Image:        "test-image",
+			ShinyPort:    3838,
+			RvBinaryPath: rvBin,
+		},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+		},
+		Proxy: config.ProxyConfig{
+			WsCacheTTL:         config.Duration{Duration: 5 * time.Second},
+			WorkerStartTimeout: config.Duration{Duration: 5 * time.Second},
+			MaxWorkers:         10,
+		},
+		OIDC: &config.OidcConfig{
+			IssuerURL:    idp.IssuerURL(),
+			ClientID:     "blockyard",
+			ClientSecret: config.NewSecret("test-secret"),
+			GroupsClaim:  "groups",
+			CookieMaxAge: config.Duration{Duration: 24 * time.Hour},
+		},
+	}
+
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+
+	srv.RoleCache = auth.NewRoleMappingCache()
+
+	jwksCache, err := auth.NewJWKSCache(idp.IssuerURL() + "/jwks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.JWKSCache = jwksCache
+
+	// Set up signing key and user session store so AppAuthMiddleware works.
+	srv.SigningKey = auth.DeriveSigningKey("test-session-secret")
+	srv.UserSessions = auth.NewUserSessionStore()
+
+	handler := api.NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return srv, ts
+}
+
+// createAndStartAppWithJWT creates an app using a JWT bearer token, uploads
+// a bundle, and starts the app. Returns the app ID.
+func createAndStartAppWithJWT(t *testing.T, ts *httptest.Server, name, token string) string {
+	t.Helper()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+		bytes.NewReader([]byte(`{"name":"`+name+`"}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+	id := created["id"].(string)
+
+	req, _ = http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/bundles",
+		bytes.NewReader(testutil.MakeBundle(t)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	http.DefaultClient.Do(req)
+	time.Sleep(200 * time.Millisecond)
+
+	req, _ = http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	http.DefaultClient.Do(req)
+
+	return id
+}
+
+// makeSessionCookie creates a signed session cookie for the given sub
+// and registers a server-side session with the given groups.
+func makeSessionCookie(t *testing.T, srv *server.Server, sub string, groups []string) *http.Cookie {
+	t.Helper()
+
+	// Register the server-side session.
+	srv.UserSessions.Set(sub, &auth.UserSession{
+		Groups:      groups,
+		AccessToken: "mock-access-token",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
+	})
+
+	// Create signed cookie payload.
+	payload := &auth.CookiePayload{
+		Sub:      sub,
+		IssuedAt: time.Now().Unix(),
+	}
+	cookieValue, err := payload.Encode(srv.SigningKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return &http.Cookie{
+		Name:  "blockyard_session",
+		Value: cookieValue,
+	}
+}
+
+func TestProxyOIDCRedirectsUnauthenticated(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testProxyServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+	token := idp.IssueJWT("publisher-1", []string{"developers"})
+
+	createAndStartAppWithJWT(t, ts, "oidc-app", token)
+
+	// Make an unauthenticated request (no cookies, no auth header).
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(ts.URL + "/app/oidc-app/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("expected 302, got %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if !strings.Contains(loc, "/login?return_url=") {
+		t.Errorf("expected redirect to /login?return_url=..., got Location: %s", loc)
+	}
+}
+
+func TestProxyOIDCDeniesUnauthorizedUser(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testProxyServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.RoleCache.Set("viewers", auth.RoleViewer)
+
+	// Publisher creates and starts app (access_type defaults to "acl").
+	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
+	createAndStartAppWithJWT(t, ts, "acl-app", pubToken)
+
+	// Another user with a mapped role but NO grant on this app.
+	cookie := makeSessionCookie(t, srv, "viewer-1", []string{"viewers"})
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, _ := http.NewRequest("GET", ts.URL+"/app/acl-app/", nil)
+	req.AddCookie(cookie)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for unauthorized user, got %d", resp.StatusCode)
+	}
+}
+
+func TestProxyOIDCAllowsPublicApp(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testProxyServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+
+	// Publisher creates and starts app.
+	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
+	appID := createAndStartAppWithJWT(t, ts, "public-app", pubToken)
+
+	// Set access_type to "public".
+	req, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/apps/"+appID,
+		bytes.NewReader([]byte(`{"access_type":"public"}`)))
+	req.Header.Set("Authorization", "Bearer "+pubToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set access_type: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Any authenticated user (even without a grant) should get 200.
+	cookie := makeSessionCookie(t, srv, "random-user", []string{"some-group"})
+	req, _ = http.NewRequest("GET", ts.URL+"/app/public-app/", nil)
+	req.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for public app, got %d", resp.StatusCode)
 	}
 }

@@ -976,3 +976,190 @@ func TestPublicAppInUnfilteredList(t *testing.T) {
 		t.Error("public app should be visible to other users")
 	}
 }
+
+func TestViewerCannotStartApp(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.RoleCache.Set("viewers", auth.RoleViewer)
+
+	// Publisher creates app
+	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant viewer access
+	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
+
+	// Viewer tries to start the app -> 404
+	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/start", viewerToken, nil))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("viewer start: expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestViewerCannotStopApp(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.RoleCache.Set("viewers", auth.RoleViewer)
+
+	// Publisher creates app
+	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant viewer access
+	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
+
+	// Viewer tries to stop the app -> 404
+	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/stop", viewerToken, nil))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("viewer stop: expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestCollaboratorCanUpdateConfig(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+
+	// Owner creates app
+	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant collaborator access
+	srv.DB.GrantAppAccess(appID, "collab-1", "user", "collaborator", "owner-1")
+
+	// Collaborator updates memory_limit -> 200
+	collabToken := idp.IssueJWT("collab-1", []string{"developers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, collabToken,
+			strings.NewReader(`{"memory_limit":"512m"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("collaborator update config: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestViewerCannotUpdateConfig(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.RoleCache.Set("viewers", auth.RoleViewer)
+
+	// Owner creates app
+	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant viewer access
+	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
+
+	// Viewer tries to update memory_limit -> 404
+	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("PATCH", ts.URL+"/api/v1/apps/"+appID, viewerToken,
+			strings.NewReader(`{"memory_limit":"512m"}`)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("viewer update config: expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestNonAdminCannotDeleteTag(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("admins", auth.RoleAdmin)
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+
+	// Admin creates a tag
+	adminToken := idp.IssueJWT("admin-1", []string{"admins"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/tags", adminToken,
+			strings.NewReader(`{"name":"production"}`)))
+	var tag map[string]any
+	json.NewDecoder(resp.Body).Decode(&tag)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("admin create tag: expected 201, got %d", resp.StatusCode)
+	}
+	tagID := tag["id"].(string)
+
+	// Publisher tries to delete the tag -> 404
+	pubToken := idp.IssueJWT("publisher-1", []string{"developers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("DELETE", ts.URL+"/api/v1/tags/"+tagID, pubToken, nil))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("publisher delete tag: expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestViewerCanReadApp(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.RoleCache.Set("developers", auth.RolePublisher)
+	srv.RoleCache.Set("viewers", auth.RoleViewer)
+
+	// Publisher creates app
+	ownerToken := idp.IssueJWT("owner-1", []string{"developers"})
+	resp, _ := http.DefaultClient.Do(
+		jwtReq("POST", ts.URL+"/api/v1/apps", ownerToken,
+			strings.NewReader(`{"name":"app-1"}`)))
+	var app map[string]any
+	json.NewDecoder(resp.Body).Decode(&app)
+	resp.Body.Close()
+	appID := app["id"].(string)
+
+	// Grant viewer access
+	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
+
+	// Viewer can GET the app -> 200
+	viewerToken := idp.IssueJWT("viewer-1", []string{"viewers"})
+	resp, _ = http.DefaultClient.Do(
+		jwtReq("GET", ts.URL+"/api/v1/apps/"+appID, viewerToken, nil))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("viewer read app: expected 200, got %d", resp.StatusCode)
+	}
+}
