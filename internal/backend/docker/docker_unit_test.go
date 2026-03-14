@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"testing"
 
 	"github.com/cynkra/blockyard/internal/backend"
@@ -118,6 +119,16 @@ func TestBuildLabels(t *testing.T) {
 		if labels[k] != v {
 			t.Errorf("buildLabels[%q] = %q, want %q", k, labels[k], v)
 		}
+	}
+}
+
+func TestDetectMountModeNative(t *testing.T) {
+	cfg, err := detectMountMode(context.Background(), nil, "", "/data/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != MountModeNative {
+		t.Errorf("expected MountModeNative, got %d", cfg.Mode)
 	}
 }
 

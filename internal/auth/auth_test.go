@@ -796,6 +796,198 @@ func TestMiddlewareInvalidCookieSignature(t *testing.T) {
 	}
 }
 
+func TestCallbackMissingStateCookie(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// Send a callback request without any state cookie at all.
+	req := httptest.NewRequest("GET", "/callback?code=test-code&state=abc", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing state cookie, got %d", w.Code)
+	}
+}
+
+func TestExtractStateCookieBadBase64(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// Send a callback with a state cookie that has a dot separator but
+	// the payload part is not valid base64.
+	req := httptest.NewRequest("GET", "/callback?code=test-code&state=abc", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_oidc_state", Value: "%%%invalid-base64.validsig"})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for bad base64 state cookie, got %d", w.Code)
+	}
+}
+
+func TestCallbackTokenExchangeFailure(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	// Don't defer close — we close it manually below.
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// 1. Login to get a valid state cookie and CSRF token.
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	stateCookie := findCookie(w.Result(), "blockyard_oidc_state")
+	if stateCookie == nil {
+		t.Fatal("missing state cookie")
+	}
+	location := w.Header().Get("Location")
+	csrfToken := extractStateParam(location)
+	idp.Nonce = extractNonceParam(location)
+
+	// 2. Close the IdP so the token exchange HTTP call fails.
+	idp.Close()
+
+	// 3. Callback should fail with 502 (bad gateway).
+	req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
+	req.AddCookie(stateCookie)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 for token exchange failure, got %d", w.Code)
+	}
+}
+
+func TestCallbackNonceMismatch(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// 1. Login to get a valid state cookie and CSRF token.
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	stateCookie := findCookie(w.Result(), "blockyard_oidc_state")
+	if stateCookie == nil {
+		t.Fatal("missing state cookie")
+	}
+	location := w.Header().Get("Location")
+	csrfToken := extractStateParam(location)
+
+	// 2. Set the IdP nonce to something DIFFERENT from what the login sent.
+	// The state cookie contains the real nonce; the IdP will embed this
+	// wrong nonce in the ID token, causing a mismatch.
+	idp.Nonce = "wrong-nonce-value"
+
+	// 3. Callback should fail with 400 (nonce mismatch).
+	req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
+	req.AddCookie(stateCookie)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for nonce mismatch, got %d", w.Code)
+	}
+}
+
+func TestCallbackMissingSub(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	// Set the MockIdP to return an empty sub claim.
+	idp.Sub = ""
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// 1. Login to get a valid state cookie and CSRF token.
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	stateCookie := findCookie(w.Result(), "blockyard_oidc_state")
+	if stateCookie == nil {
+		t.Fatal("missing state cookie")
+	}
+	location := w.Header().Get("Location")
+	csrfToken := extractStateParam(location)
+	idp.Nonce = extractNonceParam(location)
+
+	// 2. Callback should fail with 502 (missing sub).
+	req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
+	req.AddCookie(stateCookie)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 for missing sub claim, got %d", w.Code)
+	}
+}
+
+func TestCallbackDeactivatedUser(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	router := buildTestRouter(deps)
+
+	// Set up an in-memory database with a deactivated user.
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	deps.DB = database
+
+	// Create the user first, then deactivate them.
+	_, err = database.UpsertUser("test-sub", "test@example.com", "Test User")
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := false
+	_, err = database.UpdateUser("test-sub", db.UserUpdate{Active: &active})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Login to get a valid state cookie and CSRF token.
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	stateCookie := findCookie(w.Result(), "blockyard_oidc_state")
+	if stateCookie == nil {
+		t.Fatal("missing state cookie")
+	}
+	location := w.Header().Get("Location")
+	csrfToken := extractStateParam(location)
+	idp.Nonce = extractNonceParam(location)
+
+	// 2. Callback should fail with 403 (deactivated user).
+	req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
+	req.AddCookie(stateCookie)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for deactivated user, got %d", w.Code)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "account deactivated") {
+		t.Errorf("expected body to contain 'account deactivated', got %q", body)
+	}
+}
+
 func TestMiddlewareWithRoleCache(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()

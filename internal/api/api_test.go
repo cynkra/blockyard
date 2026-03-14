@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
+	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
@@ -1410,5 +1411,302 @@ func TestStopAppAlreadyStopped(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&body)
 	if body["stopped_workers"] != float64(0) {
 		t.Errorf("expected stopped_workers=0 on second stop, got %v", body["stopped_workers"])
+	}
+}
+
+// --- StartApp spawn failure ---
+
+// faultyBackend wraps mock.MockBackend to inject errors into Spawn and Addr.
+type faultyBackend struct {
+	*mock.MockBackend
+	spawnErr error
+}
+
+func (f *faultyBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
+	if f.spawnErr != nil {
+		return f.spawnErr
+	}
+	return f.MockBackend.Spawn(ctx, spec)
+}
+
+func testServerWithBackend(t *testing.T, be backend.Backend) (*server.Server, *httptest.Server) {
+	t.Helper()
+	tmp := t.TempDir()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Token: config.NewSecret("test-token")},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+	}
+
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	srv := server.NewServer(cfg, be, database)
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return srv, ts
+}
+
+func TestStartAppSpawnError(t *testing.T) {
+	fb := &faultyBackend{
+		MockBackend: mock.New(),
+		spawnErr:    fmt.Errorf("container runtime unavailable"),
+	}
+	srv, ts := testServerWithBackend(t, fb)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Set an active bundle directly to bypass the upload flow.
+	srv.DB.CreateBundle("b-1", id)
+	srv.DB.UpdateBundleStatus("b-1", "ready")
+	srv.DB.SetActiveBundle(id, "b-1")
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 on spawn error, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["error"] != "internal_error" {
+		t.Errorf("expected error=internal_error, got %q", body["error"])
+	}
+}
+
+// --- AppLogs IDOR: worker belongs to a different app ---
+
+func TestAppLogsWorkerBelongsToDifferentApp(t *testing.T) {
+	srv, ts := testServer(t)
+	appA := createApp(t, ts, "app-a")
+	createApp(t, ts, "app-b")
+	idA := appA["id"].(string)
+
+	// Register a worker for app-b, but query logs via app-a.
+	srv.Workers.Set("w-other", server.ActiveWorker{AppID: "some-other-app-id"})
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+idA+"/logs?worker_id=w-other", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for IDOR check, got %d", resp.StatusCode)
+	}
+}
+
+// --- AppLogs: worker exists for app but LogStore has no entry ---
+
+func TestAppLogsNoLogsInStore(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Register a worker for the app, but don't create a LogStore entry.
+	srv.Workers.Set("w-nologs", server.ActiveWorker{AppID: id})
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=w-nologs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for worker with no logs, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["error"] != "not_found" {
+		t.Errorf("expected error=not_found, got %q", body["error"])
+	}
+	if !strings.Contains(body["message"], "no logs") {
+		t.Errorf("expected message about no logs, got %q", body["message"])
+	}
+}
+
+// --- AppLogs: streaming live lines then channel closes ---
+
+func TestAppLogsStreamingLiveLines(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Register worker so IDOR check passes.
+	srv.Workers.Set("w-live", server.ActiveWorker{AppID: id})
+
+	// Create log entry with a buffered line (not ended yet, so streaming path is taken).
+	sender := srv.LogStore.Create("w-live", id)
+	sender.Write("buffered-line")
+
+	// In a goroutine, write a live line then end the stream.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		sender.Write("live-line")
+		time.Sleep(10 * time.Millisecond)
+		srv.LogStore.MarkEnded("w-live")
+	}()
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=w-live", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	output := string(body)
+	if !strings.Contains(output, "buffered-line") {
+		t.Errorf("expected buffered-line in output, got %q", output)
+	}
+	if !strings.Contains(output, "live-line") {
+		t.Errorf("expected live-line in output, got %q", output)
+	}
+}
+
+// --- UpdateApp: valid access_type values ---
+
+func TestUpdateAppAccessTypeValues(t *testing.T) {
+	_, ts := testServer(t)
+
+	names := map[string]string{"acl": "app-acl", "logged_in": "app-loggedin", "public": "app-public"}
+	for _, at := range []string{"acl", "logged_in", "public"} {
+		created := createApp(t, ts, names[at])
+		id := created["id"].(string)
+
+		body := fmt.Sprintf(`{"access_type":"%s"}`, at)
+		req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			t.Errorf("access_type=%q: expected 200, got %d: %s", at, resp.StatusCode, b)
+			continue
+		}
+		var updated map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&updated)
+		if updated["access_type"] != at {
+			t.Errorf("expected access_type=%s, got %v", at, updated["access_type"])
+		}
+	}
+}
+
+// --- DeleteApp by name ---
+
+func TestDeleteAppByName(t *testing.T) {
+	_, ts := testServer(t)
+	createApp(t, ts, "del-by-name")
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/del-by-name", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+
+	// Confirm gone.
+	req = authReq("GET", ts.URL+"/api/v1/apps/del-by-name", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 after delete by name, got %d", resp.StatusCode)
+	}
+}
+
+// --- StartApp by name ---
+
+func TestStartAppByName(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "start-name")
+	id := created["id"].(string)
+
+	// Set an active bundle directly.
+	srv.DB.CreateBundle("b-name", id)
+	srv.DB.UpdateBundleStatus("b-name", "ready")
+	srv.DB.SetActiveBundle(id, "b-name")
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/start-name/start", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["status"] != "running" {
+		t.Errorf("expected status=running, got %v", body["status"])
+	}
+}
+
+// --- StopApp by name ---
+
+func TestStopAppByName(t *testing.T) {
+	_, ts := testServer(t)
+	createApp(t, ts, "stop-name")
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/stop-name/stop", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// --- AppLogs: context cancellation during streaming ---
+
+func TestAppLogsStreamingContextCancel(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	srv.Workers.Set("w-cancel", server.ActiveWorker{AppID: id})
+	sender := srv.LogStore.Create("w-cancel", id)
+	sender.Write("first-line")
+
+	// Use a context with short timeout to exercise the ctx.Done() path
+	// in the streaming select loop (line 652).
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET",
+		ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=w-cancel", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// Context cancellation may cause a transport error — that's expected.
+		return
+	}
+	// If we got a response, it should be 200 and contain the buffered line.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "first-line") {
+		t.Errorf("expected first-line in output, got %q", body)
 	}
 }
