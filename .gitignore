@@ -1,2 +1,5 @@
 # Go binary output
 /blockyard
+
+# Test coverage
+coverage.out
