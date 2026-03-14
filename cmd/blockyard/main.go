@@ -105,7 +105,7 @@ func main() {
 	if cfg.Openbao != nil {
 		srv.VaultClient = integration.NewClient(
 			cfg.Openbao.Address,
-			cfg.Openbao.AdminToken.Expose(),
+			cfg.Openbao.AdminToken.Expose,
 		)
 		srv.VaultTokenCache = integration.NewVaultTokenCache()
 

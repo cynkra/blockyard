@@ -29,7 +29,7 @@ func mockVaultLogin(t *testing.T, token string, leaseDuration int) *integration.
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	return integration.NewClient(srv.URL, "admin-token")
+	return integration.NewClient(srv.URL, func() string { return "admin-token" })
 }
 
 // credentialServer builds a minimal server suitable for credential exchange tests.

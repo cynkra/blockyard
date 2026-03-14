@@ -41,8 +41,10 @@ func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string) error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	// 5. Warn if no attached policy uses per-user path scoping.
-	checkPolicyScoping(ctx, client, jwtAuthPath)
+	// 5. Verify at least one attached policy uses per-user path scoping.
+	if err := checkPolicyScoping(ctx, client, jwtAuthPath); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
 
 	return nil
 }
@@ -53,7 +55,7 @@ func checkJWTAuth(ctx context.Context, client *Client, jwtAuthPath string) error
 	if err != nil {
 		return fmt.Errorf("check jwt auth: %w", err)
 	}
-	req.Header.Set("X-Vault-Token", client.adminToken)
+	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
 
 	resp, err := client.httpClient.Do(req)
 	if err != nil {
@@ -97,7 +99,7 @@ func readRole(ctx context.Context, client *Client, jwtAuthPath string) (*roleRes
 	if err != nil {
 		return nil, fmt.Errorf("check role: %w", err)
 	}
-	req.Header.Set("X-Vault-Token", client.adminToken)
+	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
 
 	resp, err := client.httpClient.Do(req)
 	if err != nil {
@@ -126,7 +128,7 @@ func checkKVMount(ctx context.Context, client *Client) error {
 	if err != nil {
 		return fmt.Errorf("check kv mount: %w", err)
 	}
-	req.Header.Set("X-Vault-Token", client.adminToken)
+	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
 
 	resp, err := client.httpClient.Do(req)
 	if err != nil {
@@ -154,14 +156,10 @@ func checkKVMount(ctx context.Context, client *Client) error {
 // verifies at least one policy uses identity-templated paths (e.g.
 // {{identity.entity.aliases...}}). Without per-user scoping, all users
 // share the same secret namespace — a serious misconfiguration.
-//
-// This is a warning, not a hard error, because an operator may use a
-// custom scoping mechanism (e.g. Sentinel policies, external wrappers).
-func checkPolicyScoping(ctx context.Context, client *Client, jwtAuthPath string) {
+func checkPolicyScoping(ctx context.Context, client *Client, jwtAuthPath string) error {
 	role, err := readRole(ctx, client, jwtAuthPath)
 	if err != nil {
-		slog.Warn("bootstrap: cannot read role for policy scoping check", "error", err)
-		return
+		return fmt.Errorf("cannot read role for policy scoping check: %w", err)
 	}
 
 	for _, policyName := range role.Data.TokenPolicies {
@@ -175,11 +173,11 @@ func checkPolicyScoping(ctx context.Context, client *Client, jwtAuthPath string)
 			continue
 		}
 		if strings.Contains(body, "{{identity.") {
-			return // found per-user scoping — all good
+			return nil // found per-user scoping — all good
 		}
 	}
 
-	slog.Warn("bootstrap: no attached policy uses per-user path scoping " +
+	return fmt.Errorf("no attached policy uses per-user path scoping " +
 		"(expected {{identity.entity.aliases...}} template in policy paths) — " +
 		"users may be able to read each other's secrets")
 }
@@ -197,7 +195,7 @@ func readPolicy(ctx context.Context, client *Client, name string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("read policy %s: %w", name, err)
 	}
-	req.Header.Set("X-Vault-Token", client.adminToken)
+	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
 
 	resp, err := client.httpClient.Do(req)
 	if err != nil {

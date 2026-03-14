@@ -41,13 +41,19 @@ func testServerForReadyz(t *testing.T) *server.Server {
 	return server.NewServer(cfg, mock.New(), database)
 }
 
+// readyzReq creates a GET /readyz request with the test bearer token.
+func readyzReq() *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	return req
+}
+
 func TestReadyzAllPass(t *testing.T) {
 	srv := testServerForReadyz(t)
 	handler := readyzHandler(srv)
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, readyzReq())
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
@@ -100,12 +106,36 @@ func TestReadyzDatabaseFail(t *testing.T) {
 	}
 }
 
+func TestReadyzUnauthenticatedHidesChecks(t *testing.T) {
+	srv := testServerForReadyz(t)
+	handler := readyzHandler(srv)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "ready" {
+		t.Errorf("expected ready, got %v", body["status"])
+	}
+	if _, exists := body["checks"]; exists {
+		t.Error("unauthenticated response should not include checks")
+	}
+}
+
 func TestMetricsEndpointEnabled(t *testing.T) {
 	srv := testServerForReadyz(t)
 	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: true}
 
 	router := NewRouter(srv)
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -145,9 +175,8 @@ func TestReadyzWithOIDCConfigured(t *testing.T) {
 	}
 
 	handler := readyzHandler(srv)
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, readyzReq())
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
@@ -173,9 +202,8 @@ func TestReadyzWithOIDCFail(t *testing.T) {
 	}
 
 	handler := readyzHandler(srv)
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, readyzReq())
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rec.Code)
@@ -213,9 +241,8 @@ func TestReadyzDockerFail(t *testing.T) {
 	srv := server.NewServer(cfg, be, database)
 
 	handler := readyzHandler(srv)
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, readyzReq())
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rec.Code)
@@ -249,12 +276,11 @@ func TestReadyzWithVaultPass(t *testing.T) {
 	t.Cleanup(baoSrv.Close)
 
 	srv := testServerForReadyz(t)
-	srv.VaultClient = integration.NewClient(baoSrv.URL, "test-token")
+	srv.VaultClient = integration.NewClient(baoSrv.URL, func() string { return "test-token" })
 
 	handler := readyzHandler(srv)
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, readyzReq())
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
@@ -284,12 +310,11 @@ func TestReadyzWithVaultFail(t *testing.T) {
 	t.Cleanup(baoSrv.Close)
 
 	srv := testServerForReadyz(t)
-	srv.VaultClient = integration.NewClient(baoSrv.URL, "test-token")
+	srv.VaultClient = integration.NewClient(baoSrv.URL, func() string { return "test-token" })
 
 	handler := readyzHandler(srv)
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, readyzReq())
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rec.Code)
@@ -324,9 +349,8 @@ func TestReadyzWithOIDCNon200(t *testing.T) {
 	}
 
 	handler := readyzHandler(srv)
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, readyzReq())
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rec.Code)

@@ -131,6 +131,8 @@ func UnpackArchive(paths Paths) error {
 				return fmt.Errorf("write %s: %w", target, err)
 			}
 			out.Close()
+		case tar.TypeSymlink, tar.TypeLink:
+			return fmt.Errorf("tar contains unsupported link entry: %s", hdr.Name)
 		}
 	}
 	return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
@@ -22,10 +23,17 @@ func InitTracing(ctx context.Context, endpoint string) (func(context.Context) er
 		return func(context.Context) error { return nil }, nil
 	}
 
-	exporter, err := otlptracegrpc.New(ctx,
+	opts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(),
-	)
+	}
+	// Use insecure transport only for plaintext endpoints (localhost
+	// or explicit http://). All other endpoints use TLS by default.
+	if strings.HasPrefix(endpoint, "http://") ||
+		strings.HasPrefix(endpoint, "localhost") ||
+		strings.HasPrefix(endpoint, "127.0.0.1") {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+	exporter, err := otlptracegrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}

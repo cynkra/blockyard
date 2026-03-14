@@ -14,17 +14,19 @@ import (
 // It targets only the endpoints blockyard needs: JWT auth login,
 // KV v2 read/write, and sys/health.
 type Client struct {
-	addr       string
-	adminToken string
-	httpClient *http.Client
+	addr           string
+	adminTokenFunc func() string
+	httpClient     *http.Client
 }
 
-// NewClient creates a new OpenBao client.
-func NewClient(addr, adminToken string) *Client {
+// NewClient creates a new OpenBao client. The adminToken is retrieved
+// via a callback to avoid holding the plaintext value in a long-lived
+// struct field.
+func NewClient(addr string, adminTokenFunc func() string) *Client {
 	return &Client{
-		addr:       strings.TrimRight(addr, "/"),
-		adminToken: adminToken,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		addr:           strings.TrimRight(addr, "/"),
+		adminTokenFunc: adminTokenFunc,
+		httpClient:     &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -116,7 +118,7 @@ func (c *Client) KVWrite(ctx context.Context, path string, data map[string]any) 
 		return fmt.Errorf("openbao kv write: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Vault-Token", c.adminToken)
+	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -144,7 +146,7 @@ func (c *Client) SecretExists(ctx context.Context, path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("openbao secret exists: %w", err)
 	}
-	req.Header.Set("X-Vault-Token", c.adminToken)
+	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

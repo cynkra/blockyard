@@ -568,6 +568,9 @@ func TestAppLogsReturnsBufferedLines(t *testing.T) {
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
+	// Register worker so the IDOR check passes.
+	srv.Workers.Set("w1", server.ActiveWorker{AppID: id})
+
 	// Create log entry with some lines and mark ended
 	sender := srv.LogStore.Create("w1", id)
 	sender.Write("hello")
@@ -1173,8 +1176,9 @@ func TestTracingMiddlewareEnabled(t *testing.T) {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
 
-	// Metrics endpoint should be available.
+	// Metrics endpoint should be available (requires auth).
 	req = httptest.NewRequest("GET", "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

@@ -716,7 +716,7 @@ func TestBuildServiceEntriesWithVaultMock(t *testing.T) {
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 	srv.RoleCache = auth.NewRoleMappingCache()
-	srv.VaultClient = integration.NewClient(vaultSrv.URL, "root")
+	srv.VaultClient = integration.NewClient(vaultSrv.URL, func() string { return "root" })
 
 	entries := buildServiceEntries(srv, "test-user")
 

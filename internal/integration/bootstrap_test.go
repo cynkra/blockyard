@@ -58,7 +58,7 @@ func fullMockBaoWithPolicy(t *testing.T, policy string) *Client {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, "admin-token")
+	return NewClient(srv.URL, func() string { return "admin-token" })
 }
 
 func TestBootstrap_AllPass(t *testing.T) {
@@ -73,7 +73,7 @@ func TestBootstrap_HealthFails(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, "admin-token")
+	client := NewClient(srv.URL, func() string { return "admin-token" })
 
 	err := Bootstrap(context.Background(), client, "jwt")
 	if err == nil {
@@ -97,7 +97,7 @@ func TestBootstrap_JWTAuthMissing(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, "admin-token")
+	client := NewClient(srv.URL, func() string { return "admin-token" })
 
 	err := Bootstrap(context.Background(), client, "jwt")
 	if err == nil {
@@ -124,7 +124,7 @@ func TestBootstrap_RoleMissing(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, "admin-token")
+	client := NewClient(srv.URL, func() string { return "admin-token" })
 
 	err := Bootstrap(context.Background(), client, "jwt")
 	if err == nil {
@@ -167,7 +167,7 @@ func TestCheckPolicyScoping_PolicyReadFails(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, "admin-token")
+	client := NewClient(srv.URL, func() string { return "admin-token" })
 
 	checkPolicyScoping(context.Background(), client, "jwt")
 }
@@ -193,7 +193,7 @@ func TestBootstrap_KVMountMissing(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, "admin-token")
+	client := NewClient(srv.URL, func() string { return "admin-token" })
 
 	err := Bootstrap(context.Background(), client, "jwt")
 	if err == nil {

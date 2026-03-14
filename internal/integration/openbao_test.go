@@ -14,7 +14,7 @@ func mockBao(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, "test-admin-token")
+	return NewClient(srv.URL, func() string { return "test-admin-token" })
 }
 
 func TestHealth_OK(t *testing.T) {

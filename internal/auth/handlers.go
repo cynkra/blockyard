@@ -236,7 +236,7 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 
 		secure := secureFlag(deps.Config)
 		sessionCookie := fmt.Sprintf(
-			"blockyard_session=%s; Path=/; HttpOnly; SameSite=Lax%s; Max-Age=%d",
+			"blockyard_session=%s; Path=/; HttpOnly; SameSite=Strict%s; Max-Age=%d",
 			cookieValue, secure, cookieMaxAge,
 		)
 

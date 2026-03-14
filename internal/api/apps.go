@@ -602,7 +602,7 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		_, _, ok := resolveAppRelation(srv, w, caller, id)
+		app, _, ok := resolveAppRelation(srv, w, caller, id)
 		if !ok {
 			return
 		}
@@ -610,6 +610,13 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 		workerID := r.URL.Query().Get("worker_id")
 		if workerID == "" {
 			badRequest(w, "worker_id query parameter is required")
+			return
+		}
+
+		// Verify the worker belongs to this app to prevent cross-app log access.
+		worker, workerExists := srv.Workers.Get(workerID)
+		if !workerExists || worker.AppID != app.ID {
+			notFound(w, "worker not found for app")
 			return
 		}
 

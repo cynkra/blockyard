@@ -145,7 +145,9 @@ func shuttleWS(
 		// Backend workers are local containers on the Docker network;
 		// they don't serve TLS, so ws:// is correct for internal traffic.
 		backendURL := "ws://" + addr + stripAppPrefix(r.URL.Path, appName)
-		backendConn, _, dialErr := websocket.Dial(context.Background(), backendURL, &websocket.DialOptions{
+		dialCtx, dialCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer dialCancel()
+		backendConn, _, dialErr := websocket.Dial(dialCtx, backendURL, &websocket.DialOptions{
 			HTTPHeader: forwardClientHeaders(r),
 		})
 		if dialErr != nil {

@@ -47,6 +47,10 @@ var (
 		Name: "blockyard_health_checks_failed_total",
 		Help: "Failed health checks leading to eviction",
 	})
+	AuditEntriesDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "blockyard_audit_entries_dropped_total",
+		Help: "Audit log entries dropped due to full buffer",
+	})
 )
 
 // Histograms — distributions

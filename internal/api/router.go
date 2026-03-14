@@ -44,9 +44,12 @@ func NewRouter(srv *server.Server) http.Handler {
 	})
 	r.Get("/readyz", readyzHandler(srv))
 
-	// Prometheus metrics endpoint (only when enabled).
+	// Prometheus metrics endpoint (only when enabled, requires API auth).
 	if srv.Config.Telemetry != nil && srv.Config.Telemetry.MetricsEnabled {
-		r.Handle("/metrics", promhttp.Handler())
+		r.Group(func(r chi.Router) {
+			r.Use(APIAuth(srv))
+			r.Handle("/metrics", promhttp.Handler())
+		})
 	}
 
 	// UI routes — soft auth populates session context if available.
@@ -72,6 +75,7 @@ func NewRouter(srv *server.Server) http.Handler {
 
 	// Proxy routes with app-plane auth middleware (authenticate if possible).
 	r.Route("/app", func(sub chi.Router) {
+		sub.Use(httprate.LimitByIP(200, time.Minute))
 		sub.Use(auth.AppAuthMiddleware(authDeps, srv.RoleCache))
 		sub.Get("/{name}", proxy.RedirectTrailingSlash)
 		sub.Handle("/{name}/*", proxy.Handler(srv))

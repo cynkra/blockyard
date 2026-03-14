@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,16 @@ import (
 )
 
 const readyzCheckTimeout = 5 * time.Second
+
+// isAuthenticated performs a lightweight bearer token check without
+// invoking the full auth middleware. Used to gate detailed readyz output.
+func isAuthenticated(r *http.Request, srv *server.Server) bool {
+	token := extractBearerToken(r)
+	if token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(srv.Config.Server.Token.Expose())) == 1
+}
 
 func readyzHandler(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -81,10 +92,14 @@ func readyzHandler(srv *server.Server) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(httpStatus)
-		json.NewEncoder(w).Encode(map[string]any{
-			"status": status,
-			"checks": checks,
-		})
+
+		// Only expose per-component check details to authenticated callers.
+		// Unauthenticated requests get status only (no service topology).
+		result := map[string]any{"status": status}
+		if isAuthenticated(r, srv) {
+			result["checks"] = checks
+		}
+		json.NewEncoder(w).Encode(result)
 	}
 }
 

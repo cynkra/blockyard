@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"time"
+
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // Action identifies the type of audit event.
@@ -69,6 +71,7 @@ func (l *Log) Emit(entry Entry) {
 	select {
 	case l.entries <- entry:
 	default:
+		telemetry.AuditEntriesDropped.Inc()
 		slog.Warn("audit log buffer full, dropping entry",
 			"action", entry.Action, "actor", entry.Actor)
 	}
@@ -82,7 +85,7 @@ func (l *Log) Run(ctx context.Context, path string) {
 		return
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		slog.Error("failed to open audit log", "path", path, "error", err)
 		return
