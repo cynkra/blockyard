@@ -186,7 +186,6 @@ func setupIDPTestServer(t *testing.T) (*httptest.Server, *auth.Deps) {
 		keycloakClientID,
 		keycloakSecret,
 		redirectURL,
-		"groups",
 	)
 	if err != nil {
 		ts.Close()
@@ -196,7 +195,6 @@ func setupIDPTestServer(t *testing.T) (*httptest.Server, *auth.Deps) {
 	secret := config.NewSecret("idp-test-session-secret")
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			Token:         config.NewSecret("test-token"),
 			SessionSecret: &secret,
 			ExternalURL:   ts.URL,
 		},
@@ -204,7 +202,6 @@ func setupIDPTestServer(t *testing.T) (*httptest.Server, *auth.Deps) {
 			IssuerURL:    issuerURL,
 			ClientID:     keycloakClientID,
 			ClientSecret: config.NewSecret(keycloakSecret),
-			GroupsClaim:  "groups",
 			CookieMaxAge: config.Duration{Duration: 24 * time.Hour},
 		},
 	}
@@ -337,7 +334,6 @@ func TestIDPDiscovery(t *testing.T) {
 		keycloakClientID,
 		keycloakSecret,
 		"http://localhost/callback",
-		"groups",
 	)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
@@ -370,37 +366,6 @@ func TestIDPFullAuthFlow(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("authenticated request: expected 200, got %d", resp.StatusCode)
-	}
-}
-
-func TestIDPGroupsClaim(t *testing.T) {
-	_, deps := setupIDPTestServer(t)
-
-	// Keycloak uses UUIDs for sub, so decode the session cookie to find it.
-	sessionCookie, _ := simulateLogin(t, deps.Config.Server.ExternalURL)
-	payload, err := auth.DecodeCookie(sessionCookie.Value, deps.SigningKey)
-	if err != nil {
-		t.Fatalf("decode session cookie: %v", err)
-	}
-
-	session := deps.UserSessions.Get(payload.Sub)
-	if session == nil {
-		t.Fatal("expected server-side session to exist")
-	}
-
-	if len(session.Groups) == 0 {
-		t.Fatal("expected non-empty groups")
-	}
-
-	found := false
-	for _, g := range session.Groups {
-		if g == "testers" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected groups to contain 'testers', got %v", session.Groups)
 	}
 }
 
@@ -531,112 +496,6 @@ func TestIDPJWKSURI(t *testing.T) {
 	}
 	if !strings.Contains(jwksURI, keycloakURL) {
 		t.Errorf("expected JWKS URI to point to Keycloak (%s), got %s", keycloakURL, jwksURI)
-	}
-}
-
-func TestIDPExtractGroupsFromRealToken(t *testing.T) {
-	_, deps := setupIDPTestServer(t)
-
-	sessionCookie, _ := simulateLogin(t, deps.Config.Server.ExternalURL)
-	payload, err := auth.DecodeCookie(sessionCookie.Value, deps.SigningKey)
-	if err != nil {
-		t.Fatalf("decode session cookie: %v", err)
-	}
-
-	session := deps.UserSessions.Get(payload.Sub)
-	if session == nil {
-		t.Fatal("expected server-side session to exist")
-	}
-
-	// The session groups come from ExtractGroups during the callback.
-	// Verify ExtractGroups produced the correct result by checking the
-	// stored groups contain the expected "testers" group from the realm.
-	if len(session.Groups) == 0 {
-		t.Fatal("expected ExtractGroups to return non-empty groups from real token")
-	}
-
-	found := false
-	for _, g := range session.Groups {
-		if g == "testers" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected groups to contain 'testers', got %v", session.Groups)
-	}
-
-	// Verify all groups are non-empty strings.
-	for i, g := range session.Groups {
-		if g == "" {
-			t.Errorf("group[%d] is empty", i)
-		}
-	}
-}
-
-func TestIDPExtractGroupsMissingClaim(t *testing.T) {
-	ts := httptest.NewUnstartedServer(nil)
-	ts.Start()
-
-	issuerURL := keycloakURL + "/realms/blockyard-test"
-	redirectURL := ts.URL + "/callback"
-
-	// Create an OIDCClient with a non-existent groups claim name.
-	oidcClient, err := auth.Discover(
-		context.Background(),
-		issuerURL,
-		keycloakClientID,
-		keycloakSecret,
-		redirectURL,
-		"nonexistent_claim",
-	)
-	if err != nil {
-		ts.Close()
-		t.Fatalf("auth.Discover: %v", err)
-	}
-
-	secret := config.NewSecret("idp-test-session-secret-2")
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			Token:         config.NewSecret("test-token"),
-			SessionSecret: &secret,
-			ExternalURL:   ts.URL,
-		},
-		OIDC: &config.OidcConfig{
-			IssuerURL:    issuerURL,
-			ClientID:     keycloakClientID,
-			ClientSecret: config.NewSecret(keycloakSecret),
-			GroupsClaim:  "nonexistent_claim",
-			CookieMaxAge: config.Duration{Duration: 24 * time.Hour},
-		},
-	}
-
-	deps := &auth.Deps{
-		Config:       cfg,
-		OIDCClient:   oidcClient,
-		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose()),
-		UserSessions: auth.NewUserSessionStore(),
-	}
-
-	router := buildTestRouter(deps)
-	ts.Config.Handler = router
-	t.Cleanup(ts.Close)
-
-	sessionCookie, _ := simulateLogin(t, ts.URL)
-	payload, err := auth.DecodeCookie(sessionCookie.Value, deps.SigningKey)
-	if err != nil {
-		t.Fatalf("decode session cookie: %v", err)
-	}
-
-	session := deps.UserSessions.Get(payload.Sub)
-	if session == nil {
-		t.Fatal("expected server-side session to exist")
-	}
-
-	// With a non-existent claim, ExtractGroups should have returned nil,
-	// so the session should have no groups.
-	if len(session.Groups) != 0 {
-		t.Errorf("expected no groups when claim is missing, got %v", session.Groups)
 	}
 }
 
