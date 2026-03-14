@@ -96,9 +96,9 @@ of grants.
 App owners and admins manage access via the REST API:
 
 ```
-POST   /api/v1/apps/{id}/access          — Grant access
-GET    /api/v1/apps/{id}/access          — List grants
-DELETE /api/v1/apps/{id}/access/{sub}    — Revoke access
+POST   /api/v1/apps/{id}/access                    — Grant access
+GET    /api/v1/apps/{id}/access                    — List grants
+DELETE /api/v1/apps/{id}/access/{kind}/{principal}  — Revoke access
 ```
 
 Grant a user viewer access to an app:
@@ -107,7 +107,14 @@ Grant a user viewer access to an app:
 curl -X POST https://blockyard.example.com/api/v1/apps/app-id/access \
   -H "Authorization: Bearer by_..." \
   -H "Content-Type: application/json" \
-  -d '{"user_sub": "user-sub-456", "role": "viewer"}'
+  -d '{"principal": "user-sub-456", "kind": "user", "role": "viewer"}'
+```
+
+Revoke access:
+
+```bash
+curl -X DELETE https://blockyard.example.com/api/v1/apps/app-id/access/user/user-sub-456 \
+  -H "Authorization: Bearer by_..."
 ```
 
 ## Access in Shiny Apps

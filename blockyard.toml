@@ -28,13 +28,13 @@ session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
 
 # Optional: OIDC authentication
-# When enabled, server.session_secret is required.
+# When enabled, server.session_secret and server.external_url are required.
 # [oidc]
-# issuer_url    = "https://idp.example.com/realms/myapp"
-# client_id     = "blockyard"
-# client_secret = "oidc-client-secret"
-# groups_claim  = "groups"
+# issuer_url     = "https://idp.example.com/realms/myapp"
+# client_id      = "blockyard"
+# client_secret  = "oidc-client-secret"
 # cookie_max_age = "24h"
+# initial_admin  = "google-oauth2|abc123"   # OIDC sub of the first admin
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]

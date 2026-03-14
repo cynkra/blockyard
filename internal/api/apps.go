@@ -301,8 +301,8 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 				notFound(w, "app not found")
 				return
 			}
-			if *body.AccessType != "acl" && *body.AccessType != "public" {
-				badRequest(w, "access_type must be 'acl' or 'public'")
+			if *body.AccessType != "acl" && *body.AccessType != "logged_in" && *body.AccessType != "public" {
+				badRequest(w, "access_type must be 'acl', 'logged_in', or 'public'")
 				return
 			}
 		}

@@ -78,6 +78,7 @@ Enable OIDC authentication. When configured, `server.session_secret` is required
 | `client_secret` | *(required)* | OIDC client secret |
 | `cookie_max_age` | `24h` | Max lifetime of session cookies |
 | `initial_admin` | — | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
+| `initial_admin` | — | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
 
 ### `[openbao]` *(optional)*
 
@@ -156,13 +157,13 @@ log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
 
-# Optional: OIDC authentication (requires server.session_secret)
+# Optional: OIDC authentication (requires server.session_secret and server.external_url)
 # [oidc]
 # issuer_url     = "https://idp.example.com/realms/myapp"
 # client_id      = "blockyard"
 # client_secret  = "oidc-client-secret"
 # cookie_max_age = "24h"
-# initial_admin  = "google-oauth2|abc123"
+# initial_admin  = "google-oauth2|abc123"   # OIDC sub of the first admin
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]

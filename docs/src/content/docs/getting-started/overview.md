@@ -26,13 +26,15 @@ and `no-new-privileges` set.
 ## Authentication & Authorization
 
 Blockyard supports OIDC-based authentication. When configured, users must
-log in before accessing apps. Platform roles (admin, publisher, viewer) are
-derived from OIDC group claims via configurable role mappings. Per-app access
-control lists (ACLs) provide fine-grained authorization.
+log in before accessing apps. System roles (admin, publisher, viewer) are
+assigned directly by blockyard admins — not derived from IdP groups. Per-app
+access control lists (ACLs) provide fine-grained authorization, and each app
+has a visibility setting (`acl`, `logged_in`, or `public`).
 
 Optionally, Blockyard integrates with [OpenBao](https://openbao.org/) (a
-Vault-compatible secrets manager) for credential management, allowing Shiny
-apps to securely access external services.
+Vault-compatible secrets manager) for per-user credential management, allowing
+Shiny apps to securely access external services like AI providers, databases,
+and object storage.
 
 ## Key concepts
 

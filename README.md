@@ -109,16 +109,15 @@ internal/
 │   └── store.go             # In-memory task tracking & log streaming
 ├── api/
 │   ├── router.go            # Router setup
-│   ├── auth.go              # Bearer token middleware
+│   ├── auth.go              # Bearer token / PAT middleware
 │   ├── apps.go              # App CRUD & lifecycle endpoints
 │   ├── bundles.go           # Bundle upload & list endpoints
 │   ├── tasks.go             # Task log streaming endpoint
-│   ├── access.go            # ACL management endpoints
-│   ├── roles.go             # Role mapping endpoints
+│   ├── access.go            # Per-app ACL management endpoints
+│   ├── users.go             # User management, PATs, credential enrollment
 │   ├── tags.go              # Tag management endpoints
 │   ├── catalog.go           # Content discovery endpoint
 │   ├── credentials.go       # Vault credential exchange
-│   ├── users.go             # User-facing API (credential enrollment)
 │   ├── readyz.go            # Readiness probe
 │   └── error.go             # Shared error response helpers
 ├── auth/
@@ -127,8 +126,7 @@ internal/
 │   ├── oidc.go              # OIDC provider setup
 │   ├── session.go           # Session cookie encode/decode
 │   ├── identity.go          # CallerIdentity type & context helpers
-│   ├── jwt.go               # JWT/JWKS validation
-│   ├── rolecache.go         # Group-to-role mapping cache
+│   ├── pat.go               # Personal Access Token validation
 │   └── sessiontoken.go      # Worker session reference tokens
 ├── authz/
 │   ├── rbac.go              # Role-based access control
@@ -185,7 +183,7 @@ migrations/
 ```toml
 [server]
 bind             = "0.0.0.0:8080"
-token            = "change-me-in-production"
+# token          = "..."   # v0 only; replaced by PATs when [oidc] is configured
 shutdown_timeout = "30s"
 # session_secret = "random-secret"   # required when [oidc] is configured
 # external_url   = "https://blockyard.example.com"
@@ -214,13 +212,13 @@ log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
 
-# Optional: OIDC authentication
+# Optional: OIDC authentication (requires server.session_secret)
 # [oidc]
-# issuer_url    = "https://idp.example.com/realms/myapp"
-# client_id     = "blockyard"
-# client_secret = "oidc-client-secret"
-# groups_claim  = "groups"       # default: "groups"
+# issuer_url     = "https://idp.example.com/realms/myapp"
+# client_id      = "blockyard"
+# client_secret  = "oidc-client-secret"
 # cookie_max_age = "24h"         # default: "24h"
+# initial_admin  = "google-oauth2|abc123"
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]

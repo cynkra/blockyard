@@ -3,8 +3,13 @@ title: REST API
 description: Complete reference for the Blockyard control plane API.
 ---
 
-All endpoints are under `/api/v1/` and require a bearer token in the
-`Authorization` header (except `/healthz`).
+All endpoints are under `/api/v1/` and require authentication (except
+`/healthz`, `/readyz`, and `/metrics`).
+
+**Without OIDC (v0 mode):** use the static bearer token from your config file.
+
+**With OIDC:** use a [Personal Access Token](/guides/authorization/#personal-access-tokens)
+or an OIDC session cookie (browser).
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" ...
@@ -127,7 +132,7 @@ updated.
 | `max_sessions_per_worker` | `integer` | Sessions per worker (must be >= 1) |
 | `memory_limit` | `string` | Container memory limit (e.g. `"512m"`) |
 | `cpu_limit` | `float` | CPU limit (e.g. `0.5` for half a core) |
-| `access_type` | `string` | `"acl"` or `"public"` (requires owner or admin) |
+| `access_type` | `string` | `"acl"`, `"logged_in"`, or `"public"` (requires owner or admin) |
 | `title` | `string` | Human-readable title for the catalog |
 | `description` | `string` | Description for the catalog |
 
@@ -264,20 +269,21 @@ Manage per-app access grants. Requires owner or admin permissions on the app.
 
 ### `POST /api/v1/apps/{id}/access`
 
-Grant a user or group access to an app.
+Grant a user access to an app.
 
 **Request body:**
 
 ```json
 {
-  "principal": "user-sub-or-group-name",
+  "principal": "user-sub-123",
   "kind": "user",
   "role": "viewer"
 }
 ```
 
-- `kind` must be `"user"` or `"group"`
+- `kind` must be `"user"`
 - `role` must be `"viewer"` or `"collaborator"`
+- You cannot grant access to yourself
 
 **Response:** `204 No Content`
 
@@ -307,39 +313,99 @@ Revoke a specific access grant.
 
 ---
 
-## Role Mappings
+## Users
 
-Map OIDC groups to platform roles. Admin only.
+Admin-only endpoints for managing user roles and status. Users are created
+automatically on first OIDC login.
 
-### `GET /api/v1/role-mappings`
+### `GET /api/v1/users`
 
-List all group-to-role mappings.
+List all users.
 
 **Response:** `200 OK`
 
 ```json
 [
-  { "group_name": "data-team", "role": "publisher" }
+  {
+    "sub": "google-oauth2|abc123",
+    "email": "alice@example.com",
+    "name": "Alice",
+    "role": "publisher",
+    "active": true,
+    "last_login": "2026-03-10T14:00:00Z"
+  }
 ]
 ```
 
-### `PUT /api/v1/role-mappings/{group_name}`
+### `GET /api/v1/users/{sub}`
 
-Create or update a role mapping.
+Get a single user by OIDC `sub`.
+
+**Response:** `200 OK` — user object.
+
+### `PATCH /api/v1/users/{sub}`
+
+Update a user's role or active status. Admin only.
+
+```json
+{
+  "role": "publisher",
+  "active": true
+}
+```
+
+Both fields are optional. An admin cannot demote or deactivate themselves.
+
+**Response:** `200 OK` — updated user object.
+
+---
+
+## Personal Access Tokens
+
+Manage personal access tokens for API access. See the
+[Authorization guide](/guides/authorization/#personal-access-tokens) for
+usage details.
+
+### `POST /api/v1/users/me/tokens`
+
+Create a new PAT. **Must be authenticated via OIDC session cookie** — you
+cannot use a PAT to create another PAT.
 
 **Request body:**
 
 ```json
-{ "role": "publisher" }
+{ "name": "deploy-ci", "expires_in": "90d" }
 ```
 
-Valid roles: `admin`, `publisher`, `viewer`.
+**Response:** `201 Created`
+
+```json
+{
+  "id": "tok-abc123",
+  "name": "deploy-ci",
+  "token": "by_7kJx9mQ2vR...",
+  "created_at": "2026-03-14T10:00:00Z",
+  "expires_at": "2026-06-12T10:00:00Z"
+}
+```
+
+The plaintext `token` is returned **only once**. Save it immediately.
+
+### `GET /api/v1/users/me/tokens`
+
+List your PATs (without the plaintext token values).
+
+**Response:** `200 OK` — array of token objects.
+
+### `DELETE /api/v1/users/me/tokens/{tokenID}`
+
+Revoke a single PAT.
 
 **Response:** `204 No Content`
 
-### `DELETE /api/v1/role-mappings/{group_name}`
+### `DELETE /api/v1/users/me/tokens`
 
-Delete a role mapping.
+Revoke all your PATs.
 
 **Response:** `204 No Content`
 

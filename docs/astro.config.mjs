@@ -24,6 +24,8 @@ export default defineConfig({
 					items: [
 						{ label: 'Deploying an App', slug: 'guides/deploying' },
 						{ label: 'Configuration', slug: 'guides/configuration' },
+						{ label: 'Authorization', slug: 'guides/authorization' },
+						{ label: 'Credential Management', slug: 'guides/credentials' },
 					],
 				},
 				{

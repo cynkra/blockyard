@@ -40,14 +40,15 @@ shutdown_timeout = "30s"
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `bind` | `string` | `0.0.0.0:8080` | No | Socket address to listen on |
-| `token` | `string` | — | **Yes** | Bearer token for API authentication |
+| `token` | `string` | — | When `[oidc]` is **not** set | Static bearer token for API authentication (v0 only; replaced by [Personal Access Tokens](/guides/authorization/#personal-access-tokens) when OIDC is configured) |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
 | `session_secret` | `string` | — | When `[oidc]` is set | Secret for encrypting session cookies |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 
 <Aside type="caution">
-  Use a strong, randomly generated token in production. The token is the
-  sole authentication mechanism for the control plane API.
+  When running without OIDC (v0 mode), use a strong, randomly generated
+  token. When OIDC is configured, the static token is ignored — use
+  Personal Access Tokens instead.
 </Aside>
 
 ## `[docker]`
@@ -124,11 +125,11 @@ Enable OIDC-based authentication. When this section is present, `server.session_
 
 ```toml
 [oidc]
-issuer_url    = "https://idp.example.com/realms/myapp"
-client_id     = "blockyard"
-client_secret = "oidc-client-secret"
-groups_claim  = "groups"
+issuer_url     = "https://idp.example.com/realms/myapp"
+client_id      = "blockyard"
+client_secret  = "oidc-client-secret"
 cookie_max_age = "24h"
+initial_admin  = "google-oauth2|abc123"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -136,12 +137,13 @@ cookie_max_age = "24h"
 | `issuer_url` | `string` | — | **Yes** | OIDC provider issuer URL |
 | `client_id` | `string` | — | **Yes** | OIDC client ID |
 | `client_secret` | `string` | — | **Yes** | OIDC client secret |
-| `groups_claim` | `string` | `groups` | No | JWT claim containing group memberships for role mapping |
 | `cookie_max_age` | `duration` | `24h` | No | Maximum lifetime of session cookies |
+| `initial_admin` | `string` | — | No | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
 
 <Aside type="caution">
   When OIDC is configured, the proxy routes (`/app/{name}/`) enforce
-  authentication. Users must log in before accessing apps.
+  authentication. Users must log in before accessing apps (except for apps
+  with `public` visibility).
 </Aside>
 
 ## `[openbao]` *(optional)*
