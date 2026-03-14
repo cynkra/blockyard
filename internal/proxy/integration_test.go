@@ -936,7 +936,7 @@ func makeSessionCookie(t *testing.T, srv *server.Server, sub string) *http.Cooki
 	}
 
 	return &http.Cookie{
-		Name:  "blockyard_route",
+		Name:  "blockyard_session",
 		Value: cookieValue,
 	}
 }
