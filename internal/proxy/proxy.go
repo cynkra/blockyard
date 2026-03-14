@@ -166,7 +166,7 @@ func Handler(srv *server.Server) http.Handler {
 
 		// 3. Set cookie on new sessions
 		if isNewSession {
-			http.SetCookie(w, sessionCookie(sessionID, appName, srv.Config.Server.ExternalURL))
+			http.SetCookie(w, sessionCookie(sessionID, appName, srv.Config.Server.ExternalURL, srv.Config.Proxy.SessionIdleTTL.Duration))
 		}
 
 		// 4. Inject identity headers when caller is authenticated.

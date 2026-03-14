@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestExtractSessionID(t *testing.T) {
@@ -29,7 +30,7 @@ func TestExtractSessionIDEmpty(t *testing.T) {
 }
 
 func TestSessionCookie(t *testing.T) {
-	c := sessionCookie("sess-123", "my-app", "http://localhost:3000")
+	c := sessionCookie("sess-123", "my-app", "http://localhost:3000", time.Hour)
 	if c.Name != cookieName {
 		t.Errorf("expected name %q, got %q", cookieName, c.Name)
 	}
@@ -48,10 +49,13 @@ func TestSessionCookie(t *testing.T) {
 	if c.Secure {
 		t.Error("expected Secure=false for http external URL")
 	}
+	if c.MaxAge != 3600 {
+		t.Errorf("expected MaxAge 3600, got %d", c.MaxAge)
+	}
 }
 
 func TestSessionCookieSecureWhenHTTPS(t *testing.T) {
-	c := sessionCookie("sess-123", "my-app", "https://example.com")
+	c := sessionCookie("sess-123", "my-app", "https://example.com", time.Hour)
 	if !c.Secure {
 		t.Error("expected Secure=true for https external URL")
 	}
