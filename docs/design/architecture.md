@@ -172,6 +172,84 @@ browser-side OIDC flow and the container-side injection, and plaintext
 must traverse it. The architecture minimizes this to the theoretical
 minimum: active sessions only, no retroactive access.
 
+## Authorization Model
+
+Blockyard separates authentication from authorization. The IdP handles
+authentication — proving who a user is via OIDC. Blockyard handles
+authorization entirely — deciding what each user can do. IdP groups
+play no role in blockyard's authorization model.
+
+### System Roles
+
+Every user has one system-wide role, assigned by a blockyard admin.
+New users get `viewer` by default on first OIDC login.
+
+| Role | Capabilities |
+|---|---|
+| `admin` | Full control: manage all apps, users, settings. Implicit owner-level access to all content. |
+| `publisher` | Create and deploy apps. Full control over own apps. No access to other publishers' apps unless explicitly granted. |
+| `viewer` | Access apps they have been explicitly granted access to (or apps with `logged_in`/`public` visibility). Cannot create or deploy. |
+
+### Per-Content ACL
+
+Each app has an owner (the user who created it) and may have additional
+per-user access grants. Grants are user-to-resource — there are no
+group-based grants.
+
+| ACL level | Capabilities |
+|---|---|
+| `owner` | Full control: deploy bundles, change settings, delete app, manage access grants. Set at creation time; transferable by admins. |
+| `collaborator` | Deploy bundles, change app settings. Cannot delete the app or manage its access grants. |
+| `viewer` | Access and use the app. No management capabilities. |
+
+System admins have implicit owner-level access to all apps.
+
+### App Visibility
+
+Each app has an `access_type` that controls who can reach it:
+
+| `access_type` | Who can access |
+|---|---|
+| `acl` | Only users with an explicit ACL grant (owner, collaborator, or viewer). Default. |
+| `logged_in` | Any authenticated user. No per-user grant required. |
+| `public` | Anyone, including unauthenticated users. |
+
+### Identity Injection
+
+The proxy injects two headers on each request forwarded to a Shiny app:
+
+- **`X-Shiny-User`** — the authenticated user's OIDC `sub`. Empty for
+  anonymous access to public apps.
+- **`X-Shiny-Access`** — the user's effective access level for the
+  specific app being accessed. Derived at proxy time from the
+  authorization model.
+
+`X-Shiny-Access` values correspond to the per-content ACL levels:
+
+| Condition | `X-Shiny-Access` |
+|---|---|
+| System admin, or app owner | `owner` |
+| Has collaborator grant on this app | `collaborator` |
+| Has viewer grant, or app is `logged_in` and user is authenticated | `viewer` |
+| App is `public`, user is not authenticated | `anonymous` |
+
+Apps read `session$request$HTTP_X_SHINY_ACCESS` and branch on it — one
+value, no ambiguity about what the user can do.
+
+### API Authentication
+
+Two authentication mechanisms, tried in order:
+
+1. **OIDC session cookie** — for browser-based access. Established via
+   the `/login` → `/callback` OIDC flow.
+2. **Personal Access Token (PAT)** — for CLI, CI/CD, and script access.
+   `Authorization: Bearer by_...` header. Tokens are created via the
+   web UI (session-only), hashed with SHA-256 for storage, and carry
+   the owning user's current role.
+
+When neither is present, the request is rejected with 401. The v0
+static bearer token is removed.
+
 ## Graceful Shutdown
 
 On SIGTERM the server shuts down cleanly in this order:

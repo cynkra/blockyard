@@ -26,7 +26,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | Field | Default | Description |
 |---|---|---|
 | `bind` | `0.0.0.0:8080` | Address and port the server listens on |
-| `token` | *(required)* | Bearer token for the control plane API |
+| `token` | — | Static bearer token for the control plane API (v0 only; replaced by [Personal Access Tokens](/guides/authorization/#personal-access-tokens) when OIDC is configured) |
 | `shutdown_timeout` | `30s` | Time to drain in-flight requests on shutdown |
 | `session_secret` | — | Secret for encrypting session cookies (required when `[oidc]` is configured) |
 | `external_url` | — | Public-facing URL of the server (used for OIDC redirect URIs) |
@@ -76,8 +76,8 @@ Enable OIDC authentication. When configured, `server.session_secret` is required
 | `issuer_url` | *(required)* | OIDC provider issuer URL |
 | `client_id` | *(required)* | OIDC client ID |
 | `client_secret` | *(required)* | OIDC client secret |
-| `groups_claim` | `groups` | JWT claim containing group memberships |
 | `cookie_max_age` | `24h` | Max lifetime of session cookies |
+| `initial_admin` | — | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
 
 ### `[openbao]` *(optional)*
 
@@ -129,7 +129,7 @@ Enable Prometheus metrics and OpenTelemetry tracing.
 ```toml
 [server]
 bind             = "0.0.0.0:8080"
-token            = "change-me-in-production"
+# token          = "..."   # v0 only; replaced by PATs when [oidc] is configured
 shutdown_timeout = "30s"
 
 [docker]
@@ -161,8 +161,8 @@ idle_worker_timeout  = "5m"
 # issuer_url     = "https://idp.example.com/realms/myapp"
 # client_id      = "blockyard"
 # client_secret  = "oidc-client-secret"
-# groups_claim   = "groups"
 # cookie_max_age = "24h"
+# initial_admin  = "google-oauth2|abc123"
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]
