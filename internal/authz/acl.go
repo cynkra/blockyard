@@ -8,8 +8,7 @@ import (
 type AccessKind string
 
 const (
-	AccessKindUser  AccessKind = "user"
-	AccessKindGroup AccessKind = "group"
+	AccessKindUser AccessKind = "user"
 )
 
 // AccessGrant represents a row from the app_access table.

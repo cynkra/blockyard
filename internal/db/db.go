@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_bundles_app_id ON bundles(app_id);
 CREATE TABLE IF NOT EXISTS app_access (
     app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
     principal   TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('user', 'group')),
+    kind        TEXT NOT NULL CHECK (kind IN ('user')),
     role        TEXT NOT NULL CHECK (role IN ('viewer', 'collaborator')),
     granted_by  TEXT NOT NULL,
     granted_at  TEXT NOT NULL,

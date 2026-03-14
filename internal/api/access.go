@@ -14,7 +14,7 @@ import (
 
 type grantRequest struct {
 	Principal string `json:"principal"`
-	Kind      string `json:"kind"` // "user" | "group"
+	Kind      string `json:"kind"` // "user"
 	Role      string `json:"role"` // "viewer" | "collaborator"
 }
 
