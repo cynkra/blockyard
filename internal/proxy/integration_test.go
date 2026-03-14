@@ -118,7 +118,7 @@ func TestProxySetsSessionCookie(t *testing.T) {
 
 	var found bool
 	for _, c := range resp.Cookies() {
-		if c.Name == "blockyard_session" && c.Value != "" {
+		if c.Name == "blockyard_route" && c.Value != "" {
 			found = true
 			if c.Path != "/app/my-app/" {
 				t.Errorf("expected path /app/my-app/, got %s", c.Path)
@@ -129,7 +129,7 @@ func TestProxySetsSessionCookie(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("expected blockyard_session cookie")
+		t.Error("expected blockyard_route cookie")
 	}
 }
 
@@ -140,7 +140,7 @@ func TestProxySessionReuse(t *testing.T) {
 	resp, _ := http.Get(ts.URL + "/app/my-app/")
 	var sessCookie *http.Cookie
 	for _, c := range resp.Cookies() {
-		if c.Name == "blockyard_session" {
+		if c.Name == "blockyard_route" {
 			sessCookie = c
 		}
 	}
@@ -463,7 +463,7 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	// Extract session cookie
 	var sessCookie *http.Cookie
 	for _, c := range resp1.Cookies() {
-		if c.Name == "blockyard_session" {
+		if c.Name == "blockyard_route" {
 			sessCookie = c
 		}
 	}
@@ -680,7 +680,7 @@ func TestProxyStaleSessionCreatesNew(t *testing.T) {
 	}
 	var sessCookie *http.Cookie
 	for _, c := range resp.Cookies() {
-		if c.Name == "blockyard_session" {
+		if c.Name == "blockyard_route" {
 			sessCookie = c
 		}
 	}
@@ -708,7 +708,7 @@ func TestProxyStaleSessionCreatesNew(t *testing.T) {
 	// Should have received a new session cookie.
 	var newCookie *http.Cookie
 	for _, c := range resp.Cookies() {
-		if c.Name == "blockyard_session" {
+		if c.Name == "blockyard_route" {
 			newCookie = c
 		}
 	}
@@ -936,7 +936,7 @@ func makeSessionCookie(t *testing.T, srv *server.Server, sub string) *http.Cooki
 	}
 
 	return &http.Cookie{
-		Name:  "blockyard_session",
+		Name:  "blockyard_route",
 		Value: cookieValue,
 	}
 }

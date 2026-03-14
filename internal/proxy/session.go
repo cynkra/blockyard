@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-const cookieName = "blockyard_session"
+const cookieName = "blockyard_route"
 
-// extractSessionID reads the blockyard_session cookie from the request.
+// extractSessionID reads the blockyard_route cookie from the request.
 // Returns empty string if the cookie is missing or empty.
 func extractSessionID(r *http.Request) string {
 	c, err := r.Cookie(cookieName)

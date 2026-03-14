@@ -412,7 +412,7 @@ func TestDockerWSReconnectCache(t *testing.T) {
 
 	var sessCookie *http.Cookie
 	for _, c := range resp1.Cookies() {
-		if c.Name == "blockyard_session" {
+		if c.Name == "blockyard_route" {
 			sessCookie = c
 		}
 	}
