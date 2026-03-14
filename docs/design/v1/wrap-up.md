@@ -125,7 +125,7 @@ authorization model. The values align with the per-content ACL levels:
 |---|---|
 | System admin, or app owner | `owner` |
 | Has collaborator ACL on this app | `collaborator` |
-| Has viewer ACL, or app is `logged_in` and user is authenticated | `viewer` |
+| Has viewer ACL, or app is `logged_in`/`public` and user is authenticated | `viewer` |
 | App is `public`, user is not authenticated | `anonymous` |
 
 The app reads `session$request$HTTP_X_SHINY_ACCESS` and branches on

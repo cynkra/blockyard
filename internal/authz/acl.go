@@ -29,9 +29,8 @@ type AccessGrant struct {
 //	1. System admin -> RelationAdmin (overrides all)
 //	2. App owner -> RelationOwner
 //	3. Explicit user ACL grants -> highest content role
-//	4. logged_in app + authenticated caller -> RelationContentViewer
-//	5. Public app + authenticated caller with no grants -> RelationAnonymous
-//	6. No match -> RelationNone
+//	4. logged_in or public app + authenticated caller -> RelationContentViewer
+//	5. No match -> RelationNone
 //
 // accessType is the app's access_type column ("acl", "logged_in", or "public").
 // caller may be nil for unauthenticated requests to public apps.
@@ -80,14 +79,9 @@ func EvaluateAccess(
 		}
 	}
 
-	// 4. logged_in app — any authenticated user gets viewer access
-	if accessType == "logged_in" {
+	// 4. logged_in or public app — any authenticated user gets viewer access
+	if accessType == "logged_in" || accessType == "public" {
 		return RelationContentViewer
-	}
-
-	// 5. Public app — authenticated caller with no explicit grants
-	if accessType == "public" {
-		return RelationAnonymous
 	}
 
 	return RelationNone

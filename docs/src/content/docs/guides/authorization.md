@@ -134,7 +134,7 @@ can do.
 |---|---|
 | `owner` | System admin or app owner. |
 | `collaborator` | Has a collaborator grant on this app. |
-| `viewer` | Has a viewer grant, or the app uses `logged_in` visibility and the user is authenticated. |
+| `viewer` | Has a viewer grant, or the app uses `logged_in`/`public` visibility and the user is authenticated. |
 | `anonymous` | App is `public` and the user is not logged in. |
 
 ### Reading Access in R

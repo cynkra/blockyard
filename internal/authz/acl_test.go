@@ -104,11 +104,11 @@ func TestEvaluateAccessNoGrantsACL(t *testing.T) {
 	}
 }
 
-func TestEvaluateAccessNoGrantsPublic(t *testing.T) {
+func TestEvaluateAccessNoGrantsPublicAuthenticated(t *testing.T) {
 	caller := &auth.CallerIdentity{Sub: "user-2", Role: auth.RolePublisher}
 	rel := authz.EvaluateAccess(caller, "user-1", nil, "public")
-	if rel != authz.RelationAnonymous {
-		t.Errorf("no grants + public = %v, want RelationAnonymous", rel)
+	if rel != authz.RelationContentViewer {
+		t.Errorf("authenticated + no grants + public = %v, want RelationContentViewer", rel)
 	}
 }
 
