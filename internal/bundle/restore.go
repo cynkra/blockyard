@@ -115,6 +115,8 @@ func runRestore(p RestoreParams) error {
 	if err := p.DB.UpdateBundleStatus(p.BundleID, "building"); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
+	slog.Info("bundle state transition",
+		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "building")
 	p.Sender.Write("Starting dependency restoration...")
 
 	// 2. Ensure rv binary is cached
@@ -171,11 +173,15 @@ func runRestore(p RestoreParams) error {
 
 	// 4. Mark bundle as ready and activate (atomic).
 	p.Sender.Write("Build succeeded. Activating bundle...")
+	slog.Info("bundle state transition",
+		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "activating")
 
 	if err := p.DB.ActivateBundle(p.AppID, p.BundleID); err != nil {
 		return fmt.Errorf("activate bundle: %w", err)
 	}
 
+	slog.Info("bundle state transition",
+		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "active")
 	p.Sender.Write("Bundle activated.")
 	return nil
 }

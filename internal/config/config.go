@@ -393,14 +393,23 @@ func ensureDirWritable(path, label string) error {
 	if err := os.WriteFile(testFile, nil, 0o644); err != nil {
 		return fmt.Errorf("config: %s: directory %q is not writable: %w", label, path, err)
 	}
-	os.Remove(testFile)
+	if err := os.Remove(testFile); err != nil {
+		slog.Warn("config: failed to clean up write-test file",
+			"path", testFile, "error", err)
+	}
 	return nil
 }
 
-// ParseLogLevel converts a log level name (debug, info, warn, error) to
-// an slog.Level. Returns slog.LevelInfo for empty or unrecognized values.
+// LevelTrace is a custom log level below Debug for fine-grained
+// diagnostic output (protocol details, per-message flow, algorithm steps).
+const LevelTrace = slog.Level(-8)
+
+// ParseLogLevel converts a log level name (trace, debug, info, warn, error)
+// to an slog.Level. Returns slog.LevelInfo for empty or unrecognized values.
 func ParseLogLevel(s string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "trace":
+		return LevelTrace
 	case "debug":
 		return slog.LevelDebug
 	case "warn", "warning":

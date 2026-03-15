@@ -246,7 +246,10 @@ func injectCredentials(r *http.Request, srv *server.Server, appID, workerID stri
 
 	// Single-tenant container — inject raw vault token (backwards compat).
 	token, ok := srv.VaultTokenCache.Get(user.Sub)
-	if !ok {
+	if ok {
+		slog.Debug("vault token cache hit", "sub", user.Sub)
+	} else {
+		slog.Debug("vault token cache miss, performing JWT login", "sub", user.Sub)
 		var err error
 		var ttl time.Duration
 		token, ttl, err = srv.VaultClient.JWTLogin(
@@ -259,6 +262,8 @@ func injectCredentials(r *http.Request, srv *server.Server, appID, workerID stri
 			return
 		}
 		if ttl == 0 {
+			slog.Debug("vault token TTL is zero, using configured default",
+				"sub", user.Sub, "default_ttl", srv.Config.Openbao.TokenTTL.Duration)
 			ttl = srv.Config.Openbao.TokenTTL.Duration
 		}
 		srv.VaultTokenCache.Set(user.Sub, token, ttl)

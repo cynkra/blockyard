@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -29,15 +30,22 @@ func (c *WsCache) Cache(sessionID string, reader *backendReader, ttl time.Durati
 
 	// Evict any existing entry for this session
 	if existing, ok := c.entries[sessionID]; ok {
+		slog.Debug("wscache: evicting existing entry on re-cache",
+			"session_id", sessionID)
 		existing.timer.Stop()
 		existing.reader.Close()
 		delete(c.entries, sessionID)
 	}
 
+	slog.Debug("wscache: caching backend reader",
+		"session_id", sessionID, "ttl", ttl)
+
 	timer := time.AfterFunc(ttl, func() {
 		c.mu.Lock()
 		entry, ok := c.entries[sessionID]
 		if ok && entry.reader == reader {
+			slog.Debug("wscache: TTL expired, removing entry",
+				"session_id", sessionID)
 			delete(c.entries, sessionID)
 		}
 		c.mu.Unlock()
@@ -58,10 +66,14 @@ func (c *WsCache) Take(sessionID string) *backendReader {
 
 	entry, ok := c.entries[sessionID]
 	if !ok {
+		slog.Debug("wscache: miss (no cached entry)",
+			"session_id", sessionID)
 		return nil
 	}
 
 	entry.timer.Stop()
 	delete(c.entries, sessionID)
+	slog.Debug("wscache: hit, reclaiming backend reader",
+		"session_id", sessionID)
 	return entry.reader
 }

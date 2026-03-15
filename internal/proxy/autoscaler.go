@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
@@ -36,6 +37,9 @@ func RunAutoscaler(ctx context.Context, srv *server.Server) {
 }
 
 func autoscaleTick(ctx context.Context, srv *server.Server) {
+	slog.Log(ctx, config.LevelTrace, "autoscaler: tick start",
+		"worker_count", srv.Workers.Count())
+
 	// Sweep idle sessions first — this ensures stale sessions don't
 	// prevent scale-down or inflate capacity counts.
 	idleTTL := srv.Config.Proxy.SessionIdleTTL.Duration
@@ -103,7 +107,11 @@ func tryScaleUp(ctx context.Context, srv *server.Server, app *db.AppRow, workerI
 
 	// Check if all workers are at capacity.
 	for _, wid := range workerIDs {
-		if srv.Sessions.CountForWorker(wid) < maxSessions {
+		count := srv.Sessions.CountForWorker(wid)
+		slog.Log(ctx, config.LevelTrace, "autoscaler: worker load",
+			"app_id", app.ID, "worker_id", wid,
+			"sessions", count, "max_sessions", maxSessions)
+		if count < maxSessions {
 			return // at least one worker has room
 		}
 	}

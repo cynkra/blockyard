@@ -1,6 +1,7 @@
 package session
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -33,7 +34,13 @@ func (s *Store) Get(sessionID string) (Entry, bool) {
 func (s *Store) Set(sessionID string, entry Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, exists := s.sessions[sessionID]
 	s.sessions[sessionID] = entry
+	if !exists {
+		slog.Debug("session: created",
+			"session_id", sessionID, "worker_id", entry.WorkerID,
+			"user_sub", entry.UserSub)
+	}
 }
 
 // Touch updates the LastAccess timestamp for an existing session.
@@ -53,6 +60,10 @@ func (s *Store) Touch(sessionID string) bool {
 func (s *Store) Delete(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if e, ok := s.sessions[sessionID]; ok {
+		slog.Debug("session: deleted",
+			"session_id", sessionID, "worker_id", e.WorkerID)
+	}
 	delete(s.sessions, sessionID)
 }
 
@@ -67,6 +78,10 @@ func (s *Store) DeleteByWorker(workerID string) int {
 			delete(s.sessions, sid)
 			n++
 		}
+	}
+	if n > 0 {
+		slog.Debug("session: deleted all for worker",
+			"worker_id", workerID, "count", n)
 	}
 	return n
 }
@@ -109,6 +124,9 @@ func (s *Store) SweepIdle(maxAge time.Duration) int {
 	n := 0
 	for sid, e := range s.sessions {
 		if e.LastAccess.Before(cutoff) {
+			slog.Debug("session: sweeping idle",
+				"session_id", sid, "worker_id", e.WorkerID,
+				"idle_since", e.LastAccess)
 			delete(s.sessions, sid)
 			n++
 		}

@@ -389,7 +389,10 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 
 		// 6. Remove app directory from disk (best-effort)
 		appDir := filepath.Join(srv.Config.Storage.BundleServerPath, app.ID)
-		os.RemoveAll(appDir)
+		if err := os.RemoveAll(appDir); err != nil {
+			slog.Warn("failed to remove app directory",
+				"app_id", app.ID, "path", appDir, "error", err)
+		}
 
 		if srv.AuditLog != nil {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppDelete, app.ID,

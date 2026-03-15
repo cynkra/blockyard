@@ -180,6 +180,7 @@ func drainAndEvictAll(ctx context.Context, srv *server.Server, workerIDs []strin
 		w, ok := srv.Workers.Get(wid)
 		if ok && !appsSeen[w.AppID] {
 			appsSeen[w.AppID] = true
+			slog.Debug("shutdown: marking app as draining", "app_id", w.AppID)
 			srv.Workers.MarkDraining(w.AppID)
 		}
 	}

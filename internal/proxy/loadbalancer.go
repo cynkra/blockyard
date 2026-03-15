@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"log/slog"
 
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
@@ -30,6 +31,8 @@ func (lb *LoadBalancer) Assign(
 ) (string, error) {
 	workerIDs := workers.ForAppAvailable(appID)
 	if len(workerIDs) == 0 {
+		slog.Debug("lb: no workers available, caller should spawn",
+			"app_id", appID)
 		return "", nil // no workers yet — caller spawns
 	}
 
@@ -46,13 +49,22 @@ func (lb *LoadBalancer) Assign(
 	}
 
 	if bestID != "" {
+		slog.Debug("lb: assigned to least-loaded worker",
+			"app_id", appID, "worker_id", bestID,
+			"session_count", bestCount,
+			"available_workers", len(workerIDs))
 		return bestID, nil
 	}
 
 	// All workers at capacity — can we spawn more?
 	if maxWorkersPerApp == nil || len(workerIDs) < *maxWorkersPerApp {
+		slog.Debug("lb: all workers at capacity, caller should spawn",
+			"app_id", appID, "worker_count", len(workerIDs))
 		return "", nil // caller spawns
 	}
 
+	slog.Debug("lb: capacity exhausted",
+		"app_id", appID, "worker_count", len(workerIDs),
+		"max_workers_per_app", *maxWorkersPerApp)
 	return "", errCapacityExhausted
 }

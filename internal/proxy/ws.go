@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -192,12 +193,18 @@ func shuttleWS(
 				cacheBackend = true
 				goto done
 			}
+			slog.Log(context.Background(), config.LevelTrace,
+				"ws: client→backend", "session_id", sessionID,
+				"type", msg.typ, "len", len(msg.data))
 			if err := br.conn.Write(context.Background(), msg.typ, msg.data); err != nil {
 				slog.Debug("ws backend write failed", "error", err)
 				goto done
 			}
 
 		case msg := <-br.msgs:
+			slog.Log(context.Background(), config.LevelTrace,
+				"ws: backend→client", "session_id", sessionID,
+				"type", msg.typ, "len", len(msg.data))
 			if err := clientConn.Write(context.Background(), msg.typ, msg.data); err != nil {
 				slog.Debug("ws client write failed", "error", err)
 				cacheBackend = true

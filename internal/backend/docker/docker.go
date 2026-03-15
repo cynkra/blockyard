@@ -352,7 +352,10 @@ func demuxReader(r io.Reader) io.Reader {
 // --- Backend interface implementation ---
 
 func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
+	spawnStart := time.Now()
+
 	// 1. Ensure image exists locally
+	slog.Debug("spawn: ensuring image", "worker_id", spec.WorkerID, "image", spec.Image)
 	if err := d.ensureImage(ctx, spec.Image); err != nil {
 		return fmt.Errorf("spawn: %w", err)
 	}
@@ -360,18 +363,22 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 	networkName := "blockyard-" + spec.WorkerID
 
 	// 2. Create per-worker bridge network
+	slog.Debug("spawn: creating network", "worker_id", spec.WorkerID, "network", networkName)
 	networkID, err := d.createNetwork(ctx, networkName, spec.AppID, spec.WorkerID)
 	if err != nil {
 		return fmt.Errorf("spawn: %w", err)
 	}
 
 	// 3. Block metadata endpoint (iptables)
+	slog.Debug("spawn: blocking metadata endpoint", "worker_id", spec.WorkerID)
 	if err := d.blockMetadataEndpoint(ctx, networkName, spec.WorkerID); err != nil {
 		_ = d.client.NetworkRemove(ctx, networkID)
 		return fmt.Errorf("spawn: metadata block: %w", err)
 	}
 
 	// 4. Create container
+	slog.Debug("spawn: creating container", "worker_id", spec.WorkerID,
+		"memory_limit", spec.MemoryLimit, "cpu_limit", spec.CPULimit)
 	containerID, err := d.createWorkerContainer(ctx, spec, networkName)
 	if err != nil {
 		d.unblockMetadataForWorker(spec.WorkerID)
@@ -381,6 +388,8 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 
 	// 5. Join server to worker network (if running in a container)
 	if d.serverID != "" {
+		slog.Debug("spawn: joining server to worker network",
+			"worker_id", spec.WorkerID, "server_id", d.serverID)
 		if err := d.joinNetwork(ctx, d.serverID, networkName); err != nil {
 			_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 			d.unblockMetadataForWorker(spec.WorkerID)
@@ -390,6 +399,7 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 	}
 
 	// 6. Start the container
+	slog.Debug("spawn: starting container", "worker_id", spec.WorkerID, "container_id", containerID)
 	if err := d.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		if d.serverID != "" {
 			_ = d.disconnectNetwork(ctx, d.serverID, networkName)
@@ -408,6 +418,10 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 		networkName: networkName,
 	}
 	d.mu.Unlock()
+
+	slog.Debug("spawn: container started",
+		"worker_id", spec.WorkerID, "container_id", containerID,
+		"elapsed_ms", time.Since(spawnStart).Milliseconds())
 
 	return nil
 }
