@@ -196,7 +196,683 @@ func TestEnrollCredential_NoVaultConfigured(t *testing.T) {
 	}
 }
 
+// sessionCookie creates a valid session cookie for the given user sub,
+// setting up the signing key and session store on the server if needed.
+func sessionCookie(t *testing.T, srv *server.Server, sub string) *http.Cookie {
+	t.Helper()
+	if srv.SigningKey == nil {
+		srv.SigningKey = auth.DeriveSigningKey("test-session-secret")
+	}
+	if srv.UserSessions == nil {
+		srv.UserSessions = auth.NewUserSessionStore()
+	}
+	srv.UserSessions.Set(sub, &auth.UserSession{
+		AccessToken: "access-token",
+		ExpiresAt:   time.Now().Unix() + 3600,
+	})
+	cookie := &auth.CookiePayload{
+		Sub:      sub,
+		IssuedAt: time.Now().Unix(),
+	}
+	val, err := cookie.Encode(srv.SigningKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Cookie{Name: "blockyard_session", Value: val}
+}
 
+// --- User management endpoint tests (admin only) ---
+
+func TestListUsers(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/users", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var users []db.UserRow
+	json.NewDecoder(resp.Body).Decode(&users)
+	if len(users) != 2 {
+		t.Errorf("expected 2 users, got %d", len(users))
+	}
+}
+
+func TestListUsers_Forbidden(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/users", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetUser(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/users/user-1", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var user db.UserRow
+	json.NewDecoder(resp.Body).Decode(&user)
+	if user.Sub != "user-1" {
+		t.Errorf("expected sub 'user-1', got %q", user.Sub)
+	}
+}
+
+func TestGetUser_NotFound(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/users/nonexistent", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetUser_Forbidden(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/users/user-1", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateUser_ChangeRole(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	body := `{"role":"publisher"}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/user-1", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var user db.UserRow
+	json.NewDecoder(resp.Body).Decode(&user)
+	if user.Role != "publisher" {
+		t.Errorf("expected role 'publisher', got %q", user.Role)
+	}
+}
+
+func TestUpdateUser_Deactivate(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	body := `{"active":false}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/user-1", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var user db.UserRow
+	json.NewDecoder(resp.Body).Decode(&user)
+	if user.Active {
+		t.Error("expected user to be inactive")
+	}
+}
+
+func TestUpdateUser_SelfModification(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	body := `{"role":"viewer"}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/admin-1", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateUser_InvalidRole(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	body := `{"role":"superuser"}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/user-1", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateUser_NothingToUpdate(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	body := `{}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/user-1", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateUser_NotFound(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	body := `{"role":"viewer"}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/nonexistent", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateUser_Forbidden(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	body := `{"role":"admin"}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/user-1", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateUser_InvalidJSON(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/user-1", pat, strings.NewReader(`{bad`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// --- PAT lifecycle endpoint tests ---
+
+func TestCreateToken(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	cookie := sessionCookie(t, srv, "user-1")
+
+	body := `{"name":"my-token","expires_in":"90d"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+
+	var result createTokenResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Name != "my-token" {
+		t.Errorf("expected name 'my-token', got %q", result.Name)
+	}
+	if !strings.HasPrefix(result.Token, "by_") {
+		t.Errorf("expected token to start with 'by_', got %q", result.Token)
+	}
+	if result.ExpiresAt == nil {
+		t.Error("expected expires_at to be set")
+	}
+}
+
+func TestCreateToken_NoExpiry(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	cookie := sessionCookie(t, srv, "user-1")
+
+	body := `{"name":"permanent-token"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	}
+
+	var result createTokenResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.ExpiresAt != nil {
+		t.Error("expected expires_at to be nil for token without expiry")
+	}
+}
+
+func TestCreateToken_ForbiddenViaPAT(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	body := `{"name":"sneaky-token"}`
+	resp, err := http.DefaultClient.Do(jwtReq("POST", ts.URL+"/api/v1/users/me/tokens", pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 (PATs cannot create PATs), got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_MissingName(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	cookie := sessionCookie(t, srv, "user-1")
+
+	body := `{"name":""}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_InvalidExpiry(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	cookie := sessionCookie(t, srv, "user-1")
+
+	body := `{"name":"tok","expires_in":"forever"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_InvalidJSON(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	cookie := sessionCookie(t, srv, "user-1")
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(`{bad`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestListTokens(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	createTestPAT(t, srv.DB, "user-1")
+	createTestPAT(t, srv.DB, "user-1")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/users/me/tokens", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var pats []db.PATRow
+	json.NewDecoder(resp.Body).Decode(&pats)
+	if len(pats) != 3 {
+		t.Errorf("expected 3 tokens, got %d", len(pats))
+	}
+}
+
+func TestListTokens_Empty(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/users/me/tokens", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var pats []db.PATRow
+	json.NewDecoder(resp.Body).Decode(&pats)
+	// At least the PAT used for auth itself exists.
+	if len(pats) < 1 {
+		t.Errorf("expected at least 1 token, got %d", len(pats))
+	}
+}
+
+func TestListTokens_Unauthenticated(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	_, ts := testServerWithOIDC(t, idp)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/users/me/tokens", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeToken(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	cookie := sessionCookie(t, srv, "user-1")
+
+	// Create a token via the API to get its ID.
+	body := `{"name":"to-revoke"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created createTokenResponse
+	json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+
+	// Revoke it.
+	req, _ = http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens/"+created.ID, nil)
+	req.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeToken_NotFound(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("DELETE", ts.URL+"/api/v1/users/me/tokens/nonexistent-id", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeAllTokens(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	cookie := sessionCookie(t, srv, "user-1")
+
+	// Create a couple of tokens.
+	for _, name := range []string{"tok-1", "tok-2"} {
+		req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens",
+			strings.NewReader(`{"name":"`+name+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	// Revoke all.
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeAllTokens_Unauthenticated(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	_, ts := testServerWithOIDC(t, idp)
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+// --- parseDuration unit tests ---
+
+func TestParseDuration(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+		ok    bool
+	}{
+		{"90d", 90 * 24 * time.Hour, true},
+		{"24h", 24 * time.Hour, true},
+		{"30m", 30 * time.Minute, true},
+		{"1d", 24 * time.Hour, true},
+		{"", 0, false},
+		{"forever", 0, false},
+		{"10s", 0, false},   // seconds not supported
+		{"abc", 0, false},
+		{"10", 0, false},    // missing unit
+		{"-5d", 0, false},   // negative
+	}
+
+	for _, tt := range tests {
+		got, ok := parseDuration(tt.input)
+		if ok != tt.ok {
+			t.Errorf("parseDuration(%q): ok = %v, want %v", tt.input, ok, tt.ok)
+		}
+		if got != tt.want {
+			t.Errorf("parseDuration(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
 
 func TestUserAuthWithSessionCookie(t *testing.T) {
 	idp := testutil.NewMockIdP()
