@@ -102,6 +102,9 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 				if err != nil {
 					slog.Warn("failed to look up user for role",
 						"sub", cookie.Sub, "error", err)
+					// Fail closed: do not attach identity when DB is unreachable.
+					next.ServeHTTP(w, r)
+					return
 				}
 				role := RoleViewer // default
 				if dbUser != nil && dbUser.Active {

@@ -616,7 +616,7 @@ func TestAppLogsReturnsBufferedLines(t *testing.T) {
 func TestGetTaskStatusRunning(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("task-1")
+	sender := srv.Tasks.Create("task-1", "")
 	sender.Write("line 1")
 
 	req := authReq("GET", ts.URL+"/api/v1/tasks/task-1", nil)
@@ -647,7 +647,7 @@ func TestGetTaskStatusRunning(t *testing.T) {
 func TestGetTaskStatusCompleted(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("task-done")
+	sender := srv.Tasks.Create("task-done", "")
 	sender.Write("output")
 	sender.Complete(task.Completed)
 
@@ -667,7 +667,7 @@ func TestGetTaskStatusCompleted(t *testing.T) {
 func TestGetTaskStatusFailed(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("task-fail")
+	sender := srv.Tasks.Create("task-fail", "")
 	sender.Write("error output")
 	sender.Complete(task.Failed)
 
@@ -709,7 +709,7 @@ func TestTaskLogsNotFound(t *testing.T) {
 func TestTaskLogsCompletedTask(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("task-logs-done")
+	sender := srv.Tasks.Create("task-logs-done", "")
 	sender.Write("line one")
 	sender.Write("line two")
 	sender.Complete(task.Completed)
@@ -734,7 +734,7 @@ func TestTaskLogsCompletedTask(t *testing.T) {
 func TestTaskLogsFailedTask(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("task-logs-fail")
+	sender := srv.Tasks.Create("task-logs-fail", "")
 	sender.Write("starting")
 	sender.Write("error: something went wrong")
 	sender.Complete(task.Failed)
@@ -758,7 +758,7 @@ func TestTaskLogsFailedTask(t *testing.T) {
 func TestTaskLogsRunningTaskCompletes(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("task-logs-live")
+	sender := srv.Tasks.Create("task-logs-live", "")
 	sender.Write("buffered line")
 
 	// Complete the task in a goroutine after a short delay so the
@@ -1742,7 +1742,7 @@ func TestAppLogsStreamingContextCancel(t *testing.T) {
 func TestGetTaskStatus(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("cov-running")
+	sender := srv.Tasks.Create("cov-running", "")
 	sender.Write("hello from task")
 
 	req := authReq("GET", ts.URL+"/api/v1/tasks/cov-running", nil)
@@ -1785,7 +1785,7 @@ func TestGetTaskStatusNotFound2(t *testing.T) {
 func TestGetTaskStatusCompleted2(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("cov-completed")
+	sender := srv.Tasks.Create("cov-completed", "")
 	sender.Write("some output")
 	sender.Complete(task.Completed)
 
@@ -1808,7 +1808,7 @@ func TestGetTaskStatusCompleted2(t *testing.T) {
 func TestTaskLogsSnapshot(t *testing.T) {
 	srv, ts := testServer(t)
 
-	sender := srv.Tasks.Create("cov-logs-snap")
+	sender := srv.Tasks.Create("cov-logs-snap", "")
 	sender.Write("log line 1")
 	sender.Write("log line 2")
 	sender.Write("log line 3")

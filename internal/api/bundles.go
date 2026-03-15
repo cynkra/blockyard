@@ -81,7 +81,7 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 		}
 
 		// Create task in TaskStore
-		sender := srv.Tasks.Create(taskID)
+		sender := srv.Tasks.Create(taskID, app.ID)
 
 		// Spawn async restore
 		actorSub := "anonymous"

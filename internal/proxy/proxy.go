@@ -25,6 +25,11 @@ import (
 // that persist for the server's lifetime.
 func Handler(srv *server.Server) http.Handler {
 	cache := NewWsCache()
+
+	// Limit concurrent WebSocket connections to prevent resource exhaustion.
+	const maxWSConns = 1000
+	wsSem := make(chan struct{}, maxWSConns)
+
 	transport := &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
@@ -198,9 +203,16 @@ func Handler(srv *server.Server) http.Handler {
 		// 5. Dispatch — WebSocket or HTTP
 		forwardStart := time.Now()
 		if isWebSocketUpgrade(r) {
+			select {
+			case wsSem <- struct{}{}:
+				defer func() { <-wsSem }()
+			default:
+				http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
+				return
+			}
 			shuttleWS(w, r, addr, appName, sessionID, cache, srv)
 		} else {
-			forwardHTTP(w, r, addr, appName, transport)
+			forwardHTTP(w, r, addr, appName, srv.Config.Server.ExternalURL, transport)
 		}
 		telemetry.ProxyRequestDuration.Observe(time.Since(forwardStart).Seconds())
 	})
@@ -293,5 +305,23 @@ func relationToAccessLevel(r authz.AppRelation) string {
 // trailing slash is required for correct path resolution.
 func RedirectTrailingSlash(w http.ResponseWriter, r *http.Request) {
 	appName := chi.URLParam(r, "name")
+	if !isValidAppNameOrID(appName) {
+		http.NotFound(w, r)
+		return
+	}
 	http.Redirect(w, r, "/app/"+appName+"/", http.StatusMovedPermanently)
+}
+
+// isValidAppNameOrID checks that a string is safe for use in a redirect URL.
+// Accepts app names (lowercase + digits + hyphens) and UUIDs.
+func isValidAppNameOrID(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
 }

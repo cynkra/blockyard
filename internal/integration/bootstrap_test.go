@@ -63,7 +63,7 @@ func fullMockBaoWithPolicy(t *testing.T, policy string) *Client {
 
 func TestBootstrap_AllPass(t *testing.T) {
 	client := fullMockBao(t)
-	if err := Bootstrap(context.Background(), client, "jwt"); err != nil {
+	if err := Bootstrap(context.Background(), client, "jwt", false); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 }
@@ -75,7 +75,7 @@ func TestBootstrap_HealthFails(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error when health fails")
 	}
@@ -99,7 +99,7 @@ func TestBootstrap_JWTAuthMissing(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error when JWT auth missing")
 	}
@@ -126,7 +126,7 @@ func TestBootstrap_RoleMissing(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error when role missing")
 	}
@@ -203,7 +203,7 @@ func TestBootstrap_KVMountMissing(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error when KV mount missing")
 	}
@@ -230,7 +230,7 @@ func TestBootstrap_JWTAuthMalformedJSON(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for malformed JWT auth response")
 	}
@@ -255,7 +255,7 @@ func TestBootstrap_JWTAuthMissingTypeField(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error when JWT auth key is missing from response")
 	}
@@ -283,7 +283,7 @@ func TestBootstrap_RoleMalformedJSON(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for malformed role response")
 	}
@@ -310,7 +310,7 @@ func TestBootstrap_RoleUnexpectedStatus(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for unexpected role status")
 	}
@@ -341,7 +341,7 @@ func TestBootstrap_KVMountMalformedJSON(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for malformed mounts response")
 	}
@@ -371,7 +371,7 @@ func TestBootstrap_KVMountUnexpectedStatus(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for forbidden mounts status")
 	}
@@ -413,7 +413,7 @@ func TestBootstrap_PolicyMalformedJSON(t *testing.T) {
 
 	// Policy read failure is logged as a warning and skipped, so the
 	// error should be about no scoped policy found (not a decode error).
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error when policy is malformed")
 	}
@@ -455,7 +455,7 @@ func TestBootstrap_PolicyEmptyBody(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error when policy body is empty")
 	}
@@ -477,7 +477,7 @@ func TestBootstrap_JWTAuthUnexpectedStatus(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for forbidden auth status")
 	}
@@ -521,7 +521,7 @@ func TestBootstrap_PolicyFallbackToRules(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient(srv.URL, func() string { return "admin-token" })
 
-	err := Bootstrap(context.Background(), client, "jwt")
+	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err != nil {
 		t.Fatalf("expected no error for scoped policy via rules field, got: %v", err)
 	}

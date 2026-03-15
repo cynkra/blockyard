@@ -20,6 +20,16 @@ func (s Secret) String() string { return "[REDACTED]" }
 // GoString implements fmt.GoStringer for %#v formatting.
 func (s Secret) GoString() string { return "[REDACTED]" }
 
+// MarshalJSON implements json.Marshaler to prevent secret leakage.
+func (s Secret) MarshalJSON() ([]byte, error) {
+	return []byte(`"[REDACTED]"`), nil
+}
+
+// MarshalText implements encoding.TextMarshaler to prevent secret leakage.
+func (s Secret) MarshalText() ([]byte, error) {
+	return []byte("[REDACTED]"), nil
+}
+
 // UnmarshalText implements encoding.TextUnmarshaler so TOML
 // decoding writes the raw string into the Secret wrapper.
 func (s *Secret) UnmarshalText(text []byte) error {

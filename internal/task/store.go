@@ -23,6 +23,7 @@ type Store struct {
 type entry struct {
 	mu          sync.Mutex
 	status      Status
+	appID       string
 	createdAt   time.Time
 	buffer      []string     // all lines emitted so far
 	subscribers []chan string // per-subscriber channels
@@ -35,9 +36,10 @@ func NewStore() *Store {
 
 // Create registers a new running task. Returns a Sender for writing
 // log lines.
-func (s *Store) Create(id string) Sender {
+func (s *Store) Create(id, appID string) Sender {
 	e := &entry{
 		status:    Running,
+		appID:     appID,
 		createdAt: time.Now(),
 		done:      make(chan struct{}),
 	}
@@ -72,6 +74,17 @@ func (s *Store) CreatedAt(id string) string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.createdAt.Format(time.RFC3339)
+}
+
+// AppID returns the app ID associated with a task, or empty string if not found.
+func (s *Store) AppID(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.tasks[id]
+	if !ok {
+		return ""
+	}
+	return e.appID
 }
 
 // Subscribe returns a snapshot of buffered lines and a channel for

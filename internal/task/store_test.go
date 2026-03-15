@@ -4,7 +4,7 @@ import "testing"
 
 func TestCreateAndStatus(t *testing.T) {
 	s := NewStore()
-	s.Create("task-1")
+	s.Create("task-1", "")
 
 	status, ok := s.Status("task-1")
 	if !ok {
@@ -25,7 +25,7 @@ func TestStatusMissing(t *testing.T) {
 
 func TestSubscribeAndWrite(t *testing.T) {
 	s := NewStore()
-	sender := s.Create("task-1")
+	sender := s.Create("task-1", "")
 
 	sender.Write("line 1")
 	sender.Write("line 2")
@@ -64,7 +64,7 @@ func TestSubscribeAndWrite(t *testing.T) {
 
 func TestSubscribeNoDuplicates(t *testing.T) {
 	s := NewStore()
-	sender := s.Create("task-1")
+	sender := s.Create("task-1", "")
 
 	// Write lines before subscribing
 	sender.Write("before-1")
@@ -100,7 +100,7 @@ func TestSubscribeNoDuplicates(t *testing.T) {
 
 func TestComplete(t *testing.T) {
 	s := NewStore()
-	sender := s.Create("task-1")
+	sender := s.Create("task-1", "")
 
 	sender.Write("line 1")
 	sender.Complete(Completed)
@@ -137,7 +137,7 @@ func TestComplete(t *testing.T) {
 
 func TestCreatedAt(t *testing.T) {
 	s := NewStore()
-	s.Create("task-1")
+	s.Create("task-1", "")
 
 	ts := s.CreatedAt("task-1")
 	if ts == "" {
@@ -160,7 +160,7 @@ func TestSubscribeMissing(t *testing.T) {
 
 func TestCompleteFailed(t *testing.T) {
 	s := NewStore()
-	sender := s.Create("task-1")
+	sender := s.Create("task-1", "")
 	sender.Complete(Failed)
 
 	status, _ := s.Status("task-1")

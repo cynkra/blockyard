@@ -310,6 +310,7 @@ func (d *DockerBackend) createWorkerContainer(
 	if spec.CPULimit > 0 {
 		resources.NanoCPUs = int64(spec.CPULimit * 1e9)
 	}
+	resources.PidsLimit = int64Ptr(512)
 
 	resp, err := d.client.ContainerCreate(ctx,
 		&container.Config{
@@ -567,11 +568,28 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		return backend.BuildResult{}, fmt.Errorf("build: %w", err)
 	}
 
+	// 2. Create isolated build network with metadata blocking
+	buildNetworkName := "blockyard-build-" + spec.BundleID
+	_, err := d.createNetwork(ctx, buildNetworkName, spec.AppID, spec.BundleID)
+	if err != nil {
+		return backend.BuildResult{}, fmt.Errorf("build: %w", err)
+	}
+	defer func() {
+		d.client.NetworkRemove(ctx, buildNetworkName)
+	}()
+
+	if err := d.blockMetadataEndpoint(ctx, buildNetworkName, "build-"+spec.BundleID); err != nil {
+		return backend.BuildResult{}, fmt.Errorf("build: metadata block: %w", err)
+	}
+	defer func() {
+		d.unblockMetadataForWorker("build-" + spec.BundleID)
+	}()
+
 	containerName := "blockyard-build-" + spec.BundleID
 
 	cmd := []string{"/usr/local/bin/rv", "sync"}
 
-	// 2. Create container
+	// 3. Create container
 	binds, mounts := d.mountCfg.BuildMounts(spec.BundlePath, spec.LibraryPath, spec.RvBinaryPath)
 
 	resp, err := d.client.ContainerCreate(ctx,
@@ -582,8 +600,9 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 			Labels:     buildLabels(spec),
 		},
 		&container.HostConfig{
-			Binds:  binds,
-			Mounts: mounts,
+			NetworkMode: container.NetworkMode(buildNetworkName),
+			Binds:       binds,
+			Mounts:      mounts,
 			Tmpfs: map[string]string{
 				"/tmp":            "exec",
 				"/root/.cache/rv": "",
@@ -591,6 +610,9 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 			ReadonlyRootfs: true,
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges"},
+			Resources: container.Resources{
+				PidsLimit: int64Ptr(512),
+			},
 		},
 		nil, nil,
 		containerName,
@@ -601,13 +623,13 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	containerID := resp.ID
 
-	// 3. Start the build container
+	// 4. Start the build container
 	if err := d.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 		return backend.BuildResult{}, fmt.Errorf("build: start container: %w", err)
 	}
 
-	// 4. Stream logs in real-time while the build runs.
+	// 5. Stream logs in real-time while the build runs.
 	var buildLogs strings.Builder
 	if logReader, logErr := d.client.ContainerLogs(ctx, containerID, container.LogsOptions{
 		ShowStdout: true,
@@ -626,7 +648,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		logReader.Close()
 	}
 
-	// 5. Wait for exit (container has already stopped since log follow ended).
+	// 6. Wait for exit (container has already stopped since log follow ended).
 	waitCh, errCh := d.client.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
 
 	var exitCode int
@@ -643,7 +665,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	success := exitCode == 0
 
-	// 6. Remove the build container
+	// 7. Remove the build container
 	_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 
 	return backend.BuildResult{
@@ -881,3 +903,5 @@ func deleteIptablesRulesByComment(comment string) {
 func CleanupOrphanMetadataRules() {
 	deleteIptablesRulesByComment("blockyard-")
 }
+
+func int64Ptr(v int64) *int64 { return &v }

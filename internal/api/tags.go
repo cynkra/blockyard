@@ -163,7 +163,7 @@ func RemoveAppTag(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		_, relation, ok := resolveAppRelation(srv, w, caller, id)
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
 		if !ok {
 			return
 		}
@@ -173,7 +173,7 @@ func RemoveAppTag(srv *server.Server) http.HandlerFunc {
 		}
 
 		tagID := chi.URLParam(r, "tagID")
-		deleted, err := srv.DB.RemoveAppTag(id, tagID)
+		deleted, err := srv.DB.RemoveAppTag(app.ID, tagID)
 		if err != nil {
 			serverError(w, "remove app tag: "+err.Error())
 			return

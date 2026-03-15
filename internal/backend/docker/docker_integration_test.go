@@ -646,7 +646,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 
 	tasks := task.NewStore()
 	taskID := uuid.New().String()
-	sender := tasks.Create(taskID)
+	sender := tasks.Create(taskID, app.ID)
 
 	bundle.SpawnRestore(bundle.RestoreParams{
 		Backend:      be,

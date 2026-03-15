@@ -31,7 +31,7 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 		appID := chi.URLParam(r, "id")
 
-		_, relation, ok := resolveAppRelation(srv, w, caller, appID)
+		app, relation, ok := resolveAppRelation(srv, w, caller, appID)
 		if !ok {
 			return
 		}
@@ -68,14 +68,14 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		}
 
 		if err := srv.DB.GrantAppAccess(
-			appID, body.Principal, body.Kind, body.Role, caller.Sub,
+			app.ID, body.Principal, body.Kind, body.Role, caller.Sub,
 		); err != nil {
 			serverError(w, err.Error())
 			return
 		}
 
 		if srv.AuditLog != nil {
-			srv.AuditLog.Emit(auditEntry(r, audit.ActionAccessGrant, appID,
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAccessGrant, app.ID,
 				map[string]any{"principal": body.Principal, "role": body.Role}))
 		}
 
@@ -88,7 +88,7 @@ func ListAccess(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 		appID := chi.URLParam(r, "id")
 
-		_, relation, ok := resolveAppRelation(srv, w, caller, appID)
+		app, relation, ok := resolveAppRelation(srv, w, caller, appID)
 		if !ok {
 			return
 		}
@@ -98,7 +98,7 @@ func ListAccess(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		rows, err := srv.DB.ListAppAccess(appID)
+		rows, err := srv.DB.ListAppAccess(app.ID)
 		if err != nil {
 			serverError(w, err.Error())
 			return

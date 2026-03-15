@@ -72,7 +72,7 @@ func (l *Log) Emit(entry Entry) {
 
 	select {
 	case l.entries <- entry:
-	default:
+	case <-time.After(500 * time.Millisecond):
 		telemetry.AuditEntriesDropped.Inc()
 		slog.Warn("audit log buffer full, dropping entry",
 			"action", entry.Action, "actor", entry.Actor)

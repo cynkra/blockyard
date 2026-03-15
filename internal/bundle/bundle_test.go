@@ -431,7 +431,7 @@ func TestRunRestore_Success(t *testing.T) {
 
 	paths := NewBundlePaths(tmp, app.ID, "b-1")
 	tasks := task.NewStore()
-	sender := tasks.Create("task-1")
+	sender := tasks.Create("task-1", "")
 
 	params := RestoreParams{
 		Backend:   be,
@@ -487,7 +487,7 @@ func TestRunRestore_BuildFailure(t *testing.T) {
 
 	paths := NewBundlePaths(tmp, app.ID, "b-1")
 	tasks := task.NewStore()
-	sender := tasks.Create("task-1")
+	sender := tasks.Create("task-1", "")
 
 	params := RestoreParams{
 		Backend:   be,

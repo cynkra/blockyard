@@ -80,11 +80,12 @@ type OidcConfig struct {
 }
 
 type OpenbaoConfig struct {
-	Address     string          `toml:"address"`
-	AdminToken  Secret          `toml:"admin_token"`
-	TokenTTL    Duration        `toml:"token_ttl"`      // default: 1h
-	JWTAuthPath string          `toml:"jwt_auth_path"`  // default: "jwt"
-	Services    []ServiceConfig `toml:"services"`
+	Address              string          `toml:"address"`
+	AdminToken           Secret          `toml:"admin_token"`
+	TokenTTL             Duration        `toml:"token_ttl"`                // default: 1h
+	JWTAuthPath          string          `toml:"jwt_auth_path"`            // default: "jwt"
+	SkipPolicyScopeCheck bool            `toml:"skip_policy_scope_check"`
+	Services             []ServiceConfig `toml:"services"`
 }
 
 // ServiceConfig describes a third-party service whose API key users

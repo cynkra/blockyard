@@ -552,7 +552,7 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 
 		// Create task for drain tracking.
 		taskID := uuid.New().String()
-		sender := srv.Tasks.Create(taskID)
+		sender := srv.Tasks.Create(taskID, app.ID)
 		sender.Write(fmt.Sprintf("draining %d workers", len(workerIDs)))
 
 		// Drain in background — caller polls GET /tasks/{taskID}/logs.

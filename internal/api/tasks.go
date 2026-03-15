@@ -7,18 +7,27 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
 )
 
 func GetTaskStatus(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		taskID := chi.URLParam(r, "taskID")
 
 		status, ok := srv.Tasks.Status(taskID)
 		if !ok {
 			notFound(w, "task "+taskID+" not found")
 			return
+		}
+
+		// Verify caller has access to the task's associated app.
+		if appID := srv.Tasks.AppID(taskID); appID != "" {
+			if _, _, ok := resolveAppRelation(srv, w, caller, appID); !ok {
+				return
+			}
 		}
 
 		statusStr := "running"
@@ -42,12 +51,20 @@ func GetTaskStatus(srv *server.Server) http.HandlerFunc {
 
 func TaskLogs(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
 		taskID := chi.URLParam(r, "taskID")
 
 		status, ok := srv.Tasks.Status(taskID)
 		if !ok {
 			notFound(w, "task "+taskID+" not found")
 			return
+		}
+
+		// Verify caller has access to the task's associated app.
+		if appID := srv.Tasks.AppID(taskID); appID != "" {
+			if _, _, ok := resolveAppRelation(srv, w, caller, appID); !ok {
+				return
+			}
 		}
 
 		snapshot, live, done, ok := srv.Tasks.Subscribe(taskID)

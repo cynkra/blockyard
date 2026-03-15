@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -174,7 +175,7 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 		}
 
 		// 2. Verify CSRF token matches.
-		if r.URL.Query().Get("state") != statePayload.CSRFToken {
+		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("state")), []byte(statePayload.CSRFToken)) != 1 {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
@@ -344,8 +345,20 @@ func LogoutHandler(deps *Deps) http.HandlerFunc {
 
 		if deps.OIDCClient != nil {
 			if endSession := deps.OIDCClient.EndSessionEndpoint(); endSession != "" {
-				http.Redirect(w, r, endSession, http.StatusFound)
-				return
+				// Validate the endpoint shares the same origin as the issuer.
+				endURL, err := url.Parse(endSession)
+				issuerURL, issuerErr := url.Parse(deps.Config.OIDC.IssuerURL)
+				if err == nil && issuerErr == nil && endURL.Scheme == issuerURL.Scheme && endURL.Host == issuerURL.Host {
+					http.Redirect(w, r, endSession, http.StatusFound)
+					return
+				}
+				if err != nil || issuerErr != nil {
+					slog.Warn("invalid end_session_endpoint or issuer URL",
+						"end_session", endSession, "error", err)
+				} else {
+					slog.Warn("end_session_endpoint origin mismatch",
+						"end_session_host", endURL.Host, "issuer_host", issuerURL.Host)
+				}
 			}
 		}
 

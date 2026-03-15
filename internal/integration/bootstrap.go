@@ -20,7 +20,7 @@ import (
 //
 // Returns nil if all checks pass. Returns an error describing the
 // first failure. The caller decides whether to treat this as fatal.
-func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string) error {
+func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string, skipPolicyScopeCheck bool) error {
 	// 1. Health check
 	if err := client.Health(ctx); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
@@ -42,7 +42,9 @@ func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string) error {
 	}
 
 	// 5. Verify at least one attached policy uses per-user path scoping.
-	if err := checkPolicyScoping(ctx, client, jwtAuthPath); err != nil {
+	if skipPolicyScopeCheck {
+		slog.Warn("OpenBao policy scope check skipped (skip_policy_scope_check = true)")
+	} else if err := checkPolicyScoping(ctx, client, jwtAuthPath); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 

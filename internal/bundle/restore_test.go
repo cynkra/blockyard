@@ -50,7 +50,7 @@ func setupRestoreTest(t *testing.T, buildSuccess bool) (RestoreParams, *task.Sto
 	}
 
 	tasks := task.NewStore()
-	sender := tasks.Create("task-1")
+	sender := tasks.Create("task-1", "")
 
 	params := RestoreParams{
 		Backend:      be,

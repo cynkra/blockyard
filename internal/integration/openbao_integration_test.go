@@ -199,7 +199,7 @@ func vaultPost(httpClient *http.Client, path string, data map[string]any) error 
 
 func TestBootstrapReal(t *testing.T) {
 	client := integration.NewClient(openbaoURL, func() string { return rootToken })
-	if err := integration.Bootstrap(context.Background(), client, "jwt"); err != nil {
+	if err := integration.Bootstrap(context.Background(), client, "jwt", false); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 }

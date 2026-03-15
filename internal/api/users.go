@@ -101,9 +101,12 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 		dbUser, err := srv.DB.GetUser(cookie.Sub)
 		if err != nil {
 			slog.Warn("failed to look up user role", "sub", cookie.Sub, "error", err)
-		} else if dbUser != nil && !dbUser.Active {
+			return nil // fail closed: deny access when DB is unreachable
+		}
+		if dbUser != nil && !dbUser.Active {
 			return nil // deactivated
-		} else if dbUser != nil {
+		}
+		if dbUser != nil {
 			role = auth.ParseRole(dbUser.Role)
 		}
 	}

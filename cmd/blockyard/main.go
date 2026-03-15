@@ -97,9 +97,9 @@ func main() {
 		)
 		srv.VaultTokenCache = integration.NewVaultTokenCache()
 
-		if err := integration.Bootstrap(context.Background(), srv.VaultClient, cfg.Openbao.JWTAuthPath); err != nil {
-			slog.Warn("OpenBao bootstrap failed — credential injection disabled until resolved",
-				"error", err)
+		if err := integration.Bootstrap(context.Background(), srv.VaultClient, cfg.Openbao.JWTAuthPath, cfg.Openbao.SkipPolicyScopeCheck); err != nil {
+			slog.Error("OpenBao bootstrap failed", "error", err)
+			os.Exit(1)
 		}
 	}
 

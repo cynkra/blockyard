@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/coder/websocket"
@@ -11,6 +12,20 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/server"
 )
+
+// wsOriginPatterns derives WebSocket origin patterns from the external URL.
+// Falls back to allowing all origins if the URL is empty or unparseable.
+func wsOriginPatterns(externalURL string) []string {
+	if externalURL == "" {
+		return []string{"*"}
+	}
+	u, err := url.Parse(externalURL)
+	if err != nil || u.Host == "" {
+		return []string{"*"}
+	}
+	// Allow both http and https variants of the configured host.
+	return []string{u.Host}
+}
 
 // isWebSocketUpgrade checks whether the request is a WebSocket upgrade.
 func isWebSocketUpgrade(r *http.Request) bool {
@@ -125,11 +140,10 @@ func shuttleWS(
 	cache *WsCache,
 	srv *server.Server,
 ) {
-	// Accept client WebSocket. Shiny apps may be embedded cross-origin
-	// (iframes), so we allow all origins via OriginPatterns rather than
-	// InsecureSkipVerify. Auth is enforced at the session/cookie layer.
+	// Accept client WebSocket. Origin is restricted to the configured
+	// external_url host. Auth is enforced at the session/cookie layer.
 	clientConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
+		OriginPatterns: wsOriginPatterns(srv.Config.Server.ExternalURL),
 	})
 	if err != nil {
 		slog.Warn("ws accept failed", "error", err)
