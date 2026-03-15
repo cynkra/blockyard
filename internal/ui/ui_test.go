@@ -134,46 +134,7 @@ func TestStaticCSS(t *testing.T) {
 	}
 }
 
-// --- V0 mode tests (no OIDC) ---
-
-func TestV0ModeRendersAllApps(t *testing.T) {
-	srv, ts := newTestServer(t, defaultConfig())
-	srv.DB.CreateApp("my-app", "owner-1")
-
-	resp, err := http.Get(ts.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	body := readBody(t, resp)
-	if !strings.Contains(body, "my-app") {
-		t.Error("expected app name in v0 page")
-	}
-}
-
-func TestV0ModeReturns200WhenEmpty(t *testing.T) {
-	_, ts := newTestServer(t, defaultConfig())
-
-	resp, err := http.Get(ts.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	body := readBody(t, resp)
-	if !strings.Contains(body, "blockyard") {
-		t.Error("expected blockyard in page")
-	}
-}
-
-// --- Landing page tests (OIDC configured, unauthenticated) ---
+// --- Landing page tests (unauthenticated) ---
 
 func TestLandingPageWithOIDC(t *testing.T) {
 	_, ts := newTestServer(t, oidcConfig())

@@ -56,12 +56,6 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 
 func (ui *UI) root(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// v0 mode — no OIDC configured
-		if srv.Config.OIDC == nil {
-			ui.renderV0(w, r, srv)
-			return
-		}
-
 		// Check session
 		user := auth.UserFromContext(r.Context())
 		if user == nil {
@@ -107,23 +101,6 @@ type serviceEntry struct {
 }
 
 // --- Handlers ---
-
-func (ui *UI) renderV0(w http.ResponseWriter, r *http.Request, srv *server.Server) {
-	apps, _, err := srv.DB.ListCatalog(db.CatalogParams{
-		CallerRole: "admin", // no filtering in v0 mode
-		Page:       1,
-		PerPage:    1000,
-	})
-	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-
-	entries := buildCatalogEntries(apps, srv)
-	ui.pages["landing.html"].ExecuteTemplate(w, "base", landingData{
-		PublicApps: entries,
-	})
-}
 
 func (ui *UI) renderLanding(w http.ResponseWriter, r *http.Request, srv *server.Server) {
 	apps, _, err := srv.DB.ListCatalog(db.CatalogParams{

@@ -1,0 +1,36 @@
+[server]
+bind             = "0.0.0.0:8080"
+shutdown_timeout = "30s"
+
+[docker]
+socket     = "/var/run/docker.sock"
+image      = "ghcr.io/rocker-org/r-ver:4.4.3"
+shiny_port = 3838
+rv_version = "v0.19.0"
+
+[storage]
+bundle_server_path = "/data/bundles"
+bundle_worker_path = "/app"
+bundle_retention   = 50
+max_bundle_size    = 104857600
+
+[database]
+path = "/data/db/blockyard.db"
+
+[proxy]
+ws_cache_ttl         = "60s"
+health_interval      = "15s"
+worker_start_timeout = "60s"
+max_workers          = 100
+log_retention        = "1h"
+session_idle_ttl     = "1h"
+idle_worker_timeout  = "5m"
+
+# OIDC and OpenBao settings are provided via environment variables
+# in docker-compose.yml. The [[openbao.services]] entries below
+# define which third-party credentials users can enroll.
+
+[[openbao.services]]
+id    = "openai"
+label = "OpenAI API Key"
+path  = "openai"

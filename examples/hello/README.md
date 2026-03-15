@@ -1,13 +1,14 @@
-# hello-auth
+# hello
 
-Blockyard with OIDC authentication (Dex) and per-user secrets (OpenBao).
+Blockyard with OIDC authentication (Dex), per-user secrets (OpenBao),
+and credential enrollment.
 
-Extends the [hello-shiny](../hello-shiny/) example with:
+## What's included
 
 - **Dex** — lightweight OIDC identity provider with a static test user
-- **OpenBao** — secrets management (dev mode), configured with JWT auth
-  backed by Dex
-- **Blockyard** — configured for OIDC login + OpenBao credential management
+- **OpenBao** — secrets management (dev mode) with JWT auth backed by Dex
+- **Blockyard** — configured for OIDC login, OpenBao credential management,
+  and a sample credential enrollment service (OpenAI API Key)
 
 ## Prerequisites
 
@@ -25,11 +26,11 @@ Extends the [hello-shiny](../hello-shiny/) example with:
 # Start the full stack (Dex, OpenBao, blockyard)
 docker compose up -d
 
-# Deploy the hello-shiny app
+# Deploy the hello app (automatically logs in and creates a PAT)
 ./deploy.sh
 
 # Open in browser — you'll be redirected to Dex to log in
-open http://localhost:8080/app/hello-shiny/
+open http://localhost:8080/app/hello/
 ```
 
 ### Test credentials
@@ -38,6 +39,17 @@ open http://localhost:8080/app/hello-shiny/
 |----------|--------------------|
 | Email    | `demo@example.com` |
 | Password | `password`         |
+
+## What the deploy script does
+
+The `deploy.sh` script automates the full bootstrap flow:
+
+1. Waits for blockyard to be healthy
+2. Performs an OIDC login against Dex using the static demo credentials
+3. Creates a short-lived Personal Access Token (PAT) via the API
+4. Creates the app, uploads the bundle, restores dependencies, and starts it
+
+No manual browser interaction is needed for deployment.
 
 ## Architecture
 
@@ -70,8 +82,9 @@ docker compose down -v
 ## Notes
 
 - OpenBao runs in **dev mode** — data is not persisted across restarts.
-- Dex static passwords do not support group claims. RBAC role mapping via
-  `groups_claim` won't apply; use the control-plane API to grant access
-  directly if needed.
+- Dex static passwords do not support group claims. Use the API to grant
+  access directly if needed.
 - The `setup-openbao.sh` script runs once at startup to configure JWT auth,
   policies, and roles in OpenBao.
+- The credential enrollment section on the dashboard lets users store an
+  OpenAI API key in OpenBao. This is configured via `blockyard.toml`.
