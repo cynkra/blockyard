@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -578,5 +579,76 @@ func TestPtrOrNonNil(t *testing.T) {
 func TestPtrOrNil(t *testing.T) {
 	if got := ptrOr[string](nil, "fallback"); got != "fallback" {
 		t.Errorf("expected 'fallback', got %q", got)
+	}
+}
+
+// TestWorkerEnvNilOpenbao verifies that WorkerEnv returns nil when
+// srv.Config.Openbao is nil.
+func TestWorkerEnvNilOpenbao(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Openbao = nil
+
+	env := WorkerEnv(srv)
+	if env != nil {
+		t.Errorf("expected nil, got %v", env)
+	}
+}
+
+// TestWorkerEnvWithExternalURL verifies that WorkerEnv sets VAULT_ADDR and
+// BLOCKYARD_API_URL correctly when ExternalURL is configured.
+func TestWorkerEnvWithExternalURL(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Openbao = &config.OpenbaoConfig{
+		Address: "http://vault:8200",
+	}
+	srv.Config.Server.ExternalURL = "https://blockyard.example.com"
+
+	env := WorkerEnv(srv)
+	if env == nil {
+		t.Fatal("expected non-nil env map")
+	}
+	if got := env["VAULT_ADDR"]; got != "http://vault:8200" {
+		t.Errorf("VAULT_ADDR = %q, want %q", got, "http://vault:8200")
+	}
+	if got := env["BLOCKYARD_API_URL"]; got != "https://blockyard.example.com" {
+		t.Errorf("BLOCKYARD_API_URL = %q, want %q", got, "https://blockyard.example.com")
+	}
+}
+
+// TestWorkerEnvWithServices verifies that WorkerEnv sets
+// BLOCKYARD_VAULT_SERVICES to valid JSON mapping service IDs to paths.
+func TestWorkerEnvWithServices(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Openbao = &config.OpenbaoConfig{
+		Address: "http://vault:8200",
+		Services: []config.ServiceConfig{
+			{ID: "openai", Label: "OpenAI", Path: "secret/data/openai"},
+			{ID: "posit", Label: "Posit Connect", Path: "secret/data/posit"},
+		},
+	}
+	srv.Config.Server.ExternalURL = "http://blockyard:8080"
+
+	env := WorkerEnv(srv)
+	if env == nil {
+		t.Fatal("expected non-nil env map")
+	}
+
+	raw, ok := env["BLOCKYARD_VAULT_SERVICES"]
+	if !ok {
+		t.Fatal("expected BLOCKYARD_VAULT_SERVICES to be set")
+	}
+
+	var svcMap map[string]string
+	if err := json.Unmarshal([]byte(raw), &svcMap); err != nil {
+		t.Fatalf("BLOCKYARD_VAULT_SERVICES is not valid JSON: %v", err)
+	}
+	if got := svcMap["openai"]; got != "secret/data/openai" {
+		t.Errorf("openai path = %q, want %q", got, "secret/data/openai")
+	}
+	if got := svcMap["posit"]; got != "secret/data/posit" {
+		t.Errorf("posit path = %q, want %q", got, "secret/data/posit")
+	}
+	if len(svcMap) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(svcMap))
 	}
 }

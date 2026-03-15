@@ -1,7 +1,9 @@
 package bundle
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -516,4 +518,67 @@ func TestRunRestore_BuildFailure(t *testing.T) {
 	if b.Status != "building" {
 		t.Fatalf("expected status 'building', got %q", b.Status)
 	}
+}
+
+func TestUnpackArchiveRejectsSymlinks(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	// Build a tar.gz containing a symlink entry.
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	// Add a regular file first so the archive isn't empty.
+	tw.WriteHeader(&tar.Header{Name: "app.R", Size: 6, Typeflag: tar.TypeReg})
+	tw.Write([]byte("# app\n"))
+
+	// Add a symlink entry — should be rejected.
+	tw.WriteHeader(&tar.Header{
+		Name:     "evil-link",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "/etc/passwd",
+	})
+
+	tw.Close()
+	gw.Close()
+
+	if err := WriteArchive(paths, bytes.NewReader(buf.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+
+	err := UnpackArchive(paths)
+	if err == nil {
+		t.Fatal("expected error for archive containing symlink")
+	}
+	if !strings.Contains(err.Error(), "unsupported link") {
+		t.Errorf("expected 'unsupported link' error, got: %v", err)
+	}
+}
+
+func TestWriteArchiveReaderError(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	err := WriteArchive(paths, &errorReader{})
+	if err == nil {
+		t.Fatal("expected error from reader")
+	}
+	if !strings.Contains(err.Error(), "write archive") {
+		t.Errorf("expected 'write archive' error, got: %v", err)
+	}
+
+	// Temp file should have been cleaned up.
+	entries, _ := os.ReadDir(filepath.Dir(paths.Archive))
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("temp file %q was not cleaned up", e.Name())
+		}
+	}
+}
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated read error")
 }

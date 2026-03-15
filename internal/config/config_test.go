@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -810,5 +811,30 @@ func TestEnvVarOverrideTelemetryOTLPEndpoint(t *testing.T) {
 	cfg := loadFromString(t, telemetryTOML(t))
 	if cfg.Telemetry.OTLPEndpoint != "collector:4317" {
 		t.Errorf("otlp_endpoint = %q, want collector:4317", cfg.Telemetry.OTLPEndpoint)
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		input string
+		want  slog.Level
+	}{
+		{"trace", LevelTrace},
+		{"TRACE", LevelTrace},
+		{"debug", slog.LevelDebug},
+		{"DEBUG", slog.LevelDebug},
+		{"info", slog.LevelInfo},
+		{"warn", slog.LevelWarn},
+		{"warning", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"", slog.LevelInfo},
+		{"unknown", slog.LevelInfo},
+		{"  debug  ", slog.LevelDebug},
+	}
+	for _, tt := range tests {
+		got := ParseLogLevel(tt.input)
+		if got != tt.want {
+			t.Errorf("ParseLogLevel(%q) = %v, want %v", tt.input, got, tt.want)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -522,6 +523,11 @@ func TestListCatalogLoggedIn(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 
+func hashPAT(plaintext string) []byte {
+	h := sha256.Sum256([]byte(plaintext))
+	return h[:]
+}
+
 func TestOpenMemory(t *testing.T) {
 	db, err := Open(":memory:")
 	if err != nil {
@@ -918,5 +924,210 @@ func TestRemoveAppTagNonexistent(t *testing.T) {
 	}
 	if removed {
 		t.Error("expected false for nonexistent app tag")
+	}
+}
+
+func TestActivateBundle(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app", "admin")
+	db.CreateBundle("b-1", app.ID)
+
+	if err := db.ActivateBundle(app.ID, "b-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := db.GetBundle("b-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "ready" {
+		t.Errorf("expected ready, got %q", b.Status)
+	}
+
+	fetched, err := db.GetApp(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched.ActiveBundle == nil || *fetched.ActiveBundle != "b-1" {
+		t.Errorf("expected active bundle b-1, got %v", fetched.ActiveBundle)
+	}
+
+	// Nonexistent bundle ID — fails because active_bundle is a FK to bundles(id).
+	if err := db.ActivateBundle(app.ID, "nonexistent-bundle"); err == nil {
+		t.Fatal("expected error for nonexistent bundle ID")
+	}
+}
+
+func TestFailStaleBuildsNone(t *testing.T) {
+	db := testDB(t)
+
+	n, err := db.FailStaleBuilds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 stale builds, got %d", n)
+	}
+}
+
+func TestFailStaleBuildsMultiple(t *testing.T) {
+	db := testDB(t)
+	app, _ := db.CreateApp("my-app", "admin")
+
+	// Two bundles in "building" state.
+	db.Exec(
+		`INSERT INTO bundles (id, app_id, status, uploaded_at)
+		 VALUES ('sb1', ?, 'building', '2024-01-01T00:00:00Z')`,
+		app.ID,
+	)
+	db.Exec(
+		`INSERT INTO bundles (id, app_id, status, uploaded_at)
+		 VALUES ('sb2', ?, 'building', '2024-01-01T00:00:00Z')`,
+		app.ID,
+	)
+	// One bundle in "ready" state — should not be affected.
+	db.CreateBundle("sb3", app.ID)
+	db.UpdateBundleStatus("sb3", "ready")
+
+	n, err := db.FailStaleBuilds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 stale builds marked failed, got %d", n)
+	}
+
+	// Verify statuses.
+	b1, _ := db.GetBundle("sb1")
+	if b1.Status != "failed" {
+		t.Errorf("expected sb1 failed, got %q", b1.Status)
+	}
+	b2, _ := db.GetBundle("sb2")
+	if b2.Status != "failed" {
+		t.Errorf("expected sb2 failed, got %q", b2.Status)
+	}
+	b3, _ := db.GetBundle("sb3")
+	if b3.Status != "ready" {
+		t.Errorf("expected sb3 still ready, got %q", b3.Status)
+	}
+}
+
+func TestPATCRUD(t *testing.T) {
+	db := testDB(t)
+
+	// Create a user.
+	user, err := db.UpsertUser("pat-user", "pat@example.com", "PAT User")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a PAT.
+	hash := hashPAT("by_testtoken123")
+	pat, err := db.CreatePAT("pat-1", hash, user.Sub, "test-token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pat.ID != "pat-1" {
+		t.Errorf("expected pat-1, got %q", pat.ID)
+	}
+
+	// LookupPATByHash — should find it and populate User fields.
+	result, err := db.LookupPATByHash(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil lookup result")
+	}
+	if result.PAT.ID != "pat-1" {
+		t.Errorf("expected PAT ID pat-1, got %q", result.PAT.ID)
+	}
+	if result.User.Sub != "pat-user" {
+		t.Errorf("expected user sub pat-user, got %q", result.User.Sub)
+	}
+
+	// LookupPATByHash with wrong hash — returns nil.
+	wrongHash := hashPAT("by_wrongtoken999")
+	missing, err := db.LookupPATByHash(wrongHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing != nil {
+		t.Error("expected nil for wrong hash")
+	}
+
+	// ListPATsByUser — returns 1 PAT.
+	pats, err := db.ListPATsByUser(user.Sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pats) != 1 {
+		t.Errorf("expected 1 PAT, got %d", len(pats))
+	}
+
+	// RevokePAT — returns true.
+	revoked, err := db.RevokePAT("pat-1", user.Sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !revoked {
+		t.Error("expected revocation to return true")
+	}
+
+	// RevokePAT again — still returns true because the UPDATE WHERE
+	// clause matches the row (it does not filter on revoked = 0).
+	revoked, err = db.RevokePAT("pat-1", user.Sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !revoked {
+		t.Error("expected true because row is still matched by WHERE clause")
+	}
+
+	// RevokeAllPATs — create 2 more, revoke all, verify count.
+	hash2 := hashPAT("by_testtoken456")
+	hash3 := hashPAT("by_testtoken789")
+	db.CreatePAT("pat-2", hash2, user.Sub, "token-2", nil)
+	db.CreatePAT("pat-3", hash3, user.Sub, "token-3", nil)
+
+	count, err := db.RevokeAllPATs(user.Sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 PATs revoked, got %d", count)
+	}
+}
+
+func TestCreateBundleForeignKeyViolation(t *testing.T) {
+	db := testDB(t)
+
+	_, err := db.CreateBundle("b-orphan", "nonexistent-app-id")
+	if err == nil {
+		t.Error("expected error for foreign key violation")
+	}
+}
+
+func TestCloseRemovesTempFile(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if db.tempPath == "" {
+		t.Fatal("expected non-empty tempPath for :memory: DB")
+	}
+	path := db.tempPath
+
+	// Temp file should exist before Close.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected temp file to exist: %v", err)
+	}
+
+	db.Close()
+
+	// Temp file should be removed after Close.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected temp file to be removed, got err: %v", err)
 	}
 }

@@ -1736,3 +1736,110 @@ func TestAppLogsStreamingContextCancel(t *testing.T) {
 		t.Errorf("expected first-line in output, got %q", body)
 	}
 }
+
+// --- Task and audit handler coverage tests ---
+
+func TestGetTaskStatus(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("cov-running")
+	sender.Write("hello from task")
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/cov-running", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["id"] != "cov-running" {
+		t.Errorf("expected id=cov-running, got %v", body["id"])
+	}
+	if body["status"] != "running" {
+		t.Errorf("expected status=running, got %v", body["status"])
+	}
+	if body["created_at"] == "" {
+		t.Error("expected non-empty created_at")
+	}
+
+	sender.Complete(task.Completed)
+}
+
+func TestGetTaskStatusNotFound2(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/nonexistent", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetTaskStatusCompleted2(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("cov-completed")
+	sender.Write("some output")
+	sender.Complete(task.Completed)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/cov-completed", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["status"] != "completed" {
+		t.Errorf("expected status=completed, got %v", body["status"])
+	}
+}
+
+func TestTaskLogsSnapshot(t *testing.T) {
+	srv, ts := testServer(t)
+
+	sender := srv.Tasks.Create("cov-logs-snap")
+	sender.Write("log line 1")
+	sender.Write("log line 2")
+	sender.Write("log line 3")
+	sender.Complete(task.Completed)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/cov-logs-snap/logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	expected := "log line 1\nlog line 2\nlog line 3\n"
+	if string(body) != expected {
+		t.Errorf("expected %q, got %q", expected, string(body))
+	}
+}
+
+func TestTaskLogsNotFound2(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/nonexistent/logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
