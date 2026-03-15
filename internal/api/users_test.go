@@ -22,7 +22,7 @@ func mockVaultForEnrollment(t *testing.T) *integration.Client {
 	t.Helper()
 	var lastPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/v1/secret/data/") {
+		if r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/v1/secret/data/") {
 			lastPath = r.URL.Path
 			_ = lastPath
 			w.WriteHeader(http.StatusOK)

@@ -132,6 +132,12 @@ func (s Sender) Complete(status Status) {
 	s.e.mu.Lock()
 	defer s.e.mu.Unlock()
 
+	// Guard against double-call: if already completed, don't close
+	// channels again (which would panic).
+	if s.e.status != Running {
+		return
+	}
+
 	s.e.status = status
 	for _, ch := range s.e.subscribers {
 		close(ch)

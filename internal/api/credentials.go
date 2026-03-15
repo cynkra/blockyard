@@ -56,8 +56,10 @@ func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		userSession := srv.UserSessions.Get(claims.Sub)
-		if userSession == nil || userSession.AccessToken == "" {
+		// Ensure the user's access token is fresh before using it
+		// for vault login.
+		userSession, freshErr := auth.EnsureFreshToken(r.Context(), srv.AuthDeps(), claims.Sub)
+		if freshErr != nil || userSession == nil || userSession.AccessToken == "" {
 			writeError(w, http.StatusUnauthorized, "session_expired",
 				"User session not found or expired")
 			return

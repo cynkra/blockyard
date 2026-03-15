@@ -82,6 +82,7 @@ func TestExchangeValidToken(t *testing.T) {
 	srv.Workers.Set("worker-1", server.ActiveWorker{AppID: "app-1"})
 	srv.UserSessions.Set("user-1", &auth.UserSession{
 		AccessToken: "oidc-access-token",
+		ExpiresAt:   time.Now().Add(10 * time.Minute).Unix(),
 	})
 
 	handler := ExchangeVaultCredential(srv)

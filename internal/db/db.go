@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS apps (
     name                    TEXT NOT NULL UNIQUE,
     owner                   TEXT NOT NULL DEFAULT 'admin',
     access_type             TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'logged_in', 'public')),
-    active_bundle           TEXT REFERENCES bundles(id),
+    active_bundle           TEXT REFERENCES bundles(id) ON DELETE SET NULL,
     max_workers_per_app     INTEGER,
     max_sessions_per_worker INTEGER DEFAULT 1,
     memory_limit            TEXT,
@@ -312,6 +312,27 @@ func (db *DB) SetActiveBundle(appID, bundleID string) error {
 		bundleID, now, appID,
 	)
 	return err
+}
+
+// ActivateBundle marks a bundle as ready and sets it as the app's active
+// bundle in a single transaction.
+func (db *DB) ActivateBundle(appID, bundleID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE bundles SET status = 'ready' WHERE id = ?`, bundleID); err != nil {
+		return fmt.Errorf("update bundle status: %w", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(`UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?`, bundleID, now, appID); err != nil {
+		return fmt.Errorf("set active bundle: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 func (db *DB) DeleteBundle(id string) (bool, error) {

@@ -103,13 +103,17 @@ func (l *Log) Run(ctx context.Context, path string) {
 			for {
 				select {
 				case entry := <-l.entries:
-					enc.Encode(entry)
+					if err := enc.Encode(entry); err != nil {
+						slog.Error("audit log write failed", "action", entry.Action, "error", err)
+					}
 				default:
 					return
 				}
 			}
 		case entry := <-l.entries:
-			enc.Encode(entry)
+			if err := enc.Encode(entry); err != nil {
+				slog.Error("audit log write failed", "action", entry.Action, "error", err)
+			}
 		}
 	}
 }

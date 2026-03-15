@@ -159,14 +159,11 @@ func runRestore(p RestoreParams) error {
 		return fmt.Errorf("build failed with exit code %d", result.ExitCode)
 	}
 
-	// 4. Mark bundle as ready and activate
+	// 4. Mark bundle as ready and activate (atomic).
 	p.Sender.Write("Build succeeded. Activating bundle...")
 
-	if err := p.DB.UpdateBundleStatus(p.BundleID, "ready"); err != nil {
-		return fmt.Errorf("update status to ready: %w", err)
-	}
-	if err := p.DB.SetActiveBundle(p.AppID, p.BundleID); err != nil {
-		return fmt.Errorf("set active bundle: %w", err)
+	if err := p.DB.ActivateBundle(p.AppID, p.BundleID); err != nil {
+		return fmt.Errorf("activate bundle: %w", err)
 	}
 
 	p.Sender.Write("Bundle activated.")

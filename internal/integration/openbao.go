@@ -113,7 +113,7 @@ func (c *Client) KVWrite(ctx context.Context, path string, data map[string]any) 
 	}
 
 	url := fmt.Sprintf("%s/v1/secret/data/%s", c.addr, path)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
+	req, err := http.NewRequestWithContext(ctx, "PUT", url, strings.NewReader(string(payload)))
 	if err != nil {
 		return fmt.Errorf("openbao kv write: %w", err)
 	}

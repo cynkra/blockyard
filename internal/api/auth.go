@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -82,8 +83,9 @@ func authenticateFromPAT(srv *server.Server, r *http.Request, token string) *aut
 		return nil
 	}
 
-	// Update last_used_at asynchronously.
-	go srv.DB.UpdatePATLastUsed(r.Context(), result.PAT.ID)
+	// Update last_used_at asynchronously. Use Background context because
+	// the request context is cancelled after the handler returns.
+	go srv.DB.UpdatePATLastUsed(context.Background(), result.PAT.ID)
 
 	return &auth.CallerIdentity{
 		Sub:    result.User.Sub,

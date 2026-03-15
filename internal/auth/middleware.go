@@ -78,31 +78,13 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 			}
 
 			// Refresh access token if near expiry (within 60 seconds).
-			if session.ExpiresAt-nowUnix() < 60 {
-				lock := deps.UserSessions.RefreshLock(cookie.Sub)
-				lock.Lock()
-
-				// Re-check after acquiring the lock.
-				session = deps.UserSessions.Get(cookie.Sub)
-				needsRefresh := session == nil || session.ExpiresAt-nowUnix() < 60
-
-				if needsRefresh {
-					if err := refreshAccessToken(r.Context(), deps, cookie.Sub); err != nil {
-						lock.Unlock()
-						slog.Error("token refresh failed, removing session",
-							"sub", cookie.Sub, "error", err)
-						deps.UserSessions.Delete(cookie.Sub)
-						next.ServeHTTP(w, r)
-						return
-					}
-				}
-				lock.Unlock()
-
-				session = deps.UserSessions.Get(cookie.Sub)
-				if session == nil {
-					next.ServeHTTP(w, r)
-					return
-				}
+			session, err = EnsureFreshToken(r.Context(), deps, cookie.Sub)
+			if err != nil {
+				slog.Error("token refresh failed, removing session",
+					"sub", cookie.Sub, "error", err)
+				deps.UserSessions.Delete(cookie.Sub)
+				next.ServeHTTP(w, r)
+				return
 			}
 
 			user := &AuthenticatedUser{
@@ -155,6 +137,40 @@ func extractSessionCookie(r *http.Request) string {
 func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	returnURL := r.URL.RequestURI()
 	http.Redirect(w, r, "/login?return_url="+url.QueryEscape(returnURL), http.StatusFound)
+}
+
+// EnsureFreshToken checks if the user's access token is near expiry
+// (within 60 seconds) and refreshes it if needed. Returns the current
+// session, or an error if refresh fails. Thread-safe via per-user locks.
+func EnsureFreshToken(ctx context.Context, deps *Deps, sub string) (*UserSession, error) {
+	session := deps.UserSessions.Get(sub)
+	if session == nil {
+		return nil, fmt.Errorf("session not found for sub %q", sub)
+	}
+
+	if session.ExpiresAt-nowUnix() < 60 {
+		lock := deps.UserSessions.RefreshLock(sub)
+		lock.Lock()
+
+		// Re-check after acquiring the lock.
+		session = deps.UserSessions.Get(sub)
+		needsRefresh := session == nil || session.ExpiresAt-nowUnix() < 60
+
+		if needsRefresh {
+			if err := refreshAccessToken(ctx, deps, sub); err != nil {
+				lock.Unlock()
+				return nil, err
+			}
+		}
+		lock.Unlock()
+
+		session = deps.UserSessions.Get(sub)
+		if session == nil {
+			return nil, fmt.Errorf("session lost after refresh for sub %q", sub)
+		}
+	}
+
+	return session, nil
 }
 
 // refreshAccessToken exchanges the refresh token for a new access
