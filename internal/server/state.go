@@ -40,6 +40,10 @@ type Server struct {
 	VaultClient     *integration.Client
 	VaultTokenCache *integration.VaultTokenCache
 
+	// VaultTokenHealthy reports whether the vault token is valid.
+	// Non-nil only when AppRole auth is used (token renewal active).
+	VaultTokenHealthy func() bool
+
 	// Audit log — nil when [audit] is not configured.
 	AuditLog *audit.Log
 }

@@ -85,6 +85,9 @@ docker compose down -v
 - Dex static passwords do not support group claims. Use the API to grant
   access directly if needed.
 - The `setup-openbao.sh` script runs once at startup to configure JWT auth,
-  policies, and roles in OpenBao.
+  AppRole auth, policies, and roles in OpenBao.
+- Blockyard authenticates to OpenBao via **AppRole** (not a static admin
+  token). The `session_secret` is auto-generated and stored in vault —
+  no manual secret configuration is needed.
 - The credential enrollment section on the dashboard lets users store an
   OpenAI API key in OpenBao. This is configured via `blockyard.toml`.

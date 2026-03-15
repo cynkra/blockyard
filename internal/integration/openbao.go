@@ -33,6 +33,10 @@ func NewClient(addr string, adminTokenFunc func() string) *Client {
 // Addr returns the OpenBao server address.
 func (c *Client) Addr() string { return c.addr }
 
+// AdminToken returns the current admin token. Satisfies
+// config.SecretResolver.
+func (c *Client) AdminToken() string { return c.adminTokenFunc() }
+
 // Health checks if OpenBao is reachable and unsealed.
 // GET {addr}/v1/sys/health
 func (c *Client) Health(ctx context.Context) error {

@@ -335,8 +335,57 @@ func TestSecretStringRedacts(t *testing.T) {
 
 func TestSecretExpose(t *testing.T) {
 	s := NewSecret("my-value")
-	if s.Expose() != "my-value" {
-		t.Errorf("Expose() = %q, want my-value", s.Expose())
+	v, err := s.Expose()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != "my-value" {
+		t.Errorf("Expose() = %q, want my-value", v)
+	}
+}
+
+func TestSecretExposeRejectsUnresolvedVaultRef(t *testing.T) {
+	s := NewSecret("vault:secret/data/foo#bar")
+	_, err := s.Expose()
+	if err == nil {
+		t.Fatal("expected error for unresolved vault reference")
+	}
+	if !strings.Contains(err.Error(), "unresolved vault reference") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestSecretMustExpose(t *testing.T) {
+	s := NewSecret("my-value")
+	if s.MustExpose() != "my-value" {
+		t.Errorf("MustExpose() = %q, want my-value", s.MustExpose())
+	}
+}
+
+func TestSecretMustExposePanicsOnVaultRef(t *testing.T) {
+	s := NewSecret("vault:secret/data/foo#bar")
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for unresolved vault reference")
+		}
+	}()
+	s.MustExpose()
+}
+
+func TestSecretIsVaultRef(t *testing.T) {
+	if !NewSecret("vault:secret/data/foo#bar").IsVaultRef() {
+		t.Error("expected IsVaultRef() = true")
+	}
+	if NewSecret("plain-value").IsVaultRef() {
+		t.Error("expected IsVaultRef() = false")
+	}
+}
+
+func TestSecretSetValue(t *testing.T) {
+	s := NewSecret("")
+	s.SetValue("new-value")
+	if s.MustExpose() != "new-value" {
+		t.Errorf("after SetValue: got %q", s.MustExpose())
 	}
 }
 
@@ -351,8 +400,8 @@ func TestSecretIsEmpty(t *testing.T) {
 
 func TestSecretUnmarshalFromTOML(t *testing.T) {
 	cfg := loadFromString(t, oidcTOML(t))
-	if cfg.OIDC.ClientSecret.Expose() != "my-secret" {
-		t.Errorf("Secret not deserialized: got %q", cfg.OIDC.ClientSecret.Expose())
+	if cfg.OIDC.ClientSecret.MustExpose() != "my-secret" {
+		t.Errorf("Secret not deserialized: got %q", cfg.OIDC.ClientSecret.MustExpose())
 	}
 }
 
@@ -397,8 +446,8 @@ func TestParseOidcConfig(t *testing.T) {
 	if cfg.OIDC.ClientID != "my-client" {
 		t.Errorf("client_id = %q", cfg.OIDC.ClientID)
 	}
-	if cfg.OIDC.ClientSecret.Expose() != "my-secret" {
-		t.Errorf("client_secret = %q", cfg.OIDC.ClientSecret.Expose())
+	if cfg.OIDC.ClientSecret.MustExpose() != "my-secret" {
+		t.Errorf("client_secret = %q", cfg.OIDC.ClientSecret.MustExpose())
 	}
 	if cfg.OIDC.CookieMaxAge.Duration != 24*time.Hour {
 		t.Errorf("expected default cookie_max_age 24h, got %v", cfg.OIDC.CookieMaxAge.Duration)
@@ -446,6 +495,7 @@ func TestValidationRejectsOidcEmptyClientSecret(t *testing.T) {
 }
 
 func TestValidationRejectsOidcWithoutSessionSecret(t *testing.T) {
+	// Without [openbao], session_secret is required.
 	toml := strings.Replace(oidcTOML(t), `session_secret = "my-session-secret"`, ``, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
@@ -453,6 +503,116 @@ func TestValidationRejectsOidcWithoutSessionSecret(t *testing.T) {
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "session_secret") {
 		t.Errorf("expected session_secret error, got: %v", err)
+	}
+}
+
+func TestValidationDefersSessionSecretWithOpenbao(t *testing.T) {
+	// With [openbao] configured, session_secret is not required at load time
+	// (it may be auto-generated or resolved from vault).
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[oidc]
+issuer_url = "https://idp.example.com"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[openbao]
+address = "https://bao.example.com"
+role_id = "blockyard-server"
+`, bundlePath, dbPath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err != nil {
+		t.Errorf("expected no error (session_secret deferred), got: %v", err)
+	}
+}
+
+func TestValidationRejectsBothAdminTokenAndRoleID(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	toml := fmt.Sprintf(`
+[server]
+session_secret = "my-session-secret"
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[oidc]
+issuer_url = "https://idp.example.com"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[openbao]
+address = "https://bao.example.com"
+admin_token = "hvs.admin123"
+role_id = "blockyard-server"
+`, bundlePath, dbPath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestParseOpenbaoRoleID(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	toml := fmt.Sprintf(`
+[server]
+session_secret = "my-session-secret"
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[oidc]
+issuer_url = "https://idp.example.com"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[openbao]
+address = "https://bao.example.com"
+role_id = "blockyard-server"
+`, bundlePath, dbPath)
+	cfg := loadFromString(t, toml)
+	if cfg.Openbao == nil {
+		t.Fatal("expected Openbao config")
+	}
+	if cfg.Openbao.RoleID != "blockyard-server" {
+		t.Errorf("role_id = %q, want blockyard-server", cfg.Openbao.RoleID)
+	}
+	if !cfg.Openbao.AdminToken.IsEmpty() {
+		t.Error("expected admin_token to be empty")
 	}
 }
 
@@ -499,8 +659,8 @@ path = %q
 	if cfg.OIDC.ClientID != "env-client" {
 		t.Errorf("client_id = %q", cfg.OIDC.ClientID)
 	}
-	if cfg.OIDC.ClientSecret.Expose() != "env-secret" {
-		t.Errorf("client_secret = %q", cfg.OIDC.ClientSecret.Expose())
+	if cfg.OIDC.ClientSecret.MustExpose() != "env-secret" {
+		t.Errorf("client_secret = %q", cfg.OIDC.ClientSecret.MustExpose())
 	}
 }
 
@@ -543,8 +703,8 @@ func TestEnvVarOverrideSessionSecret(t *testing.T) {
 	if cfg.Server.SessionSecret == nil {
 		t.Fatal("expected SessionSecret to be set")
 	}
-	if cfg.Server.SessionSecret.Expose() != "env-session-secret" {
-		t.Errorf("session_secret = %q", cfg.Server.SessionSecret.Expose())
+	if cfg.Server.SessionSecret.MustExpose() != "env-session-secret" {
+		t.Errorf("session_secret = %q", cfg.Server.SessionSecret.MustExpose())
 	}
 }
 
@@ -597,8 +757,8 @@ func TestParseOpenbaoConfig(t *testing.T) {
 	if cfg.Openbao.Address != "https://bao.example.com" {
 		t.Errorf("address = %q", cfg.Openbao.Address)
 	}
-	if cfg.Openbao.AdminToken.Expose() != "hvs.admin123" {
-		t.Errorf("admin_token = %q", cfg.Openbao.AdminToken.Expose())
+	if cfg.Openbao.AdminToken.MustExpose() != "hvs.admin123" {
+		t.Errorf("admin_token = %q", cfg.Openbao.AdminToken.MustExpose())
 	}
 	if cfg.Openbao.TokenTTL.Duration != 1*time.Hour {
 		t.Errorf("expected default token_ttl 1h, got %v", cfg.Openbao.TokenTTL.Duration)
@@ -626,14 +786,14 @@ func TestValidationRejectsOpenbaoEmptyAddress(t *testing.T) {
 	}
 }
 
-func TestValidationRejectsOpenbaoEmptyAdminToken(t *testing.T) {
+func TestValidationRejectsOpenbaoNoCredentials(t *testing.T) {
 	toml := strings.Replace(openbaoTOML(t), `admin_token = "hvs.admin123"`, `admin_token = ""`, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(toml), 0o644)
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "openbao.admin_token") {
-		t.Errorf("expected openbao.admin_token error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "requires either admin_token or role_id") {
+		t.Errorf("expected 'requires either admin_token or role_id' error, got: %v", err)
 	}
 }
 
@@ -684,8 +844,8 @@ func TestOpenbaoAutoConstructFromEnvVars(t *testing.T) {
 	if cfg.Openbao.Address != "https://env-bao.example.com" {
 		t.Errorf("address = %q", cfg.Openbao.Address)
 	}
-	if cfg.Openbao.AdminToken.Expose() != "hvs.env-token" {
-		t.Errorf("admin_token = %q", cfg.Openbao.AdminToken.Expose())
+	if cfg.Openbao.AdminToken.MustExpose() != "hvs.env-token" {
+		t.Errorf("admin_token = %q", cfg.Openbao.AdminToken.MustExpose())
 	}
 }
 

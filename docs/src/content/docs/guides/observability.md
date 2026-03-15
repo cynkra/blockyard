@@ -69,6 +69,11 @@ When `management_bind` is set:
 - Container bridge networks cannot reach `127.0.0.1`, so untrusted
   workloads cannot access operational data
 
+When AppRole auth is used (`openbao.role_id`), `/readyz` also reports a
+`vault_token` check that reflects whether the token renewal goroutine is
+healthy. A stale or expired token degrades readiness, signaling the
+operator to re-bootstrap with a fresh `secret_id`.
+
 Point your health checks and Prometheus scraper at the management port:
 
 ```yaml

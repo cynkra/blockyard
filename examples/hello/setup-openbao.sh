@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 #
 # Configure OpenBao for blockyard: enable JWT auth backed by Dex,
-# create the KV policy and role.
+# AppRole auth for the server, and create policies and roles.
 #
 # Runs as a one-shot init container after OpenBao and Dex are healthy.
 #
@@ -10,6 +10,7 @@ set -eu
 BAO_ADDR="${BAO_ADDR:-http://openbao:8200}"
 BAO_TOKEN="${BAO_TOKEN:-root-dev-token}"
 DEX_ISSUER="${DEX_ISSUER:-http://dex:5556}"
+APPROLE_SECRET_ID="${APPROLE_SECRET_ID:-dev-secret-id-for-local-use-only}"
 
 header="-H X-Vault-Token:${BAO_TOKEN} -H Content-Type:application/json"
 
@@ -58,6 +59,32 @@ post /v1/auth/jwt/role/blockyard-user -d '{
   "token_policies":  ["blockyard-user"],
   "token_ttl":       "1h"
 }'
+echo "    OK"
+
+# ── AppRole auth for blockyard server ──
+
+echo "==> Enabling AppRole auth method..."
+post /v1/sys/auth/approle -d '{"type":"approle"}' || true
+echo "    OK"
+
+echo "==> Creating blockyard-server policy..."
+post /v1/sys/policy/blockyard-server -d '{
+  "policy": "path \"secret/data/blockyard/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\"]\n}\npath \"secret/metadata/blockyard/*\" {\n  capabilities = [\"read\", \"list\"]\n}\npath \"sys/auth\" {\n  capabilities = [\"read\"]\n}\npath \"sys/mounts\" {\n  capabilities = [\"read\"]\n}\npath \"sys/policies/acl/*\" {\n  capabilities = [\"read\"]\n}\npath \"auth/jwt/role/blockyard-user\" {\n  capabilities = [\"read\"]\n}\npath \"auth/token/renew-self\" {\n  capabilities = [\"update\"]\n}\npath \"secret/data/users/*\" {\n  capabilities = [\"create\", \"update\"]\n}\npath \"secret/metadata/users/*\" {\n  capabilities = [\"read\"]\n}"
+}'
+echo "    OK"
+
+echo "==> Creating blockyard-server AppRole role..."
+post /v1/auth/approle/role/blockyard-server -d '{
+  "token_policies":  ["blockyard-server"],
+  "token_ttl":       "1h",
+  "token_max_ttl":   "0"
+}'
+echo "    OK"
+
+echo "==> Setting custom secret_id for dev..."
+post /v1/auth/approle/role/blockyard-server/custom-secret-id -d "{
+  \"secret_id\": \"${APPROLE_SECRET_ID}\"
+}"
 echo "    OK"
 
 echo "==> OpenBao configured successfully."

@@ -64,14 +64,14 @@ services:
     environment:
       # OIDC (Dex)
       BLOCKYARD_SERVER_EXTERNAL_URL: http://localhost:8080
-      BLOCKYARD_SERVER_SESSION_SECRET: change-me-to-something-random
       BLOCKYARD_OIDC_ISSUER_URL: http://dex:5556
       BLOCKYARD_OIDC_CLIENT_ID: blockyard
       BLOCKYARD_OIDC_CLIENT_SECRET: blockyard-dex-secret
       BLOCKYARD_OIDC_INITIAL_ADMIN: demo-user-001
-      # OpenBao
+      # OpenBao (AppRole auth — session_secret is auto-generated via vault)
       BLOCKYARD_OPENBAO_ADDRESS: http://openbao:8200
-      BLOCKYARD_OPENBAO_ADMIN_TOKEN: root-dev-token
+      BLOCKYARD_OPENBAO_ROLE_ID: blockyard-server
+      BLOCKYARD_OPENBAO_SECRET_ID: dev-secret-id-for-local-use-only
     cap_add:
       - NET_ADMIN
     healthcheck:

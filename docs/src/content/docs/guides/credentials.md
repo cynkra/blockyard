@@ -35,7 +35,7 @@ also be configured.
 ```toml
 [openbao]
 address       = "http://openbao:8200"
-admin_token   = "hvs.your-admin-token"     # use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
+role_id       = "blockyard-server"     # AppRole role identifier
 token_ttl     = "1h"
 jwt_auth_path = "jwt"
 
@@ -54,17 +54,59 @@ Each `[[openbao.services]]` entry defines a third-party service whose API
 keys users can enroll. The `id` is used in API paths, `label` is shown in
 the web UI, and `path` is the KV store path prefix.
 
+## Authentication
+
+Blockyard authenticates to OpenBao using **AppRole**. This replaces the
+previous static `admin_token` approach with a more secure, renewable
+credential.
+
+### Initial bootstrap
+
+1. Configure the AppRole role in OpenBao (see the `setup-openbao.sh` script
+   in the hello example for reference)
+2. Set `role_id` in your config (this is a role identifier, not a secret)
+3. Deliver the `secret_id` via environment variable:
+
+```bash
+BLOCKYARD_OPENBAO_SECRET_ID="your-secret-id" blockyard
+```
+
+On first startup, blockyard uses the `secret_id` to authenticate, obtains a
+scoped token, and persists it to disk. The `secret_id` is a one-time
+bootstrap input — after initial authentication, the server renews its own
+token indefinitely.
+
+### Steady state
+
+After bootstrap, the server renews its vault token at half-TTL intervals.
+The persisted token is reused across restarts. No `secret_id` is needed
+for routine restarts.
+
+### Re-bootstrap
+
+If the server is down long enough for the persisted token to expire beyond
+renewal, re-deliver a fresh `secret_id` via the environment variable.
+
+### Migrating from `admin_token`
+
+The `admin_token` field is deprecated but still accepted. To migrate:
+
+1. Set up AppRole in OpenBao (enable the auth method, create a policy and role)
+2. Replace `admin_token` with `role_id` in your config
+3. Set `BLOCKYARD_OPENBAO_SECRET_ID` for the first startup
+4. Remove the old `admin_token` / `BLOCKYARD_OPENBAO_ADMIN_TOKEN`
+
 ## Bootstrapping
 
-On startup, Blockyard automatically configures OpenBao:
+On startup, Blockyard verifies OpenBao is configured correctly:
 
-- Enables the KV v2 secrets engine at `secret/`
-- Configures JWT auth with your IdP's JWKS endpoint
-- Creates per-user policies that restrict each user to reading only their
-  own secrets (`secret/users/{sub}/*`)
+- KV v2 secrets engine is mounted at `secret/`
+- JWT auth is configured with your IdP
+- Per-user policies restrict each user to reading only their own secrets
+  (`secret/users/{sub}/*`)
 
-The admin token must have sufficient permissions for these bootstrap
-operations.
+The AppRole token must have sufficient permissions for these checks and for
+writing user secrets.
 
 ## Enrolling credentials
 

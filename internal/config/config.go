@@ -84,7 +84,8 @@ type OidcConfig struct {
 
 type OpenbaoConfig struct {
 	Address              string          `toml:"address"`
-	AdminToken           Secret          `toml:"admin_token"`
+	AdminToken           Secret          `toml:"admin_token"`              // deprecated: use role_id with AppRole auth
+	RoleID               string          `toml:"role_id"`                  // AppRole role identifier
 	TokenTTL             Duration        `toml:"token_ttl"`                // default: 1h
 	JWTAuthPath          string          `toml:"jwt_auth_path"`            // default: "jwt"
 	SkipPolicyScopeCheck bool            `toml:"skip_policy_scope_check"`
@@ -352,8 +353,12 @@ func validate(cfg *Config) error {
 		if cfg.OIDC.ClientSecret.IsEmpty() {
 			return fmt.Errorf("config: oidc.client_secret must not be empty")
 		}
-		if cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty() {
-			return fmt.Errorf("config: server.session_secret is required when [oidc] is configured")
+		// session_secret validation is deferred when openbao is configured
+		// (it may be auto-generated or resolved from a vault reference).
+		if cfg.Openbao == nil {
+			if cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty() {
+				return fmt.Errorf("config: server.session_secret is required when [oidc] is configured without [openbao]")
+			}
 		}
 	}
 
@@ -364,8 +369,14 @@ func validate(cfg *Config) error {
 		if !strings.HasPrefix(cfg.Openbao.Address, "http://") && !strings.HasPrefix(cfg.Openbao.Address, "https://") {
 			return fmt.Errorf("config: openbao.address must start with http:// or https://")
 		}
-		if cfg.Openbao.AdminToken.IsEmpty() {
-			return fmt.Errorf("config: openbao.admin_token must not be empty")
+		if !cfg.Openbao.AdminToken.IsEmpty() && cfg.Openbao.RoleID != "" {
+			return fmt.Errorf("config: openbao.admin_token and openbao.role_id are mutually exclusive")
+		}
+		if cfg.Openbao.AdminToken.IsEmpty() && cfg.Openbao.RoleID == "" {
+			return fmt.Errorf("config: openbao requires either admin_token or role_id")
+		}
+		if !cfg.Openbao.AdminToken.IsEmpty() {
+			slog.Warn("openbao.admin_token is deprecated; use openbao.role_id with AppRole auth")
 		}
 		if cfg.OIDC == nil {
 			return fmt.Errorf("config: [oidc] is required when [openbao] is configured")

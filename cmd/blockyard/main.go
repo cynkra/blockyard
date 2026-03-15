@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/api"
 	"github.com/cynkra/blockyard/internal/audit"
@@ -66,6 +71,75 @@ func main() {
 	// Build shared state and router
 	srv := server.NewServer(cfg, be, database)
 
+	// Background goroutine context — used for vault token renewal and others.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	var bgWg sync.WaitGroup
+
+	// ── Initialize OpenBao (must happen before OIDC for vault reference resolution) ──
+
+	if cfg.Openbao != nil {
+		tokenFilePath := filepath.Join(filepath.Dir(cfg.Database.Path), ".vault-token")
+
+		var adminTokenFunc func() string
+
+		if cfg.Openbao.RoleID != "" {
+			// AppRole auth flow.
+			token, ttl, err := initVaultAppRole(cfg.Openbao.Address, cfg.Openbao.RoleID, tokenFilePath)
+			if err != nil {
+				slog.Error("vault authentication failed", "error", err)
+				os.Exit(1)
+			}
+
+			// Start token renewal goroutine.
+			renewer := integration.NewTokenRenewer(cfg.Openbao.Address, token, tokenFilePath)
+			adminTokenFunc = renewer.Token
+			srv.VaultTokenHealthy = renewer.Healthy
+
+			bgWg.Add(1)
+			go func() {
+				defer bgWg.Done()
+				renewer.Run(bgCtx, ttl)
+			}()
+		} else {
+			// Deprecated static admin_token.
+			adminTokenFunc = cfg.Openbao.AdminToken.MustExpose
+		}
+
+		srv.VaultClient = integration.NewClient(cfg.Openbao.Address, adminTokenFunc)
+		srv.VaultTokenCache = integration.NewVaultTokenCache()
+
+		// Resolve vault references in config (e.g. "vault:path#key").
+		if err := config.ResolveSecrets(context.Background(), cfg, srv.VaultClient); err != nil {
+			slog.Error("failed to resolve vault references in config", "error", err)
+			os.Exit(1)
+		}
+
+		// Auto-generate session_secret if empty and vault is available.
+		if cfg.OIDC != nil && (cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty()) {
+			secret, err := resolveSessionSecret(srv.VaultClient)
+			if err != nil {
+				slog.Error("failed to resolve session_secret", "error", err)
+				os.Exit(1)
+			}
+			s := config.NewSecret(secret)
+			cfg.Server.SessionSecret = &s
+		}
+
+		// Bootstrap verification.
+		if err := integration.Bootstrap(context.Background(), srv.VaultClient, cfg.Openbao.JWTAuthPath, cfg.Openbao.SkipPolicyScopeCheck); err != nil {
+			slog.Error("OpenBao bootstrap failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	// Deferred validation: session_secret must be present if OIDC is configured.
+	if cfg.OIDC != nil {
+		if cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty() {
+			slog.Error("config: server.session_secret is required when [oidc] is configured")
+			os.Exit(1)
+		}
+	}
+
 	// Initialize OIDC if configured.
 	if cfg.OIDC != nil {
 		baseURL := cfg.Server.ExternalURL
@@ -74,11 +148,17 @@ func main() {
 		}
 		redirectURL := baseURL + "/callback"
 
+		clientSecret, err := cfg.OIDC.ClientSecret.Expose()
+		if err != nil {
+			slog.Error("failed to read OIDC client secret", "error", err)
+			os.Exit(1)
+		}
+
 		oidcClient, err := auth.Discover(
 			context.Background(),
 			cfg.OIDC.IssuerURL,
 			cfg.OIDC.ClientID,
-			cfg.OIDC.ClientSecret.Expose(),
+			clientSecret,
 			redirectURL,
 		)
 		if err != nil {
@@ -87,24 +167,14 @@ func main() {
 		}
 
 		srv.OIDCClient = oidcClient
-		srv.SigningKey = auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose())
-		srv.SessionTokenKey = auth.DeriveSessionTokenKey(cfg.Server.SessionSecret.Expose())
-		srv.UserSessions = auth.NewUserSessionStore()
-
-	}
-
-	// Initialize OpenBao if configured.
-	if cfg.Openbao != nil {
-		srv.VaultClient = integration.NewClient(
-			cfg.Openbao.Address,
-			cfg.Openbao.AdminToken.Expose,
-		)
-		srv.VaultTokenCache = integration.NewVaultTokenCache()
-
-		if err := integration.Bootstrap(context.Background(), srv.VaultClient, cfg.Openbao.JWTAuthPath, cfg.Openbao.SkipPolicyScopeCheck); err != nil {
-			slog.Error("OpenBao bootstrap failed", "error", err)
+		sessionSecret, err := cfg.Server.SessionSecret.Expose()
+		if err != nil {
+			slog.Error("failed to read session secret", "error", err)
 			os.Exit(1)
 		}
+		srv.SigningKey = auth.DeriveSigningKey(sessionSecret)
+		srv.SessionTokenKey = auth.DeriveSessionTokenKey(sessionSecret)
+		srv.UserSessions = auth.NewUserSessionStore()
 	}
 
 	// Initialize audit log if configured.
@@ -145,10 +215,6 @@ func main() {
 			Handler: mgmtHandler,
 		}
 	}
-
-	// Background goroutine context
-	bgCtx, bgCancel := context.WithCancel(context.Background())
-	var bgWg sync.WaitGroup
 
 	bgWg.Add(1)
 	go func() {
@@ -232,4 +298,79 @@ func main() {
 	}
 
 	slog.Info("shutdown complete")
+}
+
+// initVaultAppRole authenticates to vault using AppRole. It first tries
+// a persisted token (renew-self), then falls back to AppRole login with
+// secret_id from the environment.
+func initVaultAppRole(addr, roleID, tokenFile string) (token string, ttl time.Duration, err error) {
+	httpClient := &http.Client{}
+
+	// 1. Try persisted token.
+	persisted, err := integration.ReadTokenFile(tokenFile)
+	if err != nil {
+		slog.Warn("failed to read persisted vault token", "error", err)
+	}
+	if persisted != "" {
+		renewTTL, err := integration.RenewSelf(context.Background(), httpClient, addr, persisted)
+		if err == nil {
+			slog.Info("reusing persisted vault token")
+			return persisted, renewTTL, nil
+		}
+		slog.Warn("persisted vault token renewal failed, trying AppRole login", "error", err)
+	}
+
+	// 2. AppRole login with secret_id from env.
+	secretID := os.Getenv("BLOCKYARD_OPENBAO_SECRET_ID")
+	if secretID == "" {
+		return "", 0, fmt.Errorf("vault bootstrap required: set BLOCKYARD_OPENBAO_SECRET_ID")
+	}
+
+	token, ttl, err = integration.AppRoleLogin(context.Background(), httpClient, addr, roleID, secretID)
+	if err != nil {
+		return "", 0, fmt.Errorf("AppRole login failed: %w", err)
+	}
+
+	// Persist the token for restart reuse.
+	if writeErr := integration.WriteTokenFile(tokenFile, token); writeErr != nil {
+		slog.Warn("failed to persist vault token", "error", writeErr)
+	}
+
+	slog.Info("vault AppRole authentication successful")
+	return token, ttl, nil
+}
+
+// resolveSessionSecret reads or generates session_secret from vault.
+// If the key exists at secret/data/blockyard/server-secrets, it's used.
+// Otherwise, a new 32-byte random value is generated, stored, and returned.
+func resolveSessionSecret(client *integration.Client) (string, error) {
+	const kvPath = "blockyard/server-secrets"
+
+	// Try reading existing.
+	data, err := client.KVRead(context.Background(), kvPath, client.AdminToken())
+	if err == nil {
+		if v, ok := data["session_secret"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				slog.Info("session_secret loaded from vault")
+				return s, nil
+			}
+		}
+	}
+
+	// Generate new.
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate session_secret: %w", err)
+	}
+	secret := base64.RawURLEncoding.EncodeToString(buf)
+
+	// Store in vault.
+	if err := client.KVWrite(context.Background(), kvPath, map[string]any{
+		"session_secret": secret,
+	}); err != nil {
+		return "", fmt.Errorf("store session_secret in vault: %w", err)
+	}
+
+	slog.Info("auto-generated session_secret (stored in vault)")
+	return secret, nil
 }

@@ -39,7 +39,7 @@ func buildTestDeps(t *testing.T, idp *testutil.MockIdP) *auth.Deps {
 		context.Background(),
 		cfg.OIDC.IssuerURL,
 		cfg.OIDC.ClientID,
-		cfg.OIDC.ClientSecret.Expose(),
+		cfg.OIDC.ClientSecret.MustExpose(),
 		cfg.Server.ExternalURL+"/callback",
 	)
 	if err != nil {
@@ -49,7 +49,7 @@ func buildTestDeps(t *testing.T, idp *testutil.MockIdP) *auth.Deps {
 	return &auth.Deps{
 		Config:       cfg,
 		OIDCClient:   oidcClient,
-		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose()),
+		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.MustExpose()),
 		UserSessions: auth.NewUserSessionStore(),
 	}
 }
@@ -508,7 +508,7 @@ func TestSecureFlagHTTPS(t *testing.T) {
 		context.Background(),
 		cfg.OIDC.IssuerURL,
 		cfg.OIDC.ClientID,
-		cfg.OIDC.ClientSecret.Expose(),
+		cfg.OIDC.ClientSecret.MustExpose(),
 		cfg.Server.ExternalURL+"/callback",
 	)
 	if err != nil {
@@ -518,7 +518,7 @@ func TestSecureFlagHTTPS(t *testing.T) {
 	deps := &auth.Deps{
 		Config:       cfg,
 		OIDCClient:   oidcClient,
-		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose()),
+		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.MustExpose()),
 		UserSessions: auth.NewUserSessionStore(),
 	}
 
@@ -588,7 +588,7 @@ func TestLogoutWithoutOIDCRedirectsToRoot(t *testing.T) {
 				SessionSecret: &secret,
 			},
 		},
-		SigningKey:    auth.DeriveSigningKey(secret.Expose()),
+		SigningKey:    auth.DeriveSigningKey(secret.MustExpose()),
 		UserSessions: auth.NewUserSessionStore(),
 	}
 

@@ -209,7 +209,7 @@ func setupIDPTestServer(t *testing.T) (*httptest.Server, *auth.Deps) {
 	deps := &auth.Deps{
 		Config:       cfg,
 		OIDCClient:   oidcClient,
-		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.Expose()),
+		SigningKey:    auth.DeriveSigningKey(cfg.Server.SessionSecret.MustExpose()),
 		UserSessions: auth.NewUserSessionStore(),
 	}
 

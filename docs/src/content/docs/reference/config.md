@@ -44,7 +44,7 @@ shutdown_timeout = "30s"
 | `management_bind` | `string` | — | No | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Management listener](/guides/observability/#management-listener). |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
 | `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn`, `error`. |
-| `session_secret` | `string` | — | When `[oidc]` is set | Secret for encrypting session cookies |
+| `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 
 <Aside type="note">
@@ -123,7 +123,7 @@ idle_worker_timeout  = "5m"
 
 ## `[oidc]` *(optional)*
 
-Enable OIDC-based authentication. When this section is present, `server.session_secret` is required.
+Enable OIDC-based authentication. When this section is present, `server.session_secret` is required unless `[openbao]` is also configured (in which case it can be auto-generated).
 
 ```toml
 [oidc]
@@ -154,18 +154,33 @@ Enable OpenBao (Vault-compatible) credential management. Requires `[oidc]` to al
 
 ```toml
 [openbao]
-address     = "http://openbao:8200"
-admin_token = "vault-admin-token"
-token_ttl   = "1h"
+address       = "http://openbao:8200"
+role_id       = "blockyard-server"    # AppRole role identifier (recommended)
+# admin_token = "vault-admin-token"   # deprecated: use role_id instead
+token_ttl     = "1h"
 jwt_auth_path = "jwt"
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `address` | `string` | — | **Yes** | OpenBao server address |
-| `admin_token` | `string` | — | **Yes** | Admin token for OpenBao API access |
+| `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via the `BLOCKYARD_OPENBAO_SECRET_ID` env var at bootstrap. |
+| `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in OpenBao |
+
+<Aside type="tip">
+  With AppRole auth (`role_id`), the server authenticates to OpenBao using a
+  one-time `secret_id` (via `BLOCKYARD_OPENBAO_SECRET_ID`) and then renews
+  its own token indefinitely. After initial bootstrap, the env var is no
+  longer needed — the token is persisted to disk and reused across restarts.
+  `session_secret` is also auto-generated and stored in vault.
+</Aside>
+
+<Aside type="caution">
+  `admin_token` and `role_id` are mutually exclusive — setting both is a
+  configuration error.
+</Aside>
 
 ### `[[openbao.services]]`
 
@@ -212,3 +227,26 @@ otlp_endpoint   = "http://otel-collector:4317"
 |---|---|---|---|---|
 | `metrics_enabled` | `boolean` | `false` | No | Expose a `/metrics` endpoint for Prometheus scraping |
 | `otlp_endpoint` | `string` | — | No | OpenTelemetry collector gRPC endpoint for distributed tracing |
+
+## Vault references
+
+Any secret field in the configuration can reference a value stored in
+OpenBao instead of containing the literal secret. Use the `vault:` prefix:
+
+```toml
+[oidc]
+client_secret = "vault:secret/data/blockyard/oidc#client_secret"
+```
+
+**Format:** `vault:{kv_v2_data_path}#{key}`
+
+- `{kv_v2_data_path}` — the full KV v2 data path (e.g. `secret/data/blockyard/oidc`)
+- `{key}` — the JSON key within the secret's data map
+
+At startup, blockyard resolves all vault references before initializing
+other subsystems. If a reference cannot be resolved (vault unreachable,
+path missing, key missing), the server exits with a clear error naming
+the field and path.
+
+Values without the `vault:` prefix are treated as literals, unchanged
+from current behavior.
