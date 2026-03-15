@@ -784,11 +784,163 @@ func TestProxyWebSocketForwardsHeaders(t *testing.T) {
 	}
 }
 
-// TestProxyInjectShinyHeaders verifies that X-Shiny-User is set on
-// forwarded requests when the caller is authenticated via OIDC.
-// Skipped when OIDC setup is too complex for an integration test.
+// TestProxyInjectShinyHeaders verifies that the proxy sets X-Shiny-User
+// and X-Shiny-Access headers on forwarded requests when the caller is
+// authenticated via OIDC.
 func TestProxyInjectShinyHeaders(t *testing.T) {
-	t.Skip("requires OIDC context injection; covered by unit tests")
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testProxyServerWithOIDC(t, idp)
+
+	// Set up a handler on the mock backend that echoes X-Shiny-User and
+	// X-Shiny-Access back as response headers so we can inspect them.
+	be := srv.Backend.(*mock.MockBackend)
+	be.SetHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Echo-User", r.Header.Get("X-Shiny-User"))
+		w.Header().Set("X-Echo-Access", r.Header.Get("X-Shiny-Access"))
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Publisher creates and starts a public app.
+	srv.DB.UpsertUserWithRole("publisher-1", "publisher-1@example.com", "Publisher", "publisher")
+	pubToken := createTestPAT(t, srv.DB, "publisher-1")
+	appID := createAndStartAppWithPAT(t, ts, "header-app", pubToken)
+
+	// Set access_type to "public" so any authenticated user can access it.
+	req, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/apps/"+appID,
+		bytes.NewReader([]byte(`{"access_type":"public"}`)))
+	req.Header.Set("Authorization", "Bearer "+pubToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set access_type: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Create a viewer user and send a request through the proxy.
+	srv.DB.UpsertUserWithRole("viewer-1", "viewer-1@example.com", "Viewer", "viewer")
+	cookie := makeSessionCookie(t, srv, "viewer-1")
+
+	req, _ = http.NewRequest("GET", ts.URL+"/app/header-app/", nil)
+	req.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// Verify the backend received the correct identity headers.
+	if got := resp.Header.Get("X-Echo-User"); got != "viewer-1" {
+		t.Errorf("X-Shiny-User: expected %q, got %q", "viewer-1", got)
+	}
+	if got := resp.Header.Get("X-Echo-Access"); got != "viewer" {
+		t.Errorf("X-Shiny-Access: expected %q, got %q", "viewer", got)
+	}
+}
+
+// TestProxyCollaboratorAccess verifies that a user with a collaborator
+// ACL grant receives X-Shiny-Access: collaborator.
+func TestProxyCollaboratorAccess(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testProxyServerWithOIDC(t, idp)
+
+	be := srv.Backend.(*mock.MockBackend)
+	be.SetHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Echo-User", r.Header.Get("X-Shiny-User"))
+		w.Header().Set("X-Echo-Access", r.Header.Get("X-Shiny-Access"))
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Publisher creates and starts an ACL app (default access_type).
+	srv.DB.UpsertUserWithRole("publisher-2", "publisher-2@example.com", "Publisher", "publisher")
+	pubToken := createTestPAT(t, srv.DB, "publisher-2")
+	appID := createAndStartAppWithPAT(t, ts, "collab-app", pubToken)
+
+	// Create a viewer-role user and grant them collaborator access on the app.
+	srv.DB.UpsertUserWithRole("collab-user", "collab@example.com", "Collab", "viewer")
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps/"+appID+"/access",
+		bytes.NewReader([]byte(`{"kind":"user","principal":"collab-user","role":"collaborator"}`)))
+	req.Header.Set("Authorization", "Bearer "+pubToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("grant access: expected 204, got %d", resp.StatusCode)
+	}
+
+	// Send a proxy request as the collaborator user.
+	cookie := makeSessionCookie(t, srv, "collab-user")
+	req, _ = http.NewRequest("GET", ts.URL+"/app/collab-app/", nil)
+	req.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("X-Echo-User"); got != "collab-user" {
+		t.Errorf("X-Shiny-User: expected %q, got %q", "collab-user", got)
+	}
+	if got := resp.Header.Get("X-Echo-Access"); got != "collaborator" {
+		t.Errorf("X-Shiny-Access: expected %q, got %q", "collaborator", got)
+	}
+}
+
+// TestProxyAdminAccess verifies that an admin user receives
+// X-Shiny-Access: owner (admin maps to RelationAdmin -> "owner").
+func TestProxyAdminAccess(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testProxyServerWithOIDC(t, idp)
+
+	be := srv.Backend.(*mock.MockBackend)
+	be.SetHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Echo-User", r.Header.Get("X-Shiny-User"))
+		w.Header().Set("X-Echo-Access", r.Header.Get("X-Shiny-Access"))
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Publisher creates and starts an app.
+	srv.DB.UpsertUserWithRole("publisher-3", "publisher-3@example.com", "Publisher", "publisher")
+	pubToken := createTestPAT(t, srv.DB, "publisher-3")
+	createAndStartAppWithPAT(t, ts, "admin-app", pubToken)
+
+	// The "admin" user was already seeded by seedTestAdmin. Send a proxy
+	// request as admin.
+	cookie := makeSessionCookie(t, srv, "admin")
+	req, _ := http.NewRequest("GET", ts.URL+"/app/admin-app/", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("X-Echo-User"); got != "admin" {
+		t.Errorf("X-Shiny-User: expected %q, got %q", "admin", got)
+	}
+	if got := resp.Header.Get("X-Echo-Access"); got != "owner" {
+		t.Errorf("X-Shiny-Access: expected %q, got %q", "owner", got)
+	}
 }
 
 // TestProxyInjectCredentialsShared verifies that shared container

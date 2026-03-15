@@ -19,6 +19,7 @@ type MockBackend struct {
 	HealthOK         atomic.Bool      // configurable: default true
 	BuildSuccess     atomic.Bool      // configurable: default true
 	wsHandler        http.HandlerFunc // optional WS handler for mock workers
+	httpHandler      http.HandlerFunc // optional HTTP handler for mock workers
 }
 
 type mockWorker struct {
@@ -58,6 +59,15 @@ func (b *MockBackend) SetWSHandler(h http.HandlerFunc) {
 	b.wsHandler = h
 }
 
+// SetHTTPHandler configures an HTTP handler for new mock workers.
+// When set, non-WebSocket requests are routed to this handler instead
+// of the default 200 OK response.
+func (b *MockBackend) SetHTTPHandler(h http.HandlerFunc) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.httpHandler = h
+}
+
 // SetManagedResources configures what ListManaged returns.
 // RemoveResource removes individual entries from this list.
 func (b *MockBackend) SetManagedResources(resources []backend.ManagedResource) {
@@ -77,23 +87,22 @@ func (b *MockBackend) SetLogLines(lines []string) {
 
 func (b *MockBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
 	b.mu.Lock()
-	handler := b.wsHandler
+	wsH := b.wsHandler
+	httpH := b.httpHandler
 	b.mu.Unlock()
 
 	var srv *httptest.Server
-	if handler != nil {
-		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Upgrade") == "websocket" {
-				handler(w, r)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		}))
-	} else {
-		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		}))
-	}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "websocket" && wsH != nil {
+			wsH(w, r)
+			return
+		}
+		if httpH != nil {
+			httpH(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
