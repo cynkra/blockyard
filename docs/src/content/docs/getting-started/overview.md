@@ -21,7 +21,9 @@ the right worker.
 
 Workers are isolated from each other via per-container bridge networks.
 Containers run with a read-only filesystem, all Linux capabilities dropped,
-and `no-new-privileges` set.
+`no-new-privileges` set, and cloud metadata endpoint access blocked
+(`169.254.169.254`). See [Deploying an App](/guides/deploying/#container-security)
+for the full list of security settings.
 
 ## Authentication & Authorization
 

@@ -32,6 +32,7 @@ Environment variables take precedence over values in the TOML file.
 [server]
 bind             = "0.0.0.0:8080"
 shutdown_timeout = "30s"
+# log_level      = "info"
 # session_secret = "random-secret"   # required when [oidc] is configured
 # external_url   = "https://blockyard.example.com"
 ```
@@ -40,6 +41,7 @@ shutdown_timeout = "30s"
 |---|---|---|---|---|
 | `bind` | `string` | `0.0.0.0:8080` | No | Socket address to listen on |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
+| `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn`, `error`. |
 | `session_secret` | `string` | — | When `[oidc]` is set | Secret for encrypting session cookies |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 

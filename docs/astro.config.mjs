@@ -26,6 +26,7 @@ export default defineConfig({
 						{ label: 'Configuration', slug: 'guides/configuration' },
 						{ label: 'Authorization', slug: 'guides/authorization' },
 						{ label: 'Credential Management', slug: 'guides/credentials' },
+					{ label: 'Observability', slug: 'guides/observability' },
 					],
 				},
 				{

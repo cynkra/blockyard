@@ -134,10 +134,20 @@ server <- function(input, output, session) {
 
 ## Environment variables injected into workers
 
+All worker containers receive:
+
+| Variable | Value |
+|---|---|
+| `SHINY_PORT` | The Shiny port (from `[docker] shiny_port`, default `3838`) |
+| `R_LIBS` | Always `/blockyard-lib` — the restored package library |
+
+When `[openbao]` is configured, workers also receive:
+
 | Variable | Value |
 |---|---|
 | `VAULT_ADDR` | The OpenBao server address (from `[openbao] address`) |
 | `BLOCKYARD_API_URL` | The server's API URL (shared container mode only) |
+| `BLOCKYARD_VAULT_SERVICES` | JSON map of service IDs to Vault paths (only when `[[openbao.services]]` are defined) |
 
 ## Security model
 

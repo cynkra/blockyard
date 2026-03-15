@@ -22,9 +22,13 @@ Returns `200 OK` with body `ok`. No authentication required.
 ### `GET /readyz`
 
 Readiness probe that checks backend dependencies (database, Docker socket, and
-optionally IdP and OpenBao). No authentication required.
+optionally IdP and OpenBao). No authentication required, but the response
+detail varies based on the caller.
 
 **Response:** `200 OK` when all checks pass, `503 Service Unavailable` otherwise.
+
+**Authenticated callers** (bearer token or session cookie) see per-component
+results:
 
 ```json
 {
@@ -36,6 +40,14 @@ optionally IdP and OpenBao). No authentication required.
 }
 ```
 
+**Unauthenticated callers** see only the aggregate status:
+
+```json
+{
+  "status": "ready"
+}
+```
+
 When not all checks pass, `status` is `"not_ready"` and the HTTP status is `503`.
 
 When OIDC and/or OpenBao are configured, their health is included in the checks
@@ -44,7 +56,7 @@ When OIDC and/or OpenBao are configured, their health is included in the checks
 ### `GET /metrics`
 
 Prometheus metrics endpoint. Only available when `telemetry.metrics_enabled` is
-`true`. No authentication required.
+`true`. Requires authentication (bearer token or session cookie).
 
 ---
 
@@ -124,15 +136,15 @@ updated.
 }
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `max_workers_per_app` | `integer` | Max concurrent workers (must be >= 1) |
-| `max_sessions_per_worker` | `integer` | Sessions per worker (must be >= 1) |
-| `memory_limit` | `string` | Container memory limit (e.g. `"512m"`) |
-| `cpu_limit` | `float` | CPU limit (e.g. `0.5` for half a core) |
-| `access_type` | `string` | `"acl"`, `"logged_in"`, or `"public"` (requires owner or admin) |
-| `title` | `string` | Human-readable title for the catalog |
-| `description` | `string` | Description for the catalog |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_workers_per_app` | `integer` | unlimited | Max concurrent workers (must be >= 1) |
+| `max_sessions_per_worker` | `integer` | `1` | Sessions per worker (must be >= 1). `1` means single-tenant containers. See [Credential Management](/guides/credentials/) for how this affects credential injection. |
+| `memory_limit` | `string` | none | Container memory limit (e.g. `"512m"`, `"2g"`) |
+| `cpu_limit` | `float` | none | CPU limit (e.g. `0.5` for half a core) |
+| `access_type` | `string` | `"acl"` | `"acl"`, `"logged_in"`, or `"public"` (requires owner or admin) |
+| `title` | `string` | none | Human-readable title for the catalog |
+| `description` | `string` | none | Description for the catalog |
 
 **Response:** `200 OK` — updated app object.
 

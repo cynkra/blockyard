@@ -72,6 +72,21 @@ curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/start" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+## Container security
+
+Worker containers run with hardened defaults:
+
+- **All Linux capabilities dropped** (`--cap-drop ALL`)
+- **No new privileges** (`--security-opt no-new-privileges`)
+- **Read-only root filesystem** — only `/tmp` (tmpfs) and the bundle
+  mount are writable
+- **Per-worker bridge network** — each worker gets its own isolated
+  Docker network
+- **Cloud metadata blocked** — requests to `169.254.169.254` are dropped
+  via iptables rules to prevent SSRF against cloud instance metadata
+
+These settings are not configurable — they are always applied.
+
 ## Updating an app
 
 To deploy a new version, upload another bundle to the same app. Once it

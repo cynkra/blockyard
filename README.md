@@ -185,6 +185,7 @@ migrations/
 bind             = "0.0.0.0:8080"
 # token          = "..."   # v0 only; replaced by PATs when [oidc] is configured
 shutdown_timeout = "30s"
+# log_level      = "info"   # trace, debug, info, warn, error
 # session_secret = "random-secret"   # required when [oidc] is configured
 # external_url   = "https://blockyard.example.com"
 

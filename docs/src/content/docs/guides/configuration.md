@@ -27,6 +27,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 |---|---|---|
 | `bind` | `0.0.0.0:8080` | Address and port the server listens on |
 | `shutdown_timeout` | `30s` | Time to drain in-flight requests on shutdown |
+| `log_level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `session_secret` | — | Secret for encrypting session cookies (required when `[oidc]` is configured) |
 | `external_url` | — | Public-facing URL of the server (used for OIDC redirect URIs) |
 
@@ -76,7 +77,6 @@ Enable OIDC authentication. When configured, `server.session_secret` is required
 | `client_id` | *(required)* | OIDC client ID |
 | `client_secret` | *(required)* | OIDC client secret |
 | `cookie_max_age` | `24h` | Max lifetime of session cookies |
-| `initial_admin` | — | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
 | `initial_admin` | — | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
 
 ### `[openbao]` *(optional)*
