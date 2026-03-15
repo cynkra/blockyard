@@ -36,7 +36,13 @@ func main() {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("loaded config", "bind", cfg.Server.Bind)
+
+	// Reconfigure log level from config (server.log_level / BLOCKYARD_SERVER_LOG_LEVEL).
+	logLevel := config.ParseLogLevel(cfg.Server.LogLevel)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
+	slog.Info("loaded config", "bind", cfg.Server.Bind, "log_level", logLevel.String())
 
 	// Initialize backend
 	be, err := docker.New(context.Background(), &cfg.Docker, cfg.Storage.BundleServerPath)

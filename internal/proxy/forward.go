@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -10,6 +11,9 @@ import (
 // forwardHTTP proxies an HTTP request to the worker at addr. The
 // /app/{name} prefix is stripped from the path before forwarding.
 func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName string, transport http.RoundTripper) {
+	slog.Debug("proxy: forwarding HTTP",
+		"app", appName, "backend", addr,
+		"path", stripAppPrefix(r.URL.Path, appName))
 	target := &url.URL{
 		Scheme: "http",
 		Host:   addr,

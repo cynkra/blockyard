@@ -124,6 +124,13 @@ func Handler(srv *server.Server) http.Handler {
 				if addrOk {
 					workerID, addr = entry.WorkerID, a
 					srv.Sessions.Touch(sessionID)
+					slog.Debug("proxy: reusing session",
+						"app", appName, "session_id", sessionID,
+						"worker_id", workerID)
+				} else {
+					slog.Debug("proxy: session worker not in registry",
+						"app", appName, "session_id", sessionID,
+						"worker_id", entry.WorkerID)
 				}
 			}
 		}
@@ -132,6 +139,8 @@ func Handler(srv *server.Server) http.Handler {
 			// No valid session or stale worker — assign via load balancer
 			isNewSession = true
 			sessionID = uuid.New().String()
+			slog.Debug("proxy: creating new session",
+				"app", appName, "session_id", sessionID)
 
 			wid, a, err := ensureWorker(r.Context(), srv, app)
 			if err != nil {

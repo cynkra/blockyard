@@ -46,6 +46,7 @@ func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string) error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
+	slog.Info("OpenBao bootstrap checks passed")
 	return nil
 }
 

@@ -15,9 +15,10 @@ import (
 // EvictWorker is the single codepath for decommissioning a worker.
 // Idempotent — safe to call concurrently from multiple goroutines.
 func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
-	_, found := srv.Workers.Get(workerID)
+	w, found := srv.Workers.Get(workerID)
 	srv.Workers.Delete(workerID)
 	if found {
+		slog.Info("evicting worker", "worker_id", workerID, "app_id", w.AppID)
 		if err := srv.Backend.Stop(ctx, workerID); err != nil {
 			slog.Warn("evict: failed to stop worker",
 				"worker_id", workerID, "error", err)
@@ -189,8 +190,10 @@ func drainAndEvictAll(ctx context.Context, srv *server.Server, workerIDs []strin
 	for time.Now().Before(deadline) {
 		total := srv.Sessions.CountForWorkers(workerIDs)
 		if total == 0 {
+			slog.Info("shutdown: all sessions drained")
 			break
 		}
+		slog.Debug("shutdown: waiting for sessions to drain", "remaining", total)
 		time.Sleep(time.Second)
 	}
 

@@ -50,12 +50,14 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 			cookieValue := extractSessionCookie(r)
 			if cookieValue == "" {
 				// No session — proceed without identity.
+				slog.Debug("auth: no session cookie")
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			cookie, err := DecodeCookie(cookieValue, deps.SigningKey)
 			if err != nil {
+				slog.Debug("auth: invalid session cookie", "error", err)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -66,12 +68,14 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 				maxAge = int64(deps.Config.OIDC.CookieMaxAge.Duration.Seconds())
 			}
 			if nowUnix()-cookie.IssuedAt > maxAge {
+				slog.Debug("auth: session cookie expired", "sub", cookie.Sub)
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			session := deps.UserSessions.Get(cookie.Sub)
 			if session == nil {
+				slog.Debug("auth: no server-side session", "sub", cookie.Sub)
 				next.ServeHTTP(w, r)
 				return
 			}

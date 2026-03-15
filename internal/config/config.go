@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,6 +39,7 @@ type ServerConfig struct {
 	SessionSecret   *Secret  `toml:"session_secret"` // required when [oidc] is set
 	ExternalURL     string   `toml:"external_url"`
 	ShutdownTimeout Duration `toml:"shutdown_timeout"`
+	LogLevel        string   `toml:"log_level"` // debug, info, warn, error (default: info)
 }
 
 type DockerConfig struct {
@@ -393,4 +395,19 @@ func ensureDirWritable(path, label string) error {
 	}
 	os.Remove(testFile)
 	return nil
+}
+
+// ParseLogLevel converts a log level name (debug, info, warn, error) to
+// an slog.Level. Returns slog.LevelInfo for empty or unrecognized values.
+func ParseLogLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

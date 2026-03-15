@@ -199,6 +199,9 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		slog.Info("app created",
+			"app_id", app.ID, "name", app.Name, "owner", caller.Sub)
+
 		if srv.AuditLog != nil {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppCreate, app.ID,
 				map[string]any{"name": app.Name}))
@@ -347,6 +350,9 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		slog.Info("deleting app",
+			"app_id", app.ID, "name", app.Name, "caller", caller.Sub)
+
 		// 1. Stop all workers for this app (synchronous for delete).
 		stopAppSync(srv, app.ID)
 
@@ -469,6 +475,9 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			Env:         proxy.WorkerEnv(srv),
 		}
 
+		slog.Info("starting app via API",
+			"app_id", app.ID, "name", app.Name, "worker_id", workerID)
+
 		if err := srv.Backend.Spawn(r.Context(), spec); err != nil {
 			serverError(w, "spawn worker: "+err.Error())
 			return
@@ -524,6 +533,9 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 			notFound(w, "app not found")
 			return
 		}
+
+		slog.Info("stopping app",
+			"app_id", app.ID, "name", app.Name, "caller", caller.Sub)
 
 		// Mark draining so no new sessions are routed.
 		workerIDs := srv.Workers.MarkDraining(app.ID)

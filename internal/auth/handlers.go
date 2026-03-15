@@ -303,6 +303,8 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			})
 		}
 
+		slog.Info("user logged in", "sub", subClaim, "email", emailClaim)
+
 		// 10. Redirect to return_url.
 		w.Header().Add("Set-Cookie", sessionCookie)
 		w.Header().Add("Set-Cookie", clearState)

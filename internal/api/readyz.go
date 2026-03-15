@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -107,6 +108,13 @@ func readyzHandler(srv *server.Server) http.HandlerFunc {
 		if !allOK {
 			status = "not_ready"
 			httpStatus = http.StatusServiceUnavailable
+			failed := make([]string, 0)
+			for k, v := range checks {
+				if v == "fail" {
+					failed = append(failed, k)
+				}
+			}
+			slog.Warn("readiness check failed", "failed_checks", failed)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

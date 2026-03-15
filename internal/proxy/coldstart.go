@@ -154,6 +154,10 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	}
 
 	wid := uuid.New().String()
+	slog.Info("spawning worker",
+		"worker_id", wid, "app_id", app.ID,
+		"bundle_id", *app.ActiveBundle,
+		"current_workers", srv.Workers.Count())
 	hostPaths := bundle.NewBundlePaths(
 		srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
 	)
@@ -202,17 +206,23 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 
 	coldStartBegin := time.Now()
 	if err := pollHealthy(ctx, srv, wid); err != nil {
+		slog.Warn("worker failed health check during cold start",
+			"worker_id", wid, "app_id", app.ID,
+			"elapsed", time.Since(coldStartBegin).Round(time.Millisecond),
+			"error", err)
 		srv.Workers.Delete(wid)
 		srv.Registry.Delete(wid)
 		srv.Backend.Stop(context.Background(), wid)
 		return "", "", err
 	}
-	telemetry.ColdStartDuration.Observe(time.Since(coldStartBegin).Seconds())
+	coldStartElapsed := time.Since(coldStartBegin)
+	telemetry.ColdStartDuration.Observe(coldStartElapsed.Seconds())
 	telemetry.WorkersSpawned.Inc()
 	telemetry.WorkersActive.Inc()
 
 	slog.Info("worker ready",
-		"worker_id", wid, "app_id", app.ID, "addr", a)
+		"worker_id", wid, "app_id", app.ID, "addr", a,
+		"cold_start_ms", coldStartElapsed.Milliseconds())
 	return wid, a, nil
 }
 

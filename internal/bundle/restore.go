@@ -38,6 +38,8 @@ type RestoreParams struct {
 // Returns immediately.
 func SpawnRestore(params RestoreParams) {
 	go func() {
+		slog.Info("bundle restore started",
+			"app_id", params.AppID, "bundle_id", params.BundleID)
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("restore task panicked",
@@ -64,6 +66,10 @@ func SpawnRestore(params RestoreParams) {
 		buildStart := time.Now()
 		err := runRestore(params)
 		if err != nil {
+			slog.Warn("bundle restore failed",
+				"app_id", params.AppID, "bundle_id", params.BundleID,
+				"elapsed", time.Since(buildStart).Round(time.Millisecond),
+				"error", err)
 			params.Sender.Write(fmt.Sprintf("ERROR: %s", err))
 			params.Sender.Complete(task.Failed)
 			telemetry.BundleRestoresFailed.Inc()
@@ -81,7 +87,11 @@ func SpawnRestore(params RestoreParams) {
 			}
 			return
 		}
-		telemetry.BuildDuration.Observe(time.Since(buildStart).Seconds())
+		elapsed := time.Since(buildStart)
+		slog.Info("bundle restore succeeded",
+			"app_id", params.AppID, "bundle_id", params.BundleID,
+			"elapsed", elapsed.Round(time.Millisecond))
+		telemetry.BuildDuration.Observe(elapsed.Seconds())
 		telemetry.BundleRestoresSucceeded.Inc()
 		if params.AuditLog != nil {
 			params.AuditLog.Emit(audit.Entry{

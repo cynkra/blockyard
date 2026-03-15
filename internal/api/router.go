@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -19,6 +20,62 @@ import (
 // maxJSONBodySize limits the request body for JSON API endpoints to 1 MiB.
 // Bundle uploads have their own limit via http.MaxBytesReader.
 const maxJSONBodySize = 1 << 20
+
+// responseCapture wraps http.ResponseWriter to capture the status code.
+type responseCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rc *responseCapture) WriteHeader(code int) {
+	rc.status = code
+	rc.ResponseWriter.WriteHeader(code)
+}
+
+func (rc *responseCapture) Unwrap() http.ResponseWriter {
+	return rc.ResponseWriter
+}
+
+// requestLogger logs each HTTP request with method, path, status, and duration.
+// Health/readiness probes are logged at Debug to reduce noise.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rc := &responseCapture{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rc, r)
+		duration := time.Since(start)
+
+		path := r.URL.Path
+		status := rc.status
+
+		// Health/readiness probes at Debug to avoid log spam.
+		if path == "/healthz" || path == "/readyz" {
+			slog.Debug("request",
+				"method", r.Method,
+				"path", path,
+				"status", status,
+				"duration_ms", duration.Milliseconds())
+			return
+		}
+
+		attrs := []any{
+			"method", r.Method,
+			"path", path,
+			"status", status,
+			"duration_ms", duration.Milliseconds(),
+			"remote", r.RemoteAddr,
+		}
+
+		switch {
+		case status >= 500:
+			slog.Error("request", attrs...)
+		case status >= 400:
+			slog.Warn("request", attrs...)
+		default:
+			slog.Info("request", attrs...)
+		}
+	})
+}
 
 // limitBody is a middleware that caps request body size to prevent
 // memory exhaustion from oversized JSON payloads.
@@ -59,6 +116,9 @@ func apiCSP(next http.Handler) http.Handler {
 
 func NewRouter(srv *server.Server) http.Handler {
 	r := chi.NewRouter()
+
+	// Request logging (outermost to capture status/duration for all routes).
+	r.Use(requestLogger)
 
 	// Global security headers (HSTS when HTTPS).
 	r.Use(securityHeaders(srv.Config.Server.ExternalURL))
