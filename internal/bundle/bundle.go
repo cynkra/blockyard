@@ -77,7 +77,14 @@ func WriteArchive(paths Paths, r io.Reader) error {
 	return nil
 }
 
+// maxDecompressedSize is the upper bound on total bytes extracted from a
+// bundle archive. This prevents gzip/tar bombs where a small compressed
+// file expands to exhaust disk space. Set to 2 GiB.
+const maxDecompressedSize int64 = 2 << 30
+
 // UnpackArchive decompresses the tar.gz archive into the unpacked directory.
+// Extraction is capped at maxDecompressedSize total bytes to prevent
+// gzip/tar bomb attacks.
 func UnpackArchive(paths Paths) error {
 	f, err := os.Open(paths.Archive)
 	if err != nil {
@@ -96,6 +103,7 @@ func UnpackArchive(paths Paths) error {
 	}
 
 	tr := tar.NewReader(gz)
+	var totalWritten int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -126,11 +134,16 @@ func UnpackArchive(paths Paths) error {
 			if err != nil {
 				return fmt.Errorf("create %s: %w", target, err)
 			}
-			if _, err := io.Copy(out, tr); err != nil {
-				out.Close()
-				return fmt.Errorf("write %s: %w", target, err)
-			}
+			remaining := maxDecompressedSize - totalWritten
+			n, copyErr := io.Copy(out, io.LimitReader(tr, remaining+1))
 			out.Close()
+			totalWritten += n
+			if copyErr != nil {
+				return fmt.Errorf("write %s: %w", target, copyErr)
+			}
+			if totalWritten > maxDecompressedSize {
+				return fmt.Errorf("decompressed content exceeds %d byte limit", maxDecompressedSize)
+			}
 		case tar.TypeSymlink, tar.TypeLink:
 			return fmt.Errorf("tar contains unsupported link entry: %s", hdr.Name)
 		}

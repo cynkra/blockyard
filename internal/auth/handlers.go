@@ -53,7 +53,9 @@ func secureFlag(cfg *config.Config) string {
 // randomHex generates a cryptographically random hex string of n bytes.
 func randomHex(n int) string {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand.Read failed: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -196,7 +198,9 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 		// 4. Extract sub, email, and name from ID token claims.
 		var subClaim string
 		if raw, ok := allClaims["sub"]; ok {
-			_ = json.Unmarshal(raw, &subClaim)
+			if err := json.Unmarshal(raw, &subClaim); err != nil {
+				slog.Warn("failed to unmarshal sub claim", "error", err)
+			}
 		}
 		if subClaim == "" {
 			slog.Error("ID token missing sub claim")
@@ -206,12 +210,16 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 
 		var emailClaim string
 		if raw, ok := allClaims["email"]; ok {
-			_ = json.Unmarshal(raw, &emailClaim)
+			if err := json.Unmarshal(raw, &emailClaim); err != nil {
+				slog.Warn("failed to unmarshal email claim", "error", err)
+			}
 		}
 
 		var nameClaim string
 		if raw, ok := allClaims["name"]; ok {
-			_ = json.Unmarshal(raw, &nameClaim)
+			if err := json.Unmarshal(raw, &nameClaim); err != nil {
+				slog.Warn("failed to unmarshal name claim", "error", err)
+			}
 		}
 
 		// 5. Upsert user in database.

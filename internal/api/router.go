@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,12 +16,43 @@ import (
 	"github.com/cynkra/blockyard/internal/ui"
 )
 
-// securityHeaders is a middleware that sets common security response headers.
-func securityHeaders(next http.Handler) http.Handler {
+// maxJSONBodySize limits the request body for JSON API endpoints to 1 MiB.
+// Bundle uploads have their own limit via http.MaxBytesReader.
+const maxJSONBodySize = 1 << 20
+
+// limitBody is a middleware that caps request body size to prevent
+// memory exhaustion from oversized JSON payloads.
+func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodySize)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeaders is a middleware that sets common security response headers.
+// CSP is intentionally not set here because proxied Shiny apps serve
+// inline scripts/styles that a strict policy would break. API-only CSP
+// is applied separately via apiCSP.
+func securityHeaders(externalURL string) func(http.Handler) http.Handler {
+	isHTTPS := strings.HasPrefix(externalURL, "https://")
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			if isHTTPS || r.Header.Get("X-Forwarded-Proto") == "https" {
+				w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// apiCSP sets a strict Content-Security-Policy for JSON API endpoints
+// where no HTML rendering occurs.
+func apiCSP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -28,8 +60,8 @@ func securityHeaders(next http.Handler) http.Handler {
 func NewRouter(srv *server.Server) http.Handler {
 	r := chi.NewRouter()
 
-	// Global security headers.
-	r.Use(securityHeaders)
+	// Global security headers (HSTS when HTTPS).
+	r.Use(securityHeaders(srv.Config.Server.ExternalURL))
 
 	// OpenTelemetry tracing middleware (only when configured).
 	if srv.Config.Telemetry != nil && srv.Config.Telemetry.OTLPEndpoint != "" {
@@ -70,6 +102,8 @@ func NewRouter(srv *server.Server) http.Handler {
 	// Credential exchange — moderate rate limit.
 	r.Group(func(r chi.Router) {
 		r.Use(httprate.LimitByIP(20, time.Minute))
+		r.Use(limitBody)
+		r.Use(apiCSP)
 		r.Post("/api/v1/credentials/vault", ExchangeVaultCredential(srv))
 	})
 
@@ -84,6 +118,8 @@ func NewRouter(srv *server.Server) http.Handler {
 	// User-facing API with dual auth (session cookie or bearer token).
 	r.Route("/api/v1/users/me", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(20, time.Minute))
+		r.Use(limitBody)
+		r.Use(apiCSP)
 		r.Use(UserAuth(srv))
 		r.Post("/credentials/{service}", EnrollCredential(srv))
 		r.Post("/tokens", CreateToken(srv))
@@ -95,7 +131,16 @@ func NewRouter(srv *server.Server) http.Handler {
 	// Authenticated API — general rate limit.
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(120, time.Minute))
+		r.Use(apiCSP)
 		r.Use(APIAuth(srv))
+
+		// Bundle upload has its own body size limit (MaxBundleSize),
+		// so it is registered before the limitBody middleware below.
+		r.Post("/apps/{id}/bundles", UploadBundle(srv))
+
+		// All other API routes get a 1 MiB body size limit.
+		r.Group(func(r chi.Router) {
+			r.Use(limitBody)
 
 		r.Post("/apps", CreateApp(srv))
 		r.Get("/apps", ListApps(srv))
@@ -103,7 +148,6 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Patch("/apps/{id}", UpdateApp(srv))
 		r.Delete("/apps/{id}", DeleteApp(srv))
 
-		r.Post("/apps/{id}/bundles", UploadBundle(srv))
 		r.Get("/apps/{id}/bundles", ListBundles(srv))
 
 		r.Post("/apps/{id}/start", StartApp(srv))
@@ -134,6 +178,8 @@ func NewRouter(srv *server.Server) http.Handler {
 
 		// Content discovery
 		r.Get("/catalog", CatalogHandler(srv))
+
+		}) // end limitBody group
 	})
 
 	return r

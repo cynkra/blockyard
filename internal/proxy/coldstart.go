@@ -163,27 +163,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		"dev.blockyard/role":      "worker",
 	}
 
-	var extraEnv map[string]string
-	if srv.Config.Openbao != nil {
-		apiURL := srv.Config.Server.ExternalURL
-		if apiURL == "" {
-			// Dev mode fallback: containers can reach the host via
-			// host.docker.internal on Docker Desktop, or the bind address.
-			apiURL = "http://host.docker.internal" + srv.Config.Server.Bind
-		}
-		extraEnv = map[string]string{
-			"VAULT_ADDR":        srv.Config.Openbao.Address,
-			"BLOCKYARD_API_URL": apiURL,
-		}
-		if len(srv.Config.Openbao.Services) > 0 {
-			svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
-			for _, svc := range srv.Config.Openbao.Services {
-				svcMap[svc.ID] = svc.Path
-			}
-			svcJSON, _ := json.Marshal(svcMap)
-			extraEnv["BLOCKYARD_VAULT_SERVICES"] = string(svcJSON)
-		}
-	}
+	extraEnv := WorkerEnv(srv)
 
 	spec := backend.WorkerSpec{
 		AppID:       app.ID,
@@ -255,6 +235,34 @@ func pollHealthy(ctx context.Context, srv *server.Server, workerID string) error
 		}
 		interval = min(interval*2, maxInterval)
 	}
+}
+
+// WorkerEnv builds the environment variable map for worker containers.
+// Includes Vault/OpenBao integration vars when configured. Shared by
+// the proxy cold-start path and the explicit StartApp API handler.
+func WorkerEnv(srv *server.Server) map[string]string {
+	if srv.Config.Openbao == nil {
+		return nil
+	}
+	apiURL := srv.Config.Server.ExternalURL
+	if apiURL == "" {
+		// Dev mode fallback: containers can reach the host via
+		// host.docker.internal on Docker Desktop, or the bind address.
+		apiURL = "http://host.docker.internal" + srv.Config.Server.Bind
+	}
+	env := map[string]string{
+		"VAULT_ADDR":        srv.Config.Openbao.Address,
+		"BLOCKYARD_API_URL": apiURL,
+	}
+	if len(srv.Config.Openbao.Services) > 0 {
+		svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
+		for _, svc := range srv.Config.Openbao.Services {
+			svcMap[svc.ID] = svc.Path
+		}
+		svcJSON, _ := json.Marshal(svcMap)
+		env["BLOCKYARD_VAULT_SERVICES"] = string(svcJSON)
+	}
+	return env
 }
 
 func ptrOr[T any](p *T, fallback T) T {

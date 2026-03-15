@@ -801,8 +801,8 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 	// Search filter
 	if params.Search != "" {
 		conditions = append(conditions,
-			"(apps.name LIKE ? OR apps.title LIKE ? OR apps.description LIKE ?)")
-		like := "%" + params.Search + "%"
+			"(apps.name LIKE ? ESCAPE '\\' OR apps.title LIKE ? ESCAPE '\\' OR apps.description LIKE ? ESCAPE '\\')")
+		like := "%" + escapeLike(params.Search) + "%"
 		args = append(args, like, like, like)
 	}
 
@@ -836,6 +836,13 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 	}
 
 	return apps, total, nil
+}
+
+// escapeLike escapes SQL LIKE metacharacters (%, _, \) in user input
+// so they are matched literally when used with ESCAPE '\'.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // --- Personal Access Tokens ---

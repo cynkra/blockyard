@@ -20,6 +20,7 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
+	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/telemetry"
@@ -465,6 +466,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			MemoryLimit: stringOrEmpty(app.MemoryLimit),
 			CPULimit:    floatOrZero(app.CPULimit),
 			Labels:      labels,
+			Env:         proxy.WorkerEnv(srv),
 		}
 
 		if err := srv.Backend.Spawn(r.Context(), spec); err != nil {
@@ -481,7 +483,18 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			srv.Registry.Set(workerID, addr)
 		}
 
+		// Start log capture before health polling so startup output is visible.
 		ops.SpawnLogCapture(context.Background(), srv, workerID, app.ID)
+
+		// Wait for the worker to become healthy before reporting success.
+		if err := pollWorkerHealthy(r.Context(), srv, workerID); err != nil {
+			srv.Workers.Delete(workerID)
+			srv.Registry.Delete(workerID)
+			srv.Backend.Stop(context.Background(), workerID)
+			serviceUnavailable(w, "worker failed to start: "+err.Error())
+			return
+		}
+
 		telemetry.WorkersSpawned.Inc()
 		telemetry.WorkersActive.Inc()
 
@@ -676,4 +689,28 @@ func floatOrZero(f *float64) float64 {
 		return 0
 	}
 	return *f
+}
+
+// pollWorkerHealthy polls the backend health check with exponential backoff
+// until the worker is healthy or worker_start_timeout expires.
+func pollWorkerHealthy(ctx context.Context, srv *server.Server, workerID string) error {
+	timeout := srv.Config.Proxy.WorkerStartTimeout.Duration
+	deadline := time.Now().Add(timeout)
+	interval := 100 * time.Millisecond
+	maxInterval := 2 * time.Second
+
+	for {
+		if srv.Backend.HealthCheck(ctx, workerID) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("worker did not become healthy within %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+		interval = min(interval*2, maxInterval)
+	}
 }

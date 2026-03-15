@@ -28,6 +28,7 @@ func forwardClientHeaders(r *http.Request) http.Header {
 		"Sec-WebSocket-Extensions",
 		"User-Agent",
 		"X-Shiny-User",
+		"X-Shiny-Access",
 		"X-Shiny-Groups",
 		"X-Blockyard-Vault-Token",
 		"X-Blockyard-Session-Token",
