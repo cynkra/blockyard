@@ -110,6 +110,34 @@ profile.
 the server, restricting egress to internet-only. Requires a CNI plugin that
 enforces NetworkPolicy (Calico or Cilium).
 
+## HTTP Hardening
+
+The HTTP stack applies several defense-in-depth measures:
+
+**Security headers** (all responses):
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `Strict-Transport-Security: max-age=63072000; includeSubDomains` (HTTPS only)
+
+**Content-Security-Policy** (API responses only):
+`default-src 'none'; frame-ancestors 'none'`. Intentionally not applied to
+proxied Shiny apps, which require inline scripts and styles.
+
+**Rate limiting** (per-IP, via `go-chi/httprate`):
+| Endpoint group | Limit |
+|---|---|
+| Auth (`/login`, `/callback`, `/logout`) | 10 req/min |
+| Credential exchange | 20 req/min |
+| User token management | 20 req/min |
+| General API (`/api/v1/*`) | 120 req/min |
+| App proxy (`/app/{name}/*`) | 200 req/min |
+
+Health probes (`/healthz`, `/readyz`) are not rate-limited.
+
+**Request body limits**: 1 MiB default; bundle upload endpoint uses
+`max_bundle_size` from config (default 100 MiB).
+
 ## Credential Trust Model
 
 Shiny apps execute arbitrary R code. Users enroll credentials for external
@@ -259,12 +287,15 @@ On SIGTERM the server shuts down cleanly in this order:
 2. **Drain in-flight requests** — wait up to `shutdown_timeout` (default `30s`)
    for in-flight HTTP and WebSocket requests to finish; remaining connections
    are dropped
-3. **Stop all managed containers and networks** — stop and remove every
-   container and bridge network carrying `dev.blockyard/managed=true`;
-   steps 3 and 4 run in parallel
-4. **Stop in-progress build containers** — stop any running dependency restore
-   containers and mark their bundles as `failed` in the DB
-5. **Flush and close** — flush structured logs and audit log, close the DB
+3. **Cancel background goroutines** — stop health poller, autoscaler, log
+   retention cleaner, and audit writer
+4. **Drain sessions and stop workers** — mark all apps as draining (no new
+   sessions routed), wait up to half of `shutdown_timeout` for active sessions
+   to end naturally, then force-evict remaining workers in parallel (15 s
+   timeout per worker)
+5. **Remove remaining resources** — clean up any leftover containers and
+   networks (build containers, orphans); mark in-progress bundles as `failed`
+6. **Flush and close** — flush structured logs and audit log, close the DB
    connection
 
 All active user sessions are killed on shutdown. This is intentional — a
@@ -288,7 +319,7 @@ In both cases all active user sessions are lost. Simplicity over resilience.
 
 ## Database Schema
 
-Four tables — everything else lives in OpenBao, the IdP, Docker, or in-memory.
+Seven tables — everything else lives in OpenBao, the IdP, Docker, or in-memory.
 
 **Storage backend:** SQLite (`modernc.org/sqlite`, pure Go) for single-host
 Docker deployments — zero operational overhead and sufficient for the write
@@ -301,11 +332,15 @@ arises.
 CREATE TABLE apps (
     id                      TEXT PRIMARY KEY,      -- UUID, system-generated
     name                    TEXT NOT NULL UNIQUE,  -- user-supplied slug
+    owner                   TEXT NOT NULL DEFAULT '',  -- OIDC sub of creator
+    access_type             TEXT NOT NULL DEFAULT 'acl', -- acl | logged_in | public
     active_bundle           TEXT REFERENCES bundles(id),
     max_workers_per_app     INTEGER,                      -- max replicas; NULL = unlimited
-    max_sessions_per_worker INTEGER NOT NULL DEFAULT 1,   -- max sessions per container; v0: always 1
+    max_sessions_per_worker INTEGER NOT NULL DEFAULT 1,   -- max sessions per container
     memory_limit            TEXT,                  -- e.g. "512m"
     cpu_limit               REAL,                  -- fractional vCPUs
+    title                   TEXT,                  -- human-readable title for catalog
+    description             TEXT,                  -- catalog description
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL
 );
@@ -316,11 +351,11 @@ CREATE TABLE bundles (
     id          TEXT PRIMARY KEY,     -- UUID
     app_id      TEXT NOT NULL REFERENCES apps(id),
     status      TEXT NOT NULL,        -- pending | building | ready | failed
-    path        TEXT NOT NULL,        -- path to tar.gz on disk
     uploaded_at TEXT NOT NULL
 );
+CREATE INDEX idx_bundles_app_id ON bundles(app_id);
 
--- v1 additions: user management and personal access tokens
+-- v1 additions: user management, personal access tokens, ACL, tags
 
 CREATE TABLE users (
     sub          TEXT PRIMARY KEY,
@@ -341,11 +376,37 @@ CREATE TABLE personal_access_tokens (
     last_used_at TEXT,
     revoked      INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX idx_pat_token_hash ON personal_access_tokens(token_hash);
+CREATE INDEX idx_pat_user_sub ON personal_access_tokens(user_sub);
+
+CREATE TABLE app_access (
+    app_id     TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    principal  TEXT NOT NULL,        -- user sub
+    kind       TEXT NOT NULL DEFAULT 'user',
+    role       TEXT NOT NULL,        -- viewer | collaborator
+    granted_by TEXT NOT NULL DEFAULT '',
+    granted_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (app_id, principal, kind)
+);
+
+CREATE TABLE tags (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE app_tags (
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (app_id, tag_id)
+);
 ```
 
 `users` tracks every OIDC-authenticated user. Roles are managed directly by
 blockyard admins — not derived from IdP groups. `personal_access_tokens`
 provides identity-aware API access, replacing the v0 static bearer token.
+`app_access` stores per-content ACL grants (viewer or collaborator). `tags`
+and `app_tags` support content discovery and catalog filtering.
 
 `active_bundle` only ever references a `ready` bundle; enforced in application
 logic. `max_workers_per_app` defaults to NULL (unlimited, capped by the global

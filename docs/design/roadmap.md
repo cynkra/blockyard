@@ -63,6 +63,7 @@ require a restart; there is no hot reload.
 bind             = "0.0.0.0:8080"
 # token field removed — superseded by Personal Access Tokens (v1 wrap-up §2)
 shutdown_timeout = "30s"   # drain window on SIGTERM
+log_level        = "info"  # trace, debug, info, warn, error
 
 [docker]
 socket     = "/var/run/docker.sock"  # or Podman socket path
@@ -85,6 +86,8 @@ health_interval         = "15s"   # how often to poll worker health
 worker_start_timeout    = "60s"   # how long to hold a request while a worker starts
 max_workers             = 100     # hard ceiling on total running workers across all apps
 log_retention           = "1h"    # how long to keep logs after a worker exits
+session_idle_ttl        = "1h"    # sweep sessions idle longer than this
+idle_worker_timeout     = "5m"    # evict workers idle (zero sessions) longer than this
 ```
 
 **v1 additions** (OIDC + OpenBao arrive together — neither is meaningful
@@ -291,9 +294,13 @@ plane protected by a single static bearer token in config.
   dependencies from `rv.lock` using [`rv`](https://github.com/A2-ai/rv).
   `rv` is a hard runtime requirement. Restore runs via the backend's build
   method — how the build step executes is backend-specific: a run-to-completion
-  container on Docker/Podman, an init container or Job on Kubernetes. Each
-  backend is responsible for ensuring `rv` is available in its build
-  environment. A shared cache avoids re-downloading packages on every deploy.
+  container on Docker/Podman, an init container or Job on Kubernetes. The `rv`
+  binary is downloaded from GitHub releases and cached locally in
+  `{bundle_server_path}/.rv-cache/` (`internal/rvcache`). Pinned versions are
+  cached indefinitely; `latest` is re-fetched when the cache is older than one
+  hour. Downloads are serialized via a global mutex and written atomically to
+  prevent partial-file corruption.
+  A shared cache avoids re-downloading packages on every deploy.
   The restored library is written to `{bundle-id}_lib/` alongside the unpacked
   bundle and mounted read-only into app workers at `/blockyard-lib`.
   The R version is configured server-wide — no per-deployment version selection
@@ -302,15 +309,23 @@ plane protected by a single static bearer token in config.
   Restore output (stdout/stderr from `rv`) is streamed to the caller via the
   task log endpoint. The task lifecycle is managed by an in-memory task store.
 
-- **Content registry.** A SQLite database with two tables:
+- **Content registry.** A SQLite database. Core v0 tables:
 
-  - `apps` — name, UUID, resource limits (`max_workers_per_app`,
-    `max_sessions_per_worker`, `memory_limit`, `cpu_limit`), and active
-    bundle ID. No persisted status column — app status (running/stopped) is
-    inferred at runtime from whether any workers exist for the app.
-  - `bundles` — per-app bundle history: tar.gz path, upload timestamp, bundle
-    status (`pending | building | ready | failed`)
+  - `apps` — name, UUID, owner, access type, resource limits
+    (`max_workers_per_app`, `max_sessions_per_worker`, `memory_limit`,
+    `cpu_limit`), catalog fields (`title`, `description`), and active bundle
+    ID. No persisted status column — app status (running/stopped) is inferred
+    at runtime from whether any workers exist for the app.
+  - `bundles` — per-app bundle history: upload timestamp, bundle status
+    (`pending | building | ready | failed`)
 
+  v1 additions:
+  - `users` — OIDC-authenticated users: sub, email, name, role, active status
+  - `personal_access_tokens` — identity-aware API tokens (SHA-256 hash stored)
+  - `app_access` — per-content ACL grants (viewer/collaborator per user)
+  - `tags` / `app_tags` — admin-managed tags for content discovery
+
+  See [Database Schema](architecture.md#database-schema) for the full DDL.
   Runtime worker state (container ID → session mapping) is in-memory. SQLite
   stores only what must survive a server restart.
 
@@ -633,9 +648,13 @@ infrastructure.
   runtime-agnostic, so adding a new language means adding a new deployment
   pipeline, not rearchitecting the core.
 
-- **Rate limiting.** No rate limiting is built in. When `max_workers` is
-  reached the server returns 503 immediately. Operators rate-limit at the
-  network edge.
+- **Rate limiting.** Per-IP rate limiting is applied at the router level
+  using `go-chi/httprate`. Limits are grouped by endpoint sensitivity:
+  auth endpoints (10 req/min), credential exchange (20 req/min), user
+  token management (20 req/min), general API (120 req/min), and app
+  proxy (200 req/min). Health probes (`/healthz`, `/readyz`) are
+  unprotected. Operators may still apply additional limits at the network
+  edge.
 
 For architecture, deployment, database schema, and shutdown behavior, see
 [architecture.md](architecture.md).
