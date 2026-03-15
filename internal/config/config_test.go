@@ -504,6 +504,39 @@ path = %q
 	}
 }
 
+func TestEnvVarOverrideManagementBind(t *testing.T) {
+	t.Setenv("BLOCKYARD_SERVER_MANAGEMENT_BIND", "127.0.0.1:9100")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Server.ManagementBind != "127.0.0.1:9100" {
+		t.Errorf("management_bind = %q, want 127.0.0.1:9100", cfg.Server.ManagementBind)
+	}
+}
+
+func TestManagementBindFromTOML(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	toml := fmt.Sprintf(`
+[server]
+management_bind = "127.0.0.1:9100"
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[proxy]
+`, bundlePath, dbPath)
+	cfg := loadFromString(t, toml)
+	if cfg.Server.ManagementBind != "127.0.0.1:9100" {
+		t.Errorf("management_bind = %q, want 127.0.0.1:9100", cfg.Server.ManagementBind)
+	}
+}
+
 func TestEnvVarOverrideSessionSecret(t *testing.T) {
 	t.Setenv("BLOCKYARD_SERVER_SESSION_SECRET", "env-session-secret")
 	cfg := loadFromString(t, oidcTOML(t))

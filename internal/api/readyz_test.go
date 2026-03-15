@@ -502,6 +502,7 @@ func TestManagementRouterMetricsDisabled(t *testing.T) {
 func TestMainRouterOmitsOpsWhenManagementBind(t *testing.T) {
 	srv := testServerForReadyz(t)
 	srv.Config.Server.ManagementBind = "127.0.0.1:9100"
+	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: true}
 
 	router := NewRouter(srv)
 
@@ -519,5 +520,226 @@ func TestMainRouterOmitsOpsWhenManagementBind(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("/readyz: expected 404 on main router, got %d", rec.Code)
+	}
+
+	// /metrics should 404 on the main router (moved to management listener)
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("/metrics: expected 404 on main router, got %d", rec.Code)
+	}
+}
+
+func TestMainRouterServesHealthzWithoutManagementBind(t *testing.T) {
+	srv := testServerForReadyz(t)
+	// ManagementBind is empty — ops endpoints should be on the main router.
+
+	router := NewRouter(srv)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("/healthz: expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Errorf("/healthz: expected 'ok', got %q", rec.Body.String())
+	}
+}
+
+func TestReadyzResponseContentType(t *testing.T) {
+	srv := testServerForReadyz(t)
+	handler := readyzHandler(srv, true)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	handler.ServeHTTP(rec, req)
+
+	ct := rec.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+func TestReadyzMultipleFailures(t *testing.T) {
+	// Both database and docker fail simultaneously.
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestAdmin(t, database)
+
+	cfg := &config.Config{}
+	be := &failingBackend{MockBackend: mock.New()}
+	srv := server.NewServer(cfg, be, database)
+
+	// Close DB to make database check fail too.
+	database.Close()
+
+	handler := readyzHandler(srv, true)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "not_ready" {
+		t.Errorf("expected not_ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map")
+	}
+	if checks["database"] != "fail" {
+		t.Errorf("database = %v, want fail", checks["database"])
+	}
+	if checks["docker"] != "fail" {
+		t.Errorf("docker = %v, want fail", checks["docker"])
+	}
+}
+
+func TestReadyzRevokedPATHidesChecks(t *testing.T) {
+	srv := testServerForReadyz(t)
+
+	// Create a second PAT and revoke it.
+	revokedToken := "by_revokedtoken0000000000000000000000000000"
+	hash := auth.HashPAT(revokedToken)
+	_, err := srv.DB.CreatePAT("revoked-pat", hash, "admin", "revoked", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.DB.RevokePAT("revoked-pat", "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := readyzHandler(srv, false)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("Authorization", "Bearer "+revokedToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if _, exists := body["checks"]; exists {
+		t.Error("revoked PAT should not expose checks")
+	}
+}
+
+func TestReadyzInactiveUserPATHidesChecks(t *testing.T) {
+	srv := testServerForReadyz(t)
+
+	// Create a second user and deactivate them.
+	_, err := srv.DB.UpsertUserWithRole("inactive-user", "inactive@test", "Inactive", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeVal := false
+	srv.DB.UpdateUser("inactive-user", db.UserUpdate{Active: &activeVal})
+
+	inactiveToken := "by_inactivetoken000000000000000000000000000"
+	hash := auth.HashPAT(inactiveToken)
+	if _, err := srv.DB.CreatePAT("inactive-pat", hash, "inactive-user", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := readyzHandler(srv, false)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("Authorization", "Bearer "+inactiveToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if _, exists := body["checks"]; exists {
+		t.Error("inactive user PAT should not expose checks")
+	}
+}
+
+func TestReadyzNonPATBearerTokenHidesChecks(t *testing.T) {
+	srv := testServerForReadyz(t)
+	handler := readyzHandler(srv, false)
+
+	// Bearer token without "by_" prefix should not authenticate.
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("Authorization", "Bearer some-random-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if _, exists := body["checks"]; exists {
+		t.Error("non-PAT bearer token should not expose checks")
+	}
+}
+
+func TestReadyzDeactivatedUserCookieHidesChecks(t *testing.T) {
+	srv := testServerForReadyz(t)
+
+	// Create a user and deactivate them.
+	_, err := srv.DB.UpsertUserWithRole("deactivated", "deactivated@test", "Gone", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeVal := false
+	srv.DB.UpdateUser("deactivated", db.UserUpdate{Active: &activeVal})
+
+	// Set up signing key and session store.
+	srv.SigningKey = auth.DeriveSigningKey("test-session-secret")
+	srv.UserSessions = auth.NewUserSessionStore()
+	srv.UserSessions.Set("deactivated", &auth.UserSession{
+		AccessToken: "access-token",
+		ExpiresAt:   time.Now().Unix() + 3600,
+	})
+
+	cookie := &auth.CookiePayload{
+		Sub:      "deactivated",
+		IssuedAt: time.Now().Unix(),
+	}
+	cookieValue, err := cookie.Encode(srv.SigningKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := readyzHandler(srv, false)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if _, exists := body["checks"]; exists {
+		t.Error("deactivated user cookie should not expose checks")
+	}
+}
+
+func TestManagementRouterMetricsExplicitlyDisabled(t *testing.T) {
+	srv := testServerForReadyz(t)
+	// Telemetry is set but metrics explicitly disabled.
+	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: false}
+
+	router := NewManagementRouter(srv)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
 	}
 }
