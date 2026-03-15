@@ -1,12 +1,9 @@
 # v1 Wrap-Up
 
-Two items remain before v1 can ship: the role mapping system should be
-replaced with direct role management in blockyard, and the API needs
-Personal Access Tokens to replace the static bearer token. Section 2
-depends on Section 1 — the `users` table and role model introduced in
-Section 1 are the foundation for PAT ownership and validation.
+Sections 1–3 are implemented. Section 4 (secret lifecycle) is the
+remaining work before v1 can ship.
 
-The design principle behind both changes: the **IdP handles
+The design principle behind Sections 1 and 2: the **IdP handles
 authentication** (proving who you are via OIDC), and **blockyard handles
 authorization** (deciding what you can do). This is a common pattern —
 most applications manage their own roles rather than syncing them from
@@ -590,3 +587,249 @@ balancers to stop sending traffic), then the main listener is drained.
 
 7. **Docs** — Update config reference, observability guide, and
    example TOML files.
+
+---
+
+## 4. Secret Lifecycle
+
+### Problem
+
+Blockyard requires two categories of secrets at runtime:
+
+**A. The vault credential.** The server authenticates to OpenBao with a
+static `admin_token` — a long-lived privileged token stored in the
+config file. There is no renewal: if the token has a TTL and expires,
+all vault operations fail silently. The token also has no scoping — it
+is typically a root or highly-privileged token, and if the config file
+leaks, the blast radius is the entire vault.
+
+**B. Server-owned secrets** that blockyard generates and consumes
+itself. `session_secret` is the primary example — it's the HMAC seed
+for session cookies and worker session tokens. Today it must be
+manually configured, and if omitted the server refuses to start. This
+is operationally annoying for a value the operator has no reason to
+choose themselves.
+
+Both problems stem from the same gap: blockyard has no secret lifecycle
+management for its own credentials.
+
+### Design
+
+#### 4A. AppRole auth for the server's vault connection
+
+Replace the static `admin_token` with AppRole authentication. AppRole
+is Vault/OpenBao's machine-oriented auth method — designed exactly for
+this use case.
+
+The key principle: **persist the vault token, not the login
+credential.** The `secret_id` is a one-time bootstrap input, not a
+permanent config value. Once authenticated, the server sustains its
+own vault access indefinitely through token renewal.
+
+**Startup flow:**
+
+1. Check for a persisted vault token at
+   `{data_dir}/.vault-token`. If found, try
+   `POST /v1/auth/token/renew-self`. If renewal succeeds, use this
+   token — no AppRole login needed, no `secret_id` needed.
+2. If no persisted token or renewal fails: read `role_id` from config
+   and `secret_id` from the `BLOCKYARD_OPENBAO_SECRET_ID` env var.
+   Call `POST /v1/auth/approle/login`. Persist the returned token.
+3. If neither path succeeds (no persisted token, no env var), exit
+   with: `"vault bootstrap required: set BLOCKYARD_OPENBAO_SECRET_ID"`.
+
+After authentication, a background goroutine renews the token at
+`ttl / 2` intervals and re-persists it after each renewal. The
+`Client` struct's `adminTokenFunc` callback returns the current token,
+so renewal is transparent to all callers.
+
+**Steady state:** the server renews its own token indefinitely. The
+AppRole's `token_max_ttl` should be `0` (unlimited renewals) — this
+is the correct configuration for a long-lived server role.
+
+**Extended downtime:** if the server is down long enough for the
+persisted token to expire beyond renewal, the operator re-delivers a
+`secret_id` via env var. This is an explicit operational event (redeploy
+or restart with the env var set), not routine maintenance.
+
+**Config:**
+
+```toml
+[openbao]
+address = "http://openbao:8200"
+role_id = "blockyard-server"     # not secret — identifies the role
+# secret_id is NEVER in config — delivered once via env var at bootstrap
+# admin_token: deprecated, still accepted for migration
+```
+
+`role_id` is safe in config — it's a role identifier, like a username.
+`admin_token` remains accepted but is deprecated. If both `admin_token`
+and `role_id` are set, the server rejects the config.
+
+**Token persistence:** the vault token is written to
+`{data_dir}/.vault-token` (mode `0600`, atomic write via temp +
+rename). This file contains a scoped, time-limited, renewable token —
+not a root credential. If it leaks, the blast radius is limited to
+blockyard's KV namespace and the token can be revoked in vault.
+
+**Policy scoping:** the AppRole role gets a policy granting exactly
+what blockyard needs — no more:
+
+```hcl
+# Read/write user secrets under the blockyard namespace
+path "secret/data/blockyard/*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
+path "secret/metadata/blockyard/*" {
+  capabilities = ["read", "list"]
+}
+
+# Bootstrap checks
+path "sys/auth" {
+  capabilities = ["read"]
+}
+path "sys/mounts" {
+  capabilities = ["read"]
+}
+path "sys/policies/acl/*" {
+  capabilities = ["read"]
+}
+
+# JWT auth role management (for bootstrap verification)
+path "auth/{{jwt_auth_path}}/role/blockyard-user" {
+  capabilities = ["read"]
+}
+
+# Token self-renewal
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}
+```
+
+**Failure modes and observability:**
+
+- Renewal failure: retries with exponential backoff (1s → 2s → 4s →
+  ... → 60s cap). Logs at `warn` on each failure. If the token
+  becomes unrenewable (max TTL exceeded or revoked), logs at `error`
+  and vault-dependent operations start failing. The server continues
+  running — non-vault features (app proxy, API) are unaffected.
+- The `/readyz` health check reports vault token status. A stale
+  token degrades readiness, signaling the operator to re-bootstrap.
+
+#### 4B. Vault references and auto-generated secrets
+
+Two changes to how blockyard handles secrets in config:
+
+1. Any `Secret` config field can reference a vault path instead of
+   holding a literal value.
+2. `session_secret` can be omitted entirely — blockyard auto-generates
+   and persists it.
+
+##### Vault references
+
+Any `Secret` field in the config accepts a `vault:` prefix that tells
+blockyard to read the value from OpenBao at startup:
+
+```toml
+[oidc]
+client_secret = "vault:secret/data/blockyard/oidc#client_secret"
+```
+
+Format: `vault:{kv_path}#{key}` — the KV v2 data path and the JSON
+key within it. At startup, blockyard resolves all `vault:` references
+before the rest of init runs. If a reference can't be resolved (vault
+unreachable, path missing, key missing), the server exits with a clear
+error naming the field and path.
+
+This keeps secrets out of config files entirely. The operator writes
+them to vault once (via CLI or UI), and the config points to where
+they live. The config is self-documenting — you see exactly where each
+secret comes from.
+
+Resolution happens in `Secret.Resolve(vaultClient)`. A `Secret` value
+that does not start with `vault:` is treated as a literal, unchanged
+from current behavior. `Secret.Expose()` returns an error if called on
+an unresolved vault reference — this prevents accidentally using the
+raw `vault:...` string as a secret value if resolution is skipped or
+reordered.
+
+##### Auto-generated `session_secret`
+
+`session_secret` is special: blockyard owns this value and the
+operator has no reason to choose it. If omitted from config, blockyard
+auto-generates a 32-byte random value and persists it for reuse:
+
+- **With OpenBao:** read from `secret/data/blockyard/server-secrets`.
+  If the key is missing, generate, write, and proceed.
+- **Without OpenBao:** `session_secret` must be set explicitly via
+  config or env var. Missing it is a startup error.
+- **Explicit config/env var:** always wins — no vault lookup.
+
+**Validation change:** `session_secret` is no longer required in config
+when `[oidc]` is set and OpenBao is configured. The startup sequence
+resolves it before OIDC initialization. Without OpenBao, the existing
+validation ("session_secret required") remains.
+
+**Logging:** when a secret is auto-generated, log at `info` level.
+Never log the value.
+
+### Implementation Plan
+
+1. **Config changes** — Add `RoleID` field to `OpenbaoConfig`.
+   `SecretID` is not a config field — it is read from
+   `BLOCKYARD_OPENBAO_SECRET_ID` env var at startup only. Validation:
+   reject if both `admin_token` and `role_id` are set. Deprecation
+   warning when `admin_token` is used.
+
+2. **Token persistence** — New `internal/integration/tokenfile.go`.
+   Atomic read/write of `{data_dir}/.vault-token` (temp + rename,
+   mode `0600`). The `data_dir` is derived from `database.path`.
+
+3. **AppRole auth with token reuse** — New
+   `internal/integration/approle.go`. Startup flow: try persisted
+   token → try AppRole login with env var `secret_id` → fail with
+   actionable error. `AppRoleLogin(ctx, addr, roleID, secretID)`
+   returns a token and TTL. Update `NewClient` to accept either a
+   static token func or an AppRole config. When AppRole is used,
+   `adminTokenFunc` returns the current renewable token.
+
+4. **Token renewal goroutine** — Background loop in
+   `internal/integration/renew.go`. Renews at `ttl/2`. Re-persists
+   token after each successful renewal. On failure, retries with
+   exponential backoff (1s → 60s cap). On unrenewable token, logs
+   `error` — vault operations degrade but the server stays up. Takes
+   a context for clean shutdown.
+
+5. **Readyz integration** — Report vault token status in `/readyz`.
+   Stale or missing token degrades readiness.
+
+6. **Vault references in `Secret` type** — Add a `Resolve(vaultClient)`
+   method to `Secret`. If the value starts with `vault:`, parse
+   `{kv_path}#{key}`, call `KVRead`, and replace the secret's internal
+   value with the result. New `internal/config/resolve.go` with
+   `ResolveSecrets(cfg *Config, vaultClient *Client)` that walks all
+   `Secret` fields in the config and resolves vault references. Vault
+   client initialization is idempotent — `ResolveSecrets` gets or
+   initializes the client itself, eliminating ordering concerns.
+
+7. **Auto-generated `session_secret`** — After vault references are
+   resolved, if `session_secret` is still empty and vault is
+   configured: read from `secret/data/blockyard/server-secrets`
+   (generate + write if missing). Without vault, `session_secret` must
+   be set explicitly — the existing validation error remains.
+
+8. **Startup sequence update** — `main.go` order becomes: parse config
+   → init vault client (persisted token or AppRole) → start renewal
+   goroutine → resolve vault references → resolve auto-generated
+   secrets → init OIDC → proceed.
+
+9. **Tests** — Token persistence round-trip. AppRole login mock.
+    Persisted token reuse on restart. Renewal behavior and backoff.
+    Config validation for mutual exclusivity. Vault reference
+    resolution (valid path, missing path, missing key, no vault
+    client). Auto-generation with vault backend.
+
+10. **Docs** — Update config reference with `vault:` prefix syntax.
+    Add operator guide: initial bootstrap with `secret_id` env var,
+    re-bootstrap after extended downtime, storing secrets in vault.
+    Migration guide from `admin_token`. Update hello-auth example.
