@@ -1044,3 +1044,135 @@ func TestMiddlewareWithRoleCache(t *testing.T) {
 		t.Errorf("Role = %v, want publisher", captured.Role)
 	}
 }
+
+func TestMiddlewareDeactivatedUserNoCaller(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+
+	// Open an in-memory database and create a deactivated user.
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	deps.DB = database
+
+	_, err = database.UpsertUser("deact-user", "deact@example.com", "Deact User")
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := false
+	_, err = database.UpdateUser("deact-user", db.UserUpdate{Active: &active})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up session.
+	deps.UserSessions.Set("deact-user", &auth.UserSession{
+		AccessToken: "at-deact",
+		ExpiresAt:   nowUnix() + 3600,
+	})
+	cookie := &auth.CookiePayload{Sub: "deact-user", IssuedAt: nowUnix()}
+	cookieValue, _ := cookie.Encode(deps.SigningKey)
+
+	var capturedCaller *auth.CallerIdentity
+	var capturedUser *auth.AuthenticatedUser
+
+	r := chi.NewRouter()
+	r.Route("/app", func(sub chi.Router) {
+		sub.Use(auth.AppAuthMiddleware(deps))
+		sub.Get("/{name}/*", func(w http.ResponseWriter, r *http.Request) {
+			capturedCaller = auth.CallerFromContext(r.Context())
+			capturedUser = auth.UserFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		})
+	})
+
+	req := httptest.NewRequest("GET", "/app/test/page", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if capturedCaller != nil {
+		t.Error("expected no CallerIdentity for deactivated user")
+	}
+	if capturedUser != nil {
+		t.Error("expected no AuthenticatedUser for deactivated user")
+	}
+}
+
+func TestMiddlewareValidUserHasCallerAndUser(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+
+	// Open an in-memory database and create an active user with admin role.
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	deps.DB = database
+
+	_, err = database.UpsertUserWithRole("valid-user", "valid@example.com", "Valid User", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up session.
+	deps.UserSessions.Set("valid-user", &auth.UserSession{
+		AccessToken: "at-valid",
+		ExpiresAt:   nowUnix() + 3600,
+	})
+	cookie := &auth.CookiePayload{Sub: "valid-user", IssuedAt: nowUnix()}
+	cookieValue, _ := cookie.Encode(deps.SigningKey)
+
+	var capturedCaller *auth.CallerIdentity
+	var capturedUser *auth.AuthenticatedUser
+
+	r := chi.NewRouter()
+	r.Route("/app", func(sub chi.Router) {
+		sub.Use(auth.AppAuthMiddleware(deps))
+		sub.Get("/{name}/*", func(w http.ResponseWriter, r *http.Request) {
+			capturedCaller = auth.CallerFromContext(r.Context())
+			capturedUser = auth.UserFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		})
+	})
+
+	req := httptest.NewRequest("GET", "/app/test/page", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if capturedUser == nil {
+		t.Fatal("expected AuthenticatedUser in context")
+	}
+	if capturedUser.Sub != "valid-user" {
+		t.Errorf("User.Sub = %q, want valid-user", capturedUser.Sub)
+	}
+	if capturedUser.AccessToken != "at-valid" {
+		t.Errorf("User.AccessToken = %q, want at-valid", capturedUser.AccessToken)
+	}
+	if capturedCaller == nil {
+		t.Fatal("expected CallerIdentity in context")
+	}
+	if capturedCaller.Sub != "valid-user" {
+		t.Errorf("Caller.Sub = %q, want valid-user", capturedCaller.Sub)
+	}
+	if capturedCaller.Role != auth.RoleAdmin {
+		t.Errorf("Caller.Role = %v, want admin", capturedCaller.Role)
+	}
+	if capturedCaller.Source != auth.AuthSourceSession {
+		t.Errorf("Caller.Source = %v, want AuthSourceSession", capturedCaller.Source)
+	}
+}

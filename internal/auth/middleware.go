@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 )
 
 // AuthenticatedUser represents a validated user identity extracted
@@ -130,13 +129,6 @@ func extractSessionCookie(r *http.Request) string {
 		}
 	}
 	return ""
-}
-
-// redirectToLogin sends a 302 redirect to /login with the current URL
-// as return_url.
-func redirectToLogin(w http.ResponseWriter, r *http.Request) {
-	returnURL := r.URL.RequestURI()
-	http.Redirect(w, r, "/login?return_url="+url.QueryEscape(returnURL), http.StatusFound)
 }
 
 // EnsureFreshToken checks if the user's access token is near expiry

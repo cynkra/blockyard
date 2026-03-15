@@ -91,6 +91,34 @@ func TestBuildConfigurable(t *testing.T) {
 	}
 }
 
+func TestGetWorkerURL(t *testing.T) {
+	b := New()
+	ctx := context.Background()
+
+	// Nonexistent worker returns empty string.
+	if url := b.GetWorkerURL("nonexistent"); url != "" {
+		t.Errorf("expected empty URL for nonexistent worker, got %q", url)
+	}
+
+	// Spawn a worker and verify GetWorkerURL returns a non-empty URL.
+	spec := testWorkerSpec("app-1", "worker-1")
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	url := b.GetWorkerURL("worker-1")
+	if url == "" {
+		t.Error("expected non-empty URL after spawn")
+	}
+
+	// After stopping the worker, GetWorkerURL should return empty again.
+	if err := b.Stop(ctx, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if url := b.GetWorkerURL("worker-1"); url != "" {
+		t.Errorf("expected empty URL after stop, got %q", url)
+	}
+}
+
 func TestStopNonexistent(t *testing.T) {
 	b := New()
 	err := b.Stop(context.Background(), "nonexistent")

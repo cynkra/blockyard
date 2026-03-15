@@ -1008,6 +1008,102 @@ func TestEnrollCredentialInvalidJSON(t *testing.T) {
 	}
 }
 
+func boolPtr(b bool) *bool { return &b }
+
+// --- authenticateFromPAT edge case tests ---
+
+func TestRevokedPATRejected(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	// Revoke the PAT. The ID is plaintext[3:9] per createTestPAT.
+	patID := pat[3:9]
+	srv.DB.RevokePAT(patID, "user-1")
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/apps", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for revoked PAT, got %d", resp.StatusCode)
+	}
+}
+
+func TestExpiredPATRejected(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+
+	// Create a PAT with an expiry in the past.
+	plaintext, hash, err := auth.GeneratePAT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	if _, err := srv.DB.CreatePAT(plaintext[3:9], hash, "user-1", "expired-pat", &expired); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/apps", plaintext, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for expired PAT, got %d", resp.StatusCode)
+	}
+}
+
+func TestInactiveUserPATRejected(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "user-1")
+
+	// Deactivate the user.
+	srv.DB.UpdateUser("user-1", db.UserUpdate{Active: boolPtr(false)})
+
+	resp, err := http.DefaultClient.Do(jwtReq("GET", ts.URL+"/api/v1/apps", pat, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for inactive user PAT, got %d", resp.StatusCode)
+	}
+}
+
+func TestNonByPrefixBearerTokenRejected(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	_, ts := testServerWithOIDC(t, idp)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps", nil)
+	req.Header.Set("Authorization", "Bearer some-random-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for non-by_ bearer token, got %d", resp.StatusCode)
+	}
+}
+
 // TestEnrollCredentialNoVault covers lines 147-150 of users.go:
 // server without vault returns 503 "credential storage not configured".
 func TestEnrollCredentialNoVault(t *testing.T) {

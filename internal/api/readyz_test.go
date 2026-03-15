@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
@@ -327,6 +329,55 @@ func TestReadyzWithVaultFail(t *testing.T) {
 	}
 	if checks["openbao"] != "fail" {
 		t.Errorf("openbao = %v, want fail", checks["openbao"])
+	}
+}
+
+func TestReadyzWithSessionCookieShowsChecks(t *testing.T) {
+	srv := testServerForReadyz(t)
+
+	// Set up signing key and session store for cookie auth.
+	srv.SigningKey = auth.DeriveSigningKey("test-session-secret")
+	srv.UserSessions = auth.NewUserSessionStore()
+	srv.UserSessions.Set("admin", &auth.UserSession{
+		AccessToken: "access-token",
+		ExpiresAt:   time.Now().Unix() + 3600,
+	})
+
+	cookie := &auth.CookiePayload{
+		Sub:      "admin",
+		IssuedAt: time.Now().Unix(),
+	}
+	cookieValue, err := cookie.Encode(srv.SigningKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := readyzHandler(srv)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "ready" {
+		t.Errorf("expected ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map in authenticated response via session cookie")
+	}
+	if checks["database"] != "pass" {
+		t.Errorf("database = %v, want pass", checks["database"])
+	}
+	if checks["docker"] != "pass" {
+		t.Errorf("docker = %v, want pass", checks["docker"])
 	}
 }
 
