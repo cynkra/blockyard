@@ -410,17 +410,20 @@ shared containers).
 ```go
 type OpenbaoConfig struct {
     Address     string        `toml:"address"`       // e.g. https://bao.example.com
-    AdminToken  Secret        `toml:"admin_token"`   // use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
+    RoleID      string        `toml:"role_id"`       // AppRole role ID (preferred)
+    AdminToken  Secret        `toml:"admin_token"`   // deprecated — use RoleID
     TokenTTL    time.Duration `toml:"token_ttl"`     // default: 1h
     JWTAuthPath string        `toml:"jwt_auth_path"` // default: "jwt"
 }
+// (Updated in v1 wrap-up §4A): RoleID + secret_id env var replaces
+// static admin_token. Both cannot be set simultaneously.
 ```
 
 **Credential enrollment API:**
 
 ```
 POST /api/v1/users/me/credentials/{service}
-Authorization: Bearer <jwt>
+Authorization: Bearer <pat-or-session-cookie>
 Content-Type: application/json
 Body: { "api_key": "sk-..." }
 
@@ -428,9 +431,9 @@ Body: { "api_key": "sk-..." }
 ```
 
 Server-side:
-1. Validate user identity from JWT
+1. Validate user identity from session cookie or PAT
 2. Write to OpenBao: `PUT /v1/secret/data/users/{sub}/apikeys/{service}`
-   using the server's admin token
+   using the server's vault token
 3. The user's session-scoped token can then read this secret
 
 **OpenBao bootstrap (server startup):**
@@ -1166,6 +1169,8 @@ bind             = "0.0.0.0:8080"
 shutdown_timeout = "30s"
 session_secret   = "..."               # HMAC key for cookie signing
                                        # use BLOCKYARD_SERVER_SESSION_SECRET env var
+                                       # auto-generated when [openbao] is configured
+management_bind  = "127.0.0.1:9100"   # optional: ops endpoints on separate listener
 external_url     = "https://blockyard.example.com"  # public URL (for redirects, cookie Secure flag)
 
 [docker]
@@ -1192,13 +1197,16 @@ max_workers             = 100
 [oidc]
 issuer_url    = "https://auth.example.com/realms/myrealm"
 client_id     = "blockyard"
-client_secret = "..."                  # use BLOCKYARD_OIDC_CLIENT_SECRET env var
+client_secret = "..."                  # use BLOCKYARD_OIDC_CLIENT_SECRET env var or
+                                       # vault:secret/data/blockyard/oidc#client_secret
 initial_admin = "..."                  # OIDC sub of first admin
 cookie_max_age = "24h"
 
 [openbao]
 address     = "https://bao.example.com"
-admin_token = "..."                    # use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
+role_id     = "blockyard-server"       # AppRole role ID (not secret)
+# secret_id via BLOCKYARD_OPENBAO_SECRET_ID env var at bootstrap only
+# admin_token is deprecated — still accepted for migration
 token_ttl   = "1h"
 
 [[openbao.services]]

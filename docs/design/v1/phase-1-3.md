@@ -5,8 +5,9 @@ fork). Phase 1-1 established user identity and phase 1-2 added
 authorization; this phase uses the authenticated user's IdP access token
 to obtain scoped OpenBao tokens and inject them into proxied requests.
 
-Identity header injection (`X-Shiny-User`, `X-Shiny-Groups`) was
-completed in phase 1-2 and is not repeated here.
+Identity header injection (`X-Shiny-User`, `X-Shiny-Access`) was
+completed in phase 1-2 and is not repeated here. *(Originally
+`X-Shiny-Groups` — replaced by `X-Shiny-Access` in wrap-up §1.)*
 
 This phase depends on phases 1-1 (OIDC sessions, access tokens) and 1-2
 (CallerIdentity, RBAC). OpenBao is an optional dependency — when

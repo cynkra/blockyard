@@ -69,10 +69,12 @@ format, not StatsD, not a push model.
 - **Low overhead:** metrics are updated in-process (atomic counter
   increments, histogram observations). No network I/O on the hot path.
 
-**Trade-off:** the `/metrics` endpoint is unauthenticated (same as
-`/healthz`). Operators restrict access at the network level if needed.
-Adding auth to `/metrics` would complicate Prometheus scraper config
-for minimal security benefit — metrics don't contain sensitive data.
+**(Updated in v1 wrap-up §3):** on the main listener, `/metrics`
+requires `APIAuth` (to prevent untrusted Shiny app containers from
+scraping operational data). When `management_bind` is configured,
+`/metrics` is served without auth on the management listener — which
+is unreachable from container bridge networks. This is the recommended
+production setup.
 
 ## Design decision: OpenTelemetry tracing is opt-in
 
@@ -238,8 +240,9 @@ const (
     ActionCredentialEnroll   Action = "credential.enroll"
     ActionUserLogin          Action = "user.login"
     ActionUserLogout         Action = "user.logout"
-    ActionRoleMappingSet     Action = "role_mapping.set"
-    ActionRoleMappingDelete  Action = "role_mapping.delete"
+    ActionUserUpdate         Action = "user.update"
+    ActionPATCreate          Action = "pat.create"
+    ActionPATRevoke          Action = "pat.revoke"
 )
 
 // Entry is a single audit log record.
@@ -392,8 +395,9 @@ func auditEntry(r *http.Request, action audit.Action, target string, detail map[
 | `enrollCredential` | `credential.enroll` | service name | — |
 | Login callback | `user.login` | — | `{"sub": "..."}` |
 | Logout | `user.logout` | — | `{"sub": "..."}` |
-| `UpsertRoleMapping` | `role_mapping.set` | group name | `{"role": "..."}` |
-| `DeleteRoleMapping` | `role_mapping.delete` | group name | — |
+| `PATCH /users/{sub}` | `user.update` | user sub | `{"role": "...", "active": ...}` |
+| `POST /users/me/tokens` | `pat.create` | token ID | `{"name": "..."}` |
+| `DELETE /users/me/tokens/{id}` | `pat.revoke` | token ID | — |
 
 **Example** (in `CreateApp`):
 
@@ -729,6 +733,16 @@ func readyzHandler(srv *server.Server) http.HandlerFunc {
                     checks["openbao"] = "pass"
                 }
             }()
+        }
+
+        // Vault token (wrap-up §4A): check token renewal status.
+        // A stale or expired token degrades readiness.
+        if srv.VaultTokenStatus != nil {
+            if srv.VaultTokenStatus.IsHealthy() {
+                checks["vault_token"] = "pass"
+            } else {
+                checks["vault_token"] = "fail"
+            }
         }
 
         allOK := true

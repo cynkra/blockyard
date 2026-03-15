@@ -1,28 +1,41 @@
 # Phase 1-2: RBAC + Per-Content ACL + Control-Plane JWT Auth
 
+> **Superseded in part by [v1 wrap-up](wrap-up.md):**
+> - **§1** replaced role mapping (`role_mappings` table, group→role
+>   derivation) with direct role management on a `users` table. Roles
+>   are assigned by blockyard admins, not derived from IdP groups.
+> - **§2** replaced control-plane JWT auth with Personal Access Tokens
+>   (PATs). The `CallerIdentity` struct and RBAC/ACL logic remain; only
+>   the control-plane auth mechanism changed.
+>
+> The remainder of this document (per-content ACL, `EvaluateAccess`,
+> identity injection) is still current.
+
 Add authorization to blockyard. Phase 1-1 established *who the user is*
 (authentication); this phase decides *what they can do* (authorization).
 Three capabilities land together because they're tightly coupled:
 
 1. **Role-based access control (RBAC)** — three system roles (`admin`,
-   `publisher`, `viewer`) mapped from IdP groups via a `role_mappings`
-   table.
+   `publisher`, `viewer`) managed directly by blockyard admins on user
+   records. *(Originally mapped from IdP groups — replaced by wrap-up
+   §1.)*
 2. **Per-content ACL** — fine-grained access grants per app (`viewer`,
-   `collaborator`) for individual users or groups.
-3. **Control-plane JWT auth** — replace the v0 static bearer token with
-   JWT validation against the IdP's JWKS, enabling machine-to-machine
-   auth via the OAuth 2.0 client credentials flow.
+   `collaborator`) for individual users.
+3. **Control-plane auth** — Personal Access Tokens (PATs) for CLI,
+   CI/CD, and script access. *(Originally JWT auth against the IdP's
+   JWKS — replaced by wrap-up §2.)*
 
 This phase depends on phase 1-1 (OIDC sessions, JWKS discovery, signed
-cookies, `AuthenticatedUser` in request context). The static bearer
-token is retained as a fallback when `[oidc]` is not configured (dev mode).
+cookies, `AuthenticatedUser` in request context).
 
 ## Design decision: unified CallerIdentity
 
-Both the app plane (session cookie) and control plane (Bearer JWT) need a
+Both the app plane (session cookie) and control plane (PAT) need a
 common identity type for authorization checks. Phase 1-2 introduces
-`CallerIdentity` — a lightweight struct carrying `Sub`, `Groups`, and
-`Role`. Both auth middlewares produce it; all authorization code consumes it.
+`CallerIdentity` — a lightweight struct carrying `Sub` and `Role`.
+Both auth middlewares produce it; all authorization code consumes it.
+*(Originally also carried `Groups` — removed in wrap-up §1 since
+blockyard's authorization model does not use IdP groups.)*
 
 `CallerIdentity` lives in `internal/auth/identity.go` alongside phase 1-1's
 `AuthenticatedUser`. The two types coexist in app-plane request contexts:
@@ -99,8 +112,9 @@ Apps have an `access_type` column with two values:
 - **`public`** — anyone can access the app via the proxy, including
   unauthenticated users. Public apps appear in the catalog for all callers
   (authenticated or not). Identity headers (`X-Shiny-User`,
-  `X-Shiny-Groups`) are injected when the user happens to be
-  authenticated; absent otherwise.
+  `X-Shiny-Access`) are injected when the user happens to be
+  authenticated; absent otherwise. *(Originally `X-Shiny-Groups` —
+  replaced by `X-Shiny-Access` in wrap-up §1.)*
 
 This matches Posit Connect's four-level access model (Anonymous, Viewer,
 Publisher, Administrator). In Connect, content can be set to "Anyone — no

@@ -127,15 +127,14 @@ type OidcConfig struct {
 	IssuerURL    string        `toml:"issuer_url"`
 	ClientID     string        `toml:"client_id"`
 	ClientSecret Secret        `toml:"client_secret"`
-	GroupsClaim  string        `toml:"groups_claim"`
+	// GroupsClaim removed in wrap-up §1 — IdP groups play no role
+	// in blockyard's authorization model.
+	InitialAdmin string        `toml:"initial_admin"` // added in wrap-up §1
 	CookieMaxAge Duration      `toml:"cookie_max_age"`
 }
 
 // oidcDefaults fills in zero-value fields with sensible defaults.
 func oidcDefaults(c *OidcConfig) {
-	if c.GroupsClaim == "" {
-		c.GroupsClaim = "groups"
-	}
 	if c.CookieMaxAge.Duration == 0 {
 		c.CookieMaxAge.Duration = 24 * time.Hour
 	}
@@ -157,7 +156,7 @@ type Config struct {
 type ServerConfig struct {
 	Bind            string   `toml:"bind"`
 	Token           Secret   `toml:"token"`           // changed from string
-	SessionSecret   *Secret  `toml:"session_secret"`  // new — required when [oidc] is set
+	SessionSecret   *Secret  `toml:"session_secret"`  // new — required when [oidc] is set without [openbao]
 	ExternalURL     string   `toml:"external_url"`    // new
 	ShutdownTimeout Duration `toml:"shutdown_timeout"`
 }
@@ -179,8 +178,10 @@ func validate(cfg *Config) error {
 		if cfg.OIDC.ClientSecret.IsEmpty() {
 			return fmt.Errorf("config: oidc.client_secret must not be empty")
 		}
-		if cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty() {
-			return fmt.Errorf("config: server.session_secret is required when [oidc] is configured")
+		// (Updated in v1 wrap-up §4B): session_secret can be auto-generated
+		// when [openbao] is configured — only required without vault.
+		if cfg.Openbao == nil && (cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty()) {
+			return fmt.Errorf("config: server.session_secret is required when [oidc] is configured without [openbao]")
 		}
 	}
 	return nil

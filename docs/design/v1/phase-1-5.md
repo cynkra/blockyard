@@ -966,13 +966,17 @@ URL to link to.
 
 **DB query for catalog:**
 
-The catalog query must filter by access control. This is the most complex
-query in blockyard. For admins, it returns all apps. For other callers,
-it returns apps where:
+The catalog query must filter by access control. For admins, it returns
+all apps. For other callers, it returns apps where:
 
 - The caller is the owner, OR
-- The caller has an explicit ACL grant (user or group), OR
+- The caller has an explicit per-user ACL grant, OR
+- The app's `access_type` is `'logged_in'` and the caller is
+  authenticated, OR
 - The app's `access_type` is `'public'`
+
+*(Updated in wrap-up §1: group-based grants removed. ACL is
+per-user only.)*
 
 ```go
 func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
@@ -985,28 +989,16 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
     } else if params.CallerSub != "" {
         accessFilter := `(
             apps.owner = ?
-            OR apps.access_type = 'public'
+            OR apps.access_type IN ('public', 'logged_in')
             OR EXISTS (
                 SELECT 1 FROM app_access
                 WHERE app_access.app_id = apps.id
-                AND (
-                    (app_access.kind = 'user' AND app_access.principal = ?)
-                    OR (app_access.kind = 'group' AND app_access.principal IN (%s))
-                )
+                AND app_access.kind = 'user'
+                AND app_access.principal = ?
             )
         )`
-        groupPlaceholders := strings.Repeat("?,", len(params.CallerGroups))
-        groupPlaceholders = strings.TrimSuffix(groupPlaceholders, ",")
-        if groupPlaceholders == "" {
-            groupPlaceholders = "''" // no groups — will never match
-        }
-        accessFilter = fmt.Sprintf(accessFilter, groupPlaceholders)
-
         conditions = append(conditions, accessFilter)
         args = append(args, params.CallerSub, params.CallerSub)
-        for _, g := range params.CallerGroups {
-            args = append(args, g)
-        }
     } else {
         // Unauthenticated — public apps only
         conditions = append(conditions, "apps.access_type = 'public'")
@@ -1065,7 +1057,6 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 ```go
 type CatalogParams struct {
     CallerSub    string
-    CallerGroups []string
     CallerRole   string
     Tag          string
     Search       string
@@ -1089,7 +1080,6 @@ func catalogHandler(srv *server.Server) http.HandlerFunc {
         }
         if caller != nil {
             params.CallerSub = caller.Sub
-            params.CallerGroups = caller.Groups
             params.CallerRole = caller.Role.String()
         }
 
