@@ -630,8 +630,12 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, _, ok := resolveAppRelation(srv, w, caller, id)
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
 		if !ok {
+			return
+		}
+		if !relation.CanDeploy() {
+			notFound(w, "app not found")
 			return
 		}
 

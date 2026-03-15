@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,11 +37,12 @@ type TelemetryConfig struct {
 
 type ServerConfig struct {
 	Bind            string   `toml:"bind"`
-	ManagementBind  string   `toml:"management_bind"` // optional: separate listener for /healthz, /readyz, /metrics
-	SessionSecret   *Secret  `toml:"session_secret"`  // required when [oidc] is set
+	ManagementBind  string   `toml:"management_bind"`  // optional: separate listener for /healthz, /readyz, /metrics
+	SessionSecret   *Secret  `toml:"session_secret"`   // required when [oidc] is set
 	ExternalURL     string   `toml:"external_url"`
 	ShutdownTimeout Duration `toml:"shutdown_timeout"`
-	LogLevel        string   `toml:"log_level"` // debug, info, warn, error (default: info)
+	LogLevel        string   `toml:"log_level"`         // debug, info, warn, error (default: info)
+	TrustedProxies  []string `toml:"trusted_proxies"`   // CIDRs whose X-Forwarded-For to trust (e.g. ["10.0.0.0/8"])
 }
 
 type DockerConfig struct {
@@ -249,6 +251,7 @@ var (
 	durationType         = reflect.TypeOf(Duration{})
 	secretType           = reflect.TypeOf(Secret{})
 	secretPtrType        = reflect.TypeOf((*Secret)(nil))
+	stringSliceType      = reflect.TypeOf([]string{})
 	oidcCfgPtrType       = reflect.TypeOf((*OidcConfig)(nil))
 	openbaoCfgPtrType    = reflect.TypeOf((*OpenbaoConfig)(nil))
 	auditCfgPtrType      = reflect.TypeOf((*AuditConfig)(nil))
@@ -304,6 +307,15 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 			}
 		case secretType:
 			fv.Set(reflect.ValueOf(NewSecret(val)))
+		case stringSliceType:
+			parts := strings.Split(val, ",")
+			trimmed := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if s := strings.TrimSpace(p); s != "" {
+					trimmed = append(trimmed, s)
+				}
+			}
+			fv.Set(reflect.ValueOf(trimmed))
 		default:
 			switch fv.Kind() {
 			case reflect.String:
@@ -373,6 +385,12 @@ func validate(cfg *Config) error {
 	if cfg.Audit != nil {
 		if cfg.Audit.Path == "" {
 			return fmt.Errorf("config: audit.path must not be empty")
+		}
+	}
+
+	for _, cidr := range cfg.Server.TrustedProxies {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("config: server.trusted_proxies: invalid CIDR %q: %w", cidr, err)
 		}
 	}
 

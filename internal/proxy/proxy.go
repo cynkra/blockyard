@@ -189,6 +189,10 @@ func Handler(srv *server.Server) http.Handler {
 		// then re-add from verified identity.
 		r.Header.Del("X-Shiny-User")
 		r.Header.Del("X-Shiny-Access")
+		// Strip client-supplied forwarding headers so httputil.ReverseProxy
+		// builds a fresh X-Forwarded-For from the resolved RemoteAddr.
+		r.Header.Del("X-Forwarded-For")
+		r.Header.Del("X-Real-IP")
 		if caller != nil {
 			r.Header.Set("X-Shiny-User", caller.Sub)
 		}

@@ -120,6 +120,10 @@ func NewRouter(srv *server.Server) http.Handler {
 	// Request logging (outermost to capture status/duration for all routes).
 	r.Use(requestLogger)
 
+	// Resolve real client IP when behind a trusted reverse proxy.
+	// Must run before rate limiting so limits are per-client, not per-proxy.
+	r.Use(realIPMiddleware(srv.Config.Server.TrustedProxies))
+
 	// Global security headers (HSTS when HTTPS).
 	r.Use(securityHeaders(srv.Config.Server.ExternalURL))
 

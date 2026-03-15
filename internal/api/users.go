@@ -184,7 +184,7 @@ func ListUsers(srv *server.Server) http.HandlerFunc {
 
 		users, err := srv.DB.ListUsers()
 		if err != nil {
-			serverError(w, err.Error())
+			serverError(w, "failed to list users")
 			return
 		}
 
@@ -208,7 +208,7 @@ func GetUser(srv *server.Server) http.HandlerFunc {
 		sub := chi.URLParam(r, "sub")
 		user, err := srv.DB.GetUser(sub)
 		if err != nil {
-			serverError(w, err.Error())
+			serverError(w, "failed to get user")
 			return
 		}
 		if user == nil {
@@ -270,7 +270,7 @@ func UpdateUser(srv *server.Server) http.HandlerFunc {
 
 		user, err := srv.DB.UpdateUser(sub, update)
 		if err != nil {
-			serverError(w, err.Error())
+			serverError(w, "failed to update user")
 			return
 		}
 		if user == nil {
@@ -376,7 +376,7 @@ func CreateToken(srv *server.Server) http.HandlerFunc {
 		id := uuid.New().String()
 		pat, err := srv.DB.CreatePAT(id, hash, caller.Sub, body.Name, expiresAt)
 		if err != nil {
-			serverError(w, err.Error())
+			serverError(w, "failed to create token")
 			return
 		}
 
@@ -408,7 +408,7 @@ func ListTokens(srv *server.Server) http.HandlerFunc {
 
 		pats, err := srv.DB.ListPATsByUser(caller.Sub)
 		if err != nil {
-			serverError(w, err.Error())
+			serverError(w, "failed to list tokens")
 			return
 		}
 
@@ -432,7 +432,7 @@ func RevokeToken(srv *server.Server) http.HandlerFunc {
 		tokenID := chi.URLParam(r, "tokenID")
 		revoked, err := srv.DB.RevokePAT(tokenID, caller.Sub)
 		if err != nil {
-			serverError(w, err.Error())
+			serverError(w, "failed to revoke token")
 			return
 		}
 		if !revoked {
@@ -459,7 +459,7 @@ func RevokeAllTokens(srv *server.Server) http.HandlerFunc {
 
 		n, err := srv.DB.RevokeAllPATs(caller.Sub)
 		if err != nil {
-			serverError(w, err.Error())
+			serverError(w, "failed to revoke tokens")
 			return
 		}
 
