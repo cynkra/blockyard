@@ -81,6 +81,10 @@ post /v1/auth/approle/role/blockyard-server -d '{
 }'
 echo "    OK"
 
+echo "==> Setting custom role_id for dev..."
+post /v1/auth/approle/role/blockyard-server/role-id -d '{"role_id": "blockyard-server"}'
+echo "    OK"
+
 echo "==> Setting custom secret_id for dev..."
 post /v1/auth/approle/role/blockyard-server/custom-secret-id -d "{
   \"secret_id\": \"${APPROLE_SECRET_ID}\"
