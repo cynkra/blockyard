@@ -43,6 +43,46 @@ All HTTP requests are logged automatically:
 
 Each log entry includes `method`, `path`, `status`, and `duration_ms`.
 
+## Management listener
+
+By default, operational endpoints (`/healthz`, `/readyz`, `/metrics`) are
+served on the main listener alongside the application proxy and API. This
+means containers running untrusted Shiny app code can reach these endpoints.
+
+For production deployments, configure a separate management listener bound
+to a loopback address:
+
+```toml
+[server]
+bind            = "0.0.0.0:3838"
+management_bind = "127.0.0.1:9100"
+```
+
+When `management_bind` is set:
+
+- `/healthz`, `/readyz`, and `/metrics` move to the management listener
+  and are removed from the main listener
+- The management listener requires **no authentication** — access is
+  controlled by the network binding (loopback = host-only)
+- `/readyz` always returns full per-component check details
+- Prometheus can scrape `/metrics` without a bearer token
+- Container bridge networks cannot reach `127.0.0.1`, so untrusted
+  workloads cannot access operational data
+
+Point your health checks and Prometheus scraper at the management port:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: blockyard
+    static_configs:
+      - targets: ['localhost:9100']
+```
+
+On shutdown, the management listener stops first (health probes fail,
+signaling load balancers to drain traffic), then the main listener is
+shut down gracefully.
+
 ## Prometheus metrics
 
 Enable the `/metrics` endpoint in your configuration:
@@ -52,7 +92,9 @@ Enable the `/metrics` endpoint in your configuration:
 metrics_enabled = true
 ```
 
-The endpoint requires authentication (bearer token or session cookie).
+When served on the main listener (no `management_bind`), the endpoint
+requires authentication (bearer token or session cookie). When served on
+the management listener, no authentication is required.
 
 ### Available metrics
 

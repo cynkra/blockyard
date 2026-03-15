@@ -130,18 +130,21 @@ func NewRouter(srv *server.Server) http.Handler {
 
 	authDeps := srv.AuthDeps()
 
-	// Unauthenticated
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("ok"))
-	})
-	r.Get("/readyz", readyzHandler(srv))
-
-	// Prometheus metrics endpoint (only when enabled, requires API auth).
-	if srv.Config.Telemetry != nil && srv.Config.Telemetry.MetricsEnabled {
-		r.Group(func(r chi.Router) {
-			r.Use(APIAuth(srv))
-			r.Handle("/metrics", promhttp.Handler())
+	// Operational endpoints: when a management listener is configured,
+	// these move there. Otherwise serve them on the main listener.
+	if srv.Config.Server.ManagementBind == "" {
+		r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte("ok"))
 		})
+		r.Get("/readyz", readyzHandler(srv, false))
+
+		// Prometheus metrics endpoint (requires API auth on main listener).
+		if srv.Config.Telemetry != nil && srv.Config.Telemetry.MetricsEnabled {
+			r.Group(func(r chi.Router) {
+				r.Use(APIAuth(srv))
+				r.Handle("/metrics", promhttp.Handler())
+			})
+		}
 	}
 
 	// UI routes — soft auth populates session context if available.
@@ -241,6 +244,25 @@ func NewRouter(srv *server.Server) http.Handler {
 
 		}) // end limitBody group
 	})
+
+	return r
+}
+
+// NewManagementRouter creates the HTTP handler for the management listener.
+// It serves /healthz, /readyz, and /metrics without authentication.
+// This listener is intended to bind to an internal-only address.
+func NewManagementRouter(srv *server.Server) http.Handler {
+	r := chi.NewRouter()
+	r.Use(requestLogger)
+
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("ok"))
+	})
+	r.Get("/readyz", readyzHandler(srv, true))
+
+	if srv.Config.Telemetry != nil && srv.Config.Telemetry.MetricsEnabled {
+		r.Handle("/metrics", promhttp.Handler())
+	}
 
 	return r
 }

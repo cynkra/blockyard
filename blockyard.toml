@@ -1,7 +1,8 @@
 [server]
 bind             = "0.0.0.0:8080"
 shutdown_timeout = "30s"
-# log_level      = "info"   # trace, debug, info, warn, error
+# management_bind = "127.0.0.1:9100"  # separate listener for /healthz, /readyz, /metrics
+# log_level      = "info"             # trace, debug, info, warn, error
 
 [docker]
 socket     = "/var/run/docker.sock"

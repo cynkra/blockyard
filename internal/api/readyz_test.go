@@ -49,7 +49,7 @@ func readyzReq() *http.Request {
 
 func TestReadyzAllPass(t *testing.T) {
 	srv := testServerForReadyz(t)
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, readyzReq())
@@ -89,7 +89,7 @@ func TestReadyzDatabaseFail(t *testing.T) {
 	// Close DB to cause a failure
 	srv.DB.Close()
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -107,7 +107,7 @@ func TestReadyzDatabaseFail(t *testing.T) {
 
 func TestReadyzUnauthenticatedHidesChecks(t *testing.T) {
 	srv := testServerForReadyz(t)
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -173,7 +173,7 @@ func TestReadyzWithOIDCConfigured(t *testing.T) {
 		IssuerURL: idpSrv.URL,
 	}
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, readyzReq())
 
@@ -200,7 +200,7 @@ func TestReadyzWithOIDCFail(t *testing.T) {
 		IssuerURL: "http://127.0.0.1:1",
 	}
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, readyzReq())
 
@@ -236,7 +236,7 @@ func TestReadyzDockerFail(t *testing.T) {
 	be := &failingBackend{MockBackend: mock.New()}
 	srv := server.NewServer(cfg, be, database)
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, readyzReq())
 
@@ -274,7 +274,7 @@ func TestReadyzWithVaultPass(t *testing.T) {
 	srv := testServerForReadyz(t)
 	srv.VaultClient = integration.NewClient(baoSrv.URL, func() string { return "test-token" })
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, readyzReq())
 
@@ -308,7 +308,7 @@ func TestReadyzWithVaultFail(t *testing.T) {
 	srv := testServerForReadyz(t)
 	srv.VaultClient = integration.NewClient(baoSrv.URL, func() string { return "test-token" })
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, readyzReq())
 
@@ -352,7 +352,7 @@ func TestReadyzWithSessionCookieShowsChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	req.AddCookie(&http.Cookie{Name: "blockyard_session", Value: cookieValue})
 	rec := httptest.NewRecorder()
@@ -393,7 +393,7 @@ func TestReadyzWithOIDCNon200(t *testing.T) {
 		IssuerURL: idpSrv.URL,
 	}
 
-	handler := readyzHandler(srv)
+	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, readyzReq())
 
@@ -414,5 +414,110 @@ func TestReadyzWithOIDCNon200(t *testing.T) {
 	}
 	if checks["idp"] != "fail" {
 		t.Errorf("idp = %v, want fail", checks["idp"])
+	}
+}
+
+func TestReadyzTrustedAlwaysShowsChecks(t *testing.T) {
+	srv := testServerForReadyz(t)
+	handler := readyzHandler(srv, true)
+
+	// Unauthenticated request — trusted handler should still show checks.
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+
+	if body["status"] != "ready" {
+		t.Errorf("expected ready, got %v", body["status"])
+	}
+
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected checks map in trusted readyz response")
+	}
+	if checks["database"] != "pass" {
+		t.Errorf("database = %v, want pass", checks["database"])
+	}
+}
+
+func TestManagementRouterServesEndpoints(t *testing.T) {
+	srv := testServerForReadyz(t)
+	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: true}
+
+	router := NewManagementRouter(srv)
+
+	// /healthz — unauthenticated, returns "ok"
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("/healthz: expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Errorf("/healthz: expected 'ok', got %q", rec.Body.String())
+	}
+
+	// /readyz — unauthenticated, includes checks (trusted)
+	req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("/readyz: expected 200, got %d", rec.Code)
+	}
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if _, ok := body["checks"]; !ok {
+		t.Error("/readyz: expected checks in management listener response")
+	}
+
+	// /metrics — unauthenticated, returns prometheus data
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("/metrics: expected 200, got %d", rec.Code)
+	}
+}
+
+func TestManagementRouterMetricsDisabled(t *testing.T) {
+	srv := testServerForReadyz(t)
+	// Telemetry nil — /metrics should 404 on management router too
+
+	router := NewManagementRouter(srv)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestMainRouterOmitsOpsWhenManagementBind(t *testing.T) {
+	srv := testServerForReadyz(t)
+	srv.Config.Server.ManagementBind = "127.0.0.1:9100"
+
+	router := NewRouter(srv)
+
+	// /healthz should 404 on the main router
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("/healthz: expected 404 on main router, got %d", rec.Code)
+	}
+
+	// /readyz should 404 on the main router
+	req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("/readyz: expected 404 on main router, got %d", rec.Code)
 	}
 }

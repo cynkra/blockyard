@@ -43,7 +43,11 @@ func isAuthenticated(r *http.Request, srv *server.Server) bool {
 	return false
 }
 
-func readyzHandler(srv *server.Server) http.HandlerFunc {
+// readyzHandler returns an HTTP handler that checks runtime dependencies.
+// When trusted is true (management listener), per-component check details
+// are always included in the response. When false (main listener), details
+// are only shown to authenticated callers.
+func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		checks := make(map[string]string)
 
@@ -120,10 +124,10 @@ func readyzHandler(srv *server.Server) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(httpStatus)
 
-		// Only expose per-component check details to authenticated callers.
-		// Unauthenticated requests get status only (no service topology).
+		// On the management listener (trusted), always expose details.
+		// On the main listener, only expose to authenticated callers.
 		result := map[string]any{"status": status}
-		if isAuthenticated(r, srv) {
+		if trusted || isAuthenticated(r, srv) {
 			result["checks"] = checks
 		}
 		json.NewEncoder(w).Encode(result)

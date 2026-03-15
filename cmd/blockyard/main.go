@@ -42,7 +42,11 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,
 	})))
-	slog.Info("loaded config", "bind", cfg.Server.Bind, "log_level", logLevel.String())
+	logAttrs := []any{"bind", cfg.Server.Bind, "log_level", logLevel.String()}
+	if cfg.Server.ManagementBind != "" {
+		logAttrs = append(logAttrs, "management_bind", cfg.Server.ManagementBind)
+	}
+	slog.Info("loaded config", logAttrs...)
 
 	// Initialize backend
 	be, err := docker.New(context.Background(), &cfg.Docker, cfg.Storage.BundleServerPath)
@@ -132,6 +136,16 @@ func main() {
 		Handler: handler,
 	}
 
+	// Management listener (optional, for /healthz, /readyz, /metrics).
+	var mgmtServer *http.Server
+	if cfg.Server.ManagementBind != "" {
+		mgmtHandler := api.NewManagementRouter(srv)
+		mgmtServer = &http.Server{
+			Addr:    cfg.Server.ManagementBind,
+			Handler: mgmtHandler,
+		}
+	}
+
 	// Background goroutine context
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	var bgWg sync.WaitGroup
@@ -176,13 +190,30 @@ func main() {
 		}
 	}()
 
+	if mgmtServer != nil {
+		go func() {
+			slog.Info("management listener started", "bind", cfg.Server.ManagementBind)
+			if err := mgmtServer.ListenAndServe(); err != http.ErrServerClosed {
+				slog.Error("management server error", "error", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	slog.Info("shutdown signal received")
 
-	// 1. Drain HTTP server
+	// 1. Drain management listener first (health probes fail, LB stops
+	//    sending traffic), then drain the main listener.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(),
 		cfg.Server.ShutdownTimeout.Duration)
 	defer cancel()
+
+	if mgmtServer != nil {
+		if err := mgmtServer.Shutdown(shutdownCtx); err != nil {
+			slog.Error("management server shutdown error", "error", err)
+		}
+	}
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)

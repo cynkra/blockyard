@@ -36,7 +36,8 @@ type TelemetryConfig struct {
 
 type ServerConfig struct {
 	Bind            string   `toml:"bind"`
-	SessionSecret   *Secret  `toml:"session_secret"` // required when [oidc] is set
+	ManagementBind  string   `toml:"management_bind"` // optional: separate listener for /healthz, /readyz, /metrics
+	SessionSecret   *Secret  `toml:"session_secret"`  // required when [oidc] is set
 	ExternalURL     string   `toml:"external_url"`
 	ShutdownTimeout Duration `toml:"shutdown_timeout"`
 	LogLevel        string   `toml:"log_level"` // debug, info, warn, error (default: info)

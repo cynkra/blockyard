@@ -530,10 +530,63 @@ trust boundaries: the public listener handles untrusted traffic with
 full auth, the management listener handles trusted infrastructure
 traffic without auth.
 
-### Status
+### Design
 
-The auth-gated `/metrics` endpoint is an acceptable interim solution.
-The separate management listener is deferred — it is not clear whether
-it belongs in v1 hardening or v2 (which introduces Kubernetes and
-changes the networking model significantly). This section documents
-the problem so it is not lost.
+A new optional `management_bind` field in `[server]`:
+
+```toml
+[server]
+bind = "0.0.0.0:3838"
+management_bind = "127.0.0.1:9100"
+```
+
+When set, a second `http.Server` starts on the management address and
+serves `/healthz`, `/readyz`, and `/metrics` **without authentication**.
+These endpoints are removed from the main listener entirely — the main
+listener only serves the application proxy and control-plane API.
+
+Because the management listener binds to a loopback address, it is
+unreachable from container bridge networks. Only the host and
+co-located monitoring agents (Prometheus, health check probes) can
+reach it.
+
+When `management_bind` is not set, current behavior is preserved:
+`/healthz` and `/readyz` are unauthenticated on the main listener,
+`/metrics` requires `APIAuth`.
+
+On the management listener, `/readyz` always returns full per-component
+check details (no auth gating). The listener is trusted by definition.
+
+Graceful shutdown drains both listeners: the management listener is
+shut down first (so health probes start failing, signaling load
+balancers to stop sending traffic), then the main listener is drained.
+
+### Implementation Plan
+
+1. **Config** — Add `ManagementBind string` to `ServerConfig`. Env
+   var: `BLOCKYARD_SERVER_MANAGEMENT_BIND`. No validation beyond
+   non-empty when set (Go's `net.Listen` validates the address).
+
+2. **Management router** — New `NewManagementRouter(srv)` function in
+   `internal/api/router.go`. Registers `/healthz`, `/readyz` (with
+   full detail exposure), and `/metrics` (when enabled). Minimal
+   middleware: request logging only.
+
+3. **Conditional main router** — When `ManagementBind` is set,
+   `NewRouter` skips registering `/healthz`, `/readyz`, and `/metrics`.
+
+4. **Readyz handler** — Add a `trusted` parameter to `readyzHandler`.
+   When true (management listener), always include per-component
+   checks in the response.
+
+5. **Second HTTP server** — In `cmd/blockyard/main.go`, when
+   `ManagementBind` is configured, create and start a second
+   `http.Server`. Shutdown order: management listener first, then main
+   listener (so health probes fail before traffic stops).
+
+6. **Tests** — Config field parsing and env var override. Management
+   router serves expected endpoints without auth. Main router omits
+   ops endpoints when management bind is set.
+
+7. **Docs** — Update config reference, observability guide, and
+   example TOML files.
