@@ -191,6 +191,18 @@ func (m *WorkerMap) SetIdleSince(workerID string, t time.Time) {
 	}
 }
 
+// SetIdleSinceIfZero marks when a worker became idle, but only if it
+// isn't already marked. This avoids resetting the timer on repeated
+// ticks while the worker remains idle.
+func (m *WorkerMap) SetIdleSinceIfZero(workerID string, t time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.workers[workerID]; ok && w.IdleSince.IsZero() {
+		w.IdleSince = t
+		m.workers[workerID] = w
+	}
+}
+
 // ClearIdleSince resets the idle timer (a new session was assigned).
 func (m *WorkerMap) ClearIdleSince(workerID string) {
 	m.mu.Lock()

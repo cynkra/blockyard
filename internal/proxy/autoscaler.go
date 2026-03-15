@@ -12,13 +12,14 @@ import (
 )
 
 // RunAutoscaler runs as a background goroutine alongside health polling.
-// On each tick it checks every running app and:
+// On each tick it:
+//   - Sweeps sessions that have been idle longer than the configured TTL.
+//   - Marks workers with zero sessions as idle (sets IdleSince).
+//   - Evicts workers that have been idle beyond idle_worker_timeout,
+//     keeping at least one worker per app (no scale-to-zero).
 //   - Evicts workers that have crashed (health check fails).
 //   - Spawns a new worker if all existing workers are at capacity and
 //     the per-app and global limits allow it (eager scale-up).
-//   - Evicts a worker that has zero sessions when at least one other
-//     worker for the same app exists (conservative scale-down).
-//   - Sweeps sessions that have been idle longer than the configured TTL.
 //
 // Blocks until ctx is cancelled.
 func RunAutoscaler(ctx context.Context, srv *server.Server) {
@@ -46,6 +47,16 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 	if idleTTL > 0 {
 		if n := srv.Sessions.SweepIdle(idleTTL); n > 0 {
 			slog.Info("autoscaler: swept idle sessions", "count", n)
+		}
+	}
+
+	// Mark workers idle when their last session has been swept.
+	// Without this, HTTP-only workers whose sessions were removed above
+	// would never get their IdleSince set and would run forever.
+	now := time.Now()
+	for _, wid := range srv.Workers.All() {
+		if srv.Sessions.CountForWorker(wid) == 0 {
+			srv.Workers.SetIdleSinceIfZero(wid, now)
 		}
 	}
 

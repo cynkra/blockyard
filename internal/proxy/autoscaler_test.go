@@ -304,12 +304,14 @@ func TestAutoscaleSkipsMissingApp(t *testing.T) {
 	srv.Workers.Set("orphan-w1", server.ActiveWorker{AppID: "nonexistent-app"})
 	srv.Workers.Set("orphan-w2", server.ActiveWorker{AppID: "nonexistent-app"})
 
-	// Should not panic — the tick skips apps not found in the DB.
+	// Should not panic — the tick handles missing apps gracefully.
+	// The workers have zero sessions and idle timeout is 0 in test config,
+	// so they are marked idle and evicted. This is correct: orphan workers
+	// for deleted apps should be cleaned up.
 	autoscaleTick(context.Background(), srv)
 
-	// Workers remain (they are not evicted just because the app is missing).
-	if srv.Workers.Count() != 2 {
-		t.Errorf("expected 2 workers to remain, got %d", srv.Workers.Count())
+	if srv.Workers.Count() != 0 {
+		t.Errorf("expected orphan workers to be evicted, got %d remaining", srv.Workers.Count())
 	}
 }
 

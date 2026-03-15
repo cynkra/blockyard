@@ -65,9 +65,9 @@ func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		ttl := srv.Config.Openbao.TokenTTL.Duration
 		vaultToken, ok := srv.VaultTokenCache.Get(claims.Sub)
 		if !ok {
-			ttl := srv.Config.Openbao.TokenTTL.Duration
 			var loginErr error
 			var loginTTL time.Duration
 			vaultToken, loginTTL, loginErr = srv.VaultClient.JWTLogin(
@@ -91,7 +91,7 @@ func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"token": vaultToken,
-			"ttl":   int(srv.Config.Openbao.TokenTTL.Duration.Seconds()),
+			"ttl":   int(ttl.Seconds()),
 		})
 	}
 }
