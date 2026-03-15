@@ -98,7 +98,12 @@ without the other):
 # v1 additions to [server]:
 session_secret = "..."                              # HMAC key for cookie signing
                                                     # use BLOCKYARD_SERVER_SESSION_SECRET env var
-                                                    # required when [oidc] is configured
+                                                    # required when [oidc] is configured and
+                                                    # [openbao] is not — auto-generated and
+                                                    # persisted to vault when [openbao] is set
+management_bind = "127.0.0.1:9100"                  # optional: separate listener for /healthz,
+                                                    # /readyz, /metrics (no auth). Keeps ops
+                                                    # endpoints off the public listener.
 external_url   = "https://blockyard.example.com"    # public URL for OIDC redirect_uri and
                                                     # cookie Secure flag; required behind a
                                                     # reverse proxy
@@ -106,15 +111,17 @@ external_url   = "https://blockyard.example.com"    # public URL for OIDC redire
 [oidc]
 issuer_url    = "https://auth.example.com/realms/myrealm"
 client_id     = "blockyard"
-client_secret = "..."    # use BLOCKYARD_OIDC_CLIENT_SECRET env var
+client_secret = "..."    # use BLOCKYARD_OIDC_CLIENT_SECRET env var or
+                         # vault:secret/data/blockyard/oidc#client_secret
 initial_admin  = "..."    # OIDC sub of the first admin user
                            # checked only on first login; use BLOCKYARD_OIDC_INITIAL_ADMIN env var
 cookie_max_age = "24h"   # optional, default: 24h
 
 [openbao]
 address     = "https://bao.example.com"
-admin_token = "..."      # use BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
-                         # operator initializes and unseals OpenBao manually
+role_id     = "blockyard-server"         # AppRole role ID (not secret — like a username)
+# secret_id is NEVER in config — delivered once via BLOCKYARD_OPENBAO_SECRET_ID env var
+# admin_token is deprecated — still accepted for migration, but cannot coexist with role_id
 ```
 
 ## Features
@@ -538,8 +545,11 @@ infrastructure.
   - **v2:** blockyard web UI wraps the v1b API. Point-and-click credential
     management.
 
-  The server authenticates to OpenBao with a static admin token supplied via
-  env var (`BLOCKYARD_OPENBAO_ADMIN_TOKEN`). AppRole auth is deferred.
+  The server authenticates to OpenBao via AppRole auth — a renewable,
+  scoped token obtained at startup and maintained by a background renewal
+  goroutine. The static `admin_token` is deprecated but still accepted
+  for migration. See [v1 wrap-up §4](v1/wrap-up.md#4-secret-lifecycle)
+  for the full design.
 
   **R interface:** no companion R package. A documented helper function
   transparently handles both deployment modes:

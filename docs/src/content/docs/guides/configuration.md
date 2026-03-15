@@ -28,7 +28,8 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `bind` | `0.0.0.0:8080` | Address and port the server listens on |
 | `shutdown_timeout` | `30s` | Time to drain in-flight requests on shutdown |
 | `log_level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
-| `session_secret` | — | Secret for encrypting session cookies (required when `[oidc]` is configured) |
+| `management_bind` | — | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Observability](/guides/observability/#management-listener). |
+| `session_secret` | — | Secret for signing session cookies. Required when `[oidc]` is set without `[openbao]`; auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | — | Public-facing URL of the server (used for OIDC redirect URIs) |
 
 ### `[docker]`
@@ -69,7 +70,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 
 ### `[oidc]` *(optional)*
 
-Enable OIDC authentication. When configured, `server.session_secret` is required.
+Enable OIDC authentication. When configured, `server.session_secret` is required unless `[openbao]` is also configured (in which case it can be auto-generated).
 
 | Field | Default | Description |
 |---|---|---|
@@ -86,7 +87,8 @@ Enable OpenBao credential management. Requires `[oidc]` to be configured.
 | Field | Default | Description |
 |---|---|---|
 | `address` | *(required)* | OpenBao server address |
-| `admin_token` | *(required)* | Admin token for OpenBao |
+| `role_id` | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via `BLOCKYARD_OPENBAO_SECRET_ID` env var at bootstrap. |
+| `admin_token` | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `1h` | TTL for issued tokens |
 | `jwt_auth_path` | `jwt` | Auth method path in OpenBao |
 
@@ -155,7 +157,9 @@ log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
 
-# Optional: OIDC authentication (requires server.session_secret and server.external_url)
+# Optional: OIDC authentication
+# When enabled, server.session_secret is required unless [openbao] is also
+# configured (in which case it is auto-generated and stored in vault).
 # [oidc]
 # issuer_url     = "https://idp.example.com/realms/myapp"
 # client_id      = "blockyard"
@@ -166,7 +170,8 @@ idle_worker_timeout  = "5m"
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]
 # address       = "http://openbao:8200"
-# admin_token   = "vault-admin-token"
+# role_id       = "blockyard-server"       # AppRole role identifier (recommended)
+# # admin_token = "vault-admin-token"      # deprecated: use role_id instead
 # token_ttl     = "1h"
 # jwt_auth_path = "jwt"
 #

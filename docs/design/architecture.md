@@ -153,15 +153,15 @@ Three independent trust domains hold the credential pipeline:
 |---|---|---|
 | **IdP** | User identities, OIDC signing keys | Forge JWTs for any user → unlock any user's OpenBao namespace |
 | **OpenBao** | Encrypted credential storage, per-user policy enforcement | Read all stored secrets directly |
-| **Server** | OIDC client secret, in-memory session tokens, OpenBao admin token (write-scoped) | Secrets for users with active sessions only (see below) |
+| **Server** | OIDC client secret, in-memory session tokens, AppRole-issued vault token (write-scoped, renewable) | Secrets for users with active sessions only (see below) |
 
 **Why the server alone is not sufficient to exfiltrate all credentials:**
 
-The server authenticates to OpenBao with an admin token that is scoped to
-**write** (credential enrollment) and **metadata** operations. It cannot
-read user secret values. The only way to read a user's secrets is with a
-scoped OpenBao token obtained via JWT login — which requires a valid IdP
-access token for that user.
+The server authenticates to OpenBao via AppRole auth — a renewable,
+scoped token that grants **write** (credential enrollment) and
+**metadata** operations. It cannot read user secret values. The only
+way to read a user's secrets is with a scoped OpenBao token obtained
+via JWT login — which requires a valid IdP access token for that user.
 
 The server obtains a user's access token only when the user actively
 authenticates via the OIDC flow. Access tokens are held in memory (never
@@ -174,8 +174,9 @@ prior login).
 Therefore, a compromised server can exfiltrate credentials only for
 users who log in during the window of compromise. Users who do not
 authenticate during that window are unaffected. On detection, restarting
-the server clears all in-memory tokens; rotating the OpenBao admin token
-and OIDC client secret completes remediation.
+the server clears all in-memory tokens; revoking the server's vault
+token, re-bootstrapping via AppRole with a new `secret_id`, and
+rotating the OIDC client secret completes remediation.
 
 **Why not store credentials in the server's own database?**
 
@@ -283,19 +284,22 @@ superseded by PATs and is no longer supported.
 
 On SIGTERM the server shuts down cleanly in this order:
 
-1. **Stop accepting new connections** — close the HTTP listener
-2. **Drain in-flight requests** — wait up to `shutdown_timeout` (default `30s`)
+1. **Stop management listener** — if `management_bind` is configured, shut
+   down the management listener first so health probes start failing and load
+   balancers stop sending traffic
+2. **Stop accepting new connections** — close the main HTTP listener
+3. **Drain in-flight requests** — wait up to `shutdown_timeout` (default `30s`)
    for in-flight HTTP and WebSocket requests to finish; remaining connections
    are dropped
-3. **Cancel background goroutines** — stop health poller, autoscaler, log
-   retention cleaner, and audit writer
-4. **Drain sessions and stop workers** — mark all apps as draining (no new
+4. **Cancel background goroutines** — stop health poller, autoscaler, log
+   retention cleaner, vault token renewal, and audit writer
+5. **Drain sessions and stop workers** — mark all apps as draining (no new
    sessions routed), wait up to half of `shutdown_timeout` for active sessions
    to end naturally, then force-evict remaining workers in parallel (15 s
    timeout per worker)
-5. **Remove remaining resources** — clean up any leftover containers and
+6. **Remove remaining resources** — clean up any leftover containers and
    networks (build containers, orphans); mark in-progress bundles as `failed`
-6. **Flush and close** — flush structured logs and audit log, close the DB
+7. **Flush and close** — flush structured logs and audit log, close the DB
    connection
 
 All active user sessions are killed on shutdown. This is intentional — a

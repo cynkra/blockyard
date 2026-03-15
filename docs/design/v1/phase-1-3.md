@@ -50,9 +50,12 @@ mid-request.
 ### Credential enrollment dual auth
 
 The `POST /api/v1/users/me/credentials/{service}` endpoint accepts both
-session cookie auth (app-plane users) and JWT bearer auth (control-plane
+session cookie auth (app-plane users) and PAT bearer auth (control-plane
 clients). Users can only manage their own credentials — the `sub` comes
 from the authenticated identity, never from the URL.
+
+**(Updated in v1 wrap-up §2):** JWT bearer auth on the control plane
+was replaced by Personal Access Tokens (PATs).
 
 ### Soft dependency on OpenBao
 
@@ -83,7 +86,9 @@ gracefully (logs warning, omits headers). The `/readyz` endpoint (phase
 ```toml
 [openbao]
 address = "https://bao.example.com"
-admin_token = "hvs.xxx"        # or BLOCKYARD_OPENBAO_ADMIN_TOKEN env var
+role_id = "blockyard-server"   # AppRole role ID (not secret)
+# secret_id via BLOCKYARD_OPENBAO_SECRET_ID env var at bootstrap only
+# admin_token = "hvs.xxx"     # deprecated — use role_id + secret_id instead
 token_ttl = "1h"               # default: 1h
 jwt_auth_path = "jwt"          # default: "jwt"
 ```
@@ -91,14 +96,22 @@ jwt_auth_path = "jwt"          # default: "jwt"
 ```go
 type OpenbaoConfig struct {
     Address     string   `toml:"address"`
-    AdminToken  Secret   `toml:"admin_token"`
+    RoleID      string   `toml:"role_id"`       // AppRole role ID
+    AdminToken  Secret   `toml:"admin_token"`   // deprecated — use RoleID
     TokenTTL    Duration `toml:"token_ttl"`     // default: 1h
     JWTAuthPath string   `toml:"jwt_auth_path"` // default: "jwt"
 }
 ```
 
-Validation: when `[openbao]` is set, `address` and `admin_token` are
-required. `[openbao]` requires `[oidc]` (JWT login needs an IdP).
+Validation: when `[openbao]` is set, `address` is required along with
+either `role_id` (preferred) or `admin_token` (deprecated). Both
+cannot be set simultaneously. `[openbao]` requires `[oidc]` (JWT
+login needs an IdP).
+
+**(Updated in v1 wrap-up §4A):** `admin_token` is deprecated. The
+preferred auth method is AppRole via `role_id` + `secret_id` env var.
+See [v1 wrap-up §4](wrap-up.md#4-secret-lifecycle) for the full
+design.
 
 Env var auto-construction: if any `BLOCKYARD_OPENBAO_*` env var is set,
 the `[openbao]` section is created with defaults applied (same pattern
@@ -112,13 +125,18 @@ as `[oidc]`).
 // Client is a lightweight HTTP client for OpenBao's REST API.
 // It wraps net/http and targets only the endpoints blockyard needs:
 // JWT auth login, KV v2 read/write, sys/health.
+//
+// (Updated in v1 wrap-up §4A): the client accepts a token callback
+// (adminTokenFunc) rather than a static token, so AppRole-issued
+// tokens can be transparently renewed. NewClient accepts either a
+// static token or an AppRole config.
 type Client struct {
-    addr       string        // OpenBao base URL
-    adminToken string        // admin token for bootstrap and enrollment
-    httpClient *http.Client
+    addr           string              // OpenBao base URL
+    adminTokenFunc func() string       // returns current admin token
+    httpClient     *http.Client
 }
 
-func NewClient(addr, adminToken string) *Client
+func NewClient(addr string, adminTokenFunc func() string) *Client
 
 // Health checks if OpenBao is reachable and unsealed.
 // GET {addr}/v1/sys/health
@@ -243,12 +261,24 @@ type Server struct {
 
 Initialization in `main.go` after OIDC setup:
 
+**(Updated in v1 wrap-up §4A):** the vault client is now initialized
+via the AppRole startup flow (persisted token → AppRole login → fail).
+The static admin token path is preserved for migration. A background
+renewal goroutine maintains the token. See
+[v1 wrap-up §4](wrap-up.md#4-secret-lifecycle) for the full startup
+sequence.
+
 ```go
 if cfg.Openbao != nil {
-    srv.VaultClient = integration.NewClient(
-        cfg.Openbao.Address,
-        cfg.Openbao.AdminToken.Expose(),
-    )
+    // Wrap-up §4A: init vault client via AppRole or static token
+    tokenFunc, stopRenewal, err := integration.InitVaultAuth(ctx, cfg)
+    if err != nil {
+        slog.Error("vault auth failed", "error", err)
+        os.Exit(1)
+    }
+    defer stopRenewal()
+
+    srv.VaultClient = integration.NewClient(cfg.Openbao.Address, tokenFunc)
     srv.VaultTokenCache = integration.NewVaultTokenCache()
 
     if err := integration.Bootstrap(ctx, srv.VaultClient, cfg.Openbao.JWTAuthPath); err != nil {
@@ -318,7 +348,7 @@ POST /api/v1/users/me/credentials/{service}
 Mounted outside the standard `APIAuth` middleware group. Instead, uses
 a dual-auth middleware that accepts either:
 - Session cookie (app-plane) — extracts `sub` from `AuthenticatedUser`
-- Bearer JWT (control-plane) — extracts `sub` from `CallerIdentity`
+- PAT bearer (control-plane) — extracts `sub` from `CallerIdentity`
 
 ### Dual-auth middleware
 

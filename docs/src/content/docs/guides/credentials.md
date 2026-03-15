@@ -23,9 +23,9 @@ sessions.
    into the request so the app can read that user's credentials
 
 No single compromised component can exfiltrate all user credentials. The
-server's OpenBao admin token is write-scoped — it cannot read user secrets.
-Only a valid IdP access token (from an active user session) can produce a
-read-scoped token.
+server's OpenBao token is write-scoped — it cannot read user secrets. Only a
+valid IdP access token (from an active user session) can produce a read-scoped
+token.
 
 ## Server configuration
 

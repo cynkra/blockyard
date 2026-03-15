@@ -93,100 +93,31 @@ case on Linux and with some macOS Docker runtimes, but not all. If
 container IPs are not routable from your host, run the server inside a
 container (e.g. the devcontainer) instead.
 
-## Project Structure
+## Project Layout
 
-```
-cmd/
-└── blockyard/
-    └── main.go              # Entry point
-internal/
-├── config/
-│   ├── config.go            # TOML + env var configuration
-│   └── secret.go            # Secret type (redacted in logs)
-├── server/
-│   └── state.go             # Shared application state
-├── task/
-│   └── store.go             # In-memory task tracking & log streaming
-├── api/
-│   ├── router.go            # Router setup
-│   ├── auth.go              # Bearer token / PAT middleware
-│   ├── apps.go              # App CRUD & lifecycle endpoints
-│   ├── bundles.go           # Bundle upload & list endpoints
-│   ├── tasks.go             # Task log streaming endpoint
-│   ├── access.go            # Per-app ACL management endpoints
-│   ├── users.go             # User management, PATs, credential enrollment
-│   ├── tags.go              # Tag management endpoints
-│   ├── catalog.go           # Content discovery endpoint
-│   ├── credentials.go       # Vault credential exchange
-│   ├── readyz.go            # Readiness probe
-│   └── error.go             # Shared error response helpers
-├── auth/
-│   ├── handlers.go          # OIDC login/callback/logout handlers
-│   ├── middleware.go         # App-plane auth middleware
-│   ├── oidc.go              # OIDC provider setup
-│   ├── session.go           # Session cookie encode/decode
-│   ├── identity.go          # CallerIdentity type & context helpers
-│   ├── pat.go               # Personal Access Token validation
-│   └── sessiontoken.go      # Worker session reference tokens
-├── authz/
-│   ├── rbac.go              # Role-based access control
-│   └── acl.go               # Per-app access control lists
-├── backend/
-│   ├── backend.go           # Backend interface definition
-│   ├── docker/
-│   │   ├── docker.go        # Docker/Podman implementation
-│   │   ├── detect.go        # Runtime detection (Docker vs Podman)
-│   │   └── mounts.go        # Container mount configuration
-│   └── mock/
-│       └── mock.go          # In-memory mock for tests
-├── bundle/
-│   ├── bundle.go            # Archive storage, unpacking, retention
-│   └── restore.go           # Dependency restoration pipeline
-├── proxy/
-│   ├── proxy.go             # Reverse proxy router (/app/{name}/)
-│   ├── forward.go           # HTTP and WebSocket forwarding
-│   ├── coldstart.go         # On-demand worker startup
-│   ├── session.go           # Session-to-worker mapping
-│   ├── loadbalancer.go      # Multi-worker load balancing
-│   ├── autoscaler.go        # Automatic worker scaling
-│   ├── ws.go                # WebSocket proxying
-│   └── wscache.go           # WebSocket connection caching
-├── ops/
-│   └── ops.go               # Health polling, log capture, orphan cleanup
-├── db/
-│   └── db.go                # Pool creation, migrations & CRUD queries
-├── integration/
-│   ├── openbao.go           # OpenBao (Vault) client
-│   ├── bootstrap.go         # OpenBao policy/role bootstrapping
-│   ├── enrollment.go        # Credential enrollment in KV store
-│   └── tokencache.go        # Vault token cache
-├── audit/
-│   └── audit.go             # Append-only JSONL audit logging
-├── telemetry/
-│   ├── metrics.go           # Prometheus metrics
-│   └── tracing.go           # OpenTelemetry tracing middleware
-├── logstore/
-│   └── store.go             # Container log storage
-├── registry/
-│   └── registry.go          # Worker address caching
-├── rvcache/
-│   └── rvcache.go           # R package binary caching
-└── session/
-    └── store.go             # Session store
-migrations/
-├── 001_initial.sql          # Initial schema
-└── 002_remove_app_status.sql  # Remove runtime status from apps table
-```
+- `cmd/blockyard/` — Entry point.
+- `internal/` — All application code, organized by domain:
+  - `api/` — HTTP handlers for the management API (apps, bundles, users, tags, etc.)
+  - `auth/`, `authz/` — OIDC authentication, session management, RBAC, and per-app ACLs.
+  - `proxy/` — Reverse proxy, WebSocket forwarding, cold-start, session routing, autoscaling.
+  - `backend/` — Container runtime abstraction (`docker/` for Docker/Podman, `mock/` for tests).
+  - `bundle/` — Bundle archive storage, unpacking, and R dependency restoration.
+  - `db/` — SQLite pool, migrations, and CRUD queries.
+  - `integration/` — OpenBao (Vault) client, bootstrapping, and credential enrollment.
+  - `config/`, `server/` — TOML/env configuration and shared server state.
+  - `ops/` — Health polling, log capture, orphan cleanup.
+  - `audit/`, `telemetry/` — Audit logging, Prometheus metrics, OpenTelemetry tracing.
+- `migrations/` — SQL migration files.
 
 ## Configuration Reference
 
 ```toml
 [server]
 bind             = "0.0.0.0:8080"
-# token          = "..."   # v0 only; replaced by PATs when [oidc] is configured
 shutdown_timeout = "30s"
+# management_bind = "127.0.0.1:9100"  # separate listener for /healthz, /readyz, /metrics
 # log_level      = "info"   # trace, debug, info, warn, error
-# session_secret = "random-secret"   # required when [oidc] is configured
+# session_secret = "random-secret"   # required when [oidc] is set without [openbao]
 # external_url   = "https://blockyard.example.com"
 
 [docker]
@@ -213,7 +144,9 @@ log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
 
-# Optional: OIDC authentication (requires server.session_secret)
+# Optional: OIDC authentication
+# When enabled, server.session_secret is required unless [openbao] is also
+# configured (in which case it is auto-generated and stored in vault).
 # [oidc]
 # issuer_url     = "https://idp.example.com/realms/myapp"
 # client_id      = "blockyard"
@@ -223,10 +156,11 @@ idle_worker_timeout  = "5m"
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]
-# address     = "http://openbao:8200"
-# admin_token = "vault-admin-token"
-# token_ttl   = "1h"             # default: "1h"
-# jwt_auth_path = "jwt"          # default: "jwt"
+# address       = "http://openbao:8200"
+# role_id       = "blockyard-server"       # AppRole role identifier (recommended)
+# # admin_token = "vault-admin-token"      # deprecated: use role_id instead
+# token_ttl     = "1h"             # default: "1h"
+# jwt_auth_path = "jwt"            # default: "jwt"
 
 # Optional: Audit logging
 # [audit]

@@ -51,12 +51,20 @@ results:
 When not all checks pass, `status` is `"not_ready"` and the HTTP status is `503`.
 
 When OIDC and/or OpenBao are configured, their health is included in the checks
-(as `"idp"` and `"openbao"` respectively).
+(as `"idp"` and `"openbao"` respectively). When AppRole auth is used
+(`openbao.role_id`), a `"vault_token"` check reports whether the token renewal
+goroutine is healthy.
+
+When served on the [management listener](/guides/observability/#management-listener),
+`/readyz` always returns full per-component check details regardless of
+authentication.
 
 ### `GET /metrics`
 
 Prometheus metrics endpoint. Only available when `telemetry.metrics_enabled` is
-`true`. Requires authentication (bearer token or session cookie).
+`true`. Requires authentication (bearer token or session cookie) when served on
+the main listener. No authentication when served on the
+[management listener](/guides/observability/#management-listener).
 
 ---
 

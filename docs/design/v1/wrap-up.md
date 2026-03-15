@@ -1,7 +1,6 @@
 # v1 Wrap-Up
 
-Sections 1–3 are implemented. Section 4 (secret lifecycle) is the
-remaining work before v1 can ship.
+All four sections are implemented. v1 is feature-complete.
 
 The design principle behind Sections 1 and 2: the **IdP handles
 authentication** (proving who you are via OIDC), and **blockyard handles

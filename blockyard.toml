@@ -30,7 +30,8 @@ session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
 
 # Optional: OIDC authentication
-# When enabled, server.session_secret and server.external_url are required.
+# When enabled, server.session_secret is required unless [openbao] is also
+# configured (in which case it is auto-generated and stored in vault).
 # [oidc]
 # issuer_url     = "https://idp.example.com/realms/myapp"
 # client_id      = "blockyard"
@@ -40,9 +41,10 @@ idle_worker_timeout  = "5m"
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]
-# address     = "http://openbao:8200"
-# admin_token = "vault-admin-token"
-# token_ttl   = "1h"
+# address       = "http://openbao:8200"
+# role_id       = "blockyard-server"       # AppRole role identifier (recommended)
+# # admin_token = "vault-admin-token"      # deprecated: use role_id instead
+# token_ttl     = "1h"
 # jwt_auth_path = "jwt"
 
 # Optional: Append-only audit logging
