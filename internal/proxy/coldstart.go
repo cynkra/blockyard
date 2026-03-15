@@ -98,6 +98,8 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 
 	if wid != "" {
 		// Assigned to an existing worker — resolve its address.
+		slog.Debug("proxy: assigned to existing worker",
+			"app_id", app.ID, "worker_id", wid)
 		a, ok := srv.Registry.Get(wid)
 		if ok {
 			return wid, a, nil
@@ -166,9 +168,12 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	extraEnv := WorkerEnv(srv)
 
 	spec := backend.WorkerSpec{
-		AppID:       app.ID,
-		WorkerID:    wid,
-		Image:       srv.Config.Docker.Image,
+		AppID:    app.ID,
+		WorkerID: wid,
+		Image:    srv.Config.Docker.Image,
+		Cmd: []string{"R", "-e",
+			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
+				srv.Config.Storage.BundleWorkerPath)},
 		BundlePath:  hostPaths.Unpacked,
 		LibraryPath: hostPaths.Library,
 		WorkerMount: srv.Config.Storage.BundleWorkerPath,
