@@ -6,7 +6,6 @@ RUN go mod download
 
 COPY cmd/ cmd/
 COPY internal/ internal/
-COPY migrations/ migrations/
 
 RUN CGO_ENABLED=0 go build -o /blockyard ./cmd/blockyard
 
