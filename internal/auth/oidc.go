@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -15,12 +17,40 @@ type OIDCClient struct {
 	provider     *oidc.Provider
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
+	// httpClient carries a rewriting transport when issuer_discovery_url is set,
+	// ensuring all server-side requests (token exchange, JWKS, refresh) use
+	// the internal address.
+	httpClient *http.Client
 }
 
 // Discover performs OIDC discovery against the issuer URL and returns
 // a configured client ready for the authorization code flow.
-func Discover(ctx context.Context, issuerURL, clientID, clientSecret, redirectURL string) (*OIDCClient, error) {
-	provider, err := oidc.NewProvider(ctx, issuerURL)
+//
+// If discoveryURL is non-empty, OIDC discovery is performed against that
+// URL instead of issuerURL. This is useful in Docker environments where
+// the IdP is reachable at a different internal address (e.g. http://dex:5556)
+// than the public issuer URL used in tokens (e.g. http://localhost:5556).
+// A custom HTTP transport rewrites all server-side requests to use the
+// internal address. Token issuer validation still uses issuerURL.
+func Discover(ctx context.Context, issuerURL, discoveryURL, clientID, clientSecret, redirectURL string) (*OIDCClient, error) {
+	discoverFrom := issuerURL
+	var httpClient *http.Client
+	if discoveryURL != "" {
+		ctx = oidc.InsecureIssuerURLContext(ctx, issuerURL)
+		discoverFrom = discoveryURL
+
+		// Install a rewriting HTTP client so that all server-side requests
+		// (JWKS fetch, token exchange, refresh) reach the internal address.
+		transport := &rewriteTransport{
+			base:    http.DefaultTransport,
+			oldBase: issuerURL,
+			newBase: discoveryURL,
+		}
+		httpClient = &http.Client{Transport: transport}
+		ctx = oidc.ClientContext(ctx, httpClient)
+	}
+
+	provider, err := oidc.NewProvider(ctx, discoverFrom)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
@@ -41,6 +71,7 @@ func Discover(ctx context.Context, issuerURL, clientID, clientSecret, redirectUR
 		provider:     provider,
 		oauth2Config: oauth2Cfg,
 		verifier:     verifier,
+		httpClient:   httpClient,
 	}, nil
 }
 
@@ -51,6 +82,10 @@ func (c *OIDCClient) AuthCodeURL(state string, nonce string) string {
 
 // Exchange trades an authorization code for tokens.
 func (c *OIDCClient) Exchange(ctx context.Context, code string) (*oauth2.Token, *oidc.IDToken, map[string]json.RawMessage, error) {
+	if c.httpClient != nil {
+		ctx = oidc.ClientContext(ctx, c.httpClient)
+	}
+
 	oauth2Token, err := c.oauth2Config.Exchange(ctx, code)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("token exchange: %w", err)
@@ -76,6 +111,9 @@ func (c *OIDCClient) Exchange(ctx context.Context, code string) (*oauth2.Token, 
 
 // RefreshToken exchanges a refresh token for a new access token.
 func (c *OIDCClient) RefreshToken(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
+	if c.httpClient != nil {
+		ctx = oidc.ClientContext(ctx, c.httpClient)
+	}
 	src := c.oauth2Config.TokenSource(ctx, &oauth2.Token{
 		RefreshToken: refreshToken,
 	})
@@ -107,4 +145,29 @@ func (c *OIDCClient) JWKSURI() string {
 		return ""
 	}
 	return meta.JWKSURI
+}
+
+// rewriteTransport is an http.RoundTripper that rewrites request URLs,
+// replacing oldBase with newBase. This allows the OIDC library to contact
+// an internal address while the issuer URL stays external.
+type rewriteTransport struct {
+	base    http.RoundTripper
+	oldBase string
+	newBase string
+}
+
+func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	u := req.URL.String()
+	if strings.HasPrefix(u, t.oldBase) {
+		rewritten := t.newBase + strings.TrimPrefix(u, t.oldBase)
+		newReq := req.Clone(req.Context())
+		parsed, err := req.URL.Parse(rewritten)
+		if err != nil {
+			return nil, err
+		}
+		newReq.URL = parsed
+		newReq.Host = parsed.Host
+		req = newReq
+	}
+	return t.base.RoundTrip(req)
 }

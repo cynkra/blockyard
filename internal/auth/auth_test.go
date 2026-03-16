@@ -38,6 +38,7 @@ func buildTestDeps(t *testing.T, idp *testutil.MockIdP) *auth.Deps {
 	oidcClient, err := auth.Discover(
 		context.Background(),
 		cfg.OIDC.IssuerURL,
+		"",
 		cfg.OIDC.ClientID,
 		cfg.OIDC.ClientSecret.MustExpose(),
 		cfg.Server.ExternalURL+"/callback",
@@ -507,6 +508,7 @@ func TestSecureFlagHTTPS(t *testing.T) {
 	oidcClient, err := auth.Discover(
 		context.Background(),
 		cfg.OIDC.IssuerURL,
+		"",
 		cfg.OIDC.ClientID,
 		cfg.OIDC.ClientSecret.MustExpose(),
 		cfg.Server.ExternalURL+"/callback",

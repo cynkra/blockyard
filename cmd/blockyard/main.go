@@ -157,6 +157,7 @@ func main() {
 		oidcClient, err := auth.Discover(
 			context.Background(),
 			cfg.OIDC.IssuerURL,
+			cfg.OIDC.IssuerDiscoveryURL,
 			cfg.OIDC.ClientID,
 			clientSecret,
 			redirectURL,

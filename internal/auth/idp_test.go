@@ -183,6 +183,7 @@ func setupIDPTestServer(t *testing.T) (*httptest.Server, *auth.Deps) {
 	oidcClient, err := auth.Discover(
 		context.Background(),
 		issuerURL,
+		"",
 		keycloakClientID,
 		keycloakSecret,
 		redirectURL,
@@ -331,6 +332,7 @@ func TestIDPDiscovery(t *testing.T) {
 	oidcClient, err := auth.Discover(
 		context.Background(),
 		issuerURL,
+		"",
 		keycloakClientID,
 		keycloakSecret,
 		"http://localhost/callback",

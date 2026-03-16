@@ -53,9 +53,9 @@ Browser
   ├── http://localhost:8080   → blockyard (Shiny apps + API)
   └── http://localhost:5556   → Dex (OIDC login redirect)
 
-blockyard ──OIDC──→ localhost:5556   (token validation, discovery)
+blockyard ──OIDC──→ dex:5556         (discovery, token exchange, JWKS via Docker DNS)
 blockyard ──HTTP──→ openbao:8200     (credential storage, JWT→vault token exchange)
-openbao   ──JWKS──→ localhost:5556   (JWT signature verification)
+openbao   ──JWKS──→ dex:5556         (JWT signature verification via Docker DNS)
 ```
 
 ## Services
@@ -85,7 +85,8 @@ docker compose down -v
   no manual secret configuration is needed.
 - The credential enrollment section on the dashboard lets users store an
   OpenAI API key in OpenBao. This is configured via `blockyard.toml`.
-- Containers that need to reach Dex use `extra_hosts: localhost:host-gateway`
-  so that `localhost:5556` routes to the host-mapped Dex port. This keeps
-  the OIDC issuer URL consistent between the browser, deploy script, and
-  Docker services.
+- Dex's issuer URL is `http://localhost:5556` (what the browser sees).
+  Containers reach Dex via Docker DNS (`dex:5556`). Blockyard uses
+  `issuer_discovery_url` to perform OIDC discovery and server-side
+  requests against the internal address while validating tokens against
+  the public issuer URL.

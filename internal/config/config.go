@@ -75,11 +75,12 @@ type ProxyConfig struct {
 }
 
 type OidcConfig struct {
-	IssuerURL    string   `toml:"issuer_url"`
-	ClientID     string   `toml:"client_id"`
-	ClientSecret Secret   `toml:"client_secret"`
-	CookieMaxAge Duration `toml:"cookie_max_age"`
-	InitialAdmin string   `toml:"initial_admin"`
+	IssuerURL         string   `toml:"issuer_url"`
+	IssuerDiscoveryURL string  `toml:"issuer_discovery_url"` // optional: use a different URL for OIDC discovery (e.g. Docker-internal DNS)
+	ClientID          string   `toml:"client_id"`
+	ClientSecret      Secret   `toml:"client_secret"`
+	CookieMaxAge      Duration `toml:"cookie_max_age"`
+	InitialAdmin      string   `toml:"initial_admin"`
 }
 
 type OpenbaoConfig struct {

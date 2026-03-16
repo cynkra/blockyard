@@ -148,11 +148,12 @@ idle_worker_timeout  = "5m"
 # When enabled, server.session_secret is required unless [openbao] is also
 # configured (in which case it is auto-generated and stored in vault).
 # [oidc]
-# issuer_url     = "https://idp.example.com/realms/myapp"
-# client_id      = "blockyard"
-# client_secret  = "oidc-client-secret"
-# cookie_max_age = "24h"         # default: "24h"
-# initial_admin  = "google-oauth2|abc123"
+# issuer_url           = "https://idp.example.com/realms/myapp"
+# issuer_discovery_url = ""      # optional: internal URL for OIDC discovery (e.g. Docker DNS)
+# client_id            = "blockyard"
+# client_secret        = "oidc-client-secret"
+# cookie_max_age       = "24h"   # default: "24h"
+# initial_admin        = "google-oauth2|abc123"
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]

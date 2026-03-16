@@ -10,6 +10,7 @@ set -eu
 BAO_ADDR="${BAO_ADDR:-http://openbao:8200}"
 BAO_TOKEN="${BAO_TOKEN:-root-dev-token}"
 DEX_ISSUER="${DEX_ISSUER:-http://localhost:5556}"
+DEX_INTERNAL="${DEX_INTERNAL:-${DEX_ISSUER}}"
 APPROLE_SECRET_ID="${APPROLE_SECRET_ID:-dev-secret-id-for-local-use-only}"
 
 header="-H X-Vault-Token:${BAO_TOKEN} -H Content-Type:application/json"
@@ -22,7 +23,7 @@ post() {
 
 echo "==> Waiting for Dex JWKS..."
 for i in $(seq 1 60); do
-  if curl -sf "${DEX_ISSUER}/keys" > /dev/null 2>&1; then
+  if curl -sf "${DEX_INTERNAL}/keys" > /dev/null 2>&1; then
     break
   fi
   if [ "$i" -eq 60 ]; then
@@ -39,7 +40,7 @@ echo "    OK"
 
 echo "==> Configuring JWT auth with Dex..."
 post /v1/auth/jwt/config -d "{
-  \"jwks_url\":      \"${DEX_ISSUER}/keys\",
+  \"jwks_url\":      \"${DEX_INTERNAL}/keys\",
   \"bound_issuer\":  \"${DEX_ISSUER}\",
   \"default_role\":  \"blockyard-user\"
 }"
