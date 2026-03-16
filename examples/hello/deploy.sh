@@ -9,12 +9,11 @@
 #
 # Prerequisites:
 #   - docker compose up -d
-#   - "dex" in /etc/hosts (see README.md)
 #
 set -euo pipefail
 
 BASE_URL="${BLOCKYARD_URL:-http://localhost:8080}"
-DEX_URL="${DEX_URL:-http://dex:5556}"
+DEX_URL="${DEX_URL:-http://localhost:5556}"
 DEX_EMAIL="demo@example.com"
 DEX_PASSWORD="password"
 APP_NAME="hello"
@@ -169,7 +168,7 @@ echo "==> Starting app..."
 auth -X POST "${BASE_URL}/api/v1/apps/${APP_ID}/start" > /dev/null
 
 echo ""
-echo "Done! Open http://localhost:8080/app/${APP_NAME}/ in your browser."
+echo "Done! Open ${BASE_URL}/app/${APP_NAME}/ in your browser."
 echo "You will be redirected to Dex to log in."
 echo ""
 echo "  Email:    ${DEX_EMAIL}"

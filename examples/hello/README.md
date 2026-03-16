@@ -13,12 +13,6 @@ and credential enrollment.
 ## Prerequisites
 
 - Docker (with Compose v2)
-- Add `dex` to your hosts file so the browser can reach the same issuer URL
-  that blockyard uses internally:
-
-  ```bash
-  echo '127.0.0.1 dex' | sudo tee -a /etc/hosts
-  ```
 
 ## Usage
 
@@ -26,7 +20,7 @@ and credential enrollment.
 # Start the full stack (Dex, OpenBao, blockyard)
 docker compose up -d
 
-# Deploy the hello app (automatically logs in and creates a PAT)
+# Deploy the hello app
 ./deploy.sh
 
 # Open in browser — you'll be redirected to Dex to log in
@@ -57,11 +51,11 @@ No manual browser interaction is needed for deployment.
 Browser
   │
   ├── http://localhost:8080   → blockyard (Shiny apps + API)
-  └── http://dex:5556         → Dex (OIDC login redirect)
+  └── http://localhost:5556   → Dex (OIDC login redirect)
 
-blockyard ──OIDC──→ dex:5556      (token validation, discovery)
-blockyard ──HTTP──→ openbao:8200   (credential storage, JWT→vault token exchange)
-openbao   ──JWKS──→ dex:5556      (JWT signature verification)
+blockyard ──OIDC──→ localhost:5556   (token validation, discovery)
+blockyard ──HTTP──→ openbao:8200     (credential storage, JWT→vault token exchange)
+openbao   ──JWKS──→ localhost:5556   (JWT signature verification)
 ```
 
 ## Services
@@ -91,3 +85,7 @@ docker compose down -v
   no manual secret configuration is needed.
 - The credential enrollment section on the dashboard lets users store an
   OpenAI API key in OpenBao. This is configured via `blockyard.toml`.
+- Containers that need to reach Dex use `extra_hosts: localhost:host-gateway`
+  so that `localhost:5556` routes to the host-mapped Dex port. This keeps
+  the OIDC issuer URL consistent between the browser, deploy script, and
+  Docker services.

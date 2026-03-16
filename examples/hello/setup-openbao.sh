@@ -9,7 +9,7 @@ set -eu
 
 BAO_ADDR="${BAO_ADDR:-http://openbao:8200}"
 BAO_TOKEN="${BAO_TOKEN:-root-dev-token}"
-DEX_ISSUER="${DEX_ISSUER:-http://dex:5556}"
+DEX_ISSUER="${DEX_ISSUER:-http://localhost:5556}"
 APPROLE_SECRET_ID="${APPROLE_SECRET_ID:-dev-secret-id-for-local-use-only}"
 
 header="-H X-Vault-Token:${BAO_TOKEN} -H Content-Type:application/json"
@@ -82,13 +82,13 @@ post /v1/auth/approle/role/blockyard-server -d '{
 echo "    OK"
 
 echo "==> Setting custom role_id for dev..."
-post /v1/auth/approle/role/blockyard-server/role-id -d '{"role_id": "blockyard-server"}'
+post /v1/auth/approle/role/blockyard-server/role-id -d '{"role_id": "blockyard-server"}' || true
 echo "    OK"
 
 echo "==> Setting custom secret_id for dev..."
 post /v1/auth/approle/role/blockyard-server/custom-secret-id -d "{
   \"secret_id\": \"${APPROLE_SECRET_ID}\"
-}"
+}" || true
 echo "    OK"
 
 echo "==> OpenBao configured successfully."
