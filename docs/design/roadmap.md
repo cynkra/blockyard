@@ -600,39 +600,68 @@ infrastructure.
   In v0 mode (no OIDC), the root page shows all deployed apps without auth.
   In-app navigation chrome (navbar, app switcher) is deferred to v2.
 
-### v2
+### v2: Single-Node Production Completeness
+
+Usability improvements, safety nets, and blockr-specific features for the
+existing Docker deployment. No Kubernetes dependency.
+
+---
+
+- **CLI tool.** A dedicated Go binary for interacting with the server: deploy
+  apps, list content, tail logs, manage settings. Communicates via the REST
+  API.
+
+- **Bundle rollback.** Activate a previous bundle for a content item. Drain
+  active sessions gracefully before switching.
+
+- **Soft-delete for apps.** Mark apps as deleted instead of immediate removal;
+  background cleanup purges after a retention period. Enables undo and audit
+  trails.
+
+- **Per-content resource limit enforcement.** CPU/memory caps via Docker
+  `--memory` and `--cpus` flags (fields already carried in `WorkerSpec` from
+  v0). Kubernetes enforcement comes for free in v3.
+
+- **Scale-to-zero.** When an app has no active connections for a configurable
+  idle period, stop its workers to free resources. On the next request, hold
+  the connection and spin up a worker before forwarding.
+
+- **Seat-based pre-warming.** Pre-start a standby worker per app so the first
+  user doesn't incur cold-start latency. When a session claims the warm
+  container, replace it with a fresh one.
+
+- **Multiple execution environment images.** Per-app image selection; add an
+  `image` field to app configuration that overrides the server-wide default.
+
+- **Web UI expansion.** Content browser with search/filter and tag management,
+  live-streaming log viewer per app. Lower priority — the API + CLI covers
+  the same functionality.
+
+- **Runtime package installation.** Allow users to install additional block
+  packages during a live session via a server-level package store with
+  per-worker hard-linked library views. See [v2 draft](v2/draft.md) for the
+  full design.
+
+### v3: Kubernetes and Multi-Node
+
+The Kubernetes backend and the architectural refactors it triggers.
+
+---
 
 - **Kubernetes backend.** Implement the `Backend` interface using
   `k8s.io/client-go` to create Deployments (long-lived apps) and Jobs (tasks).
   Involves pod specs, service creation for routing, PVC management for shared
   caches, and pod status polling.
 
-- **Bundle rollback.** Activate a previous bundle for a content item. Drain
-  active sessions gracefully before switching.
+- **Interface extraction.** `SessionStore`, `WorkerRegistry`, and `TaskStore`
+  become interfaces with swappable implementations (in-memory for single-node,
+  PostgreSQL-backed for multi-node HA).
 
-- **Per-content resource limit enforcement.** CPU/memory caps via Docker / K8s
-  (fields carried in `WorkerSpec` from v0).
+- **Backend package extraction.** Extract separate Go packages for each backend
+  implementation if build-tag sprawl warrants it.
 
-- **CLI tool.** A dedicated Go binary for interacting with the server: deploy
-  apps, list content, tail logs, manage settings. Communicates via the REST
-  API.
-
-- **Web UI.** Admin dashboard, content browser, log viewer.
-
-- **Multiple execution environment images.** Per-app image selection; operators
-  or app developers specify which image to use per deployment.
-
-- **Scale-to-zero.** When an app has no active connections for a configurable
-  idle period, stop its workers to free resources. On the next request, hold
-  the connection and spin up a worker before forwarding. Pair with
-  pre-warming.
-
-- **Seat-based pre-warming.** Pre-start a pool of containers before users
-  arrive, so the first request doesn't incur cold-start latency.
-
-- **Runtime package installation.** Allow apps to install R packages at runtime
-  (writable library mount); explore use cases such as user-driven package
-  experimentation.
+- **Build image consolidation.** Kubernetes variant of the v2 rv-binary mount
+  approach: init containers or shared volumes for build dependencies.
 
 ### Out of Scope
 
