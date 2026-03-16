@@ -74,7 +74,8 @@ Enable OIDC authentication. When configured, `server.session_secret` is required
 
 | Field | Default | Description |
 |---|---|---|
-| `issuer_url` | *(required)* | OIDC provider issuer URL |
+| `issuer_url` | *(required)* | OIDC provider issuer URL (must match the `iss` claim in tokens) |
+| `issuer_discovery_url` | — | Internal URL for OIDC discovery when the IdP is at a different address server-side (e.g. Docker DNS). See [Configuration Reference](/reference/config/#split-url-oidc). |
 | `client_id` | *(required)* | OIDC client ID |
 | `client_secret` | *(required)* | OIDC client secret |
 | `cookie_max_age` | `24h` | Max lifetime of session cookies |
@@ -161,11 +162,12 @@ idle_worker_timeout  = "5m"
 # When enabled, server.session_secret is required unless [openbao] is also
 # configured (in which case it is auto-generated and stored in vault).
 # [oidc]
-# issuer_url     = "https://idp.example.com/realms/myapp"
-# client_id      = "blockyard"
-# client_secret  = "oidc-client-secret"
-# cookie_max_age = "24h"
-# initial_admin  = "google-oauth2|abc123"   # OIDC sub of the first admin
+# issuer_url           = "https://idp.example.com/realms/myapp"
+# issuer_discovery_url = ""      # optional: internal URL for OIDC discovery (e.g. Docker DNS)
+# client_id            = "blockyard"
+# client_secret        = "oidc-client-secret"
+# cookie_max_age       = "24h"
+# initial_admin        = "google-oauth2|abc123"   # OIDC sub of the first admin
 
 # Optional: OpenBao credential management (requires [oidc])
 # [openbao]

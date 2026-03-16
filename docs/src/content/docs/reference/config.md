@@ -127,16 +127,18 @@ Enable OIDC-based authentication. When this section is present, `server.session_
 
 ```toml
 [oidc]
-issuer_url     = "https://idp.example.com/realms/myapp"
-client_id      = "blockyard"
-client_secret  = "oidc-client-secret"
-cookie_max_age = "24h"
-initial_admin  = "google-oauth2|abc123"
+issuer_url           = "https://idp.example.com/realms/myapp"
+# issuer_discovery_url = ""      # optional: internal URL for OIDC discovery
+client_id            = "blockyard"
+client_secret        = "oidc-client-secret"
+cookie_max_age       = "24h"
+initial_admin        = "google-oauth2|abc123"
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `issuer_url` | `string` | — | **Yes** | OIDC provider issuer URL |
+| `issuer_url` | `string` | — | **Yes** | OIDC provider issuer URL (must match the `iss` claim in tokens) |
+| `issuer_discovery_url` | `string` | — | No | Internal URL for OIDC discovery and server-side requests. Use when the IdP is reachable at a different address from the server than from browsers (e.g. Docker DNS). See [Split-URL OIDC](#split-url-oidc). |
 | `client_id` | `string` | — | **Yes** | OIDC client ID |
 | `client_secret` | `string` | — | **Yes** | OIDC client secret |
 | `cookie_max_age` | `duration` | `24h` | No | Maximum lifetime of session cookies |
@@ -147,6 +149,32 @@ initial_admin  = "google-oauth2|abc123"
   authentication. Users must log in before accessing apps (except for apps
   with `public` visibility).
 </Aside>
+
+### Split-URL OIDC
+
+In Docker or Kubernetes deployments, the OIDC provider (e.g. Dex, Keycloak)
+is often reachable at a different address from inside the cluster than from
+the user's browser. For example:
+
+- **Browser** reaches the IdP at `http://localhost:5556`
+- **Server container** reaches the IdP at `http://dex:5556` (Docker DNS)
+
+Set `issuer_discovery_url` to the internal address. Blockyard will:
+
+1. Perform OIDC discovery against the internal URL
+2. Route all server-side requests (token exchange, JWKS fetch, refresh) to the internal URL
+3. Keep the public `issuer_url` for browser-facing redirects and token validation
+
+```toml
+[oidc]
+issuer_url           = "http://localhost:5556"       # public: what the browser sees
+issuer_discovery_url = "http://dex:5556"             # internal: Docker DNS
+client_id            = "blockyard"
+client_secret        = "oidc-client-secret"
+```
+
+The corresponding environment variables are `BLOCKYARD_OIDC_ISSUER_URL` and
+`BLOCKYARD_OIDC_ISSUER_DISCOVERY_URL`.
 
 ## `[openbao]` *(optional)*
 
