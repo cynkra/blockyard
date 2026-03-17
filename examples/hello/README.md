@@ -24,7 +24,7 @@ docker compose up -d
 ./deploy.sh
 
 # Open in browser — you'll be redirected to Dex to log in
-open http://localhost:8080/app/hello/
+open http://localhost:8080/
 ```
 
 ### Test credentials
