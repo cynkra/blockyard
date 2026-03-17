@@ -64,6 +64,65 @@ the server container into build containers (bind mount to
 works with Docker DooD; the Kubernetes variant (init container or shared
 volume) is a v3 concern.
 
+### Data Mounts
+
+App owners can map additional host directories into worker containers —
+e.g., shared model files, reference datasets, or writable scratch space.
+
+#### Mount Specification
+
+Each mount has three fields:
+
+| Field      | Required | Description                                      |
+|------------|----------|--------------------------------------------------|
+| `source`   | yes      | Named mount source (defined by admin), optionally followed by a subpath — e.g., `models` or `models/v2` |
+| `target`   | yes      | Absolute path inside the worker container — e.g., `/data/models` |
+| `readonly` | no       | Default `true`. Set to `false` for writable mounts. |
+
+Stored as a JSON column (`data_mounts`) on the `apps` table, consistent
+with other per-app settings like `memory_limit` and `cpu_limit`.
+
+#### Admin-Defined Mount Sources
+
+The server config defines a whitelist of named mount sources. App owners
+can only mount from these sources — they never specify raw host paths.
+
+```toml
+[[storage.data_mounts]]
+name = "models"
+path = "/data/shared-models"
+
+[[storage.data_mounts]]
+name = "scratch"
+path = "/data/scratch"
+```
+
+`path` is from the server's perspective (i.e., inside the server
+container in a DooD setup). The existing `MountConfig` logic in
+`mounts.go` handles translation to the host-side path before passing it
+to the Docker API — the same mechanism that already translates bundle
+paths across native, bind-mount, and volume deployment modes.
+
+When an app owner specifies `source: "models/v2"`, the server:
+1. Splits into source name (`models`) and subpath (`v2`).
+2. Validates the source name against the configured mount sources.
+3. Validates the subpath contains no `..` components (path traversal).
+4. Resolves the full server-side path (`/data/shared-models/v2`).
+5. Translates to the host-side path via `MountConfig`.
+6. Adds the bind mount to the worker container spec.
+
+This gives operators full control over which host directories are
+exposed, while app owners get a portable, environment-agnostic
+interface. The same app config works across staging and production —
+only the admin-defined paths differ.
+
+#### Interaction with Existing Mounts
+
+Worker containers already receive two read-only mounts: the bundle at
+`/app` and the restored library at `/blockyard-lib`. Data mounts must
+not collide with these paths or with each other. The server rejects
+mount specs where `target` conflicts with a reserved path.
+
 ### Web UI Expansion
 
 The v1 minimal UI covers the dashboard, user management, PAT management,
@@ -379,6 +438,45 @@ A possible split:
   lockfile. This is what blockyard already does.
 - **Server-side (live install):** New mechanism — a thin shim over
   `pak::pkg_install()` rather than either rv or renv.
+
+### Docker Daemon Hardening
+
+The server communicates with the Docker daemon via the Docker socket.
+A compromised server process has unrestricted access to the Docker API —
+it could create privileged containers, mount arbitrary host paths, use
+host networking, or mount the Docker socket itself into a worker. This
+is not specific to data mounts; it is a pre-existing concern that
+data mounts make more visible.
+
+#### Docker Authorization Plugins
+
+Docker supports [authorization plugins](https://docs.docker.com/engine/extend/plugins_authorization/)
+that intercept every API request before the daemon processes it. An
+authorization plugin can inspect the request (image, mounts, network
+mode, capabilities, etc.) and return allow or deny.
+
+The policy for blockyard workers should enforce:
+
+- **Mount sources** are restricted to configured data mount paths,
+  bundle storage, and library paths. No access to `/`, `/etc`,
+  the Docker socket, or other sensitive host paths.
+- **No privileged containers.** Workers must never run with
+  `--privileged` or elevated capabilities.
+- **No host networking.** Workers use the blockyard-managed bridge
+  network only.
+- **Image allowlist.** Workers may only use the server-wide default
+  image or explicitly configured per-app images.
+
+This can be implemented as a purpose-built plugin (a small HTTP server
+that parses Docker API create-container requests and validates against
+the policy) or via an existing OPA-based plugin like `opa-docker-authz`
+with a Rego policy encoding the above rules.
+
+The authorization plugin runs as a daemon-level configuration — the
+operator enables it in Docker's `daemon.json`. This means enforcement
+is independent of blockyard's application code: even if the server is
+fully compromised, the Docker daemon itself refuses to create containers
+that violate the policy.
 
 #### Open Questions
 

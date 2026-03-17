@@ -32,7 +32,8 @@ plane. v1 is the MVP: the minimum needed to host a real blockr app for real
 users. v1 adds user auth (OIDC), identity injection, per-user credential
 management (the integration system), and load balancing. Nothing beyond v1 is
 required to call the product useful. v2 adds single-node production polish
-(CLI, scale-to-zero, pre-warming, runtime package install). v3 adds the
+(CLI, scale-to-zero, pre-warming, runtime package install, data mounts,
+Docker daemon hardening). v3 adds the
 lightweight process backend. v4 adds Kubernetes for multi-node scaling.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
@@ -653,6 +654,17 @@ existing Docker deployment. No Kubernetes dependency.
   packages during a live session via a server-level package store with
   per-worker hard-linked library views. See [v2 draft](v2/draft.md) for the
   full design.
+
+- **Data mounts.** Per-app configuration for mounting additional host
+  directories into worker containers (e.g., shared datasets, model files,
+  scratch space). Admin-defined named mount sources whitelist which host
+  paths are available; app owners reference sources by name and specify
+  the container mount point and read-only/read-write mode.
+
+- **Docker daemon hardening.** A Docker authorization plugin that enforces
+  mount path restrictions, disallows privileged containers, restricts
+  network modes, and limits allowed images at the daemon level — defense
+  in depth against a compromised server process.
 
 ### v3: Process Backend
 
