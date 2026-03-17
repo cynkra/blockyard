@@ -93,6 +93,7 @@ func authenticateFromPAT(srv *server.Server, r *http.Request, token string) *aut
 
 	return &auth.CallerIdentity{
 		Sub:    result.User.Sub,
+		Name:   result.User.Name,
 		Role:   auth.ParseRole(result.User.Role),
 		Source: auth.AuthSourcePAT,
 	}

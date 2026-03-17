@@ -194,7 +194,7 @@ func Handler(srv *server.Server) http.Handler {
 		r.Header.Del("X-Forwarded-For")
 		r.Header.Del("X-Real-IP")
 		if caller != nil {
-			r.Header.Set("X-Shiny-User", caller.Sub)
+			r.Header.Set("X-Shiny-User", caller.DisplayName())
 		}
 		r.Header.Set("X-Shiny-Access", relationToAccessLevel(relation))
 

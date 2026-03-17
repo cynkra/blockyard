@@ -837,8 +837,8 @@ func TestProxyInjectShinyHeaders(t *testing.T) {
 	}
 
 	// Verify the backend received the correct identity headers.
-	if got := resp.Header.Get("X-Echo-User"); got != "viewer-1" {
-		t.Errorf("X-Shiny-User: expected %q, got %q", "viewer-1", got)
+	if got := resp.Header.Get("X-Echo-User"); got != "Viewer" {
+		t.Errorf("X-Shiny-User: expected %q, got %q", "Viewer", got)
 	}
 	if got := resp.Header.Get("X-Echo-Access"); got != "viewer" {
 		t.Errorf("X-Shiny-Access: expected %q, got %q", "viewer", got)
@@ -893,8 +893,8 @@ func TestProxyCollaboratorAccess(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	if got := resp.Header.Get("X-Echo-User"); got != "collab-user" {
-		t.Errorf("X-Shiny-User: expected %q, got %q", "collab-user", got)
+	if got := resp.Header.Get("X-Echo-User"); got != "Collab" {
+		t.Errorf("X-Shiny-User: expected %q, got %q", "Collab", got)
 	}
 	if got := resp.Header.Get("X-Echo-Access"); got != "collaborator" {
 		t.Errorf("X-Shiny-Access: expected %q, got %q", "collaborator", got)
@@ -935,8 +935,8 @@ func TestProxyAdminAccess(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	if got := resp.Header.Get("X-Echo-User"); got != "admin" {
-		t.Errorf("X-Shiny-User: expected %q, got %q", "admin", got)
+	if got := resp.Header.Get("X-Echo-User"); got != "Admin" {
+		t.Errorf("X-Shiny-User: expected %q, got %q", "Admin", got)
 	}
 	if got := resp.Header.Get("X-Echo-Access"); got != "owner" {
 		t.Errorf("X-Shiny-Access: expected %q, got %q", "owner", got)

@@ -97,6 +97,7 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 
 	// Look up role from database.
 	role := auth.RoleViewer
+	name := ""
 	if srv.DB != nil {
 		dbUser, err := srv.DB.GetUser(cookie.Sub)
 		if err != nil {
@@ -108,11 +109,13 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 		}
 		if dbUser != nil {
 			role = auth.ParseRole(dbUser.Role)
+			name = dbUser.Name
 		}
 	}
 
 	return &auth.CallerIdentity{
 		Sub:    cookie.Sub,
+		Name:   name,
 		Role:   role,
 		Source: auth.AuthSourceSession,
 	}

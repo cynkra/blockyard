@@ -74,8 +74,17 @@ const (
 // middlewares. Stored in request context for use by authorization checks.
 type CallerIdentity struct {
 	Sub    string
+	Name   string // human-readable display name (from OIDC name claim / DB)
 	Role   Role
 	Source AuthSource
+}
+
+// DisplayName returns the human-readable name if available, otherwise the Sub.
+func (c *CallerIdentity) DisplayName() string {
+	if c.Name != "" {
+		return c.Name
+	}
+	return c.Sub
 }
 
 type callerContextKey int

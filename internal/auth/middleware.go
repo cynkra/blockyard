@@ -114,8 +114,13 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 					next.ServeHTTP(w, r)
 					return
 				}
+				name := ""
+				if dbUser != nil {
+					name = dbUser.Name
+				}
 				caller := &CallerIdentity{
 					Sub:    cookie.Sub,
+					Name:   name,
 					Role:   role,
 					Source: AuthSourceSession,
 				}
