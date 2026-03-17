@@ -21,26 +21,30 @@ Connect:
   inside a container, so adding a new language later is a matter of adding a
   new deployment pipeline, not changing the core architecture.
 
-- **Isolation:** blockr apps execute arbitrary user-supplied R code. Container
-  isolation is required — there is no bare-metal process backend. The default
-  is one container per session (`max_sessions_per_worker = 1`). See the Worker
-  Scaling feature entry for details.
+- **Isolation:** blockr apps execute arbitrary user-supplied R code. The
+  default Docker backend provides full container isolation; a lightweight
+  process backend using bubblewrap is available as an alternative (v3).
+  The default is one worker per session (`max_sessions_per_worker = 1`).
+  See the Worker Scaling feature entry for details.
 
 **Milestones:** v0 is the core infrastructure — no user auth on the app
 plane. v1 is the MVP: the minimum needed to host a real blockr app for real
 users. v1 adds user auth (OIDC), identity injection, per-user credential
 management (the integration system), and load balancing. Nothing beyond v1 is
-required to call the product useful.
+required to call the product useful. v2 adds single-node production polish
+(CLI, scale-to-zero, pre-warming, runtime package install). v3 adds the
+lightweight process backend. v4 adds Kubernetes for multi-node scaling.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
-interface (Docker vs. Kubernetes). This abstraction is worth its complexity
-because: (a) it affects every other layer of the architecture and retrofitting
-it later is expensive, (b) its shape is well-validated across multiple prior
-projects, and (c) we know we will need Kubernetes before the project reaches
-scale. The `Backend` interface is validated in tests using a lightweight
-in-process mock — no bare-metal process spawner is needed. Everything else —
-language dispatch, content-type routing tables, version matching — gets built
-when there is a second use case to validate the abstraction's shape.
+interface (Docker vs. process vs. Kubernetes). This abstraction is worth its
+complexity because: (a) it affects every other layer of the architecture and
+retrofitting it later is expensive, (b) its shape is well-validated across
+multiple prior projects, and (c) we know we will need alternative backends
+(process for lightweight deployments, Kubernetes for scale). The `Backend`
+interface is validated in tests using a lightweight in-process mock.
+Everything else — language dispatch, content-type routing tables, version
+matching — gets built when there is a second use case to validate the
+abstraction's shape.
 
 ## Server Configuration
 
@@ -642,7 +646,38 @@ existing Docker deployment. No Kubernetes dependency.
   per-worker hard-linked library views. See [v2 draft](v2/draft.md) for the
   full design.
 
-### v3: Kubernetes and Multi-Node
+### v3: Process Backend
+
+A lightweight alternative to Docker for single-host deployments. Replaces
+per-worker containers with bubblewrap-sandboxed processes — no daemon, no
+socket, ~2ms startup overhead. See [backends.md](backends.md) for the full
+design and isolation analysis.
+
+---
+
+- **Process backend implementation.** Implement the `Backend` interface
+  using bubblewrap (`bwrap`) for process sandboxing. Workers are spawned
+  as bwrap-sandboxed R processes with PID namespace isolation, filesystem
+  isolation via bind mounts, seccomp filtering, and capability dropping.
+  No per-worker network isolation or resource limits — these are deferred
+  to the Docker and Kubernetes backends.
+
+- **Containerized deployment mode.** A Docker image shipping blockyard, R,
+  bwrap, and system libraries. Runs with a custom seccomp profile allowing
+  user namespace creation — no Docker socket, no `CAP_SYS_ADMIN`. The
+  recommended deployment mode for most users of the process backend.
+  Provides rootfs containment: a bwrap sandbox escape lands in the outer
+  container's filesystem, not the host.
+
+- **Native deployment mode.** Documentation and tooling for running the
+  process backend directly on a Linux host without an outer container.
+  Operator provisions R, bwrap, and system libraries.
+
+- **Custom seccomp profile.** A JSON seccomp profile based on Docker's
+  default, adding `CLONE_NEWUSER` to the allowlist. Shipped alongside
+  the Docker Compose configuration.
+
+### v4: Kubernetes and Multi-Node
 
 The Kubernetes backend and the architectural refactors it triggers.
 

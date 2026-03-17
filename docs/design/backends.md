@@ -1,10 +1,10 @@
 # Backend Strategies
 
-This document compares three backend strategies for running worker processes:
-the current Docker/Podman backend, a daemonless OCI runtime backend, and a
-bare process backend using kernel primitives directly. It also evaluates the
-Posit Connect sandboxing model as prior art and explains why it is
-insufficient for blockyard's threat model.
+This document compares four backend strategies for running worker processes:
+the current Docker/Podman backend, a lightweight process backend using
+bubblewrap, a daemonless OCI runtime backend, and a Kubernetes backend. It
+also evaluates the Posit Connect sandboxing model as prior art and explains
+why it is insufficient for blockyard's threat model.
 
 For the Backend interface definition and current Docker backend implementation,
 see [architecture.md](architecture.md). For threat model and credential trust
@@ -187,32 +187,41 @@ host policy that prohibits it), the OCI backend is the fallback that
 preserves container-equivalent isolation. Until then, Docker or the process
 backend below are the practical choices.
 
-## Proposed Alternative: Process Backend
+## Alternative: Process Backend
 
-A local backend that spawns R processes directly on the host, using Linux
-kernel primitives to achieve isolation equivalent to containers — without a
-container runtime.
+A lightweight backend that spawns R processes directly, using bubblewrap
+(`bwrap`) for namespace and filesystem isolation — without a container
+runtime, daemon, or socket. This is a single-host backend that prioritizes
+startup speed (~2ms overhead vs ~500ms–1s for Docker) and operational
+simplicity over the full defense-in-depth of the Docker backend.
 
-### Building blocks
+### Deployment modes
 
-The Linux kernel provides the same isolation primitives that containers use.
-Containers simply bundle all of them behind a runtime API. A process backend
-uses the same primitives directly:
+The process backend runs on any Linux system with bubblewrap installed.
+How blockyard itself is deployed is an orthogonal choice:
 
-| Primitive | Purpose | How containers use it |
-|---|---|---|
-| Namespaces (`clone`/`unshare`) | Visibility isolation (mount, PID, user, UTS, cgroup) | All namespaces enabled |
-| seccomp-bpf | Syscall filtering | Default profile blocks ~44 syscalls |
-| cgroups v2 | Resource limits (CPU, memory, IO, PIDs) | Per-container cgroup |
-| Capabilities | Privilege restriction | `--cap-drop=ALL` |
-| `pivot_root`/`chroot` | Filesystem root isolation | Overlay rootfs |
-| AppArmor / SELinux | Mandatory access control | Optional profiles |
-| Landlock (5.13+) | Unprivileged filesystem sandboxing | Not yet widely used |
+**Containerized (recommended for most users):** blockyard runs inside a
+container image that ships R, bwrap, and system libraries. The outer
+container provides rootfs containment — a bwrap sandbox escape lands in the
+container's minimal filesystem, not the host. This also makes the process
+backend portable to macOS and Windows via Docker Desktop. The outer
+container requires a custom seccomp profile that allows `CLONE_NEWUSER`
+(see [Containerized deployment](#containerized-deployment) below).
 
-Two practical tools wrap these primitives into usable interfaces:
+**Native (dedicated VM/host):** blockyard runs directly on a Linux host.
+The operator provisions R, bwrap, and system libraries. No container
+overhead. A bwrap sandbox escape lands on the host filesystem — acceptable
+when the host is dedicated to blockyard.
 
-**bubblewrap (`bwrap`)**: A single static binary designed for running untrusted
-code. Used by Flatpak for desktop app sandboxing. Combines namespaces, bind
+The Go code is identical in both modes — it exec's bwrap the same way.
+The difference is purely operational: what's pre-installed and what the
+filesystem looks like outside the sandbox.
+
+### Isolation mechanism
+
+bubblewrap (`bwrap`) is a single static binary (~100KB) designed for
+sandboxing untrusted code. Used by Flatpak for desktop app sandboxing and
+by OpenAI Codex for AI agent code execution. It combines namespaces, bind
 mounts, seccomp, and capability dropping into one CLI invocation:
 
 ```
@@ -229,95 +238,86 @@ bwrap \
   -- R -e "shiny::runApp('/app', port=PORT)"
 ```
 
-**systemd transient units**: `systemd-run` spawns a process with cgroups,
-seccomp, filesystem protection, and capability dropping — all declaratively:
+The `--unshare-user` flag is critical: it creates a user namespace first,
+which allows the remaining namespaces (PID, mount) to be created without
+`CAP_SYS_ADMIN`. This is what makes bwrap work inside unprivileged
+containers.
 
-```
-systemd-run --scope \
-  --property=ProtectSystem=strict \
-  --property=ReadOnlyPaths=/app \
-  --property=TemporaryFileSystem=/tmp \
-  --property=NoNewPrivileges=yes \
-  --property=CapabilityBoundingSet= \
-  --property=SystemCallFilter=@system-service \
-  --property=MemoryMax=512M \
-  --property=CPUQuota=50% \
-  --property=TasksMax=64 \
-  R -e "shiny::runApp('/app', port=PORT)"
-```
+### Isolation properties
 
-### Network isolation without network namespaces
-
-Network namespaces are the hardest primitive to use in isolation — creating one
-gives the process a completely disconnected network stack, and reconnecting it
-requires veth pairs, bridges, and NAT rules (i.e., reimplementing what the
-container runtime does).
-
-blockyard's network requirements are narrowly scoped: workers need to reach
-**Vault (OpenBao)**, the **IdP**, and the **internet**. Nothing else. This
-known allowlist enables a simpler approach: **per-UID iptables rules on the
-shared host network**.
-
-Each worker runs as a dedicated UID from a preallocated pool (e.g.,
-`blockyard-w0` through `blockyard-w99`, UIDs 10000–10099). The iptables
-`owner` match module (`-m owner --uid-owner`) applies firewall rules
-per-UID without requiring a network namespace:
-
-```bash
-# Allowlist: Vault and IdP (insert before the deny rules)
--A OUTPUT -m owner --uid-owner 10000:10099 -d $VAULT_HOST -p tcp --dport $VAULT_PORT -j ACCEPT
--A OUTPUT -m owner --uid-owner 10000:10099 -d $IDP_HOST -p tcp --dport $IDP_PORT -j ACCEPT
--A OUTPUT -m owner --uid-owner 10000:10099 -p udp --dport 53 -j ACCEPT
-
-# Block everything local
--A OUTPUT -m owner --uid-owner 10000:10099 -d 127.0.0.0/8 -j DROP
--A OUTPUT -m owner --uid-owner 10000:10099 -d 169.254.0.0/16 -j DROP
--A OUTPUT -m owner --uid-owner 10000:10099 -d 10.0.0.0/8 -j DROP
--A OUTPUT -m owner --uid-owner 10000:10099 -d 172.16.0.0/12 -j DROP
--A OUTPUT -m owner --uid-owner 10000:10099 -d 192.168.0.0/16 -j DROP
-
-# Allow internet (public IPs)
--A OUTPUT -m owner --uid-owner 10000:10099 -j ACCEPT
-```
-
-This achieves:
-
-- **Workers cannot reach each other** — inter-worker traffic would go via
-  localhost or RFC1918, which is blocked.
-- **Workers cannot reach the management API** — the server listens on
-  localhost.
-- **Workers cannot reach cloud metadata** — `169.254.0.0/16` is blocked.
-- **Workers can reach Vault and the IdP** — explicit allowlist holes punched
-  before the RFC1918 deny rules.
-- **Workers can reach the internet** — public IPs are allowed.
-- **The server can reach workers** — the server runs as a different UID, not
-  subject to the worker rules. Workers bind on localhost; the server connects
-  to them freely.
-
-No network namespace. No veth pairs. No bridge setup. No NAT. Standard
-iptables with the `owner` module, which has been in the kernel for decades.
-
-**Modern variant — nftables + cgroup matching:** On cgroups v2, nftables can
-match on `meta cgroup` instead of UID. Each worker's cgroup (created
-automatically by systemd transient units) becomes the firewall selector. This
-avoids preallocating a UID pool, but requires nftables.
-
-### Isolation comparison
-
-| Property | Docker backend | Process backend |
+| Property | Mechanism | Strength |
 |---|---|---|
-| Filesystem | Overlay rootfs, full isolation | Bind mounts via bwrap, read-only. No overlay rootfs — process sees host kernel's `/proc`, `/sys`. Adequate with careful mount construction. |
-| PID | PID namespace per container | `CLONE_NEWPID` via bwrap. Equivalent. |
-| Network | Per-container bridge + iptables | Per-UID iptables on shared host network. Same effective policy; no network namespace overhead. |
-| Syscalls | Default seccomp profile | Same seccomp BPF profile applied via bwrap or systemd. Equivalent. |
-| Capabilities | `--cap-drop=ALL` | `PR_SET_NO_NEW_PRIVS` + empty capability bounding set. Equivalent. |
-| Resources | Per-container cgroup | Per-process cgroup via systemd or direct cgroupfs writes. Equivalent. |
-| Rootfs | Separate overlay filesystem | **Weaker.** The process runs on the host filesystem, with visibility restricted by bind mounts. A sandbox escape lands on the real host filesystem, not a minimal container rootfs. |
+| Filesystem | Bind mounts via bwrap, read-only app and library mounts, writable tmpfs at `/tmp`. | Full |
+| PID | `CLONE_NEWPID` via bwrap. Workers cannot see or signal other processes. | Full |
+| Syscalls | seccomp-bpf profile applied via bwrap. Same filter as Docker's default. | Full |
+| Capabilities | `PR_SET_NO_NEW_PRIVS` + empty capability bounding set. | Full |
+| Rootfs | **Containerized:** escape lands in the outer container's filesystem (equivalent to Docker). **Native:** escape lands on the host filesystem (weaker). | Mode-dependent |
+| Network | **Not provided.** Workers share the host (or container) network stack. | None |
+| Resources | **Not provided.** No per-worker CPU, memory, or PID limits. The outer container's cgroup limits act as a shared ceiling (containerized mode only). | Shared ceiling only |
 
-The only meaningful gap is **rootfs isolation**: a container escape lands in
-a container's minimal filesystem, while a bwrap escape lands on the host.
-This is a defense-in-depth difference, not a primary security boundary —
-both rely on the kernel for enforcement.
+### What's intentionally not included
+
+**Network isolation** and **per-worker resource limits** are omitted from
+the process backend. This is a deliberate scope decision:
+
+- **Network isolation** requires either network namespaces (complex — veth
+  pairs, bridges, NAT) or per-UID iptables rules (requires `CAP_NET_ADMIN`
+  and a preallocated UID pool). Both add significant operational complexity
+  for a backend whose purpose is simplicity.
+
+- **Per-worker resource limits** require cgroup delegation, which is
+  difficult to obtain inside a container and adds a systemd dependency on
+  native hosts. Posit Connect — the industry-standard R deployment
+  platform — does not implement per-process resource limits in its local
+  deployment mode either, relying instead on process count management.
+
+For deployments that need network isolation or per-worker resource limits,
+use the Docker backend. The process backend is appropriate for internal
+deployments, development, and scenarios where startup latency is the
+primary concern.
+
+### Containerized deployment
+
+When blockyard runs inside a container, the outer container needs a custom
+seccomp profile that allows user namespace creation (`CLONE_NEWUSER`).
+Docker's default seccomp profile blocks all `CLONE_NEW*` flags without
+`CAP_SYS_ADMIN`.
+
+The custom profile is a copy of Docker's default with one addition:
+allowing `clone`/`unshare` with the `CLONE_NEWUSER` argument. This is a
+minimal, surgical change — no capabilities are added, no other seccomp
+restrictions are relaxed.
+
+```
+docker run \
+  --security-opt seccomp=blockyard-seccomp.json \
+  --read-only \
+  ghcr.io/cynkra/blockyard:latest
+```
+
+No `--privileged`, no `--cap-add SYS_ADMIN`, no Docker socket mount.
+
+**Prior art:** OpenAI Codex uses the same approach — bubblewrap inside a
+container with `--unshare-user` for nested namespace creation. They
+validated this pattern at scale for sandboxing AI agent code execution.
+See [containers/bubblewrap#505](https://github.com/containers/bubblewrap/issues/505)
+and [openai/codex#13624](https://github.com/openai/codex/pull/13624).
+
+### Kernel primitives reference
+
+The Linux kernel provides the same isolation primitives that containers
+use. Containers bundle all of them behind a runtime API; the process
+backend uses a subset directly via bubblewrap:
+
+| Primitive | Purpose | Used by process backend? |
+|---|---|---|
+| Namespaces (`clone`/`unshare`) | Visibility isolation (mount, PID, user, UTS) | Yes, via bwrap |
+| seccomp-bpf | Syscall filtering | Yes, via bwrap |
+| Capabilities | Privilege restriction | Yes, via bwrap |
+| cgroups v2 | Resource limits (CPU, memory, PIDs) | No — shared ceiling only |
+| Network namespaces | Network isolation | No — shared network stack |
+| `pivot_root`/`chroot` | Filesystem root isolation | Partial — bwrap uses bind mounts, not overlay rootfs |
+| AppArmor / SELinux | Mandatory access control | No |
 
 ## Comparison
 
@@ -326,15 +326,16 @@ both rely on the kernel for enforcement.
 | Dimension | Docker | Process (bwrap) | Kubernetes |
 |---|---|---|---|
 | Startup latency | ~500ms–1s (container + network) | ~2ms (fork + exec) | ~2–5s (Pod scheduling + pull + start) |
-| Runtime dependencies | Docker/Podman daemon + socket | bubblewrap (~100KB static binary) + systemd (for cgroups) | Kubernetes cluster + CNI with NetworkPolicy + ReadWriteMany PVC |
-| Socket privilege | Root-equivalent Docker socket | None. iptables rules require initial root setup (one-time). | RBAC (namespace-scoped, auditable) |
-| Rootfs isolation | Full (overlay filesystem) | Partial (bind mounts on host filesystem) | Full (container image per Pod) |
-| Image management | Docker images, version pinning, registries | R + system libraries installed on host. Reproducibility is the operator's responsibility. | Same image model as Docker; pulled by kubelet |
-| Operational tooling | `docker ps/logs/inspect` | `systemctl`, `journalctl`, `ps`, custom CLI | `kubectl get pods/logs/describe`, standard k8s tooling |
-| Network overhead | Per-container bridge, server multi-homing | None — shared host network with per-UID firewall | CNI-managed; NetworkPolicy for isolation |
-| Portability | Linux + container runtime | Linux only (kernel primitives). Not portable to macOS. | Any k8s cluster (cloud or on-prem) |
-| Go integration | Mature Docker Go client | `os/exec` to call bwrap/systemd-run | Mature `k8s.io/client-go` |
-| Maturity | Production-hardened, widely deployed | Requires careful implementation and testing | Kubernetes is battle-tested; integration is custom |
+| Runtime dependencies | Docker/Podman daemon + socket | bubblewrap (~100KB static binary). Containerized mode: container runtime for the outer container. Native mode: R + system libraries on host. | Kubernetes cluster + CNI with NetworkPolicy + ReadWriteMany PVC |
+| Socket privilege | Root-equivalent Docker socket | None. Containerized mode: custom seccomp profile only. Native mode: no special privileges. | RBAC (namespace-scoped, auditable) |
+| Rootfs isolation | Full (overlay filesystem) | Containerized: full (outer container). Native: partial (host filesystem). | Full (container image per Pod) |
+| Image management | Docker images, version pinning, registries | Containerized: single image ships R + bwrap + system libs. Native: operator's responsibility. | Same image model as Docker; pulled by kubelet |
+| Network isolation | Per-container bridge + iptables | **Not provided.** Shared network stack. | CNI-managed; NetworkPolicy for isolation |
+| Resource limits | Per-container cgroup (CPU, memory, PIDs) | **Not provided.** Shared ceiling from outer container (containerized) or none (native). | Per-Pod resource limits via PodSpec |
+| Operational tooling | `docker ps/logs/inspect` | `ps`, custom CLI, stdout/stderr pipes | `kubectl get pods/logs/describe`, standard k8s tooling |
+| Portability | Linux + container runtime | Containerized: any OS via Docker Desktop. Native: Linux only. | Any k8s cluster (cloud or on-prem) |
+| Go integration | Mature Docker Go client | `os/exec` to call bwrap | Mature `k8s.io/client-go` |
+| Maturity | Production-hardened, widely deployed | Requires careful implementation and testing. bwrap-in-container pattern validated by OpenAI Codex. | Kubernetes is battle-tested; integration is custom |
 | Scaling model | Single host | Single host | Multi-node (horizontal scaling of both server and workers) |
 | Database | SQLite (single-writer) | SQLite (single-writer) | PostgreSQL (multi-replica) |
 | State sharing | In-memory (single process) | In-memory (single process) | Redis or PostgreSQL for cross-replica coordination |
@@ -357,9 +358,11 @@ both rely on the kernel for enforcement.
   near-instant wake-up).
 - The Docker socket privilege is unacceptable (e.g., hardened hosts that
   prohibit Docker-out-of-Docker).
-- The deployment is internal-only or behind additional network controls
-  that compensate for weaker rootfs isolation.
-- Simplicity is valued — no daemon, no images, no socket.
+- The deployment is internal-only or behind additional network controls.
+  The process backend does not provide per-worker network isolation or
+  resource limits — use Docker if these are required.
+- Simplicity is valued — no daemon, no socket. Containerized mode ships
+  a single image; native mode needs only bwrap and R on the host.
 
 **Kubernetes backend** is the right choice when:
 
@@ -386,30 +389,24 @@ runtime-agnostic. A process backend implements them as:
 
 | Method | Docker | Process (bwrap) | Kubernetes |
 |---|---|---|---|
-| `Spawn` | `ContainerCreate` + `ContainerStart` + network setup | `bwrap` + `exec` (or `systemd-run`) | Create Pod + Service + NetworkPolicy |
+| `Spawn` | `ContainerCreate` + `ContainerStart` + network setup | `bwrap` + `exec` | Create Pod + Service + NetworkPolicy |
 | `Stop` | `ContainerStop` + `ContainerRemove` + network cleanup | `kill` + `waitpid` | Delete Pod + Service + NetworkPolicy |
 | `HealthCheck` | TCP connect to container IP | TCP connect to `127.0.0.1:PORT` | Pod Ready condition via k8s API |
-| `Logs` | Docker log stream API | stdout/stderr pipes (or `journalctl` for systemd) | `Pods().GetLogs()` stream |
+| `Logs` | Docker log stream API | stdout/stderr pipes from bwrap child process | `Pods().GetLogs()` stream |
 | `Addr` | Container IP on named network | `127.0.0.1:PORT` (allocated from a port pool) | Pod IP + port from `pod.Status.PodIP` |
 | `Build` | Run-to-completion container | bwrap process with write access to library path | Job with `backoffLimit: 0`, wait for completion |
-| `ListManaged` | Docker API filter by labels | Scan cgroup hierarchy or PID files for managed processes | Label selector query across Pods, Jobs, Services, NetworkPolicies |
-| `RemoveResource` | Docker remove container/network | Kill process, remove cgroup, clean up temp dirs | Delete resource by name and kind |
-
-### UID pool management
-
-The process backend preallocates a range of system UIDs for workers (e.g.,
-`blockyard-w0` through `blockyard-w99`). The UID pool is configured at install
-time. Each `Spawn` call claims the next available UID; `Stop` returns it to
-the pool. iptables rules are configured once for the entire UID range —
-individual worker lifecycle events do not modify firewall rules.
+| `ListManaged` | Docker API filter by labels | Scan PID files for managed processes | Label selector query across Pods, Jobs, Services, NetworkPolicies |
+| `RemoveResource` | Docker remove container/network | Kill process, clean up temp dirs | Delete resource by name and kind |
 
 ### R runtime management
 
-Unlike the Docker backend (where R is baked into the image), the process
-backend requires R to be installed on the host. The configured R binary
-path, library paths, and environment variables are set per-process at spawn
-time. Package libraries are bind-mounted read-only, identically to the
-Docker backend.
+In containerized mode, R is baked into the blockyard image — the same
+approach as the Docker backend, but without per-worker containers. In
+native mode, R must be installed on the host and the operator is
+responsible for system library management. In both modes, the configured
+R binary path, library paths, and environment variables are set
+per-process at spawn time. Package libraries are bind-mounted read-only
+into each bwrap sandbox, identically to the Docker backend.
 
 ### Port allocation
 
@@ -426,8 +423,9 @@ networking, and resource management to a cluster orchestrator. The server
 talks to the Kubernetes API instead of a Docker socket or local runtime
 binary.
 
-This is the v2 production backend for multi-node deployments. The Docker
-backend remains the recommended choice for single-host deployments.
+This is the v4 production backend for multi-node deployments. The Docker
+backend remains the recommended choice for single-host deployments that
+need full isolation; the process backend is the lightweight alternative.
 
 ### Architecture
 
@@ -647,14 +645,17 @@ pvc_mount_path = "/data/bundles" # mount point in all Pods
 kubeconfig = ""                  # empty = in-cluster; path = out-of-cluster
 ```
 
-Validation rejects configs where both `[docker]` and `[kubernetes]` are
-set, or where neither is set. Backend selection is a config-time decision:
+Validation rejects configs where more than one backend section is set, or
+where none is set. Backend selection is a config-time decision:
 
 ```go
 var be backend.Backend
-if cfg.Docker != nil {
+switch {
+case cfg.Docker != nil:
     be, err = docker.New(ctx, cfg.Docker, cfg.Storage.BundleServerPath)
-} else {
+case cfg.Process != nil:
+    be, err = process.New(ctx, cfg.Process, cfg.Storage.BundleServerPath)
+case cfg.Kubernetes != nil:
     be, err = kubernetes.New(ctx, cfg.Kubernetes)
 }
 ```
@@ -755,59 +756,64 @@ backend's single-host simplicity.
 
 ## Open Questions
 
-1. **Hybrid deployments.** Could a single blockyard instance run both
+### Process backend (v3)
+
+1. **`/proc` mounting inside containers.** Docker masks certain `/proc`
+   paths by default (e.g., `/proc/kcore`, `/proc/sysrq-trigger`). When
+   bwrap creates a new PID namespace and mounts a fresh `/proc` inside
+   the sandbox, Docker's masked paths may cause `Operation not permitted`
+   errors. OpenAI Codex hit this issue. Needs testing to confirm which
+   bwrap flags work cleanly inside Docker's default `/proc` masking, and
+   whether the custom seccomp profile needs additional adjustments.
+
+2. **AppArmor on Ubuntu.** Ubuntu 24.04 ships an AppArmor profile that
+   blocks user namespace creation even when the seccomp profile allows it.
+   OpenAI Codex documented a workaround (custom AppArmor profile for
+   bwrap). The containerized deployment must either ship an AppArmor
+   profile or document the workaround for Ubuntu hosts.
+
+3. **Rootfs hardening in native mode.** The bind-mount approach exposes
+   the host's `/proc` and `/sys`. bwrap supports `--proc /proc` (mounts
+   a new procfs), but `/sys` and other pseudo-filesystems need careful
+   handling to avoid information leakage while keeping R functional.
+   This is a native-mode concern only — containerized mode inherits the
+   outer container's filesystem.
+
+4. **R package compatibility in native mode.** Some R packages use system
+   libraries that must be present on the host (e.g., `libcurl`, `libxml2`,
+   `libssl`). In native mode, system library management is the operator's
+   responsibility. In containerized mode, these are baked into the image.
+
+5. **Testing strategy.** The process backend needs integration tests on a
+   Linux host with bwrap installed. CI must provision a container with the
+   custom seccomp profile for containerized-mode tests. Simpler than the
+   Docker backend's tests (no Docker socket, no daemon) but still
+   Linux-only.
+
+6. **Hybrid deployments.** Could a single blockyard instance run both
    backends — Docker for public-facing apps, process for internal apps?
    The Backend interface already supports this; the routing layer would
    need per-app backend selection.
 
-2. **bubblewrap vs. systemd vs. both.** bubblewrap handles namespace and
-   mount isolation well; systemd handles cgroups well. Using both
-   (bubblewrap inside a systemd transient unit) gives the cleanest
-   separation but adds complexity. Alternatively, bubblewrap + direct
-   cgroup writes, or systemd alone with its sandboxing directives.
+### Kubernetes backend (v4)
 
-3. **Rootfs hardening.** The bind-mount approach exposes the host's `/proc`
-   and `/sys`. These could be masked (bwrap supports `--proc /proc` which
-   mounts a new procfs), but `/sys` and other pseudo-filesystems need
-   careful handling to avoid information leakage while keeping R functional.
+7. **CNI enforcement.** The k8s backend's network isolation depends
+   entirely on the CNI plugin enforcing NetworkPolicy. Should the server
+   verify this at startup, or is documenting the requirement sufficient?
 
-4. **R package compatibility.** Some R packages use system libraries that
-   must be present on the host (e.g., `libcurl`, `libxml2`, `libssl`).
-   Without container images, system library management becomes the
-   operator's responsibility. This is the largest operational difference.
+8. **PVC filesystem requirements.** The live package installation design
+   requires hard link support. NFS, EFS, and CephFS support this; Azure
+   Files (SMB) does not.
 
-5. **Testing strategy.** The process backend needs integration tests on a
-   Linux host with bwrap, iptables, and a UID pool configured. CI must
-   provision these. The Docker backend's tests are simpler (just a Docker
-   socket).
+9. **Worker Pod scheduling.** Should the k8s backend support node affinity,
+   tolerations, or topology spread constraints for worker Pods?
 
-6. **Kubernetes CNI enforcement.** The k8s backend's network isolation
-   depends entirely on the CNI plugin enforcing NetworkPolicy. Should the
-   server verify this at startup (e.g., create a test NetworkPolicy and
-   confirm enforcement), or is documenting the requirement sufficient?
-   Clusters without enforcement silently provide no worker isolation.
+10. **Single-replica bootstrap.** The k8s backend can work initially with
+    one server replica, SQLite, and in-memory state — deferring PostgreSQL
+    and Redis to a later phase.
 
-7. **PVC filesystem requirements.** The live package installation design
-   requires hard link support on the PVC's underlying filesystem. NFS,
-   EFS, and CephFS support this; Azure Files (SMB) does not. Should the
-   k8s backend detect the filesystem type and warn, or is this purely a
-   documentation concern?
-
-8. **Worker Pod scheduling.** Should the k8s backend support node affinity,
-   tolerations, or topology spread constraints for worker Pods? Operators
-   may want workers on dedicated node pools (e.g., GPU nodes for certain
-   apps, or spot instances for cost optimization). This could be exposed
-   as optional fields in `[kubernetes]` config or as per-app overrides.
-
-9. **Single-replica bootstrap.** The k8s backend can work initially with
-   one server replica, SQLite, and in-memory state — deferring PostgreSQL
-   and Redis to a later phase. Is this acceptable as a v2.0 scope, with
-   multi-replica HA as v2.1?
-
-10. **Pod vs. Deployment for workers.** Bare Pods are simpler and match
-    the ephemeral worker lifecycle (no restart policy needed). Deployments
-    with 1 replica add restart-on-failure semantics but introduce
-    complexity (ReplicaSet management, rolling update semantics that don't
-    apply). Bare Pods are likely the right choice — a crashed worker
-    should be detected by health polling and re-spawned by the server,
-    not auto-restarted by the kubelet with potentially stale state.
+11. **Pod vs. Deployment for workers.** Bare Pods are simpler and match
+    the ephemeral worker lifecycle (no restart policy needed). Bare Pods
+    are likely the right choice — a crashed worker should be detected by
+    health polling and re-spawned by the server, not auto-restarted by
+    the kubelet with potentially stale state.
