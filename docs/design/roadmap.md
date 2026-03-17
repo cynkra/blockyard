@@ -641,6 +641,14 @@ existing Docker deployment. No Kubernetes dependency.
   live-streaming log viewer per app. Lower priority — the API + CLI covers
   the same functionality.
 
+- **Onboarding hooks.** Exec-based hooks that run once per new user to
+  provision external resources (e.g., S3 access keys, database accounts).
+  Blockyard executes the configured command, passes user context via
+  environment variables, receives credentials as JSON on stdout, and stores
+  them in OpenBao at the user's vault path. This enables self-service
+  onboarding for storage backends used by blockr's board save/restore.
+  See [v2 draft](v2/draft.md) for the full design.
+
 - **Runtime package installation.** Allow users to install additional block
   packages during a live session via a server-level package store with
   per-worker hard-linked library views. See [v2 draft](v2/draft.md) for the
