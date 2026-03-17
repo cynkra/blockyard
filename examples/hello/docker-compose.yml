@@ -61,7 +61,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/data/bundles
-      - ./blockyard.toml:/blockyard.toml:ro
+      - ./blockyard.toml:/etc/blockyard/blockyard.toml:ro
     environment:
       # OIDC (Dex)
       BLOCKYARD_SERVER_EXTERNAL_URL: http://localhost:8080
