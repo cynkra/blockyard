@@ -251,8 +251,86 @@ R app at runtime. No blockyard code changes are needed.
    production concern.
 
 4. **Future: real-time collaboration.** The current model is
-   single-writer (last write wins). For real-time collaboration, a CRDT
-   approach may be appropriate — boards are structured documents (a graph
-   of blocks with parameters), which maps well to operation-based CRDTs.
-   See [Zed's CRDT design](https://zed.dev/blog/crdts) for prior art on
-   collaborative structured editing. This is out of scope for v2.
+   single-writer (last write wins). See the appendix below for a
+   feasibility sketch of real-time collaborative editing and its
+   implications for storage. This is out of scope for v2.
+
+## Appendix: Real-Time Collaborative Editing
+
+A feasibility sketch for multi-user real-time board editing. Out of
+scope for v2 but relevant to storage design decisions made now.
+
+### Approach
+
+A board decomposes naturally into CRDT-friendly structures:
+
+- **Set of blocks** → add-wins set (concurrent add + remove of the
+  same block resolves to "block survives").
+- **Block parameters** → last-writer-wins register per field.
+- **Connections** → add-wins set of edges.
+- **Layout positions** → last-writer-wins register per block.
+
+Libraries like [Yjs](https://github.com/yjs/yjs) and
+[Automerge](https://automerge.org/) implement these primitives as
+document CRDTs with proven sync protocols.
+
+### Architecture
+
+Yjs runs in the browser (JavaScript). R does not need CRDT logic —
+it exchanges granular operations with the Yjs document over Shiny's
+existing custom-message channel (the same pattern blockr.dock uses
+with dockview for layout state). A [y-websocket][yws] server relays
+changes between browsers.
+
+[yws]: https://github.com/yjs/y-websocket
+
+```
+Browser A (Yjs)  ←—ws—→  y-websocket  ←—ws—→  Browser B (Yjs)
+      ↕ Shiny msg               │                  ↕ Shiny msg
+  R session A              persistence          R session B
+```
+
+Outgoing: user edits a parameter → R sends a granular operation to
+JS → JS applies it to the Yjs doc → Yjs syncs to other browsers.
+
+Incoming: Yjs observer fires → JS sends the operation to R via
+`Shiny.setInputValue()` → R updates reactive state → UI updates.
+
+### Storage Implications
+
+The Yjs document is persisted as an opaque binary encoding, not
+application-level JSON. This creates a potential separation between
+two kinds of board data:
+
+- **Static save-points.** Explicit user-initiated snapshots ("save
+  board"). These can remain `JSONB` — a materialized view of the
+  board state at a point in time. Useful for listing, search, forking,
+  and restoring boards outside a live session. The current `data JSONB`
+  column serves this role.
+- **Dynamic sync state.** The live CRDT document used during
+  collaborative editing. Stored as `BYTEA` (or in a separate system
+  entirely) and managed by the Yjs persistence layer, not PostgREST.
+
+Whether these live in the same table, separate tables, or separate
+systems is TBD. The key constraint: the current `data JSONB` column
+and PostgREST CRUD operations remain valid for single-user save/load.
+Real-time sync adds a parallel storage path, it does not replace the
+existing one.
+
+### Auth Integration
+
+The y-websocket server must verify the user's JWT and check board
+permissions (owner or shared-with) before granting access to a
+document. This likely requires a query against the `boards` /
+`board_shares` tables or a call to PostgREST. The `board_shares`
+model would also need to support write access, not just read.
+
+### Open Conflict Semantics
+
+- User A deletes a block while User B edits its parameters — does the
+  block survive (add-wins) or disappear (delete-wins)?
+- Concurrent connection additions could create cycles in a DAG.
+  CRDTs do not enforce structural invariants — application-level
+  validation is needed.
+- CRDT documents grow over time (tombstones). A compaction / garbage
+  collection strategy is needed for long-lived boards.
