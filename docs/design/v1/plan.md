@@ -1028,27 +1028,26 @@ with three new pieces:
 type ServiceConfig struct {
     ID    string `toml:"id"`    // stable identifier, e.g. "openai"
     Label string `toml:"label"` // display name, e.g. "OpenAI API Key"
-    Path  string `toml:"path"`  // OpenBao path relative to secret/data/users/{sub}/
 }
 ```
+
+Credentials are stored at `secret/data/users/{sub}/apikeys/{id}`.
 
 ```toml
 [[openbao.services]]
 id    = "openai"
 label = "OpenAI API Key"
-path  = "apikeys/openai"
 
 [[openbao.services]]
 id    = "anthropic"
 label = "Anthropic API Key"
-path  = "apikeys/anthropic"
 ```
 
 The service catalog is immutable at runtime — changes require a server
-restart. The `id` is used in API paths and the `BLOCKYARD_VAULT_SERVICES`
-env var. The `path` is relative to `secret/data/users/{sub}/` in OpenBao.
+restart. The `id` is used in API paths, as the vault path segment, and in
+the `BLOCKYARD_VAULT_SERVICES` env var.
 The enrollment API (phase 1-3) is extended to validate `{service}` against
-this catalog and use the configured `path` instead of a hardcoded prefix.
+this catalog.
 
 *2. OpenBao operational model for user secrets:*
 
@@ -1091,8 +1090,8 @@ additional env var at container startup:
 BLOCKYARD_VAULT_SERVICES={"openai":"apikeys/openai","anthropic":"apikeys/anthropic"}
 ```
 
-This is a JSON object mapping service `id` to OpenBao `path` (relative to
-`secret/data/users/{sub}/`). R apps parse this env var once at startup,
+This is a JSON object mapping service `id` to its vault path segment
+(relative to `secret/data/users/{sub}/`). R apps parse this env var once at startup,
 then fetch individual secrets using the scoped token from
 `session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN` and `VAULT_ADDR`.
 
@@ -1212,12 +1211,10 @@ token_ttl   = "1h"
 [[openbao.services]]
 id    = "openai"
 label = "OpenAI API Key"
-path  = "apikeys/openai"
 
 [[openbao.services]]
 id    = "anthropic"
 label = "Anthropic API Key"
-path  = "apikeys/anthropic"
 
 [telemetry]
 metrics_enabled = true

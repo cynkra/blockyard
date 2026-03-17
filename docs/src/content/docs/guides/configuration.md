@@ -101,14 +101,14 @@ Define third-party services whose API keys users can enroll via OpenBao.
 [[openbao.services]]
 id    = "openai"
 label = "OpenAI"
-path  = "openai"
 ```
+
+Credentials are stored at `secret/data/users/{sub}/apikeys/{id}`.
 
 | Field | Default | Description |
 |---|---|---|
-| `id` | *(required)* | Unique identifier for the service |
+| `id` | *(required)* | Unique identifier (also the vault path segment) |
 | `label` | *(required)* | Human-readable label |
-| `path` | *(required)* | KV store path prefix for credentials |
 
 ### `[audit]` *(optional)*
 
@@ -180,7 +180,6 @@ idle_worker_timeout  = "5m"
 # [[openbao.services]]
 # id    = "openai"
 # label = "OpenAI"
-# path  = "openai"
 
 # Optional: Audit logging
 # [audit]

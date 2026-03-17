@@ -317,7 +317,7 @@ func TestDashboardCredentialsSectionShown(t *testing.T) {
 		Address:    "http://localhost:8200",
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{
-			{ID: "openai", Label: "OpenAI", Path: "apikeys/openai"},
+			{ID: "openai", Label: "OpenAI"},
 		},
 	}
 
@@ -592,7 +592,7 @@ func TestDashboardCredentialConfigured(t *testing.T) {
 		Address:    "http://localhost:8200",
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{
-			{ID: "openai", Label: "OpenAI", Path: "apikeys/openai"},
+			{ID: "openai", Label: "OpenAI"},
 		},
 	}
 
@@ -617,8 +617,8 @@ func TestDashboardMultipleServices(t *testing.T) {
 		Address:    "http://localhost:8200",
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{
-			{ID: "openai", Label: "OpenAI", Path: "apikeys/openai"},
-			{ID: "anthropic", Label: "Anthropic", Path: "apikeys/anthropic"},
+			{ID: "openai", Label: "OpenAI"},
+			{ID: "anthropic", Label: "Anthropic"},
 		},
 	}
 
@@ -658,8 +658,8 @@ func TestBuildServiceEntriesWithVaultMock(t *testing.T) {
 		Address:    vaultSrv.URL,
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{
-			{ID: "openai", Label: "OpenAI", Path: "apikeys/openai"},
-			{ID: "github", Label: "GitHub", Path: "apikeys/github"},
+			{ID: "openai", Label: "OpenAI"},
+			{ID: "github", Label: "GitHub"},
 		},
 	}
 

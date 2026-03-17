@@ -209,7 +209,7 @@ func buildServiceEntries(srv *server.Server, sub string) []serviceEntry {
 		if srv.VaultClient != nil {
 			exists, err := srv.VaultClient.SecretExists(
 				context.Background(),
-				"secret/data/users/"+sub+"/"+svc.Path,
+				"secret/data/users/"+sub+"/apikeys/"+svc.ID,
 			)
 			if err == nil && exists {
 				status = "configured"

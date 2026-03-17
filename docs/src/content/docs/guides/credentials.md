@@ -42,17 +42,16 @@ jwt_auth_path = "jwt"
 [[openbao.services]]
 id    = "openai"
 label = "OpenAI"
-path  = "openai"
 
 [[openbao.services]]
 id    = "anthropic"
 label = "Anthropic"
-path  = "anthropic"
 ```
 
 Each `[[openbao.services]]` entry defines a third-party service whose API
-keys users can enroll. The `id` is used in API paths, `label` is shown in
-the web UI, and `path` is the KV store path prefix.
+keys users can enroll. The `id` is used in API paths and as the vault path
+segment, `label` is shown in the web UI. Credentials are stored at
+`secret/data/users/{sub}/apikeys/{id}`.
 
 ## Authentication
 

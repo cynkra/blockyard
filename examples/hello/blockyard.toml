@@ -33,4 +33,3 @@ idle_worker_timeout  = "5m"
 [[openbao.services]]
 id    = "openai"
 label = "OpenAI API Key"
-path  = "openai"

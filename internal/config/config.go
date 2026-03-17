@@ -95,10 +95,11 @@ type OpenbaoConfig struct {
 
 // ServiceConfig describes a third-party service whose API key users
 // can enroll via OpenBao (e.g. OpenAI, Posit Connect).
+//
+// Credentials are stored at: secret/data/users/{sub}/apikeys/{id}
 type ServiceConfig struct {
 	ID    string `toml:"id"`
 	Label string `toml:"label"`
-	Path  string `toml:"path"`
 }
 
 // Duration wraps time.Duration for TOML deserialization from strings
@@ -384,8 +385,8 @@ func validate(cfg *Config) error {
 		}
 		seen := make(map[string]bool)
 		for _, svc := range cfg.Openbao.Services {
-			if svc.ID == "" || svc.Label == "" || svc.Path == "" {
-				return fmt.Errorf("config: openbao.services entries must have id, label, and path")
+			if svc.ID == "" || svc.Label == "" {
+				return fmt.Errorf("config: openbao.services entries must have id and label")
 			}
 			if seen[svc.ID] {
 				return fmt.Errorf("config: duplicate openbao.services id %q", svc.ID)

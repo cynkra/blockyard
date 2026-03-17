@@ -646,7 +646,7 @@ func buildServiceEntries(srv *server.Server, sub string) []serviceEntry {
             // The enrollment token has list but not read permission.
             exists, err := srv.OpenBaoClient.SecretExists(
                 context.Background(),
-                "secret/data/users/"+sub+"/"+svc.Path,
+                "secret/data/users/"+sub+"/apikeys/"+svc.ID,
             )
             if err == nil && exists {
                 status = "configured"
@@ -861,7 +861,6 @@ and available. This config structure was specified in the plan's phase
 type ServiceConfig struct {
     ID    string `toml:"id"`
     Label string `toml:"label"`
-    Path  string `toml:"path"`
 }
 
 type OpenbaoConfig struct {
@@ -876,8 +875,8 @@ type OpenbaoConfig struct {
 if cfg.Openbao != nil {
     seen := make(map[string]bool)
     for _, svc := range cfg.Openbao.Services {
-        if svc.ID == "" || svc.Label == "" || svc.Path == "" {
-            return fmt.Errorf("config: openbao.services entries must have id, label, and path")
+        if svc.ID == "" || svc.Label == "" {
+            return fmt.Errorf("config: openbao.services entries must have id and label")
         }
         if seen[svc.ID] {
             return fmt.Errorf("config: duplicate openbao.services id %q", svc.ID)
@@ -897,7 +896,7 @@ When `[openbao]` is configured with services, inject
 if len(srv.Config.Openbao.Services) > 0 {
     svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
     for _, svc := range srv.Config.Openbao.Services {
-        svcMap[svc.ID] = svc.Path
+        svcMap[svc.ID] = "apikeys/" + svc.ID
     }
     svcJSON, _ := json.Marshal(svcMap)
     extraEnv["BLOCKYARD_VAULT_SERVICES"] = string(svcJSON)
@@ -908,7 +907,7 @@ if len(srv.Config.Openbao.Services) > 0 {
 
 - Parse config with `[[openbao.services]]` — all fields populated
 - Parse config without services — empty slice
-- Validation: reject empty id/label/path
+- Validation: reject empty id/label
 - Validation: reject duplicate service IDs
 - `BLOCKYARD_VAULT_SERVICES` env var injected into worker spec
 - JSON format correct: `{"openai":"apikeys/openai"}`

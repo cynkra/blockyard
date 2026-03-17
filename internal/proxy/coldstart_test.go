@@ -622,8 +622,8 @@ func TestWorkerEnvWithServices(t *testing.T) {
 	srv.Config.Openbao = &config.OpenbaoConfig{
 		Address: "http://vault:8200",
 		Services: []config.ServiceConfig{
-			{ID: "openai", Label: "OpenAI", Path: "secret/data/openai"},
-			{ID: "posit", Label: "Posit Connect", Path: "secret/data/posit"},
+			{ID: "openai", Label: "OpenAI"},
+			{ID: "posit", Label: "Posit Connect"},
 		},
 	}
 	srv.Config.Server.ExternalURL = "http://blockyard:8080"
@@ -642,11 +642,11 @@ func TestWorkerEnvWithServices(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &svcMap); err != nil {
 		t.Fatalf("BLOCKYARD_VAULT_SERVICES is not valid JSON: %v", err)
 	}
-	if got := svcMap["openai"]; got != "secret/data/openai" {
-		t.Errorf("openai path = %q, want %q", got, "secret/data/openai")
+	if got := svcMap["openai"]; got != "apikeys/openai" {
+		t.Errorf("openai path = %q, want %q", got, "apikeys/openai")
 	}
-	if got := svcMap["posit"]; got != "secret/data/posit" {
-		t.Errorf("posit path = %q, want %q", got, "secret/data/posit")
+	if got := svcMap["posit"]; got != "apikeys/posit" {
+		t.Errorf("posit path = %q, want %q", got, "apikeys/posit")
 	}
 	if len(svcMap) != 2 {
 		t.Errorf("expected 2 entries, got %d", len(svcMap))

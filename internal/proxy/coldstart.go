@@ -272,7 +272,7 @@ func WorkerEnv(srv *server.Server) map[string]string {
 	if len(srv.Config.Openbao.Services) > 0 {
 		svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
 		for _, svc := range srv.Config.Openbao.Services {
-			svcMap[svc.ID] = svc.Path
+			svcMap[svc.ID] = "apikeys/" + svc.ID
 		}
 		svcJSON, _ := json.Marshal(svcMap)
 		env["BLOCKYARD_VAULT_SERVICES"] = string(svcJSON)

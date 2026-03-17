@@ -213,20 +213,20 @@ jwt_auth_path = "jwt"
 ### `[[openbao.services]]`
 
 Define third-party services whose API keys users can enroll via OpenBao. Each
-entry must have `id`, `label`, and `path`. Service IDs must be unique.
+entry must have `id` and `label`. Service IDs must be unique.
+
+Credentials are stored at `secret/data/users/{sub}/apikeys/{id}`.
 
 ```toml
 [[openbao.services]]
 id    = "openai"
 label = "OpenAI"
-path  = "openai"
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `id` | `string` | — | **Yes** | Unique identifier for the service |
+| `id` | `string` | — | **Yes** | Unique identifier for the service (also used as the vault path segment) |
 | `label` | `string` | — | **Yes** | Human-readable label shown to users |
-| `path` | `string` | — | **Yes** | KV store path prefix for user credentials |
 
 ## `[audit]` *(optional)*
 
