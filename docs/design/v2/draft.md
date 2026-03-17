@@ -132,8 +132,9 @@ Each worker gets a flat R library directory on the host, populated with
 ```
 
 The worker container mounts this directory read-only at `/extra-lib/`. R's
-`.libPaths()` is set to `c("/rv-library", "/extra-lib")` — the bundle's base
-library takes precedence, and the view provides everything else.
+`.libPaths()` is set to `c("/extra-lib/", "/rv-library")` — the view takes
+precedence so that live-installed packages can shadow older versions in the
+base library (see "Library Path Ordering" below).
 
 **Hard links** (`cp -al`) create the directory structure with zero additional
 disk usage for file contents — every file shares the same inode and disk
@@ -161,6 +162,16 @@ filesystem requirements beyond "same mount point," no Docker configuration
 changes, no mount lifecycle management. The view directory is a plain bind
 mount — the existing Docker backend code handles it without modification.
 
+##### Library Path Ordering
+
+The worker's `.libPaths()` is set to `c("/extra-lib/", "/rv-library")` —
+the live-install view takes precedence over the bundle's base library. This
+ordering is critical: when a live-installed package provides a newer version
+of something already present in the base library, R must find the newer
+version first. With the reverse ordering (`/rv-library` first), a newer
+`ggplot2` in `/extra-lib/` would be shadowed by the older one in the base
+library, silently causing version mismatches.
+
 ##### Adding Packages to a Running Worker
 
 Because the worker-libs directory is bind-mounted into the container, **new
@@ -168,22 +179,101 @@ hard-linked packages created on the host are immediately visible inside the
 container.** This is standard bind mount behavior — no mount propagation
 configuration needed.
 
-The sequence when Shiny/blockr requests a package mid-session:
+However, R namespaces are **immutable once loaded** — `library()` is a
+no-op for a package whose namespace is already attached, and
+`unloadNamespace()` fails if anything imports it (which is nearly always
+the case for foundational packages). This means a live-installed package
+that requires a newer version of an already-loaded dependency cannot be
+used without restarting the R session.
 
-1. blockr calls `POST /api/v1/packages` with the package name (and
+This gives three cases:
+
+| Situation | Already loaded? | Action | User impact |
+|---|---|---|---|
+| Purely additive — not in base library, not loaded | No | Hard-link into view, `library()` | Seamless |
+| Shadows base library, not yet loaded | No | Hard-link into view, `library()` loads new version | Seamless |
+| Shadows base library or extra-lib, already loaded | Yes | Save board state, restart session | Brief interruption |
+
+The first two cases are the common path. The third — a loaded namespace
+that needs upgrading — requires a session restart (see "Session Restart
+on Conflict" below).
+
+**The sequence when blockr requests a package mid-session (cases 1 and 2):**
+
+1. blockr resolves the dependency tree for the requested package and checks
+   it against `loadedNamespaces()`. If any loaded namespace would need
+   upgrading → divert to the restart flow (case 3).
+2. blockr calls `POST /api/v1/packages` with the package name (and
    optionally version/source).
-2. blockyard checks the package store. If present → skip to step 4.
-3. If not present → spawn a build container to install the package into the
+3. blockyard checks the package store. If present → skip to step 5.
+4. If not present → spawn a build container to install the package into the
    store (see "Installation Flow").
-4. Create a hard-linked tree from the store entry into the requesting
+5. Create a hard-linked tree from the store entry into the requesting
    worker's view directory.
-5. Return success.
-6. blockr calls `library(pkg)` — R finds it in `/extra-lib/`.
+6. Return success.
+7. blockr calls `library(pkg)` — R finds it in `/extra-lib/`.
 
-Step 4 (hard-linking) takes milliseconds. Step 3 (installation) takes
+Step 5 (hard-linking) takes milliseconds. Step 4 (installation) takes
 seconds to minutes depending on the package, but only happens once per
 package version globally. Subsequent requests for the same package from any
-worker skip straight to step 4.
+worker skip straight to step 5.
+
+##### Session Restart on Conflict
+
+When blockr detects that a requested package's dependency tree conflicts
+with an already-loaded namespace (case 3), the install cannot proceed
+in-process. Instead:
+
+1. blockr serializes the current board state (the same mechanism used for
+   board save).
+2. blockr calls the install API — blockyard installs the package into the
+   store and updates the worker's view as usual.
+3. blockr signals blockyard (or the Shiny session) that a restart is
+   needed. The exact mechanism is TBD — possibilities include a
+   `POST /api/v1/workers/{id}/restart` endpoint or a client-side
+   `session$reload()`.
+4. The worker restarts with the updated view already in place (hard links
+   are persistent). R starts fresh with all packages available at the
+   correct versions.
+5. blockr restores the saved board state. The user is back where they were,
+   with the new block available.
+
+Users already expect this interaction model — installing a package in
+RStudio that conflicts with a loaded namespace produces a "please restart
+R" prompt. The experience here is similar but more seamless because
+blockyard handles the library reconstruction and blockr handles the
+state preservation automatically.
+
+##### Why Conflicts Are Rare in Practice
+
+Three factors conspire to keep the restart path uncommon:
+
+1. **Block packages are lightweight.** Block packages are thin wrappers
+   defining block interfaces. Their dependency trees are small and largely
+   overlap with the dependencies the app already has — they don't
+   introduce heavy new dependency sub-trees that demand version bumps.
+
+2. **A current base library eliminates version lag.** If the bundle's base
+   library is restored from a recent lockfile, its packages are already at
+   or near the latest versions. A live-installed block package is unlikely
+   to demand a *newer* version of something the base library already
+   provides at the latest release. R's dependency system has no upper
+   bounds on version constraints — `Depends: ggplot2 (>= 3.4.0)` is
+   satisfied by any newer version, so a current base library satisfies
+   virtually all downstream constraints.
+
+3. **PPM snapshots guarantee internal consistency.** When both the base
+   library (restored by `rv` at deploy time) and live installs (via `pak`
+   at runtime) resolve against the same Posit Package Manager snapshot
+   date, the entire dependency graph is drawn from a single coherent
+   package universe. There is no version where the live install wants
+   `ggplot2 3.6.0` but the base library has `3.5.0` — they both resolve
+   to whatever version the snapshot contains. Conflicts are limited to
+   packages sourced outside the snapshot (e.g., GitHub remotes with
+   pinned dependency floors above the snapshot's versions).
+
+   Configuring a PPM snapshot URL is the single most effective mitigation
+   and should be the recommended default for production deployments.
 
 ##### Board Save and Restore
 
@@ -200,7 +290,11 @@ during the session.
 already available (in `/rv-library` or `/extra-lib/`) and requests any
 missing ones via the API. Since the packages likely already exist in the
 store (they were installed at least once before), this is a hard-link
-operation — near-instant. The app does not need to restart.
+operation — near-instant. If all missing packages are purely additive
+(no loaded-namespace conflicts), the app does not need to restart. If
+any conflict with a loaded namespace, the session restart flow handles
+it transparently — the board being restored is itself the state that
+gets carried across the restart.
 
 **Fallback for boards with no dependency metadata** (e.g., boards saved
 before this feature exists): blockr attempts to load blocks, catches
@@ -277,17 +371,23 @@ A possible split:
    source alongside board data?
 
 2. **Version resolution policy.** When a user requests "blockr.ggplot"
-   without specifying a version, what does blockyard install? Latest from
-   CRAN? Latest from a configured set of repositories? Should the API accept
-   version constraints, or always resolve to a specific version before
-   calling?
+   without specifying a version, what does blockyard install? The
+   recommended default is to resolve against a configured PPM snapshot URL
+   (the same snapshot used for bundle restoration). This guarantees
+   consistency between base and live-installed packages. The API should
+   accept an optional version/source but default to the configured
+   repository set. Open sub-question: should blockyard enforce that the
+   live-install repository configuration matches the base library's
+   snapshot, or allow operators to diverge?
 
-3. **Transitive dependency version conflicts.** If `blockr.ggplot` wants
-   `ggplot2 >= 3.5.0` but the app's base bundle has `ggplot2 3.4.0` in
-   `/rv-library`, the `.libPaths()` ordering means the bundle version wins.
-   This could cause runtime failures. Should blockyard detect this conflict
-   at install time and warn? Should the view be able to override the base
-   library for specific packages?
+3. ~~**Transitive dependency version conflicts.**~~ Resolved — see
+   "Library Path Ordering", "Session Restart on Conflict", and "Why
+   Conflicts Are Rare in Practice" above. Summary: `/extra-lib/` takes
+   precedence in `.libPaths()` so newer versions shadow the base library
+   for not-yet-loaded packages. Already-loaded namespaces that need
+   upgrading trigger a board-state-preserving session restart. PPM
+   snapshots, current base libraries, and lightweight block packages make
+   the restart path uncommon in practice.
 
 4. **Security.** Installation happens in a sandboxed build container (not in
    the running worker), which limits the blast radius. But the installed
