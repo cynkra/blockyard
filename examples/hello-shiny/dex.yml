@@ -1,0 +1,26 @@
+issuer: http://localhost:5556
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+  - id: blockyard
+    name: Blockyard
+    secret: blockyard-dex-secret
+    redirectURIs:
+      - http://localhost:8080/callback
+
+enablePasswordDB: true
+
+staticPasswords:
+  - email: "demo@example.com"
+    # bcrypt hash of "password"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: "demo"
+    userID: "demo-user-001"

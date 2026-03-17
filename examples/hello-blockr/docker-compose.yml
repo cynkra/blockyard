@@ -1,0 +1,98 @@
+services:
+
+  # --- Dex: OIDC identity provider ---
+  dex:
+    image: dexidp/dex:v2.41.1
+    command: ["dex", "serve", "/etc/dex/config.yml"]
+    volumes:
+      - ./dex.yml:/etc/dex/config.yml:ro
+    ports:
+      - "5556:5556"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:5556/.well-known/openid-configuration"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 20
+
+  # --- OpenBao: secrets management ---
+  openbao:
+    image: ghcr.io/openbao/openbao:latest
+    command: ["server", "-dev", "-dev-root-token-id=root-dev-token", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: root-dev-token
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- Garage: S3-compatible object storage ---
+  garage:
+    image: dxflrs/garage:v1.3.1
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+    ports:
+      - "3900:3900"    # S3 API
+    environment:
+      GARAGE_CONFIG_FILE: /etc/garage.toml
+
+  # --- One-shot init: configure OpenBao, Garage, and pre-enroll credentials ---
+  init:
+    image: curlimages/curl:latest
+    depends_on:
+      openbao:
+        condition: service_healthy
+      dex:
+        condition: service_healthy
+      garage:
+        condition: service_started
+    volumes:
+      - ./setup.sh:/setup.sh:ro
+    entrypoint: ["/bin/sh", "/setup.sh"]
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: root-dev-token
+      DEX_ISSUER: http://localhost:5556
+      DEX_INTERNAL: http://dex:5556
+      GARAGE_ADMIN: http://garage:3903
+      GARAGE_ADMIN_TOKEN: garage-admin-token
+      DEMO_SUB: Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA
+
+  # --- Blockyard: Shiny app hosting platform ---
+  blockyard:
+    image: ghcr.io/cynkra/blockyard:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      dex:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data/bundles
+      - ./blockyard.toml:/etc/blockyard/blockyard.toml:ro
+    environment:
+      # OIDC (Dex)
+      BLOCKYARD_SERVER_EXTERNAL_URL: http://localhost:8080
+      BLOCKYARD_OIDC_ISSUER_URL: http://localhost:5556
+      BLOCKYARD_OIDC_ISSUER_DISCOVERY_URL: http://dex:5556
+      BLOCKYARD_OIDC_CLIENT_ID: blockyard
+      BLOCKYARD_OIDC_CLIENT_SECRET: blockyard-dex-secret
+      BLOCKYARD_OIDC_INITIAL_ADMIN: Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA
+      # OpenBao (AppRole auth — session_secret is auto-generated via vault)
+      BLOCKYARD_OPENBAO_ADDRESS: http://openbao:8200
+      BLOCKYARD_OPENBAO_ROLE_ID: blockyard-server
+      BLOCKYARD_OPENBAO_SECRET_ID: dev-secret-id-for-local-use-only
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

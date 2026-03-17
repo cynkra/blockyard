@@ -26,10 +26,6 @@ log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
 
-# OIDC and OpenBao settings are provided via environment variables
-# in docker-compose.yml. The [[openbao.services]] entries below
-# define which third-party credentials users can enroll.
-
-[[openbao.services]]
-id    = "openai"
-label = "OpenAI API Key"
+# OIDC settings are provided via environment variables in docker-compose.yml.
+# No [openbao] section — this example runs without a secrets manager.
+# session_secret is set explicitly via env var.

@@ -1,0 +1,11 @@
+[project]
+name = "hello-blockr"
+r_version = "4.4"
+
+repositories = [
+    {alias = "P3M", url = "https://p3m.dev/cran/__linux__/noble/latest"},
+]
+
+dependencies = [
+    "blockr",
+]
