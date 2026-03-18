@@ -658,7 +658,7 @@ existing Docker deployment. No Kubernetes dependency.
 
 - **Runtime package installation.** Allow users to install additional block
   packages during a live session via a server-level package store with
-  per-worker hard-linked library views. See [v2 draft](v2/draft.md) for the
+  per-worker hard-linked library views. See [v2 plan](v2/plan.md) for the
   full design.
 
 ### v3: Process Backend + Deferred Single-Node Features

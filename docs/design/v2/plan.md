@@ -1,0 +1,878 @@
+# blockyard v2 Implementation Plan
+
+This document is the build plan for v2 — single-node production completeness.
+It covers new packages, dependency additions, build phases, key type
+definitions, schema changes, and test strategy. The roadmap (`../roadmap.md`)
+is the source of truth for *what* v2 includes; this document describes *how*
+to build it.
+
+v2 builds on v1's infrastructure (OIDC, RBAC, OpenBao, autoscaling, web UI)
+and adds usability improvements, safety nets, and blockr-specific features:
+dual-database support (SQLite + PostgreSQL), bundle rollback, soft-delete,
+resource limit enforcement, scale-to-zero with pre-warming, a cold-start
+loading page, board storage (PostgreSQL + PostgREST), runtime package
+installation, web UI expansion, and a CLI tool.
+
+## New Packages
+
+v2 adds the following packages to the existing layout. Existing packages
+are extended in place.
+
+```
+cmd/
+├── blockyard/                  # (existing) server binary
+└── by/                         # NEW: CLI binary
+    └── main.go                 # subcommands: deploy, list, logs, start, stop, ...
+
+internal/
+├── db/
+│   ├── db.go                   # refactored: sqlx + dialect abstraction
+│   ├── dialect.go              # SQLite/PostgreSQL dialect helpers
+│   └── ...
+├── pkgstore/
+│   ├── store.go                # package store: content-addressable directory
+│   └── view.go                 # per-worker library views (hard-linked trees)
+├── proxy/
+│   ├── ... (existing)
+│   └── loading.go              # cold-start loading page handler
+├── ui/
+│   ├── ... (existing)
+│   └── templates/
+│       ├── loading.html        # cold-start spinner page
+│       ├── app_settings.html   # per-app settings panel
+│       └── app_logs.html       # per-app log viewer
+
+migrations/
+├── sqlite/
+│   ├── 001_initial.up.sql      # existing v1 schema
+│   ├── 001_initial.down.sql
+│   ├── 002_v2_soft_delete.up.sql
+│   ├── 002_v2_soft_delete.down.sql
+│   ├── 003_v2_pre_warming.up.sql
+│   └── 003_v2_pre_warming.down.sql
+└── postgres/
+    ├── 001_initial.up.sql      # existing v1 schema (PostgreSQL dialect)
+    ├── 001_initial.down.sql
+    ├── 002_v2_soft_delete.up.sql
+    ├── 002_v2_soft_delete.down.sql
+    ├── 003_v2_pre_warming.up.sql
+    ├── 003_v2_pre_warming.down.sql
+    ├── 004_v2_boards.up.sql    # board storage (PostgreSQL only)
+    └── 004_v2_boards.down.sql
+```
+
+## New Dependencies
+
+```go
+// go.mod additions — existing deps unchanged
+
+// Database
+require (
+    github.com/jmoiron/sqlx             v1.x  // database abstraction, placeholder rebinding
+    github.com/golang-migrate/migrate/v4 v4.x  // versioned schema migrations
+    github.com/jackc/pgx/v5             v5.x  // PostgreSQL driver (stdlib adapter)
+)
+
+// CLI
+require (
+    github.com/spf13/cobra  v1.x  // CLI framework (subcommands, flags, help)
+)
+```
+
+**Dependency rationale:**
+
+- **sqlx** — thin layer over `database/sql`. Provides `Rebind()` for
+  placeholder rewriting (`?` → `$1,$2,...`), struct scanning, and named
+  parameters. Not an ORM — all existing SQL stays unchanged.
+- **golang-migrate** — versioned migration files with up/down support.
+  Embedded via `embed.FS` for single-binary distribution. Supports
+  both SQLite and PostgreSQL drivers.
+- **pgx** — the standard PostgreSQL driver for Go. Used via its
+  `stdlib` adapter to register with `database/sql` (which sqlx wraps).
+- **cobra** — standard Go CLI framework. Provides subcommands, flag
+  parsing, and auto-generated help text.
+
+## v2 Config Additions
+
+```toml
+[database]
+# NEW: driver selection. "sqlite" (default) or "postgres".
+driver = "sqlite"
+path = "/data/db/blockyard.db"       # used when driver = "sqlite"
+url = ""                             # PostgreSQL connection string; used when driver = "postgres"
+                                     # use BLOCKYARD_DATABASE_URL env var for secrets
+
+[board_storage]
+# When set, enables board storage. Injected as POSTGREST_URL into worker
+# containers. Requires driver = "postgres".
+postgrest_url = ""
+
+[proxy]
+# existing fields unchanged; new additions:
+pre_warmed_seats = 0     # per-app default; 0 = scale-to-zero (no warm pool)
+```
+
+Per-app overrides for `pre_warmed_seats` are stored in the `apps` table
+(see schema changes below).
+
+## Schema Changes
+
+### SQLite + PostgreSQL (shared)
+
+**Migration 002: soft-delete**
+
+```sql
+ALTER TABLE apps ADD COLUMN deleted_at TEXT;
+```
+
+**Migration 003: pre-warming**
+
+```sql
+ALTER TABLE apps ADD COLUMN pre_warmed_seats INTEGER NOT NULL DEFAULT 0;
+```
+
+### PostgreSQL Only
+
+**Migration 004: board storage**
+
+```sql
+-- PostgREST roles
+CREATE ROLE blockr_user NOLOGIN;
+GRANT USAGE ON SCHEMA public TO blockr_user;
+CREATE ROLE anon NOLOGIN;
+
+-- Board identity and metadata
+CREATE TABLE boards (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_sub   TEXT NOT NULL,
+    board_id    TEXT NOT NULL,
+    acl_type    TEXT NOT NULL DEFAULT 'private'
+                CHECK (acl_type IN ('private', 'public', 'restricted')),
+    tags        TEXT[] DEFAULT '{}',
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (owner_sub, board_id)
+);
+
+-- Versioned board data
+CREATE TABLE board_versions (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_sub   TEXT NOT NULL,
+    board_id    TEXT NOT NULL,
+    data        JSONB NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    FOREIGN KEY (owner_sub, board_id)
+        REFERENCES boards(owner_sub, board_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_board_versions_lookup
+    ON board_versions(owner_sub, board_id, created_at DESC);
+
+-- Sharing (for restricted ACL)
+CREATE TABLE board_shares (
+    owner_sub       TEXT NOT NULL,
+    board_id        TEXT NOT NULL,
+    shared_with_sub TEXT NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (owner_sub, board_id, shared_with_sub),
+    FOREIGN KEY (owner_sub, board_id)
+        REFERENCES boards(owner_sub, board_id) ON DELETE CASCADE
+);
+
+-- Identity helper for RLS
+CREATE FUNCTION current_sub() RETURNS TEXT AS $$
+    SELECT current_setting('request.jwt.claims', true)::json->>'sub'
+$$ LANGUAGE sql STABLE;
+
+-- RLS: boards
+ALTER TABLE boards ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY owner_all ON boards
+    USING (owner_sub = current_sub())
+    WITH CHECK (owner_sub = current_sub());
+
+CREATE POLICY public_read ON boards FOR SELECT
+    USING (acl_type = 'public');
+
+CREATE POLICY restricted_read ON boards FOR SELECT
+    USING (acl_type = 'restricted' AND EXISTS (
+        SELECT 1 FROM board_shares
+        WHERE board_shares.owner_sub = boards.owner_sub
+        AND board_shares.board_id = boards.board_id
+        AND board_shares.shared_with_sub = current_sub()
+    ));
+
+-- RLS: board_versions (inherits access from parent board)
+ALTER TABLE board_versions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY version_owner ON board_versions
+    USING (owner_sub = current_sub())
+    WITH CHECK (owner_sub = current_sub());
+
+CREATE POLICY version_public ON board_versions FOR SELECT
+    USING (EXISTS (
+        SELECT 1 FROM boards
+        WHERE boards.owner_sub = board_versions.owner_sub
+        AND boards.board_id = board_versions.board_id
+        AND boards.acl_type = 'public'
+    ));
+
+CREATE POLICY version_restricted ON board_versions FOR SELECT
+    USING (EXISTS (
+        SELECT 1 FROM boards b
+        JOIN board_shares bs
+            ON b.owner_sub = bs.owner_sub AND b.board_id = bs.board_id
+        WHERE b.owner_sub = board_versions.owner_sub
+        AND b.board_id = board_versions.board_id
+        AND b.acl_type = 'restricted'
+        AND bs.shared_with_sub = current_sub()
+    ));
+
+-- RLS: board_shares
+ALTER TABLE board_shares ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY shares_owner ON board_shares
+    USING (owner_sub = current_sub())
+    WITH CHECK (owner_sub = current_sub());
+
+CREATE POLICY shares_see_own ON board_shares FOR SELECT
+    USING (shared_with_sub = current_sub());
+
+-- Grant PostgREST access
+GRANT SELECT, INSERT, UPDATE, DELETE ON boards, board_versions, board_shares
+    TO blockr_user;
+```
+
+Security enforcement is entirely PostgreSQL's responsibility via RLS.
+Blockyard provisions the schema and policies; PostgREST validates JWTs
+against the IdP's JWKS endpoint; PostgreSQL evaluates RLS policies on
+every query. Blockyard is not in the data path at runtime.
+
+## Build Phases
+
+### Phase 2-1: Database Dual-Backend Foundation
+
+Migrate the database layer from raw `database/sql` + inline DDL to
+`sqlx` + `golang-migrate`. Support both SQLite and PostgreSQL as a
+config option. This is the foundation — board storage requires
+PostgreSQL, and v4 multi-node HA requires it for session/worker stores.
+
+**Deliverables:**
+
+1. Introduce `sqlx` — replace `*sql.DB` with `*sqlx.DB` in the `DB`
+   struct. All existing queries get `sqlx.Rebind(dialect, query)` for
+   placeholder portability. Struct scanning replaces manual `Scan()`
+   calls where beneficial.
+2. Versioned migrations via `golang-migrate` — extract the inline DDL
+   from `db.go` into `migrations/sqlite/001_initial.up.sql` and
+   `migrations/postgres/001_initial.up.sql`. Migrations are embedded
+   via `embed.FS`.
+3. PostgreSQL driver registration — register `pgx/v5/stdlib` alongside
+   `modernc.org/sqlite`. The `[database] driver` config field selects
+   which is used.
+4. Dialect helpers — `internal/db/dialect.go`:
+   - `IsUniqueConstraintError(err)` dispatches on driver type
+     (SQLite: string match; PostgreSQL: `pq` error code `23505`)
+   - Connection setup differs: SQLite gets `SetMaxOpenConns(1)`;
+     PostgreSQL gets a connection pool.
+5. Config validation — `driver = "postgres"` requires `url` to be set;
+   `driver = "sqlite"` requires `path`.
+6. Test infrastructure — integration tests run against both backends.
+   SQLite tests use `:memory:`; PostgreSQL tests use a test container
+   or are skipped when no PostgreSQL is available.
+
+**Key type changes:**
+
+```go
+// internal/db/db.go
+
+type Dialect int
+
+const (
+    DialectSQLite Dialect = iota
+    DialectPostgres
+)
+
+type DB struct {
+    *sqlx.DB
+    dialect  Dialect
+    tempPath string // non-empty when using a temp file for :memory:
+}
+
+func Open(cfg config.DatabaseConfig) (*DB, error) {
+    switch cfg.Driver {
+    case "sqlite":
+        return openSQLite(cfg.Path)
+    case "postgres":
+        return openPostgres(cfg.URL)
+    default:
+        return nil, fmt.Errorf("unsupported database driver: %q", cfg.Driver)
+    }
+}
+```
+
+All existing `db.Exec("... ? ...", args...)` calls become
+`db.Exec(sqlx.Rebind(db.BindType(), "... ? ..."), args...)` — or
+equivalently, a helper method on `*DB` that rebinds automatically.
+This is a mechanical transformation across all ~40 methods.
+
+### Phase 2-2: Quick Wins
+
+Three independent features that build on the existing schema and
+infrastructure. Low risk, high usability impact.
+
+**Deliverables:**
+
+1. **Bundle rollback** — new endpoint
+   `POST /api/v1/apps/{id}/rollback` with body `{ "bundle_id": "..." }`.
+   Validates the target bundle exists, is `ready`, and belongs to the
+   app. Drains active sessions (marks app as draining, waits for
+   `shutdown_timeout / 2`, then force-evicts remaining workers), sets
+   `active_bundle`, and allows new sessions against the rolled-back
+   bundle.
+
+   ```
+   POST /api/v1/apps/{id}/rollback  { "bundle_id": "..." }
+     1. Validate bundle is ready and belongs to app
+     2. Mark app as draining (no new sessions routed)
+     3. Wait up to drain_timeout for sessions to end
+     4. Force-evict remaining workers
+     5. Set active_bundle = target bundle
+     6. Clear draining flag
+     → 200 { app details with new active_bundle }
+   ```
+
+2. **Soft-delete for apps** — add `deleted_at TEXT` column. `DELETE
+   /api/v1/apps/{id}` sets `deleted_at` instead of removing the row.
+   All queries filter `WHERE deleted_at IS NULL`. A background sweeper
+   goroutine runs periodically and purges soft-deleted apps older than
+   a configurable retention period (default: 30 days) — stopping
+   workers, removing files, deleting bundle rows, then the app row.
+
+   New config field:
+
+   ```toml
+   [storage]
+   soft_delete_retention = "720h"   # 30 days; 0 = immediate hard delete
+   ```
+
+   A restore endpoint allows undoing a soft-delete before purge:
+
+   ```
+   POST /api/v1/apps/{id}/restore  → clears deleted_at, returns 200
+   ```
+
+3. **Per-content resource limit enforcement** — wire the existing
+   `memory_limit` and `cpu_limit` fields from `WorkerSpec` into Docker
+   container creation. In `internal/backend/docker/docker.go`, the
+   `Spawn` method sets `HostConfig.Resources`:
+
+   ```go
+   resources := container.Resources{}
+   if spec.MemoryLimit != "" {
+       mem, _ := units.RAMInBytes(spec.MemoryLimit)
+       resources.Memory = mem
+   }
+   if spec.CPULimit > 0 {
+       resources.NanoCPUs = int64(spec.CPULimit * 1e9)
+   }
+   ```
+
+   No schema changes — the fields already exist.
+
+### Phase 2-3: Worker Lifecycle (Scale-to-Zero, Pre-Warming, Loading Page)
+
+Three features that share idle-detection and worker-lifecycle machinery.
+Built together because they interact tightly.
+
+**Deliverables:**
+
+1. **Scale-to-zero** — the existing autoscaler already evicts idle
+   workers after `idle_worker_timeout`. Scale-to-zero formalizes this:
+   when all sessions disconnect and the idle timeout expires, the app
+   has zero running workers. The next request triggers a cold start.
+   No new machinery needed for the eviction side — the change is on
+   the cold-start side (the loading page).
+
+2. **Pre-warming** — a new per-app `pre_warmed_seats` field (default
+   `0`, stored in `apps` table). When `> 0`, the autoscaler maintains
+   a pool of standby workers with no assigned sessions. When a new
+   session arrives, it claims a warm worker (zero cold-start latency)
+   and the autoscaler immediately spawns a replacement to maintain
+   the pool size.
+
+   The autoscaler loop (which already runs on `health_interval`) gains
+   a pre-warming check:
+
+   ```
+   for each app with pre_warmed_seats > 0:
+       idle_count = count workers with zero sessions
+       deficit = pre_warmed_seats - idle_count
+       if deficit > 0:
+           spawn deficit workers (respecting max_workers limits)
+   ```
+
+   Workers spawned for pre-warming are identical to on-demand workers —
+   same image, same mounts, same health checks. The only difference is
+   they have no assigned sessions until claimed.
+
+3. **Cold-start loading page** — when a browser request (`Accept:
+   text/html`) arrives for an app with no healthy workers, the proxy
+   serves an HTML page with a spinner instead of holding the request
+   open. The page polls a readiness endpoint to detect when the worker
+   is ready, then redirects to the app.
+
+   Non-browser requests (API calls, WebSocket upgrades) continue using
+   the existing hold-until-healthy behavior.
+
+   **New endpoint:**
+
+   ```
+   GET /app/{name}/__blockyard/ready
+     → 200 { "ready": true }   when a healthy worker exists
+     → 200 { "ready": false }  when still starting
+     → 503                     on timeout / failure
+   ```
+
+   **Loading page behavior:**
+
+   ```
+   1. Browser requests /app/my-app/
+   2. Proxy detects: no healthy workers, Accept includes text/html
+   3. Spawn worker (if not already spawning)
+   4. Serve loading.html (embedded template, blockyard-branded spinner)
+   5. loading.html polls GET /app/my-app/__blockyard/ready every 2s
+   6. On { "ready": true } → JavaScript redirects to /app/my-app/
+   7. On timeout (worker_start_timeout) → show error message
+   ```
+
+   The `/__blockyard/` path prefix is reserved and never forwarded to
+   the worker container. It's intercepted by the proxy before routing.
+
+   The loading page is not customizable in v2 — branding and
+   customization are v3 concerns.
+
+### Phase 2-4: Board Storage
+
+Add PostgreSQL-backed board storage with PostgREST as the API layer.
+Blockyard owns the schema; PostgREST + RLS enforce access control.
+
+**Deliverables:**
+
+1. **Board schema migration** — `migrations/postgres/004_v2_boards.up.sql`
+   creates the `boards`, `board_versions`, `board_shares` tables, RLS
+   policies, and PostgREST roles. Only runs on PostgreSQL — SQLite
+   deployments skip this migration.
+
+2. **JWT injection** — inject `X-Blockyard-Access-Token` on every
+   proxied request when OIDC is configured. The header carries the
+   user's current OIDC access token (refreshed transparently by the
+   server-side session store). Same injection pattern as the existing
+   `X-Blockyard-Vault-Token`.
+
+   ```go
+   // internal/proxy/identity.go — addition to existing identity injection
+   if accessToken := auth.AccessTokenFromContext(r.Context()); accessToken != "" {
+       proxyReq.Header.Set("X-Blockyard-Access-Token", accessToken)
+   }
+   ```
+
+3. **PostgREST URL injection** — when `[board_storage] postgrest_url`
+   is configured, inject `POSTGREST_URL` as an environment variable
+   into worker containers (alongside existing `VAULT_ADDR` and
+   `BLOCKYARD_API_URL` injection in `WorkerSpec`).
+
+4. **Update hello-blockr example** — replace PocketBase with PostgreSQL
+   + PostgREST in the example docker-compose. Update `setup.sh` to
+   initialize the board schema (or rely on blockyard's migrations).
+   Demonstrate board save/load/share from the blockr app.
+
+**Architecture (unchanged from design doc):**
+
+```
+blockr (R app)
+  │
+  ├── Authorization: Bearer <OIDC access token>
+  │
+  ▼
+PostgREST ──JWKS──→ IdP (JWT signature verification)
+  │
+  ▼
+PostgreSQL (RLS enforces per-user scoping + sharing)
+```
+
+Blockyard is not in the data path. The R app reads the access token
+from `session$request$HTTP_X_BLOCKYARD_ACCESS_TOKEN` and sends it as
+a Bearer token to PostgREST.
+
+**Board operations from R:**
+
+```
+Save:    POST   /boards          { owner_sub, board_id }
+                                 → creates board metadata
+         POST   /board_versions  { owner_sub, board_id, data }
+                                 → creates versioned snapshot
+Load:    GET    /board_versions?owner_sub=eq.{sub}&board_id=eq.{id}
+                                 &order=created_at.desc&limit=1
+List:    GET    /boards          (RLS filters automatically)
+Delete:  DELETE /boards?owner_sub=eq.{sub}&board_id=eq.{id}
+Share:   POST   /board_shares   { owner_sub, board_id, shared_with_sub }
+Tags:    PATCH  /boards?owner_sub=eq.{sub}&board_id=eq.{id}
+                                 { tags: ["analysis", "demo"] }
+```
+
+### Phase 2-5: Runtime Package Installation
+
+The most complex feature in v2. Allows users to install additional R
+packages during a live session. The design separates three concerns: a
+server-level package store, per-worker library views, and an API that
+blockr calls to request packages.
+
+**Deliverables:**
+
+1. **Package store** (`internal/pkgstore/store.go`) — a
+   content-addressable directory on the host:
+
+   ```
+   {bundle_server_path}/.pkg-store/
+   ├── ggplot2/
+   │   ├── 3.4.0-cran/          ← installed R package tree
+   │   └── 3.5.0-cran/
+   ├── blockr.ggplot/
+   │   ├── 0.2.0-cran/
+   │   └── 0.2.1-gh-blockr/     ← same version, different source
+   └── ...
+   ```
+
+   Keyed by `{package}/{version}-{source}`. Multiple versions and
+   sources coexist. Append-only — packages are never modified after
+   installation. The store key includes the R major.minor version to
+   handle R upgrades (e.g., `ggplot2/3.5.0-cran-R4.4/`).
+
+   ```go
+   type Store struct {
+       basePath   string    // {bundle_server_path}/.pkg-store
+       rVersion   string    // e.g. "4.4" — from the configured image
+       mu         sync.Mutex
+       installing map[string]chan struct{} // dedup concurrent installs
+   }
+
+   // Has checks if a package version exists in the store.
+   func (s *Store) Has(pkg, version, source string) bool
+
+   // Install runs a build container to install a package into the store.
+   // Blocks until complete. Concurrent requests for the same package
+   // coalesce — only one build runs; others wait on the channel.
+   func (s *Store) Install(ctx context.Context, backend backend.Backend,
+       req InstallRequest) error
+
+   // Path returns the store path for a package entry.
+   func (s *Store) Path(pkg, version, source string) string
+   ```
+
+2. **Per-worker library views** (`internal/pkgstore/view.go`) — flat
+   directories populated with hard links into the store:
+
+   ```
+   {bundle_server_path}/.worker-libs/{worker-id}/
+   ├── ggplot2/     ← hard-linked from .pkg-store/ggplot2/3.5.0-cran-R4.4/
+   ├── blockr.ggplot/
+   └── ...
+   ```
+
+   Mounted read-only at `/extra-lib/` in the worker container.
+   R's `.libPaths()` is set to `c("/extra-lib/", "/blockyard-lib")` —
+   live-installed packages shadow the base library.
+
+   ```go
+   type View struct {
+       basePath string // {bundle_server_path}/.worker-libs
+   }
+
+   // Create creates a view directory for a worker.
+   func (v *View) Create(workerID string) error
+
+   // Link hard-links a package from the store into a worker's view.
+   func (v *View) Link(workerID string, storePath string) error
+
+   // Cleanup removes a worker's view directory.
+   func (v *View) Cleanup(workerID string) error
+   ```
+
+   Hard links (`cp -al`) give zero additional disk usage. Creating a
+   linked tree takes milliseconds. Cleanup is `rm -rf` on the view
+   directory — the store is unaffected.
+
+3. **Package install API** — new endpoint:
+
+   ```
+   POST /api/v1/packages
+   {
+       "worker_id": "...",
+       "packages": [
+           { "name": "blockr.ggplot" },
+           { "name": "ggplot2", "version": "3.5.0", "source": "cran" }
+       ]
+   }
+   ```
+
+   Flow:
+
+   ```
+   1. Validate worker exists and caller has access to the app
+   2. For each package:
+      a. Check store — if present, skip to step (d)
+      b. Spawn build container: same base image, mounts store rw,
+         runs pak::pkg_install() with the store as the library
+      c. Record installed package in store index
+      d. Hard-link from store into the worker's view
+   3. Return 200 with list of installed packages
+   ```
+
+   Build containers carry the same isolation as workers: cap-drop ALL,
+   no-new-privileges, isolated network. The store is mounted read-write
+   (the only writable mount). The existing base R library is mounted
+   read-only as an additional lib path so `pak` sees already-installed
+   dependencies and only installs the delta.
+
+   Open installs — no allowlist, no source restrictions. The threat
+   model is unchanged from the worker containers themselves.
+
+4. **Worker lifecycle integration** — on `Spawn`, create a view
+   directory and mount it. On `evictWorker`, clean up the view. The
+   view directory is created alongside the existing bundle and library
+   mounts.
+
+5. **Board restore integration** — when a board is loaded, blockr
+   records its dependency set (package names, versions, sources) in
+   the board metadata. On restore, blockr checks which packages are
+   available and requests missing ones via the API. Since packages
+   likely exist in the store from prior sessions, this is a
+   hard-link operation — near-instant.
+
+**Build container for package installation:**
+
+```go
+type PkgBuildSpec struct {
+    Image         string            // same base R image
+    StorePath     string            // host path to .pkg-store (rw mount)
+    BaseLibPath   string            // host path to bundle's rv library (ro mount)
+    Package       string            // e.g. "blockr.ggplot"
+    Version       string            // optional; empty = latest
+    Source        string            // "cran", "gh-blockr", etc.
+    Labels        map[string]string
+}
+```
+
+The build command runs `pak::pkg_install()` targeting a package-specific
+output directory within the store. Transitive dependencies that already
+exist in the store or base library are reused — `pak` sees them via the
+read-only library mount.
+
+### Phase 2-6: Web UI Expansion
+
+Extends the v1 dashboard with per-app management and operational
+visibility. Server-rendered HTML, no JavaScript framework.
+
+**Deliverables:**
+
+1. **Per-app settings panel** — accessible from the dashboard via a
+   detail/edit link per app. Displays and allows editing of:
+   - Name, title, description
+   - Access type (acl / logged_in / public)
+   - ACL management (grant/revoke user access)
+   - Resource limits (memory, CPU)
+   - Worker scaling (max_workers_per_app, max_sessions_per_worker)
+   - Pre-warmed seats
+   - Tags
+   - Bundle list with rollback action
+   - Soft-delete (with confirmation)
+
+   Uses existing API endpoints — the UI is a form that POSTs to
+   `PATCH /api/v1/apps/{id}`, `POST /api/v1/apps/{id}/rollback`, etc.
+
+2. **Content filtering** — add search/filter controls to the dashboard
+   app list. Filter by tag, search by name/title/description. Uses the
+   existing `ListCatalog` endpoint with query parameters.
+
+3. **Per-app log viewer** — accessible from the per-app settings panel.
+   Streams logs via `GET /api/v1/apps/{id}/logs` using chunked transfer
+   encoding. The UI uses `fetch()` with a `ReadableStream` reader to
+   append log lines to a `<pre>` element in real time. Historical logs
+   are loaded first, then live lines are appended.
+
+No new navigation chrome (navbar, app switcher) — deferred to v3.
+
+### Phase 2-7: CLI Tool
+
+A dedicated Go binary (`cmd/by/`) for interacting with the server via
+the REST API. Built last to target the stable, final v2 API surface.
+
+**Authentication:** `BLOCKYARD_TOKEN` environment variable (a PAT).
+No login command — users create PATs via the web UI and export the
+env var. A `blockyard login` convenience command is a future addition.
+
+**Server URL:** `BLOCKYARD_URL` environment variable (e.g.,
+`https://blockyard.example.com`).
+
+**Subcommands:**
+
+```
+by deploy <app-name> <path>    Upload a bundle (tar.gz the directory, POST to upload endpoint)
+by list                        List apps (with status, active bundle, owner)
+by get <app>                   Get app details
+by start <app>                 Start an app
+by stop <app>                  Stop an app
+by rollback <app> <bundle-id>  Roll back to a previous bundle
+by logs <app>                  Tail app logs (--follow for streaming)
+by bundles <app>               List bundles for an app
+by delete <app>                Soft-delete an app
+by restore <app>               Restore a soft-deleted app
+by config <app> [flags]        Update app config (--memory, --cpu, --access-type, etc.)
+by users list                  List users (admin only)
+by users update <sub> [flags]  Update user role/active status (admin only)
+by tokens create <name>        Create a PAT (requires browser session — deferred)
+```
+
+All commands are thin wrappers around the REST API. The CLI bundles a
+directory into a tar.gz archive for `deploy` — this is the primary
+value over raw `curl`.
+
+**Error handling:** the CLI prints the `message` field from error
+responses, not the raw JSON. Non-zero exit codes on failure.
+
+## Build Order and Dependency Graph
+
+```
+Phase 2-1: Database Dual-Backend Foundation
+  └── prerequisite for: board storage (phase 2-4), everything else benefits
+
+Phase 2-2: Quick Wins (Rollback, Soft-Delete, Resource Limits)
+  └── depends on: phase 2-1 (migrations)
+  └── independent of: phases 2-3 through 2-7
+
+Phase 2-3: Worker Lifecycle (Scale-to-Zero, Pre-Warming, Loading Page)
+  └── depends on: phase 2-1 (pre_warmed_seats column)
+  └── independent of: phases 2-4, 2-5
+
+Phase 2-4: Board Storage
+  └── depends on: phase 2-1 (PostgreSQL support)
+  └── independent of: phases 2-3, 2-5
+
+Phase 2-5: Runtime Package Installation
+  └── depends on: phase 2-1 (migrations for any new tables)
+  └── independent of: phases 2-3, 2-4
+
+Phase 2-6: Web UI Expansion
+  └── depends on: phases 2-2 (rollback, soft-delete UI),
+      2-3 (pre-warming config), 2-4 (board storage optional)
+
+Phase 2-7: CLI Tool
+  └── depends on: all API-changing phases (2-2 through 2-5)
+  └── built last to target final API surface
+```
+
+Phases 2-3, 2-4, and 2-5 are independent of each other and can be
+developed in parallel after the foundation.
+
+## Test Strategy
+
+### Unit tests
+
+- **Database dialect tests:** verify all ~40 methods produce correct
+  results on both SQLite and PostgreSQL. Run against `:memory:` SQLite
+  and a test PostgreSQL instance (skipped when unavailable).
+- **Migration tests:** verify up/down migrations on both dialects.
+- **Package store tests:** store has/install/path operations using temp
+  directories. Hard-link view creation and cleanup.
+- **Loading page tests:** verify HTML template renders, readiness
+  endpoint returns correct status.
+- **CLI tests:** subcommand parsing, flag validation, output formatting.
+
+### Integration tests
+
+Start the full server (with mock backend) and exercise HTTP endpoints:
+
+- **Rollback flow:** deploy two bundles → rollback to first → verify
+  active bundle changed.
+- **Soft-delete flow:** delete app → verify filtered from listings →
+  restore → verify visible again → wait for purge.
+- **Resource limits:** spawn worker with memory/CPU limits → verify
+  Docker container has correct `HostConfig.Resources`.
+- **Pre-warming:** configure app with `pre_warmed_seats = 1` → verify
+  autoscaler maintains one idle worker → claim it with a session →
+  verify replacement spawned.
+- **Loading page:** request app with no workers → verify HTML loading
+  page served (not held request) → verify `/__blockyard/ready` returns
+  status → verify redirect on ready.
+- **Package install:** POST to install endpoint → verify store entry
+  created → verify hard-linked into worker view.
+- **Board storage:** requires PostgreSQL test instance. Verify RLS
+  policies: owner sees own boards, shared user sees restricted boards,
+  public boards visible to all, private boards invisible to others.
+
+### Docker integration tests
+
+- Resource limit enforcement: spawn container with `memory_limit` and
+  `cpu_limit`, verify Docker inspect shows correct values.
+- Package install build container: run a real `pak::pkg_install()` in
+  a build container, verify package appears in store.
+
+## Design Decisions
+
+1. **sqlx over raw database/sql.** The refactor is mechanical
+   (rebind + struct scanning) and sqlx is the thinnest useful layer.
+   It avoids both the fragility of hand-rolled placeholder rewriting
+   and the complexity of a full ORM. All existing SQL is preserved.
+
+2. **golang-migrate over inline DDL.** Versioned migrations with
+   up/down support are essential for production PostgreSQL deployments.
+   Embedded via `embed.FS` so the single-binary distribution is
+   preserved. SQLite deployments also benefit from versioned schema
+   evolution (vs. the current `CREATE TABLE IF NOT EXISTS` approach
+   that cannot handle column additions).
+
+3. **Separate migration tracks per dialect.** SQLite and PostgreSQL
+   migration files are maintained independently. This avoids
+   dialect-conditional SQL within migration files and allows
+   PostgreSQL-only migrations (board storage).
+
+4. **Board metadata separate from versions.** The `boards` table holds
+   identity and access control (owner, board_id, acl_type, tags). The
+   `board_versions` table holds the data snapshots. This ensures ACL
+   settings and tags are per-board, not per-version — sharing a board
+   means sharing all its versions.
+
+5. **Hard links over bind mount propagation for package views.** Hard
+   links require no special privileges, no Docker configuration changes,
+   and no mount lifecycle management. The only constraint — store and
+   views on the same filesystem — is naturally satisfied when both live
+   under `bundle_server_path`.
+
+6. **Open package installation (no allowlist).** The threat model is
+   unchanged from the worker container — users already run arbitrary R
+   code. Build containers carry the same isolation as workers. An
+   allowlist would add operational friction without meaningful security
+   improvement.
+
+7. **Loading page for browsers only.** API clients and WebSocket
+   connections continue using the hold-until-healthy pattern. The
+   loading page is only served when the request's `Accept` header
+   includes `text/html`. This avoids breaking programmatic clients
+   that expect either a response or a timeout.
+
+8. **CLI last.** The CLI targets the final v2 API surface, avoiding
+   rework if endpoints change during development. Auth is a simple
+   env var (`BLOCKYARD_TOKEN`); no device flow or browser-based login
+   in v2.
+
+9. **Pre-warming shares autoscaler machinery.** The pre-warming check
+   runs inside the existing autoscaler loop (which already runs on
+   `health_interval`). No new goroutine or timer. The autoscaler
+   already handles idle eviction; pre-warming is the inverse — spawn
+   when the idle pool is below the target.
+
+10. **`/__blockyard/` reserved path prefix.** All blockyard-internal
+    proxy endpoints live under this prefix, which is never forwarded to
+    worker containers. This avoids collisions with app routes and
+    provides a clean namespace for future proxy-level features.
