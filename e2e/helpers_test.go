@@ -338,31 +338,44 @@ func (c *APIClient) PollTask(t *testing.T, taskID string, timeout time.Duration)
 
 func (c *APIClient) StartApp(t *testing.T, appID string) string {
 	t.Helper()
-	// Use a dedicated client with no timeout for start — the server-side
-	// spawn + health poll can take over 60s on CI.
-	req, err := http.NewRequest("POST", c.BaseURL+"/api/v1/apps/"+appID+"/start", http.NoBody)
-	if err != nil {
-		t.Fatalf("start app: %v", err)
+	// The start endpoint blocks while spawning a Docker container and
+	// waiting for it to become healthy. On CI runners, the TCP connection
+	// can be dropped during this idle period. Retry on transient errors;
+	// the server returns the existing worker if one is already running.
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			t.Logf("start app: retrying (attempt %d) after: %v", attempt+1, lastErr)
+			time.Sleep(5 * time.Second)
+		}
+		req, err := http.NewRequest("POST", c.BaseURL+"/api/v1/apps/"+appID+"/start", http.NoBody)
+		if err != nil {
+			t.Fatalf("start app: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var result struct {
+				WorkerID string `json:"worker_id"`
+			}
+			json.Unmarshal(body, &result)
+			return result.WorkerID
+		}
+		// 503 = worker failed to start, may succeed on retry.
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, body)
+			continue
+		}
+		t.Fatalf("start app: status %d, body: %s", resp.StatusCode, body)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	startClient := &http.Client{
-		Timeout:   0,
-		Transport: &http.Transport{DisableKeepAlives: true},
-	}
-	resp, err := startClient.Do(req)
-	if err != nil {
-		t.Fatalf("start app: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("start app: status %d, body: %s", resp.StatusCode, b)
-	}
-	var result struct {
-		WorkerID string `json:"worker_id"`
-	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	return result.WorkerID
+	t.Fatalf("start app: all attempts failed, last error: %v", lastErr)
+	return ""
 }
 
 func (c *APIClient) StopApp(t *testing.T, appID string) {
