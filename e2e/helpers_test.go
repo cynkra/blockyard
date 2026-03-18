@@ -159,7 +159,7 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 		req.AddCookie(c)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("create PAT: %v", err)
 	}
@@ -187,6 +187,9 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 // API Client
 // ---------------------------------------------------------------------------
 
+// httpClient is a shared client with a generous timeout for CI.
+var httpClient = &http.Client{Timeout: 120 * time.Second}
+
 type APIClient struct {
 	BaseURL string
 	Token   string
@@ -201,7 +204,7 @@ func (c *APIClient) do(method, path string, body io.Reader) (*http.Response, err
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 func (c *APIClient) doOctet(method, path string, body io.Reader) (*http.Response, error) {
@@ -211,7 +214,7 @@ func (c *APIClient) doOctet(method, path string, body io.Reader) (*http.Response
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/octet-stream")
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 // CreateApp creates an app and returns its ID. Handles 409 (already exists)
@@ -416,7 +419,7 @@ func enrollCredential(t *testing.T, baseURL string, cookies []*http.Cookie, serv
 		req.AddCookie(c)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("enroll credential: %v", err)
 	}
@@ -436,7 +439,7 @@ func enrollCredentialWithPAT(t *testing.T, baseURL, token, service, apiKey strin
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("enroll credential: %v", err)
 	}
@@ -455,7 +458,7 @@ func readVaultSecret(t *testing.T, vaultURL, token, path string) map[string]any 
 	req, _ := http.NewRequest("GET", vaultURL+"/v1/"+path, nil)
 	req.Header.Set("X-Vault-Token", token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("read vault secret: %v", err)
 	}
