@@ -23,7 +23,7 @@ cleanup.
 | Backend             | Client                            | Handle    | Priority | Purpose                |
 |---------------------|-----------------------------------|-----------|----------|------------------------|
 | `Docker` / `Podman` | `github.com/docker/docker/client` | Container ID | v0  | Single-host production |
-| `Kubernetes`        | `k8s.io/client-go`               | Pod/Job name | v2  | Multi-node production  |
+| `Kubernetes`        | `k8s.io/client-go`               | Pod/Job name | v4  | Multi-node production  |
 
 **Podman** exposes a Docker-compatible socket via `podman system service`.
 The Docker Go client connects to it unchanged; the Docker backend works
@@ -44,7 +44,7 @@ IDs to network addresses. Both are concrete in-memory structs for v0 (map +
 `sync.RWMutex`). Load balancing (v1) sits on top — it picks a worker and
 writes the mapping; the stores just hold the data.
 
-When v2 needs PostgreSQL-backed implementations for multi-node HA, extracting
+When v4 needs PostgreSQL-backed implementations for multi-node HA, extracting
 an interface in Go is a low-cost refactor — define the interface at the call
 site and the existing struct already satisfies it.
 
@@ -53,7 +53,7 @@ site and the existing struct already satisfies it.
 An in-memory task store manages restore tasks. It provides a create/subscribe
 pattern: background restore goroutines write log lines; HTTP handlers read
 buffered output and optionally follow live lines via a channel. Same interface
-extraction story as session/worker routing for v2 HA.
+extraction story as session/worker routing for v4 HA.
 
 ## Network Isolation
 
@@ -106,7 +106,7 @@ any it has no active record for.
 `--read-only` with tmpfs at `/tmp`, no Docker socket mount, default seccomp
 profile.
 
-**Kubernetes (v2):** `NetworkPolicy` per Pod denying all ingress except from
+**Kubernetes (v4):** `NetworkPolicy` per Pod denying all ingress except from
 the server, restricting egress to internet-only. Requires a CNI plugin that
 enforces NetworkPolicy (Calico or Cilium).
 
@@ -521,9 +521,9 @@ blockyard.example.com {
 }
 ```
 
-### Kubernetes Deployment (v2)
+### Kubernetes Deployment (v4)
 
-The k8s deployment is a v2 milestone. Several constraints differ meaningfully
+The k8s deployment is a v4 milestone. Several constraints differ meaningfully
 from the single-host Docker case.
 
 **Our server** runs as a k8s Deployment, talking to the cluster API via

@@ -543,14 +543,10 @@ infrastructure.
   injects `BLOCKYARD_API_URL` as a container environment variable so the
   R process knows where to call the exchange endpoint.
 
-  **Enrollment progression:**
-  - **v1a (stopgap):** users write credentials directly via the OpenBao web UI
-    at the correct paths (`secret/users/{sub}/apikeys/{service}` etc.).
-  - **v1b:** `POST /users/me/credentials/{service}` on the blockyard REST
-    API. Server validates identity via OIDC, writes to OpenBao on the user's
-    behalf.
-  - **v2:** blockyard web UI wraps the v1b API. Point-and-click credential
-    management.
+  **Enrollment:** users manage credentials via the enrollment forms on the
+  blockyard dashboard (v1). The REST API endpoint
+  `POST /users/me/credentials/{service}` validates identity via OIDC and
+  writes to OpenBao on the user's behalf.
 
   The server authenticates to OpenBao via AppRole auth — a renewable,
   scoped token obtained at startup and maintained by a background renewal

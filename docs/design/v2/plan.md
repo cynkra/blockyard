@@ -482,8 +482,9 @@ Blockyard owns the schema; PostgREST + RLS enforce access control.
    into worker containers (alongside existing `VAULT_ADDR` and
    `BLOCKYARD_API_URL` injection in `WorkerSpec`).
 
-4. **Update hello-blockr example** — replace PocketBase with PostgreSQL
-   + PostgREST in the example docker-compose. Update `setup.sh` to
+4. **Add PostgreSQL board storage example** — add a new example
+   docker-compose showing PostgreSQL + PostgREST board storage
+   alongside the existing PocketBase example. Include `setup.sh` to
    initialize the board schema (or rely on blockyard's migrations).
    Demonstrate board save/load/share from the blockr app.
 
