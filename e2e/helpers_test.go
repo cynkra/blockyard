@@ -332,7 +332,15 @@ func (c *APIClient) PollTask(t *testing.T, taskID string, timeout time.Duration)
 
 func (c *APIClient) StartApp(t *testing.T, appID string) string {
 	t.Helper()
-	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/start", nil)
+	// Use a dedicated client with no timeout for start — the server-side
+	// spawn + health poll can take over 60s on CI.
+	req, err := http.NewRequest("POST", c.BaseURL+"/api/v1/apps/"+appID+"/start", http.NoBody)
+	if err != nil {
+		t.Fatalf("start app: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	noTimeoutClient := &http.Client{Timeout: 0}
+	resp, err := noTimeoutClient.Do(req)
 	if err != nil {
 		t.Fatalf("start app: %v", err)
 	}
