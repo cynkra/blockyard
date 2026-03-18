@@ -149,28 +149,43 @@ func TestOrphanCleanup(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 
-	// Simulate crash — don't call Stop, just list and clean up
+	// Simulate crash — don't call Stop, just list and clean up.
+	// Filter to only this test's resources to avoid interference from
+	// parallel tests that also create managed containers/networks.
 	managed, err := b.ListManaged(ctx)
 	if err != nil {
 		t.Fatalf("ListManaged: %v", err)
 	}
-	if len(managed) == 0 {
+
+	var ours []backend.ManagedResource
+	for _, r := range managed {
+		if r.Labels["dev.blockyard/worker-id"] == workerID {
+			ours = append(ours, r)
+		}
+	}
+	if len(ours) == 0 {
 		t.Fatal("expected managed resources after spawn")
 	}
 
-	for _, r := range managed {
+	for _, r := range ours {
 		if err := b.RemoveResource(ctx, r); err != nil {
 			t.Logf("RemoveResource warning: %v", err)
 		}
 	}
 
-	// Should be clean now
+	// Our resources should be gone now.
 	remaining, err := b.ListManaged(ctx)
 	if err != nil {
 		t.Fatalf("ListManaged after cleanup: %v", err)
 	}
-	if len(remaining) != 0 {
-		t.Fatalf("expected 0 remaining resources, got %d", len(remaining))
+	var oursRemaining int
+	for _, r := range remaining {
+		if r.Labels["dev.blockyard/worker-id"] == workerID {
+			oursRemaining++
+		}
+	}
+	if oursRemaining != 0 {
+		t.Fatalf("expected 0 remaining resources for worker %s, got %d", workerID, oursRemaining)
 	}
 }
 

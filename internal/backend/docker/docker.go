@@ -783,8 +783,9 @@ func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResou
 	}
 	for _, c := range containers {
 		resources = append(resources, backend.ManagedResource{
-			ID:   c.ID,
-			Kind: backend.ResourceContainer,
+			ID:     c.ID,
+			Kind:   backend.ResourceContainer,
+			Labels: c.Labels,
 		})
 	}
 
@@ -799,8 +800,9 @@ func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResou
 	}
 	for _, n := range networks {
 		resources = append(resources, backend.ManagedResource{
-			ID:   n.ID,
-			Kind: backend.ResourceNetwork,
+			ID:     n.ID,
+			Kind:   backend.ResourceNetwork,
+			Labels: n.Labels,
 		})
 	}
 
