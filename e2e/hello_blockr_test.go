@@ -102,7 +102,7 @@ func TestHelloBlockr(t *testing.T) {
 	})
 
 	t.Run("enroll_credential_via_api", func(t *testing.T) {
-		if cookies1 == nil {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
