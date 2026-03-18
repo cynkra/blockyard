@@ -136,6 +136,94 @@ is independent of blockyard's application code: even if the server is
 fully compromised, the Docker daemon itself refuses to create containers
 that violate the policy.
 
+#### Residual Risk: Shared Kernel
+
+The authorization plugin, combined with the existing worker hardening
+(`--cap-drop=ALL`, `no-new-privileges`, read-only root, default seccomp
+profile, per-container bridge networks), closes off misconfiguration and
+server-compromise attack paths. The residual risk is the shared host
+kernel — the irreducible attack surface of container-based isolation.
+
+Known container escape vectors against hardened containers:
+
+- **Kernel local privilege escalation.** The container shares the host
+  kernel. A bug in any reachable kernel code path (namespaces, cgroups,
+  filesystems, netfilter) can break out. These appear several times per
+  year — e.g., CVE-2022-0185 (user namespace + filesystem), CVE-2024-1086
+  (nftables), CVE-2022-0847 Dirty Pipe. Seccomp reduces the reachable
+  syscall surface but the kernel still exposes hundreds of entry points.
+- **Container runtime bugs.** Vulnerabilities in runc or containerd
+  itself — e.g., CVE-2019-5736 (runc binary overwrite), CVE-2024-21626
+  Leaky Vessels (runc working directory file descriptor leak). Rarer but
+  high-impact.
+
+Keeping the host kernel and Docker/runc patched is the single most
+important operational measure — it matters more than any additional
+configuration-level hardening.
+
+#### Stronger Isolation: Alternative Runtimes
+
+For internet-facing deployments where adversarial input is expected,
+Docker supports swapping the container runtime without changing
+application code or the blockyard Docker backend. The OCI runtime
+interface means this is purely a deployment-time configuration choice.
+
+| Runtime | Mechanism | Overhead | Isolation boundary |
+|---|---|---|---|
+| **runc** (default) | Shared kernel, namespaces + seccomp | Negligible | Kernel syscall surface — hundreds of entry points |
+| **gVisor (runsc)** | User-space kernel reimplementation; intercepts syscalls in a Go process before they reach the host kernel | ~5–15% CPU | gVisor's own codebase — most host kernel exploits don't apply, but gVisor itself can have bugs, and a handful of syscalls still pass through to the host |
+| **Kata Containers** | Real VM per container; guest runs its own kernel, host kernel is only reachable through the hypervisor's virtual device interface (virtio) | ~30–50MB RAM per VM, ~100–200ms additional boot | Hypervisor virtual device interface — escapes require a hypervisor vulnerability, which are dramatically rarer and harder than kernel privilege escalations |
+
+**Kata Containers** is the recommended runtime for public-internet
+deployments. It is an OCI-compatible runtime — configured in Docker's
+`daemon.json` or per-container via `--runtime=kata-runtime`. The
+existing Docker backend code requires no changes: networking, mounts,
+resource limits, labels, and log streaming all work through Docker's
+API as before.
+
+The performance tradeoff is well-suited to Shiny workloads. The
+per-VM memory overhead (30–50MB) is modest relative to an R process,
+and the additional boot latency (100–200ms) is invisible against a
+Shiny cold start that already takes seconds for R initialization and
+package loading.
+
+gVisor is a lighter alternative that significantly raises the bar
+over runc (used by Google for Cloud Run and GKE Sandbox), but its
+isolation boundary is weaker than Kata's — it filters syscalls in
+userspace rather than interposing a real VM boundary. For deployments
+where the additional per-VM memory cost of Kata is acceptable, Kata
+provides a stronger guarantee.
+
+#### Per-App Runtime Selection
+
+Docker allows overriding the runtime per container via the
+`--runtime` flag, independent of the daemon-wide default. This means
+a single blockyard instance can run different apps at different
+isolation levels — e.g., Kata for public-facing apps that accept
+untrusted input and runc for private apps behind authentication.
+
+Add a `runtime` field to per-app configuration, following the same
+pattern as the existing `image`, `memory_limit`, and `cpu_limit`
+fields. When set, the Docker backend passes it through to the
+container create call. When unset, Docker uses its configured default
+runtime.
+
+```toml
+[docker]
+runtime = "kata-runtime"   # server-wide default
+
+# Per-app override (in app config / database):
+# runtime = "runc"         # cheaper isolation for trusted/private apps
+```
+
+The authorization plugin policy should allowlist the set of permitted
+runtimes (e.g., `["runc", "kata-runtime"]`) to prevent a compromised
+server from selecting an unrecognized or weaker runtime.
+
+Documenting the Kata runtime swap, per-app runtime configuration, and
+verifying Shiny workload compatibility is a low-effort addition to the
+deployment guide.
+
 ### Multiple Execution Environment Images
 
 Per-app image selection. Add an `image` field to app configuration that
