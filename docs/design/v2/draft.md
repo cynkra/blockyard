@@ -2,8 +2,9 @@
 
 v2 focuses on single-node production completeness: usability improvements,
 safety nets, and blockr-specific features that make the platform pleasant to
-operate and use on Docker. Kubernetes and multi-node concerns are deferred to
-v3.
+operate and use on Docker. The headline differentiators are runtime package
+installation (breaking free of Connect's up-front dependency model) and
+production-grade board storage via PostgreSQL + PostgREST.
 
 ## Features
 
@@ -33,7 +34,7 @@ queries, background sweeper.
 CPU and memory limit fields are already in the content registry and carried
 in `WorkerSpec` from v0. v2 enforces them at the Docker level via
 `--memory` and `--cpus` container creation flags. When the Kubernetes backend
-arrives in v3, enforcement comes for free via pod resource specs.
+arrives in v4, enforcement comes for free via pod resource specs.
 
 ### Scale-to-Zero
 
@@ -50,90 +51,35 @@ cold-start latency. When a session claims the warm container, replace it
 with a fresh one. On a single node with a handful of apps, the resource
 cost is minimal — one idle container per app.
 
-### Multiple Execution Environment Images
+Default is `pre_warmed_seats = 0` (scale-to-zero behavior). Setting it
+to `> 0` maintains a warm pool of that size. Shares idle detection and
+worker lifecycle machinery with scale-to-zero.
 
-Per-app image selection. Add an `image` field to app configuration that
-overrides the server-wide `[docker] image` default. Operators or app
-developers specify which image to use per deployment.
+### Cold-Start Loading Page
 
-This interacts with the `build_image` config: rv's library path is
-namespaced by R version/arch/codename, so the build image's R version must
-match the worker image. For v2, the fix is to mount the `rv` binary from
-the server container into build containers (bind mount to
-`/usr/local/bin/rv`), collapsing back to a single image for builds. This
-works with Docker DooD; the Kubernetes variant (init container or shared
-volume) is a v3 concern.
+Serve a blockyard-branded loading page with a spinner during cold start
+instead of holding the request open to a blank browser tab. The page polls
+or uses SSE to detect when the worker is healthy, then redirects to the
+app.
 
-### Data Mounts
-
-App owners can map additional host directories into worker containers —
-e.g., shared model files, reference datasets, or writable scratch space.
-
-#### Mount Specification
-
-Each mount has three fields:
-
-| Field      | Required | Description                                      |
-|------------|----------|--------------------------------------------------|
-| `source`   | yes      | Named mount source (defined by admin), optionally followed by a subpath — e.g., `models` or `models/v2` |
-| `target`   | yes      | Absolute path inside the worker container — e.g., `/data/models` |
-| `readonly` | no       | Default `true`. Set to `false` for writable mounts. |
-
-Stored as a JSON column (`data_mounts`) on the `apps` table, consistent
-with other per-app settings like `memory_limit` and `cpu_limit`.
-
-#### Admin-Defined Mount Sources
-
-The server config defines a whitelist of named mount sources. App owners
-can only mount from these sources — they never specify raw host paths.
-
-```toml
-[[storage.data_mounts]]
-name = "models"
-path = "/data/shared-models"
-
-[[storage.data_mounts]]
-name = "scratch"
-path = "/data/scratch"
-```
-
-`path` is from the server's perspective (i.e., inside the server
-container in a DooD setup). The existing `MountConfig` logic in
-`mounts.go` handles translation to the host-side path before passing it
-to the Docker API — the same mechanism that already translates bundle
-paths across native, bind-mount, and volume deployment modes.
-
-When an app owner specifies `source: "models/v2"`, the server:
-1. Splits into source name (`models`) and subpath (`v2`).
-2. Validates the source name against the configured mount sources.
-3. Validates the subpath contains no `..` components (path traversal).
-4. Resolves the full server-side path (`/data/shared-models/v2`).
-5. Translates to the host-side path via `MountConfig`.
-6. Adds the bind mount to the worker container spec.
-
-This gives operators full control over which host directories are
-exposed, while app owners get a portable, environment-agnostic
-interface. The same app config works across staging and production —
-only the admin-defined paths differ.
-
-#### Interaction with Existing Mounts
-
-Worker containers already receive two read-only mounts: the bundle at
-`/app` and the restored library at `/blockyard-lib`. Data mounts must
-not collide with these paths or with each other. The server rejects
-mount specs where `target` conflicts with a reserved path.
+This changes the cold-start flow from "hold the request" to "serve an
+interim page, then redirect." Not customizable in v2 — branding and
+customization are v3 concerns.
 
 ### Web UI Expansion
 
 The v1 minimal UI covers the dashboard, user management, PAT management,
 and credential enrollment. v2 adds:
 
-- **Content browser** — richer app listing with search/filter, tag
-  management UI
-- **Log viewer** — live-streaming and historical log viewing per app
+- **Per-app settings panel** — ACLs, resource limits, metadata (name,
+  description), tags. Accessible from the existing dashboard as a
+  detail/edit view per app.
+- **Content filtering** — filter/search the app list by tag, name,
+  description on the dashboard.
+- **Per-app log viewer** — live-streaming and historical log viewing,
+  accessible from the per-app context menu.
 
-Lower priority than the other v2 items since the API + CLI covers the same
-functionality.
+No new navigation chrome (navbar, app switcher) — deferred to v3.
 
 ### Board Storage
 
@@ -141,12 +87,20 @@ Board save/restore and sharing for blockr. Storage is a blockr concern,
 not a blockyard concern — blockyard's only role is injecting the user's
 credentials (JWT or vault token) into the R session.
 
-The recommended backend is **PostgreSQL + PostgREST**: the user's OIDC
-JWT flows through to the database via PostgREST, and PostgreSQL RLS
-enforces per-user scoping and targeted sharing. No provisioning, no
-onboarding hooks, no admin tokens. Alternative backends (PocketBase,
-S3/MinIO, Gitea) work if the operator provisions credentials into
-OpenBao manually.
+**Two tiers:**
+
+- **Production (v2):** PostgreSQL + PostgREST. The user's OIDC JWT flows
+  through to the database via PostgREST, and PostgreSQL RLS enforces
+  per-user scoping and targeted sharing. No per-user provisioning, no
+  admin tokens, no blockyard involvement in the data path. Putting
+  PostgreSQL in the stack also prepares for v4 (PostgreSQL-backed
+  SessionStore, WorkerRegistry, TaskStore for multi-node HA).
+- **Dev / examples (v1):** PocketBase. Lightweight, works well, but
+  requires manual setup (user + token provisioned into vault).
+
+**Schema ownership** is an open question — blockyard could manage the
+boards schema alongside its own, or blockr could manage its own migrations
+independently with blockyard brokering access. TBD.
 
 See [board-storage.md](../board-storage.md) for the full design: schema,
 RLS policies, PostgREST configuration, JWT injection, and the comparison
@@ -157,6 +111,9 @@ of alternative backends.
 A blockr app is built from **blocks**, which are defined in R packages. The
 set of available blocks is currently fixed at deploy time. Users need to
 install additional block packages during a live session.
+
+This is the key differentiator over Connect's model — users don't need to
+specify all dependencies up front.
 
 #### Design: Package Store + Hard-Linked Views
 
@@ -439,98 +396,44 @@ A possible split:
 - **Server-side (live install):** New mechanism — a thin shim over
   `pak::pkg_install()` rather than either rv or renv.
 
-### Docker Daemon Hardening
+## Open Questions
 
-The server communicates with the Docker daemon via the Docker socket.
-A compromised server process has unrestricted access to the Docker API —
-it could create privileged containers, mount arbitrary host paths, use
-host networking, or mount the Docker socket itself into a worker. This
-is not specific to data mounts; it is a pre-existing concern that
-data mounts make more visible.
+1. **Version resolution policy.** When a user requests "blockr.ggplot"
+   without specifying a version, blockyard resolves against the configured
+   PPM snapshot URL (the same snapshot used for bundle restoration). This
+   guarantees consistency between base and live-installed packages for CRAN
+   sources. Dev packages (GitHub remotes, etc.) are supported and cannot
+   be restricted to CRAN — snapshots are a half-measure for these, but
+   there is no better option. The API accepts an optional version/source
+   but defaults to the configured repository set. Operators can override
+   the live-install repository configuration independently of the base
+   library's snapshot.
 
-#### Docker Authorization Plugins
-
-Docker supports [authorization plugins](https://docs.docker.com/engine/extend/plugins_authorization/)
-that intercept every API request before the daemon processes it. An
-authorization plugin can inspect the request (image, mounts, network
-mode, capabilities, etc.) and return allow or deny.
-
-The policy for blockyard workers should enforce:
-
-- **Mount sources** are restricted to configured data mount paths,
-  bundle storage, and library paths. No access to `/`, `/etc`,
-  the Docker socket, or other sensitive host paths.
-- **No privileged containers.** Workers must never run with
-  `--privileged` or elevated capabilities.
-- **No host networking.** Workers use the blockyard-managed bridge
-  network only.
-- **Image allowlist.** Workers may only use the server-wide default
-  image or explicitly configured per-app images.
-
-This can be implemented as a purpose-built plugin (a small HTTP server
-that parses Docker API create-container requests and validates against
-the policy) or via an existing OPA-based plugin like `opa-docker-authz`
-with a Rego policy encoding the above rules.
-
-The authorization plugin runs as a daemon-level configuration — the
-operator enables it in Docker's `daemon.json`. This means enforcement
-is independent of blockyard's application code: even if the server is
-fully compromised, the Docker daemon itself refuses to create containers
-that violate the policy.
-
-#### Open Questions
-
-1. **Board serialization format.** Does the current blockr format capture
-   which packages each block comes from, or only block identifiers? What
-   changes are needed on the blockr side to record package name + version +
-   source alongside board data?
-
-2. **Version resolution policy.** When a user requests "blockr.ggplot"
-   without specifying a version, what does blockyard install? The
-   recommended default is to resolve against a configured PPM snapshot URL
-   (the same snapshot used for bundle restoration). This guarantees
-   consistency between base and live-installed packages. The API should
-   accept an optional version/source but default to the configured
-   repository set. Open sub-question: should blockyard enforce that the
-   live-install repository configuration matches the base library's
-   snapshot, or allow operators to diverge?
-
-3. ~~**Transitive dependency version conflicts.**~~ Resolved — see
-   "Library Path Ordering", "Session Restart on Conflict", and "Why
-   Conflicts Are Rare in Practice" above. Summary: `/extra-lib/` takes
-   precedence in `.libPaths()` so newer versions shadow the base library
-   for not-yet-loaded packages. Already-loaded namespaces that need
-   upgrading trigger a board-state-preserving session restart. PPM
-   snapshots, current base libraries, and lightweight block packages make
-   the restart path uncommon in practice.
-
-4. **Security.** Installation happens in a sandboxed build container (not in
+2. **Security.** Installation happens in a sandboxed build container (not in
    the running worker), which limits the blast radius. But the installed
    package then runs inside the worker with the user's session context.
    Should there be an allowlist of installable packages? Per-app
    restrictions? Admin-only approval for new packages?
 
-5. **Store garbage collection.** The store grows monotonically. When should
+3. **Store garbage collection.** The store grows monotonically. When should
    packages be removed? Options: reference counting (remove when no board or
    active worker references a version), TTL-based expiry, manual admin
-   cleanup, or never (disk is cheap). This is not urgent but needs a policy
+   cleanup, or never (disk is cheap). Not urgent but needs a policy
    eventually.
 
-6. **API design.** Should the install endpoint be synchronous (block until
-   package is ready) or async (return a task ID, client polls)? For packages
-   already in the store, the response is near-instant. For new installs, it
-   could take minutes. A hybrid approach — return immediately if cached,
-   else return a task ID — may be cleanest.
-
-7. **Impact on cold-start time.** When a worker starts and needs extra
+4. **Impact on cold-start time.** When a worker starts and needs extra
    packages (e.g., for a board restore), hard-linking is fast. But if any
    required package is missing from the store and must be installed first,
    the user-facing delay could be significant. Should blockyard pre-warm the
    store based on known board dependencies? Or is the expectation that most
    packages are already cached from prior sessions?
 
-8. **Interaction with R version upgrades.** R packages compiled for one R
+5. **Interaction with R version upgrades.** R packages compiled for one R
    version may not work with another. If the server-wide R image is
    upgraded, does the entire store need to be invalidated and rebuilt? The
    store key should probably include the R version (e.g.,
    `ggplot2/3.5.0-cran-R4.4/`).
+
+6. **Board storage schema ownership.** Should blockyard manage the boards
+   PostgreSQL schema alongside its own database, or should blockr manage
+   its own migrations independently with blockyard brokering access?

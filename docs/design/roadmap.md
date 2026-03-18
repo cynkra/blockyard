@@ -31,10 +31,12 @@ Connect:
 plane. v1 is the MVP: the minimum needed to host a real blockr app for real
 users. v1 adds user auth (OIDC), identity injection, per-user credential
 management (the integration system), and load balancing. Nothing beyond v1 is
-required to call the product useful. v2 adds single-node production polish
-(CLI, scale-to-zero, pre-warming, runtime package install, data mounts,
-Docker daemon hardening). v3 adds the
-lightweight process backend. v4 adds Kubernetes for multi-node scaling.
+required to call the product useful. v2 adds single-node production
+completeness (CLI, scale-to-zero, pre-warming, runtime package install,
+board storage via PostgreSQL + PostgREST, cold-start loading page). v3 adds
+the lightweight process backend plus deferred single-node features (data
+mounts, Docker daemon hardening, multiple execution environment images, UI
+branding). v4 adds Kubernetes for multi-node scaling.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
 interface (Docker vs. process vs. Kubernetes). This abstraction is worth its
@@ -603,7 +605,7 @@ infrastructure.
   management (admin UI for role assignment and activation/deactivation)
   and PAT management (create, list, and revoke tokens) are also provided.
   In v0 mode (no OIDC), the root page shows all deployed apps without auth.
-  In-app navigation chrome (navbar, app switcher) is deferred to v2.
+  In-app navigation chrome (navbar, app switcher) is deferred to v3.
 
 ### v2: Single-Node Production Completeness
 
@@ -625,7 +627,7 @@ existing Docker deployment. No Kubernetes dependency.
 
 - **Per-content resource limit enforcement.** CPU/memory caps via Docker
   `--memory` and `--cpus` flags (fields already carried in `WorkerSpec` from
-  v0). Kubernetes enforcement comes for free in v3.
+  v0). Kubernetes enforcement comes for free in v4.
 
 - **Scale-to-zero.** When an app has no active connections for a configurable
   idle period, stop its workers to free resources. On the next request, hold
@@ -635,43 +637,35 @@ existing Docker deployment. No Kubernetes dependency.
   user doesn't incur cold-start latency. When a session claims the warm
   container, replace it with a fresh one.
 
-- **Multiple execution environment images.** Per-app image selection; add an
-  `image` field to app configuration that overrides the server-wide default.
+- **Cold-start loading page.** Serve a blockyard-branded loading page with
+  a spinner during cold start instead of holding the request open to a blank
+  browser tab. The page polls or uses SSE to detect when the worker is
+  healthy, then redirects. Not customizable in v2 — branding and
+  customization are v3 concerns.
 
-- **Web UI expansion.** Content browser with search/filter and tag management,
-  live-streaming log viewer per app. Lower priority — the API + CLI covers
-  the same functionality.
+- **Web UI expansion.** Per-app settings panel (ACLs, resource limits,
+  metadata, tags), content filtering by tag/name/description on the
+  dashboard, and per-app live-streaming log viewer. Builds on the v1
+  dashboard — no new navigation chrome.
 
 - **Board storage.** Per-user board save/restore and sharing for blockr.
-  The recommended backend is PostgreSQL with Row-Level Security, accessed
-  via PostgREST using the user's existing OIDC JWT — no provisioning, no
-  admin tokens, no blockyard involvement in the data path. Alternative
-  backends (PocketBase, S3, Gitea) are supported via operator-provisioned
-  credentials in OpenBao. See [board-storage.md](board-storage.md) for
-  the full design.
+  The production backend is PostgreSQL with Row-Level Security, accessed
+  via PostgREST using the user's existing OIDC JWT — no per-user
+  provisioning, no admin tokens, no blockyard involvement in the data
+  path. Lightweight alternatives (PocketBase) are available for dev and
+  example setups via operator-provisioned credentials in OpenBao.
+  See [board-storage.md](board-storage.md) for the full design.
 
 - **Runtime package installation.** Allow users to install additional block
   packages during a live session via a server-level package store with
   per-worker hard-linked library views. See [v2 draft](v2/draft.md) for the
   full design.
 
-- **Data mounts.** Per-app configuration for mounting additional host
-  directories into worker containers (e.g., shared datasets, model files,
-  scratch space). Admin-defined named mount sources whitelist which host
-  paths are available; app owners reference sources by name and specify
-  the container mount point and read-only/read-write mode.
+### v3: Process Backend + Deferred Single-Node Features
 
-- **Docker daemon hardening.** A Docker authorization plugin that enforces
-  mount path restrictions, disallows privileged containers, restricts
-  network modes, and limits allowed images at the daemon level — defense
-  in depth against a compromised server process.
-
-### v3: Process Backend
-
-A lightweight alternative to Docker for single-host deployments. Replaces
-per-worker containers with bubblewrap-sandboxed processes — no daemon, no
-socket, ~2ms startup overhead. See [backends.md](backends.md) for the full
-design and isolation analysis.
+A lightweight alternative to Docker for single-host deployments, plus
+features deferred from v2: data mounts, Docker daemon hardening, multiple
+execution environment images, and UI branding / customization.
 
 ---
 
@@ -697,6 +691,24 @@ design and isolation analysis.
   default, adding `CLONE_NEWUSER` to the allowlist. Shipped alongside
   the Docker Compose configuration.
 
+- **Data mounts.** Per-app configuration for mounting additional host
+  directories into worker containers (e.g., shared datasets, model files,
+  scratch space). Admin-defined named mount sources whitelist which host
+  paths are available; app owners reference sources by name and specify
+  the container mount point and read-only/read-write mode.
+
+- **Docker daemon hardening.** A Docker authorization plugin that enforces
+  mount path restrictions, disallows privileged containers, restricts
+  network modes, and limits allowed images at the daemon level — defense
+  in depth against a compromised server process.
+
+- **Multiple execution environment images.** Per-app image selection; add an
+  `image` field to app configuration that overrides the server-wide default.
+
+- **UI branding and customization.** Customizable cold-start loading page,
+  in-app navigation chrome (navbar, app switcher), and general branding
+  support (logo, colors).
+
 ### v4: Kubernetes and Multi-Node
 
 The Kubernetes backend and the architectural refactors it triggers.
@@ -715,7 +727,7 @@ The Kubernetes backend and the architectural refactors it triggers.
 - **Backend package extraction.** Extract separate Go packages for each backend
   implementation if build-tag sprawl warrants it.
 
-- **Build image consolidation.** Kubernetes variant of the v2 rv-binary mount
+- **Build image consolidation.** Kubernetes variant of the v3 rv-binary mount
   approach: init containers or shared volumes for build dependencies.
 
 ### Out of Scope
