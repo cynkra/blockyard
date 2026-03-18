@@ -74,7 +74,7 @@ type landingData struct {
 }
 
 type dashboardData struct {
-	UserSub           string
+	UserDisplayName   string
 	UserRole          string
 	Search            string
 	ActiveTag         string
@@ -149,8 +149,13 @@ func (ui *UI) renderDashboard(w http.ResponseWriter, r *http.Request, srv *serve
 		role = caller.Role.String()
 	}
 
+	displayName := user.Sub
+	if caller != nil {
+		displayName = caller.DisplayName()
+	}
+
 	data := dashboardData{
-		UserSub:   user.Sub,
+		UserDisplayName: displayName,
 		UserRole:  role,
 		Search:    search,
 		ActiveTag: activeTag,
