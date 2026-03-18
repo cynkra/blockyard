@@ -187,8 +187,8 @@ BOARDS_PAYLOAD=$(cat <<PAYLOAD
   "fields": [
     {"name": "name", "type": "text", "required": true},
     {"name": "data", "type": "json", "required": true},
-    {"name": "owner", "type": "relation", "required": true, "options": {"collectionId": "${USERS_ID}", "maxSelect": 1}},
-    {"name": "shared_with", "type": "relation", "options": {"collectionId": "${USERS_ID}"}}
+    {"name": "owner", "type": "relation", "required": true, "collectionId": "${USERS_ID}", "maxSelect": 1},
+    {"name": "shared_with", "type": "relation", "collectionId": "${USERS_ID}"}
   ],
   "listRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",
   "viewRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",

@@ -42,6 +42,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.pocketbase
+    environment:
+      PB_ADMIN_EMAIL: admin@pocketbase.local
+      PB_ADMIN_PASSWORD: pb-admin-dev-password
     ports:
       - "8090:8090"
     networks: [default, services]
