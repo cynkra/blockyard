@@ -165,7 +165,7 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusCreated {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("create PAT: status %d, body: %s", resp.StatusCode, b)
 	}
