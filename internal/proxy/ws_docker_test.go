@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,53 +81,77 @@ func main() {
 }
 `
 
+// sharedWSBinary caches the compiled ws-echo binary across all tests in
+// the package so we only pay the go-mod-tidy + go-build cost once.
+var sharedWSBinary struct {
+	once sync.Once
+	path string
+	err  error
+}
+
 // buildWSEchoBinary compiles the WS echo server as a static Linux binary
-// and returns its path. The binary is placed in a temp directory owned by t.
+// and returns its path. The binary is compiled once and shared across tests.
 func buildWSEchoBinary(t *testing.T) string {
 	t.Helper()
 
-	dir := t.TempDir()
+	sharedWSBinary.once.Do(func() {
+		dir, err := os.MkdirTemp("", "wsecho-build-*")
+		if err != nil {
+			sharedWSBinary.err = err
+			return
+		}
 
-	// Write the source file and go.mod.
-	srcDir := filepath.Join(dir, "wsecho")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(wsEchoServerSource), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	goMod := "module wsecho\n\ngo 1.24.1\n\nrequire github.com/coder/websocket v1.8.14\n"
-	if err := os.WriteFile(filepath.Join(srcDir, "go.mod"), []byte(goMod), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	goSum := "" // go mod tidy will fetch it
-	if err := os.WriteFile(filepath.Join(srcDir, "go.sum"), []byte(goSum), 0o644); err != nil {
-		t.Fatal(err)
-	}
+		// Write the source file and go.mod.
+		srcDir := filepath.Join(dir, "wsecho")
+		if err := os.MkdirAll(srcDir, 0o755); err != nil {
+			sharedWSBinary.err = err
+			return
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(wsEchoServerSource), 0o644); err != nil {
+			sharedWSBinary.err = err
+			return
+		}
+		goMod := "module wsecho\n\ngo 1.24.1\n\nrequire github.com/coder/websocket v1.8.14\n"
+		if err := os.WriteFile(filepath.Join(srcDir, "go.mod"), []byte(goMod), 0o644); err != nil {
+			sharedWSBinary.err = err
+			return
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, "go.sum"), []byte(""), 0o644); err != nil {
+			sharedWSBinary.err = err
+			return
+		}
 
-	// Run go mod tidy to populate go.sum.
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = srcDir
-	tidy.Env = append(os.Environ(), "GOFLAGS=")
-	if out, err := tidy.CombinedOutput(); err != nil {
-		t.Fatalf("go mod tidy failed: %v\n%s", err, out)
-	}
+		// Run go mod tidy to populate go.sum.
+		tidy := exec.Command("go", "mod", "tidy")
+		tidy.Dir = srcDir
+		tidy.Env = append(os.Environ(), "GOFLAGS=")
+		if out, err := tidy.CombinedOutput(); err != nil {
+			sharedWSBinary.err = fmt.Errorf("go mod tidy failed: %v\n%s", err, out)
+			return
+		}
 
-	// Cross-compile as a static binary for linux.
-	binPath := filepath.Join(dir, "wsecho-bin")
-	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Dir = srcDir
-	build.Env = append(os.Environ(),
-		"CGO_ENABLED=0",
-		"GOOS=linux",
-		"GOARCH=amd64",
-		"GOFLAGS=",
-	)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ws-echo failed: %v\n%s", err, out)
-	}
+		// Cross-compile as a static binary for linux.
+		binPath := filepath.Join(dir, "wsecho-bin")
+		build := exec.Command("go", "build", "-o", binPath, ".")
+		build.Dir = srcDir
+		build.Env = append(os.Environ(),
+			"CGO_ENABLED=0",
+			"GOOS=linux",
+			"GOARCH=amd64",
+			"GOFLAGS=",
+		)
+		if out, err := build.CombinedOutput(); err != nil {
+			sharedWSBinary.err = fmt.Errorf("go build ws-echo failed: %v\n%s", err, out)
+			return
+		}
 
-	return binPath
+		sharedWSBinary.path = binPath
+	})
+
+	if sharedWSBinary.err != nil {
+		t.Fatal(sharedWSBinary.err)
+	}
+	return sharedWSBinary.path
 }
 
 // dockerTestConfig returns a DockerConfig suitable for integration tests.
@@ -242,7 +267,9 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	t.Logf("ws-echo container at %s", addr)
 
 	// Wait for the WS echo server to start accepting connections.
-	deadline := time.Now().Add(15 * time.Second)
+	// Use 30s to match the WorkerStartTimeout in the test config and
+	// give slow CI runners enough headroom.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if be.HealthCheck(ctx, workerID) {
 			break
@@ -250,7 +277,28 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 		time.Sleep(200 * time.Millisecond)
 	}
 	if !be.HealthCheck(ctx, workerID) {
-		t.Fatal("ws-echo container did not become healthy within 15s")
+		// Log diagnostics so we know why next time.
+		if _, addrErr := be.Addr(ctx, workerID); addrErr != nil {
+			t.Logf("container addr lookup failed (container may have crashed): %v", addrErr)
+		}
+		if ls, logErr := be.Logs(ctx, workerID); logErr == nil {
+			var lines []string
+			for i := 0; i < 20; i++ {
+				select {
+				case l, ok := <-ls.Lines:
+					if !ok {
+						break
+					}
+					lines = append(lines, l)
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+			ls.Close()
+			if len(lines) > 0 {
+				t.Logf("container logs:\n%s", strings.Join(lines, "\n"))
+			}
+		}
+		t.Fatal("ws-echo container did not become healthy within 30s")
 	}
 
 	// Register the worker in the server's registry and worker map
