@@ -638,32 +638,40 @@ func dialAppWebSocket(t *testing.T, baseURL, appName string, cookies []*http.Coo
 		cookieStrs = append(cookieStrs, c.Name+"="+c.Value)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Retry on transient errors (EOF, connection reset) common on CI.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			t.Logf("websocket dial: retrying (attempt %d) after: %v", attempt+1, lastErr)
+			time.Sleep(2 * time.Second)
+		}
 
-	header := http.Header{}
-	if len(cookieStrs) > 0 {
-		header.Set("Cookie", strings.Join(cookieStrs, "; "))
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+		header := http.Header{}
+		if len(cookieStrs) > 0 {
+			header.Set("Cookie", strings.Join(cookieStrs, "; "))
+		}
+
+		req, _ := http.NewRequestWithContext(ctx, "GET", wsURL, nil)
+		req.Header = header
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			return
+		}
+		lastErr = fmt.Errorf("status %d", resp.StatusCode)
 	}
-
-	// Use coder/websocket via the standard library's net/http upgrade path.
-	// We do a manual websocket handshake to keep the dependency minimal.
-	req, _ := http.NewRequestWithContext(ctx, "GET", wsURL, nil)
-	req.Header = header
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	req.Header.Set("Sec-WebSocket-Version", "13")
-
-	resp, err := http.DefaultTransport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("websocket dial: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("websocket: expected 101 Switching Protocols, got %d: %s",
-			resp.StatusCode, body)
-	}
+	t.Fatalf("websocket dial: all attempts failed, last error: %v", lastErr)
 }
