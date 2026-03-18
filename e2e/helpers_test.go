@@ -188,7 +188,13 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 // ---------------------------------------------------------------------------
 
 // httpClient is a shared client with a generous timeout for CI.
-var httpClient = &http.Client{Timeout: 120 * time.Second}
+// Disable keep-alive to prevent stale connection issues on GHA runners.
+var httpClient = &http.Client{
+	Timeout: 120 * time.Second,
+	Transport: &http.Transport{
+		DisableKeepAlives: true,
+	},
+}
 
 type APIClient struct {
 	BaseURL string
@@ -339,8 +345,11 @@ func (c *APIClient) StartApp(t *testing.T, appID string) string {
 		t.Fatalf("start app: %v", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	noTimeoutClient := &http.Client{Timeout: 0}
-	resp, err := noTimeoutClient.Do(req)
+	startClient := &http.Client{
+		Timeout:   0,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	resp, err := startClient.Do(req)
 	if err != nil {
 		t.Fatalf("start app: %v", err)
 	}
