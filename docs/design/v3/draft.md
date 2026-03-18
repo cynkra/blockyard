@@ -224,6 +224,43 @@ Documenting the Kata runtime swap, per-app runtime configuration, and
 verifying Shiny workload compatibility is a low-effort addition to the
 deployment guide.
 
+### Dynamic Resource Limit Updates
+
+v2 enforces resource limits at container creation and validates inputs
+at the API boundary, but changing limits via `PATCH /api/v1/apps/{id}`
+only affects newly spawned workers. Running workers retain their
+original limits.
+
+Docker supports `client.ContainerUpdate()` (maps to
+`POST /containers/{id}/update`) to change `Memory`, `NanoCPUs`, and
+other resource constraints on a running container without restart. This
+is the cleanest path for the Docker backend.
+
+**Implementation sketch:**
+
+1. In `UpdateApp`, when `memory_limit` or `cpu_limit` changes, call a
+   new `Backend.UpdateResources(ctx, workerID, limits)` method for each
+   running worker.
+2. The Docker backend implements this via `ContainerUpdate()`.
+3. The process backend (new in v3) implements this via direct cgroup
+   writes (`memory.max`, `cpu.max` in cgroup v2).
+4. The Kubernetes backend (v4) patches the pod spec — note that
+   in-place resource resize is a Kubernetes 1.27+ feature
+   (`InPlacePodVerticalScaling` gate) and may not be available on all
+   clusters.
+
+**Backend interface addition:**
+
+```go
+// UpdateResources changes resource limits on a running worker.
+// Returns ErrNotSupported if the backend doesn't support live updates.
+UpdateResources(ctx context.Context, id string, mem int64, nanoCPUs int64) error
+```
+
+The API handler should call this best-effort — if the backend returns
+`ErrNotSupported`, the change is still persisted in the DB and takes
+effect on the next spawn. Log a note so the operator knows.
+
 ### Multiple Execution Environment Images
 
 Per-app image selection. Add an `image` field to app configuration that
