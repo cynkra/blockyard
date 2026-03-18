@@ -122,6 +122,14 @@ else
   exit 1
 fi
 
+# -- Make the app accessible to all authenticated users ----------------------
+
+echo "==> Setting app access to logged_in..."
+auth -X PATCH "${BASE_URL}/api/v1/apps/${APP_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"access_type":"logged_in"}' > /dev/null
+echo "    OK"
+
 # -- Bundle the app as tar.gz ------------------------------------------------
 
 echo "==> Bundling app..."
@@ -164,12 +172,12 @@ echo ""
 echo "Done! Open ${BASE_URL}/app/${APP_NAME}/ in your browser."
 echo "You will be redirected to Dex to log in."
 echo ""
-echo "  Email:    ${DEX_EMAIL}"
-echo "  Password: ${DEX_PASSWORD}"
+echo "  User 1:  ${DEX_EMAIL} / ${DEX_PASSWORD}"
+echo "  User 2:  demo2@example.com / ${DEX_PASSWORD}"
 echo ""
-echo "S3 credentials for the demo user are pre-enrolled in OpenBao."
+echo "PocketBase credentials for both users are pre-enrolled in OpenBao."
 echo "View them on the dashboard under credential management."
 echo ""
-echo "  S3 endpoint: http://localhost:3900"
-echo "  Bucket:      blockyard-demo"
+echo "  PocketBase API: http://localhost:8090/api/"
+echo "  PocketBase Admin: http://localhost:8090/_/"
 echo ""

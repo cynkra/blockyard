@@ -1,9 +1,10 @@
 #!/usr/bin/env sh
 #
-# Combined init: configure OpenBao, Garage, and pre-enroll S3 credentials
-# for the demo user.
+# Combined init: configure OpenBao and PocketBase, and pre-enroll
+# PocketBase credentials for both demo users.
 #
-# Runs as a one-shot init container after OpenBao, Dex, and Garage are started.
+# Runs as a one-shot init container after OpenBao, Dex, and PocketBase
+# are started.
 #
 set -eu
 
@@ -12,12 +13,14 @@ BAO_TOKEN="${BAO_TOKEN:-root-dev-token}"
 DEX_ISSUER="${DEX_ISSUER:-http://localhost:5556}"
 DEX_INTERNAL="${DEX_INTERNAL:-${DEX_ISSUER}}"
 APPROLE_SECRET_ID="${APPROLE_SECRET_ID:-dev-secret-id-for-local-use-only}"
-GARAGE_ADMIN="${GARAGE_ADMIN:-http://garage:3903}"
-GARAGE_ADMIN_TOKEN="${GARAGE_ADMIN_TOKEN:-garage-admin-token}"
+PB_URL="${PB_URL:-http://pocketbase:8090}"
+PB_ADMIN_EMAIL="${PB_ADMIN_EMAIL:-admin@pocketbase.local}"
+PB_ADMIN_PASSWORD="${PB_ADMIN_PASSWORD:-pb-admin-dev-password}"
+PB_USER_PASSWORD="${PB_USER_PASSWORD:-demo-password}"
 DEMO_SUB="${DEMO_SUB:-Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA}"
+DEMO2_SUB="${DEMO2_SUB:-Cg1kZW1vLXVzZXItMDAyEgVsb2NhbA}"
 
 bao_header="-H X-Vault-Token:${BAO_TOKEN} -H Content-Type:application/json"
-garage_header="-H Authorization:Bearer ${GARAGE_ADMIN_TOKEN} -H Content-Type:application/json"
 
 bao_post() {
   path="$1"; shift
@@ -25,14 +28,8 @@ bao_post() {
   curl -sf $bao_header -X POST "${BAO_ADDR}${path}" "$@"
 }
 
-garage_req() {
-  method="$1"; path="$2"; shift 2
-  # shellcheck disable=SC2086
-  curl -sf $garage_header -X "$method" "${GARAGE_ADMIN}${path}" "$@"
-}
-
 # ══════════════════════════════════════════════════════════════════════
-# OpenBao setup (JWT auth + AppRole — same as hello example)
+# OpenBao setup (JWT auth + AppRole)
 # ══════════════════════════════════════════════════════════════════════
 
 echo "==> Waiting for Dex JWKS..."
@@ -107,70 +104,129 @@ echo "    OK"
 echo "==> OpenBao configured."
 
 # ══════════════════════════════════════════════════════════════════════
-# Garage setup (cluster layout, access key, bucket)
+# PocketBase setup (superuser, users, boards collection)
 # ══════════════════════════════════════════════════════════════════════
 
-echo "==> Waiting for Garage admin API..."
+echo "==> Waiting for PocketBase..."
 for i in $(seq 1 60); do
-  if curl -sf -H "Authorization: Bearer ${GARAGE_ADMIN_TOKEN}" "${GARAGE_ADMIN}/health" > /dev/null 2>&1; then
+  if curl -sf "${PB_URL}/api/health" > /dev/null 2>&1; then
     break
   fi
   if [ "$i" -eq 60 ]; then
-    echo "ERROR: Garage did not become ready" >&2
+    echo "ERROR: PocketBase did not become ready" >&2
     exit 1
   fi
   sleep 1
 done
 echo "    OK"
 
-echo "==> Getting Garage node ID..."
-STATUS=$(garage_req GET /v1/status)
-NODE_ID=$(echo "$STATUS" | grep -o '"node":"[^"]*"' | head -1 | cut -d'"' -f4)
-echo "    node=${NODE_ID}"
-
-echo "==> Assigning cluster layout..."
-garage_req POST /v1/layout \
-  -d "[{\"id\":\"${NODE_ID}\",\"zone\":\"dc1\",\"capacity\":1073741824,\"tags\":[\"dev\"]}]"
+echo "==> Creating PocketBase superuser..."
+curl -sf -X POST "${PB_URL}/api/collections/_superusers/records" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"email\":           \"${PB_ADMIN_EMAIL}\",
+    \"password\":        \"${PB_ADMIN_PASSWORD}\",
+    \"passwordConfirm\": \"${PB_ADMIN_PASSWORD}\"
+  }" > /dev/null || true
 echo "    OK"
 
-echo "==> Applying layout..."
-garage_req POST /v1/layout/apply -d '{"version":1}'
+echo "==> Authenticating as PocketBase superuser..."
+PB_AUTH=$(curl -sf -X POST "${PB_URL}/api/collections/_superusers/auth-with-password" \
+  -H "Content-Type: application/json" \
+  -d "{\"identity\":\"${PB_ADMIN_EMAIL}\",\"password\":\"${PB_ADMIN_PASSWORD}\"}")
+PB_TOKEN=$(echo "$PB_AUTH" | grep -o '"token":"[^"]*"' | head -1 | cut -d'"' -f4)
+if [ -z "$PB_TOKEN" ]; then
+  echo "ERROR: Failed to authenticate as PocketBase superuser" >&2
+  exit 1
+fi
 echo "    OK"
 
-echo "==> Creating S3 access key for demo user..."
-KEY_RESP=$(garage_req POST /v1/key -d '{"name":"demo-user"}')
-ACCESS_KEY=$(echo "$KEY_RESP" | grep -o '"accessKeyId":"[^"]*"' | cut -d'"' -f4)
-SECRET_KEY=$(echo "$KEY_RESP" | grep -o '"secretAccessKey":"[^"]*"' | cut -d'"' -f4)
-echo "    accessKeyId=${ACCESS_KEY}"
+pb_header="-H Authorization:${PB_TOKEN} -H Content-Type:application/json"
 
-echo "==> Creating S3 bucket..."
-BUCKET_RESP=$(garage_req POST /v1/bucket -d '{"globalAlias":"blockyard-demo"}')
-BUCKET_ID=$(echo "$BUCKET_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-echo "    bucket=blockyard-demo (id=${BUCKET_ID})"
+pb_req() {
+  method="$1"; path="$2"; shift 2
+  # shellcheck disable=SC2086
+  curl -sf $pb_header -X "$method" "${PB_URL}${path}" "$@"
+}
 
-echo "==> Granting key access to bucket..."
-garage_req POST /v1/bucket/allow \
-  -d "{\"bucketId\":\"${BUCKET_ID}\",\"accessKeyId\":\"${ACCESS_KEY}\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}"
+echo "==> Creating demo users in PocketBase..."
+pb_req POST /api/collections/users/records \
+  -d "{
+    \"email\":           \"demo@example.com\",
+    \"password\":        \"${PB_USER_PASSWORD}\",
+    \"passwordConfirm\": \"${PB_USER_PASSWORD}\",
+    \"name\":            \"Demo User\",
+    \"emailVisibility\":  true
+  }" > /dev/null || true
+pb_req POST /api/collections/users/records \
+  -d "{
+    \"email\":           \"demo2@example.com\",
+    \"password\":        \"${PB_USER_PASSWORD}\",
+    \"passwordConfirm\": \"${PB_USER_PASSWORD}\",
+    \"name\":            \"Demo User 2\",
+    \"emailVisibility\":  true
+  }" > /dev/null || true
 echo "    OK"
 
-echo "==> Garage configured."
+echo "==> Updating users collection rules for user discovery..."
+pb_req PATCH /api/collections/users \
+  -d '{"listRule":"@request.auth.id != \"\"","viewRule":"@request.auth.id != \"\""}' \
+  > /dev/null
+echo "    OK"
+
+echo "==> Getting users collection ID..."
+USERS_COL=$(pb_req GET /api/collections/users)
+USERS_ID=$(echo "$USERS_COL" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "    id=${USERS_ID}"
+
+echo "==> Creating boards collection..."
+BOARDS_PAYLOAD=$(cat <<PAYLOAD
+{
+  "name": "boards",
+  "type": "base",
+  "fields": [
+    {"name": "name", "type": "text", "required": true},
+    {"name": "data", "type": "json", "required": true},
+    {"name": "owner", "type": "relation", "required": true, "options": {"collectionId": "${USERS_ID}", "maxSelect": 1}},
+    {"name": "shared_with", "type": "relation", "options": {"collectionId": "${USERS_ID}"}}
+  ],
+  "listRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",
+  "viewRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",
+  "createRule": "owner = @request.auth.id",
+  "updateRule": "owner = @request.auth.id",
+  "deleteRule": "owner = @request.auth.id"
+}
+PAYLOAD
+)
+pb_req POST /api/collections -d "$BOARDS_PAYLOAD" > /dev/null
+echo "    OK"
+
+echo "==> PocketBase configured."
 
 # ══════════════════════════════════════════════════════════════════════
-# Pre-enroll S3 credentials for the demo user in OpenBao
+# Pre-enroll PocketBase credentials for both demo users in OpenBao
 # ══════════════════════════════════════════════════════════════════════
 
-echo "==> Pre-enrolling S3 credentials for demo user..."
-bao_post "/v1/secret/data/users/${DEMO_SUB}/apikeys/s3" -d "{
+echo "==> Pre-enrolling PocketBase credentials for demo user..."
+bao_post "/v1/secret/data/users/${DEMO_SUB}/apikeys/pocketbase" -d "{
   \"data\": {
-    \"access_key\": \"${ACCESS_KEY}\",
-    \"secret_key\": \"${SECRET_KEY}\",
-    \"bucket\": \"blockyard-demo\",
-    \"endpoint\": \"http://garage:3900\",
-    \"region\": \"garage\"
+    \"email\":    \"demo@example.com\",
+    \"password\": \"${PB_USER_PASSWORD}\",
+    \"url\":      \"${PB_URL}\"
+  }
+}"
+echo "    OK"
+
+echo "==> Pre-enrolling PocketBase credentials for demo2 user..."
+bao_post "/v1/secret/data/users/${DEMO2_SUB}/apikeys/pocketbase" -d "{
+  \"data\": {
+    \"email\":    \"demo2@example.com\",
+    \"password\": \"${PB_USER_PASSWORD}\",
+    \"url\":      \"${PB_URL}\"
   }
 }"
 echo "    OK"
 
 echo ""
 echo "==> All services configured successfully."
-echo "    S3 credentials for demo user enrolled in OpenBao."
+echo "    PocketBase credentials for both demo users enrolled in OpenBao."

@@ -274,12 +274,88 @@ func (d *DockerBackend) createNetwork(
 	return resp.ID, nil
 }
 
-func (d *DockerBackend) joinNetwork(ctx context.Context, containerID, networkName string) error {
-	return d.client.NetworkConnect(ctx, networkName, containerID, nil)
+func (d *DockerBackend) joinNetwork(ctx context.Context, containerID, networkName string, aliases []string) error {
+	var epConfig *network.EndpointSettings
+	if len(aliases) > 0 {
+		epConfig = &network.EndpointSettings{Aliases: aliases}
+	}
+	return d.client.NetworkConnect(ctx, networkName, containerID, epConfig)
 }
 
 func (d *DockerBackend) disconnectNetwork(ctx context.Context, containerID, networkName string) error {
 	return d.client.NetworkDisconnect(ctx, networkName, containerID, true)
+}
+
+// connectServiceContainers inspects the configured service network and
+// connects each container on it to the worker's per-worker network,
+// preserving DNS aliases so the worker can resolve service hostnames.
+func (d *DockerBackend) connectServiceContainers(ctx context.Context, workerNetworkName string) error {
+	svcNet := d.config.ServiceNetwork
+	if svcNet == "" {
+		return nil
+	}
+
+	info, err := d.client.NetworkInspect(ctx, svcNet, network.InspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect service network %s: %w", svcNet, err)
+	}
+
+	for containerID := range info.Containers {
+		if containerID == d.serverID {
+			continue // server joins with "blockyard" alias separately
+		}
+
+		// Get DNS aliases from the service network endpoint.
+		var aliases []string
+		cInfo, err := d.client.ContainerInspect(ctx, containerID)
+		if err != nil {
+			slog.Warn("service network: cannot inspect container, skipping",
+				"container_id", containerID, "error", err)
+			continue
+		}
+		if ep, ok := cInfo.NetworkSettings.Networks[svcNet]; ok && ep != nil {
+			aliases = ep.Aliases
+		}
+
+		if err := d.joinNetwork(ctx, containerID, workerNetworkName, aliases); err != nil {
+			slog.Warn("service network: failed to connect container",
+				"container_id", containerID,
+				"worker_network", workerNetworkName, "error", err)
+		} else {
+			slog.Debug("service network: connected container",
+				"container_id", containerID,
+				"worker_network", workerNetworkName, "aliases", aliases)
+		}
+	}
+
+	return nil
+}
+
+// disconnectServiceContainers removes service containers from the worker's
+// network before the network is deleted.
+func (d *DockerBackend) disconnectServiceContainers(ctx context.Context, workerNetworkName string) {
+	svcNet := d.config.ServiceNetwork
+	if svcNet == "" {
+		return
+	}
+
+	info, err := d.client.NetworkInspect(ctx, svcNet, network.InspectOptions{})
+	if err != nil {
+		slog.Warn("service network: cannot inspect for disconnect",
+			"service_network", svcNet, "error", err)
+		return
+	}
+
+	for containerID := range info.Containers {
+		if containerID == d.serverID {
+			continue
+		}
+		if err := d.disconnectNetwork(ctx, containerID, workerNetworkName); err != nil {
+			slog.Warn("service network: failed to disconnect container",
+				"container_id", containerID,
+				"worker_network", workerNetworkName, "error", err)
+		}
+	}
 }
 
 // --- Container creation ---
@@ -387,11 +463,11 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 		return fmt.Errorf("spawn: %w", err)
 	}
 
-	// 5. Join server to worker network (if running in a container)
-	if d.serverID != "" {
-		slog.Debug("spawn: joining server to worker network",
-			"worker_id", spec.WorkerID, "server_id", d.serverID)
-		if err := d.joinNetwork(ctx, d.serverID, networkName); err != nil {
+	// 5. Connect service containers to worker network
+	if d.config.ServiceNetwork != "" {
+		slog.Debug("spawn: connecting service containers",
+			"worker_id", spec.WorkerID, "service_network", d.config.ServiceNetwork)
+		if err := d.connectServiceContainers(ctx, networkName); err != nil {
 			_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 			d.unblockMetadataForWorker(spec.WorkerID)
 			_ = d.client.NetworkRemove(ctx, networkID)
@@ -399,12 +475,26 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 		}
 	}
 
-	// 6. Start the container
+	// 6. Join server to worker network (if running in a container)
+	if d.serverID != "" {
+		slog.Debug("spawn: joining server to worker network",
+			"worker_id", spec.WorkerID, "server_id", d.serverID)
+		if err := d.joinNetwork(ctx, d.serverID, networkName, []string{"blockyard"}); err != nil {
+			d.disconnectServiceContainers(ctx, networkName)
+			_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+			d.unblockMetadataForWorker(spec.WorkerID)
+			_ = d.client.NetworkRemove(ctx, networkID)
+			return fmt.Errorf("spawn: %w", err)
+		}
+	}
+
+	// 7. Start the container
 	slog.Debug("spawn: starting container", "worker_id", spec.WorkerID, "container_id", containerID)
 	if err := d.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		if d.serverID != "" {
 			_ = d.disconnectNetwork(ctx, d.serverID, networkName)
 		}
+		d.disconnectServiceContainers(ctx, networkName)
 		_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
 		d.unblockMetadataForWorker(spec.WorkerID)
 		_ = d.client.NetworkRemove(ctx, networkID)
@@ -464,10 +554,13 @@ func (d *DockerBackend) Stop(ctx context.Context, id string) error {
 		}
 	}
 
-	// 4. Remove iptables metadata block rule
+	// 4. Disconnect service containers from the worker's network
+	d.disconnectServiceContainers(ctx, ws.networkName)
+
+	// 5. Remove iptables metadata block rule
 	d.unblockMetadataForWorker(id)
 
-	// 5. Remove the network
+	// 6. Remove the network
 	if err := d.client.NetworkRemove(ctx, ws.networkName); err != nil {
 		slog.Warn("failed to remove network", "worker_id", id, "error", err)
 	}

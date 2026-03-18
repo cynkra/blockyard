@@ -46,11 +46,12 @@ type ServerConfig struct {
 }
 
 type DockerConfig struct {
-	Socket       string `toml:"socket"`
-	Image        string `toml:"image"`
-	ShinyPort    int    `toml:"shiny_port"`
-	RvVersion    string `toml:"rv_version"`
-	RvBinaryPath string `toml:"-"` // set at runtime; skips download if non-empty
+	Socket         string `toml:"socket"`
+	Image          string `toml:"image"`
+	ShinyPort      int    `toml:"shiny_port"`
+	RvVersion      string `toml:"rv_version"`
+	RvBinaryPath   string `toml:"-"` // set at runtime; skips download if non-empty
+	ServiceNetwork string `toml:"service_network"` // Docker network whose containers are made reachable from workers
 }
 
 type StorageConfig struct {

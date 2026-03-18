@@ -652,3 +652,44 @@ func TestWorkerEnvWithServices(t *testing.T) {
 		t.Errorf("expected 2 entries, got %d", len(svcMap))
 	}
 }
+
+// TestWorkerEnvWithServiceNetwork verifies that WorkerEnv sets
+// BLOCKYARD_API_URL to http://blockyard:<port> when service_network is
+// configured, overriding ExternalURL.
+func TestWorkerEnvWithServiceNetwork(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Openbao = &config.OpenbaoConfig{
+		Address: "http://openbao:8200",
+	}
+	srv.Config.Server.ExternalURL = "http://localhost:8080"
+	srv.Config.Server.Bind = "0.0.0.0:8080"
+	srv.Config.Docker.ServiceNetwork = "blockyard-services"
+
+	env := WorkerEnv(srv)
+	if env == nil {
+		t.Fatal("expected non-nil env map")
+	}
+	if got, want := env["BLOCKYARD_API_URL"], "http://blockyard:8080"; got != want {
+		t.Errorf("BLOCKYARD_API_URL = %q, want %q", got, want)
+	}
+	if got, want := env["VAULT_ADDR"], "http://openbao:8200"; got != want {
+		t.Errorf("VAULT_ADDR = %q, want %q", got, want)
+	}
+}
+
+// TestWorkerEnvServiceNetworkOverridesExternalURL verifies that
+// service_network takes precedence over ExternalURL for BLOCKYARD_API_URL.
+func TestWorkerEnvServiceNetworkOverridesExternalURL(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Openbao = &config.OpenbaoConfig{
+		Address: "http://vault:8200",
+	}
+	srv.Config.Server.ExternalURL = "https://blockyard.example.com"
+	srv.Config.Server.Bind = "0.0.0.0:9090"
+	srv.Config.Docker.ServiceNetwork = "my-services"
+
+	env := WorkerEnv(srv)
+	if got, want := env["BLOCKYARD_API_URL"], "http://blockyard:9090"; got != want {
+		t.Errorf("BLOCKYARD_API_URL = %q, want %q", got, want)
+	}
+}

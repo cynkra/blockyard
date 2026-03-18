@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -259,8 +260,18 @@ func WorkerEnv(srv *server.Server) map[string]string {
 	if srv.Config.Openbao == nil {
 		return nil
 	}
+
+	// When service_network is configured, the server joins each worker's
+	// network with the DNS alias "blockyard". Use that for the API URL
+	// so workers can reach the credential exchange endpoint directly.
 	apiURL := srv.Config.Server.ExternalURL
-	if apiURL == "" {
+	if srv.Config.Docker.ServiceNetwork != "" {
+		_, port, _ := net.SplitHostPort(srv.Config.Server.Bind)
+		if port == "" {
+			port = "8080"
+		}
+		apiURL = "http://blockyard:" + port
+	} else if apiURL == "" {
 		// Dev mode fallback: containers can reach the host via
 		// host.docker.internal on Docker Desktop, or the bind address.
 		apiURL = "http://host.docker.internal" + srv.Config.Server.Bind

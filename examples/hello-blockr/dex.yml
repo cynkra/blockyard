@@ -24,3 +24,8 @@ staticPasswords:
     hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
     username: "demo"
     userID: "demo-user-001"
+  - email: "demo2@example.com"
+    # bcrypt hash of "password"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: "demo2"
+    userID: "demo-user-002"

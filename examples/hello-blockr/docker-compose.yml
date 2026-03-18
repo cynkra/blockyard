@@ -1,3 +1,8 @@
+networks:
+  default:
+  services:
+    name: blockyard-services
+
 services:
 
   # --- Dex: OIDC identity provider ---
@@ -25,23 +30,28 @@ services:
       - "8200:8200"
     cap_add:
       - IPC_LOCK
+    networks: [default, services]
     healthcheck:
       test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-  # --- Garage: S3-compatible object storage ---
-  garage:
-    image: dxflrs/garage:v1.3.1
-    volumes:
-      - ./garage.toml:/etc/garage.toml:ro
+  # --- PocketBase: board storage backend ---
+  pocketbase:
+    build:
+      context: .
+      dockerfile: Dockerfile.pocketbase
     ports:
-      - "3900:3900"    # S3 API
-    environment:
-      GARAGE_CONFIG_FILE: /etc/garage.toml
+      - "8090:8090"
+    networks: [default, services]
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:8090/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
-  # --- One-shot init: configure OpenBao, Garage, and pre-enroll credentials ---
+  # --- One-shot init: configure OpenBao and PocketBase ---
   init:
     image: curlimages/curl:latest
     depends_on:
@@ -49,8 +59,8 @@ services:
         condition: service_healthy
       dex:
         condition: service_healthy
-      garage:
-        condition: service_started
+      pocketbase:
+        condition: service_healthy
     volumes:
       - ./setup.sh:/setup.sh:ro
     entrypoint: ["/bin/sh", "/setup.sh"]
@@ -59,9 +69,9 @@ services:
       BAO_TOKEN: root-dev-token
       DEX_ISSUER: http://localhost:5556
       DEX_INTERNAL: http://dex:5556
-      GARAGE_ADMIN: http://garage:3903
-      GARAGE_ADMIN_TOKEN: garage-admin-token
+      PB_URL: http://pocketbase:8090
       DEMO_SUB: Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA
+      DEMO2_SUB: Cg1kZW1vLXVzZXItMDAyEgVsb2NhbA
 
   # --- Blockyard: Shiny app hosting platform ---
   blockyard:
