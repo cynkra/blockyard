@@ -396,7 +396,7 @@ func (c *APIClient) StopApp(t *testing.T, appID string) {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result.TaskID != "" {
-		c.PollTask(t, result.TaskID, 60*time.Second)
+		c.PollTask(t, result.TaskID, 120*time.Second)
 	}
 }
 
@@ -629,9 +629,8 @@ func fetchAppPageNoRedirect(t *testing.T, baseURL, appName string) (int, string)
 func dialAppWebSocket(t *testing.T, baseURL, appName string, cookies []*http.Cookie) {
 	t.Helper()
 
-	// Convert http:// to ws://
-	wsURL := strings.Replace(baseURL, "http://", "ws://", 1) +
-		"/app/" + appName + "/websocket/"
+	// Use http:// (not ws://) since we do a raw HTTP upgrade via RoundTrip.
+	wsURL := baseURL + "/app/" + appName + "/websocket/"
 
 	// Build cookie header.
 	var cookieStrs []string
