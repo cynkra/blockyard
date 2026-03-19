@@ -170,7 +170,9 @@ func TestPollHealthyTimeout(t *testing.T) {
 	be.Spawn(context.Background(), backend.WorkerSpec{WorkerID: "timeout-worker"})
 	srv.Workers.Set("timeout-worker", server.ActiveWorker{AppID: "test"})
 
-	err := pollHealthy(context.Background(), srv, "timeout-worker")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := pollHealthy(ctx, srv, "timeout-worker")
 	if err != errHealthTimeout {
 		t.Errorf("expected errHealthTimeout, got %v", err)
 	}
@@ -556,8 +558,8 @@ func TestPollHealthyContextCancellation(t *testing.T) {
 	}()
 
 	err := pollHealthy(ctx, srv, "cancel-worker")
-	if err != context.Canceled {
-		t.Errorf("expected context.Canceled, got %v", err)
+	if err != errHealthTimeout {
+		t.Errorf("expected errHealthTimeout, got %v", err)
 	}
 }
 

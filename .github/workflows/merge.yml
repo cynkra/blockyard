@@ -1,6 +1,7 @@
 name: Merge
 
 on:
+  pull_request:
   merge_group:
   workflow_call:
 
@@ -8,27 +9,38 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: hello-shiny
+            test: TestHelloShiny
+          - example: hello-blockr
+            test: TestHelloBlockr
     steps:
       - uses: actions/checkout@v6
+        if: github.event_name == 'merge_group'
       - uses: actions/setup-go@v6
+        if: github.event_name == 'merge_group'
         with:
           go-version-file: go.mod
       - name: Build blockyard image from source
+        if: github.event_name == 'merge_group'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
-      - name: Build and pull images used by examples
+      - name: Pre-pull images used by examples
+        if: github.event_name == 'merge_group'
         run: |
-          docker build -t ghcr.io/cynkra/blockyard-r-worker:latest -f docker/r-worker.Dockerfile .
           docker pull dexidp/dex:v2.41.1
           docker pull ghcr.io/openbao/openbao:latest
+          docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - name: Block cloud metadata endpoint for containers
+        if: github.event_name == 'merge_group'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Run e2e tests
-        run: sudo --preserve-env=PATH go test -v -tags e2e -timeout 20m ./e2e/...
+        if: github.event_name == 'merge_group'
+        run: sudo --preserve-env=PATH go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
       - name: Dump compose logs on failure
         if: failure()
         run: |
-          for dir in examples/hello-shiny examples/hello-blockr; do
-            echo "=== $dir ==="
-            docker compose -f "$dir/docker-compose.yml" logs --no-color 2>/dev/null || true
-            docker compose -f "$dir/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-          done
+          docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
+          docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
