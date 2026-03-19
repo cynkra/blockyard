@@ -1,42 +1,36 @@
 ---
 name: pr
-description: Create a pull request from the current branch's changes. Handles branch naming, committing, pushing, PR creation, and CI monitoring.
+description: Create a pull request from the current branch. Handles pushing, PR creation, and CI monitoring. Use /commit first to stage changes.
 ---
 
 # Create Pull Request
 
-Create a PR for the current changes. If arguments are provided, use them
-as context for the PR title/description: $ARGUMENTS
+Create a PR from the current branch: $ARGUMENTS
 
-## Branch
+## Pre-flight
 
-If on `main`, create a new branch first. Branch names MUST follow the
-repo convention enforced by the GitHub ruleset:
+1. Verify you're NOT on `main`. If on main, abort and tell the user
+   to use `/commit` first.
+2. Check for uncommitted changes — commit them first if present.
+3. Push with `-u origin <branch>` if not already pushed.
 
+## Create PR
+
+```sh
+gh pr create --title "<title>" --body "$(cat <<'EOF'
+## Summary
+<2-5 bullet points>
+EOF
+)"
 ```
-<type>/<short-description>
-```
 
-Types: `feat`, `fix`, `ci`, `docs`, `refactor`, `chore`.
-Use lowercase, hyphen-separated descriptions. Keep it short.
-
-## Commit
-
-1. Run `git status` and `git diff` to understand all changes.
-2. Write a concise commit message (1-2 sentences) focused on the "why".
-3. Stage specific files — never `git add -A`. Never commit `.env` or credentials.
-4. Commit using a HEREDOC for the message.
-
-## Push & Create PR
-
-1. Push with `-u origin <branch>`.
-2. Create the PR with `gh pr create`. Keep the body to a short `## Summary`
-   section with 2-5 bullet points. No checklists, no test plans, no boilerplate.
-3. Use a HEREDOC for the body to ensure correct formatting.
+- Title: under 70 characters, describes the change.
+- Body: short `## Summary` section only. No checklists, no test plans,
+  no boilerplate, no "Generated with Claude Code".
 
 ## Monitor CI
 
-After pushing, poll CI until all checks resolve:
+After creating the PR, poll CI until all checks resolve:
 
 ```sh
 gh pr checks <number>
@@ -47,5 +41,5 @@ If any check fails:
 2. Diagnose and fix the issue.
 3. Commit, push, and monitor again.
 
-Repeat until all checks pass. Do NOT ask the user to check CI — that is
-your responsibility.
+Repeat until all checks pass. Do NOT ask the user to check CI — that
+is your responsibility.
