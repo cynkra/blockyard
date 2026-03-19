@@ -810,6 +810,9 @@ func TestRevokeAllTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create token %q: expected 201, got %d", name, resp.StatusCode)
+		}
 	}
 
 	// Revoke all.
