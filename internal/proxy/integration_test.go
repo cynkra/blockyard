@@ -61,6 +61,7 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 			WsCacheTTL:         config.Duration{Duration: 5 * time.Second},
 			WorkerStartTimeout: config.Duration{Duration: 5 * time.Second},
 			MaxWorkers:         10,
+			HTTPForwardTimeout: config.Duration{Duration: 5 * time.Minute},
 		},
 	}
 
@@ -538,11 +539,10 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	}
 }
 
-// TestProxyWebSocketCrossOrigin verifies that cross-origin WebSocket
-// upgrades are accepted (Bug 2 fix — origin checking). Browsers always
-// send an Origin header on WebSocket upgrades; the proxy must not
-// reject requests where Origin differs from Host.
-func TestProxyWebSocketCrossOrigin(t *testing.T) {
+// TestProxyWebSocketCrossOriginRejected verifies that cross-origin
+// WebSocket upgrades are rejected when external_url is not configured.
+// This prevents cross-site WebSocket hijacking in misconfigured deployments.
+func TestProxyWebSocketCrossOriginRejected(t *testing.T) {
 	srv, ts := testProxyServer(t)
 	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
 	createAndStartApp(t, ts, "origin-app")
@@ -551,18 +551,46 @@ func TestProxyWebSocketCrossOrigin(t *testing.T) {
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
 		"/app/origin-app/"
 
-	// Dial with an explicit cross-origin Origin header.
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+	// Dial with a cross-origin Origin header — should be rejected
+	// because external_url is not configured.
+	_, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Origin": []string{"http://different-host.example.com"},
 		},
 	})
+	if err == nil {
+		t.Fatal("expected cross-origin WebSocket to be rejected, but it succeeded")
+	}
+}
+
+// TestProxyWebSocketCrossOriginAllowedByExternalURL verifies that
+// cross-origin WebSocket upgrades are accepted when the Origin matches
+// the configured external_url host.
+func TestProxyWebSocketCrossOriginAllowedByExternalURL(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
+
+	// Configure external_url to match the cross-origin header we'll send.
+	srv.Config.Server.ExternalURL = "http://my-app.example.com"
+
+	createAndStartApp(t, ts, "origin-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/origin-app/"
+
+	// Dial with Origin matching the configured external_url host.
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Origin": []string{"http://my-app.example.com"},
+		},
+	})
 	if err != nil {
-		t.Fatalf("cross-origin WebSocket dial failed: %v", err)
+		t.Fatalf("same-origin WebSocket dial failed: %v", err)
 	}
 	defer conn.CloseNow()
 
-	// Confirm the connection actually works end-to-end.
+	// Confirm the connection works end-to-end.
 	if err := conn.Write(ctx, websocket.MessageText, []byte("xorigin")); err != nil {
 		t.Fatal(err)
 	}
@@ -1006,6 +1034,7 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 			WsCacheTTL:         config.Duration{Duration: 5 * time.Second},
 			WorkerStartTimeout: config.Duration{Duration: 5 * time.Second},
 			MaxWorkers:         10,
+			HTTPForwardTimeout: config.Duration{Duration: 5 * time.Minute},
 		},
 		OIDC: &config.OidcConfig{
 			IssuerURL:    idp.IssuerURL(),

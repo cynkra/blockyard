@@ -27,7 +27,9 @@ func Handler(srv *server.Server) http.Handler {
 	cache := NewWsCache()
 
 	// Limit concurrent WebSocket connections to prevent resource exhaustion.
-	const maxWSConns = 1000
+	// Aligned with max_workers (default 100): each session holds at most
+	// one WebSocket, so this bounds memory even if every session is active.
+	const maxWSConns = 100
 	wsSem := make(chan struct{}, maxWSConns)
 
 	transport := &http.Transport{
@@ -189,6 +191,7 @@ func Handler(srv *server.Server) http.Handler {
 		// then re-add from verified identity.
 		r.Header.Del("X-Shiny-User")
 		r.Header.Del("X-Shiny-Access")
+		r.Header.Del("X-Shiny-Groups")
 		// Strip client-supplied forwarding headers so httputil.ReverseProxy
 		// builds a fresh X-Forwarded-For from the resolved RemoteAddr.
 		r.Header.Del("X-Forwarded-For")
@@ -216,7 +219,7 @@ func Handler(srv *server.Server) http.Handler {
 			}
 			shuttleWS(w, r, addr, appName, sessionID, cache, srv)
 		} else {
-			forwardHTTP(w, r, addr, appName, srv.Config.Server.ExternalURL, transport)
+			forwardHTTP(w, r, addr, appName, srv.Config.Server.ExternalURL, transport, srv.Config.Proxy.HTTPForwardTimeout.Duration)
 		}
 		telemetry.ProxyRequestDuration.Observe(time.Since(forwardStart).Seconds())
 	})
