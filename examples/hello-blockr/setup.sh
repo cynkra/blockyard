@@ -209,7 +209,7 @@ BOARDS_PAYLOAD=$(cat <<PAYLOAD
     {"name": "name", "type": "text", "required": true},
     {"name": "owner", "type": "relation", "required": true, "collectionId": "${USERS_ID}", "maxSelect": 1},
     {"name": "shared_with", "type": "relation", "collectionId": "${USERS_ID}"},
-    {"name": "acl_type", "type": "select", "required": true, "options": {"values": ["private", "restricted", "public"]}},
+    {"name": "acl_type", "type": "select", "required": true, "values": ["private", "restricted", "public"]},
     {"name": "tags", "type": "json"}
   ],
   "listRule": "owner = @request.auth.id || (acl_type = 'restricted' && shared_with ?= @request.auth.id) || acl_type = 'public'",
