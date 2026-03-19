@@ -45,6 +45,19 @@ for i in $(seq 1 60); do
 done
 echo "    OK"
 
+echo "==> Waiting for OpenBao API..."
+for i in $(seq 1 30); do
+  if curl -sf -H "X-Vault-Token:${BAO_TOKEN}" "${BAO_ADDR}/v1/sys/health" > /dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "ERROR: OpenBao API did not become ready" >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "    OK"
+
 echo "==> Enabling JWT auth method..."
 bao_post /v1/sys/auth/jwt -d '{"type":"jwt"}' || true
 echo "    OK"

@@ -18,10 +18,19 @@ in the PR description.
 ## CI monitoring
 
 After every `git push` and merge queue submission, monitor CI status
-(`gh pr checks`, `gh run view --log-failed`) and fix failures without
-being asked. Do not wait for the user to report a broken build. This
-includes merge queue runs (event=merge_group) — check that e2e passes
-and the merge completes successfully.
+and fix failures without being asked. Do not wait for the user to
+report a broken build.
+
+How to monitor:
+- **PR checks**: `gh pr checks <number>`
+- **Merge queue runs**: Poll the actual workflow runs, NOT `gh pr view`
+  (which only shows OPEN/pending regardless of queue failures):
+  ```
+  gh api repos/cynkra/blockyard/actions/runs?event=merge_group&per_page=4 \
+    --jq '.workflow_runs[] | "\(.id) \(.conclusion // "running") \(.name)"'
+  ```
+- **Failed logs**: `gh run view <id> --log-failed`
+- **Merge confirmation**: `gh pr view <n> --json state,mergedAt`
 
 ## Development environment
 
