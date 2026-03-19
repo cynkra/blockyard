@@ -11,6 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      - name: Clean up stale containers from previous runs
+        run: |
+          for dir in examples/hello-shiny examples/hello-blockr; do
+            docker compose -f "$dir/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
+          done
+          docker container prune -f 2>/dev/null || true
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
