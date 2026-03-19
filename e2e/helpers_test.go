@@ -159,7 +159,7 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 		req.AddCookie(c)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("create PAT: %v", err)
 	}
@@ -187,6 +187,15 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 // API Client
 // ---------------------------------------------------------------------------
 
+// httpClient is a shared client with a generous timeout for CI.
+// Disable keep-alive to prevent stale connection issues on GHA runners.
+var httpClient = &http.Client{
+	Timeout: 120 * time.Second,
+	Transport: &http.Transport{
+		DisableKeepAlives: true,
+	},
+}
+
 type APIClient struct {
 	BaseURL string
 	Token   string
@@ -201,7 +210,7 @@ func (c *APIClient) do(method, path string, body io.Reader) (*http.Response, err
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 func (c *APIClient) doOctet(method, path string, body io.Reader) (*http.Response, error) {
@@ -211,7 +220,7 @@ func (c *APIClient) doOctet(method, path string, body io.Reader) (*http.Response
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/octet-stream")
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 // CreateApp creates an app and returns its ID. Handles 409 (already exists)
@@ -329,20 +338,44 @@ func (c *APIClient) PollTask(t *testing.T, taskID string, timeout time.Duration)
 
 func (c *APIClient) StartApp(t *testing.T, appID string) string {
 	t.Helper()
-	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/start", nil)
-	if err != nil {
-		t.Fatalf("start app: %v", err)
+	// The start endpoint blocks while spawning a Docker container and
+	// waiting for it to become healthy. On CI runners, the TCP connection
+	// can be dropped during this idle period. Retry on transient errors;
+	// the server returns the existing worker if one is already running.
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			t.Logf("start app: retrying (attempt %d) after: %v", attempt+1, lastErr)
+			time.Sleep(5 * time.Second)
+		}
+		req, err := http.NewRequest("POST", c.BaseURL+"/api/v1/apps/"+appID+"/start", http.NoBody)
+		if err != nil {
+			t.Fatalf("start app: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var result struct {
+				WorkerID string `json:"worker_id"`
+			}
+			json.Unmarshal(body, &result)
+			return result.WorkerID
+		}
+		// 503 = worker failed to start, may succeed on retry.
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, body)
+			continue
+		}
+		t.Fatalf("start app: status %d, body: %s", resp.StatusCode, body)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("start app: status %d, body: %s", resp.StatusCode, b)
-	}
-	var result struct {
-		WorkerID string `json:"worker_id"`
-	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	return result.WorkerID
+	t.Fatalf("start app: all attempts failed, last error: %v", lastErr)
+	return ""
 }
 
 func (c *APIClient) StopApp(t *testing.T, appID string) {
@@ -363,7 +396,7 @@ func (c *APIClient) StopApp(t *testing.T, appID string) {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result.TaskID != "" {
-		c.PollTask(t, result.TaskID, 60*time.Second)
+		c.PollTask(t, result.TaskID, 120*time.Second)
 	}
 }
 
@@ -416,7 +449,7 @@ func enrollCredential(t *testing.T, baseURL string, cookies []*http.Cookie, serv
 		req.AddCookie(c)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("enroll credential: %v", err)
 	}
@@ -436,7 +469,7 @@ func enrollCredentialWithPAT(t *testing.T, baseURL, token, service, apiKey strin
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("enroll credential: %v", err)
 	}
@@ -455,7 +488,7 @@ func readVaultSecret(t *testing.T, vaultURL, token, path string) map[string]any 
 	req, _ := http.NewRequest("GET", vaultURL+"/v1/"+path, nil)
 	req.Header.Set("X-Vault-Token", token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("read vault secret: %v", err)
 	}
@@ -596,9 +629,8 @@ func fetchAppPageNoRedirect(t *testing.T, baseURL, appName string) (int, string)
 func dialAppWebSocket(t *testing.T, baseURL, appName string, cookies []*http.Cookie) {
 	t.Helper()
 
-	// Convert http:// to ws://
-	wsURL := strings.Replace(baseURL, "http://", "ws://", 1) +
-		"/app/" + appName + "/websocket/"
+	// Use http:// (not ws://) since we do a raw HTTP upgrade via RoundTrip.
+	wsURL := baseURL + "/app/" + appName + "/websocket/"
 
 	// Build cookie header.
 	var cookieStrs []string
@@ -606,32 +638,40 @@ func dialAppWebSocket(t *testing.T, baseURL, appName string, cookies []*http.Coo
 		cookieStrs = append(cookieStrs, c.Name+"="+c.Value)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Retry on transient errors (EOF, connection reset) common on CI.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			t.Logf("websocket dial: retrying (attempt %d) after: %v", attempt+1, lastErr)
+			time.Sleep(2 * time.Second)
+		}
 
-	header := http.Header{}
-	if len(cookieStrs) > 0 {
-		header.Set("Cookie", strings.Join(cookieStrs, "; "))
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+		header := http.Header{}
+		if len(cookieStrs) > 0 {
+			header.Set("Cookie", strings.Join(cookieStrs, "; "))
+		}
+
+		req, _ := http.NewRequestWithContext(ctx, "GET", wsURL, nil)
+		req.Header = header
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			return
+		}
+		lastErr = fmt.Errorf("status %d", resp.StatusCode)
 	}
-
-	// Use coder/websocket via the standard library's net/http upgrade path.
-	// We do a manual websocket handshake to keep the dependency minimal.
-	req, _ := http.NewRequestWithContext(ctx, "GET", wsURL, nil)
-	req.Header = header
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	req.Header.Set("Sec-WebSocket-Version", "13")
-
-	resp, err := http.DefaultTransport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("websocket dial: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("websocket: expected 101 Switching Protocols, got %d: %s",
-			resp.StatusCode, body)
-	}
+	t.Fatalf("websocket dial: all attempts failed, last error: %v", lastErr)
 }

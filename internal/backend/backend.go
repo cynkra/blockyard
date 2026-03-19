@@ -64,8 +64,9 @@ type BuildResult struct {
 }
 
 type ManagedResource struct {
-	ID   string
-	Kind ResourceKind
+	ID     string
+	Kind   ResourceKind
+	Labels map[string]string
 }
 
 type ResourceKind int

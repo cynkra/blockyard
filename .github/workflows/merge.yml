@@ -20,6 +20,8 @@ jobs:
           docker pull dexidp/dex:v2.41.1
           docker pull ghcr.io/openbao/openbao:latest
           docker pull ghcr.io/rocker-org/r-ver:4.4.3
+      - name: Block cloud metadata endpoint for containers
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Run e2e tests
         run: sudo go test -v -tags e2e -timeout 20m ./e2e/...
       - name: Dump compose logs on failure
