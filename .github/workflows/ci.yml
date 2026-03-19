@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   check:
-    if: inputs.job == '' || inputs.job == 'check'
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'check')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -49,7 +49,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: [check]
-    if: inputs.job == '' || inputs.job == 'docker'
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'docker')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -65,7 +65,7 @@ jobs:
   idp:
     runs-on: ubuntu-latest
     needs: [check]
-    if: inputs.job == '' || inputs.job == 'idp'
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'idp')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -81,7 +81,7 @@ jobs:
   openbao:
     runs-on: ubuntu-latest
     needs: [check]
-    if: inputs.job == '' || inputs.job == 'openbao'
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'openbao')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -96,7 +96,7 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
-    if: inputs.job == ''
+    if: github.event_name != 'merge_group' && inputs.job == ''
     needs: [check, docker, idp, openbao]
     steps:
       - uses: actions/checkout@v6
