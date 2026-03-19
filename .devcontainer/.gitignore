@@ -7,5 +7,4 @@
 .gitconfig.local
 .gitignore.local
 .ssh/
-.claude/*
-!.claude/skills/
+.claude/
