@@ -154,6 +154,13 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		return "", "", errNoBundle
 	}
 
+	// Use a dedicated context for Docker operations so that a client
+	// disconnect (request context cancellation) does not abort container
+	// creation mid-flight. The worker_start_timeout bounds the total time.
+	timeout := srv.Config.Proxy.WorkerStartTimeout.Duration
+	spawnCtx, spawnCancel := context.WithTimeout(context.Background(), timeout)
+	defer spawnCancel()
+
 	wid := uuid.New().String()
 	slog.Info("spawning worker",
 		"worker_id", wid, "app_id", app.ID,
@@ -189,13 +196,13 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		Env:         extraEnv,
 	}
 
-	if err := srv.Backend.Spawn(ctx, spec); err != nil {
+	if err := srv.Backend.Spawn(spawnCtx, spec); err != nil {
 		return "", "", fmt.Errorf("spawn worker: %w", err)
 	}
 
-	a, err := srv.Backend.Addr(ctx, wid)
+	a, err := srv.Backend.Addr(spawnCtx, wid)
 	if err != nil {
-		srv.Backend.Stop(ctx, wid) //nolint:errcheck // best-effort cleanup
+		srv.Backend.Stop(spawnCtx, wid) //nolint:errcheck // best-effort cleanup
 		return "", "", fmt.Errorf("resolve worker address: %w", err)
 	}
 
@@ -206,7 +213,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	ops.SpawnLogCapture(context.Background(), srv, wid, app.ID)
 
 	coldStartBegin := time.Now()
-	if err := pollHealthy(ctx, srv, wid); err != nil {
+	if err := pollHealthy(spawnCtx, srv, wid); err != nil {
 		slog.Warn("worker failed health check during cold start",
 			"worker_id", wid, "app_id", app.ID,
 			"elapsed", time.Since(coldStartBegin).Round(time.Millisecond),
@@ -228,25 +235,19 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 }
 
 // pollHealthy polls backend.HealthCheck with exponential backoff until
-// the worker is healthy or worker_start_timeout expires.
+// the worker is healthy or the context expires (worker_start_timeout).
 func pollHealthy(ctx context.Context, srv *server.Server, workerID string) error {
-	timeout := srv.Config.Proxy.WorkerStartTimeout.Duration
-	deadline := time.Now().Add(timeout)
 	interval := 100 * time.Millisecond
 	maxInterval := 2 * time.Second
 
 	for {
-		if time.Now().After(deadline) {
-			return errHealthTimeout
-		}
-
 		if srv.Backend.HealthCheck(ctx, workerID) {
 			return nil
 		}
 
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return errHealthTimeout
 		case <-time.After(interval):
 		}
 		interval = min(interval*2, maxInterval)
