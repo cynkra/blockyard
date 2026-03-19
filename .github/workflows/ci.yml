@@ -84,12 +84,29 @@ jobs:
     needs: [check, docker, idp, openbao]
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
       - uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           merge-multiple: true
+      - name: Enforce 80% coverage threshold
+        run: |
+          go tool covdata textfmt -i=. -o=merged.out || {
+            # Fallback: merge profiles manually if covdata fails
+            head -1 coverage-check.out > merged.out
+            tail -n +2 -q coverage-*.out >> merged.out
+          }
+          TOTAL=$(go tool cover -func=merged.out | grep ^total: | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${TOTAL}%"
+          if [ "$(echo "$TOTAL < 80" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${TOTAL}% is below 80% threshold"
+            exit 1
+          fi
       - uses: codecov/codecov-action@v5
+        if: always()
         with:
           files: coverage-check.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out
           flags: unit,docker,idp,openbao
-          fail_ci_if_error: true
+          fail_ci_if_error: false
