@@ -16,7 +16,15 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
+      - name: Verify Go version consistency
+        run: |
+          GO_MINOR=$(awk '/^go /{print $2}' go.mod | grep -oP '^\d+\.\d+')
+          for f in docker/server.Dockerfile .devcontainer/Dockerfile; do
+            if ! grep -qP "golang:${GO_MINOR}|GO_VERSION=${GO_MINOR}" "$f"; then
+              echo "::error file=$f::Go version mismatch — expected $GO_MINOR (from go.mod)" && exit 1
+            fi
+          done
       - uses: golangci/golangci-lint-action@v7
       - name: Check for known vulnerabilities
         run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
@@ -34,7 +42,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: docker pull alpine:latest && docker pull ghcr.io/rocker-org/r-ver:latest && docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - run: sudo --preserve-env=PATH go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
       - uses: actions/upload-artifact@v7
@@ -50,7 +58,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: docker pull quay.io/keycloak/keycloak:26.0
       - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./... ./internal/auth/...
       - uses: actions/upload-artifact@v7
@@ -66,7 +74,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: docker pull ghcr.io/openbao/openbao:latest
       - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./... ./internal/integration/...
       - uses: actions/upload-artifact@v7
