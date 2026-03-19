@@ -7,7 +7,6 @@ on:
 
 jobs:
   e2e:
-    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -20,19 +19,25 @@ jobs:
             test: TestHelloBlockr
     steps:
       - uses: actions/checkout@v6
+        if: github.event_name == 'merge_group'
       - uses: actions/setup-go@v6
+        if: github.event_name == 'merge_group'
         with:
           go-version-file: go.mod
       - name: Build blockyard image from source
+        if: github.event_name == 'merge_group'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
       - name: Pre-pull images used by examples
+        if: github.event_name == 'merge_group'
         run: |
           docker pull dexidp/dex:v2.41.1
           docker pull ghcr.io/openbao/openbao:latest
           docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - name: Block cloud metadata endpoint for containers
+        if: github.event_name == 'merge_group'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Run e2e tests
+        if: github.event_name == 'merge_group'
         run: sudo --preserve-env=PATH go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
       - name: Dump compose logs on failure
         if: failure()
