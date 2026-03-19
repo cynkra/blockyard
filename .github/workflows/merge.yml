@@ -1,11 +1,13 @@
 name: Merge
 
 on:
+  pull_request:
   merge_group:
   workflow_call:
 
 jobs:
   e2e:
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
