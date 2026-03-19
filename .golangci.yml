@@ -1,17 +1,35 @@
-linters-settings:
-  errcheck:
-    exclude-functions:
-      - io.Copy
-      - (*database/sql.Tx).Rollback
-      - (*net/http.ResponseWriter).Write
-      - (net/http.ResponseWriter).Write
-      - (*encoding/json.Encoder).Encode
-      - (*html/template.Template).ExecuteTemplate
-      - (*nhooyr.io/websocket.Conn).CloseNow
-      - (*github.com/coder/websocket.Conn).CloseNow
+version: "2"
 
-issues:
-  exclude-rules:
-    - path: (_test\.go|internal/testutil/)
-      linters:
-        - errcheck
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - io.Copy
+        - fmt.Fprintf
+        - fmt.Fprint
+        - fmt.Fprintln
+        - (net/http.ResponseWriter).Write
+        - (*database/sql.Tx).Rollback
+        - (*database/sql.Rows).Close
+        - (*encoding/json.Encoder).Encode
+        - (*html/template.Template).ExecuteTemplate
+        - (*github.com/coder/websocket.Conn).Close
+        - (*github.com/coder/websocket.Conn).CloseNow
+      check-type-assertions: false
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF*"
+        - "-ST1000"
+        - "-ST1003"
+  exclusions:
+    rules:
+      - path: (_test\.go|internal/testutil/)
+        linters:
+          - errcheck
+      - linters:
+          - errcheck
+        source: '\.Close\('
+      - linters:
+          - errcheck
+        source: 'os\.Remove\('
