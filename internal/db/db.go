@@ -580,9 +580,13 @@ func (db *DB) UpdateUser(sub string, u UserUpdate) (*UserRow, error) {
 		user.Active = *u.Active
 	}
 
+	active := 0
+	if user.Active {
+		active = 1
+	}
 	_, err = db.Exec(db.rebind(
 		"UPDATE users SET role = ?, active = ? WHERE sub = ?"),
-		user.Role, user.Active, sub,
+		user.Role, active, sub,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update user: %w", err)
