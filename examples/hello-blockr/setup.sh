@@ -6,7 +6,7 @@
 # Runs as a one-shot init container after OpenBao, Dex, and PocketBase
 # are started.
 #
-set -eu
+set -eux
 
 BAO_ADDR="${BAO_ADDR:-http://openbao:8200}"
 BAO_TOKEN="${BAO_TOKEN:-root-dev-token}"
@@ -25,7 +25,7 @@ bao_header="-H X-Vault-Token:${BAO_TOKEN} -H Content-Type:application/json"
 bao_post() {
   path="$1"; shift
   # shellcheck disable=SC2086
-  curl -sf $bao_header -X POST "${BAO_ADDR}${path}" "$@"
+  curl -f --show-error $bao_header -X POST "${BAO_ADDR}${path}" "$@"
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -135,7 +135,7 @@ done
 echo "    OK"
 
 echo "==> Creating PocketBase superuser..."
-curl -sf -X POST "${PB_URL}/api/collections/_superusers/records" \
+curl -f --show-error -X POST "${PB_URL}/api/collections/_superusers/records" \
   -H "Content-Type: application/json" \
   -d "{
     \"email\":           \"${PB_ADMIN_EMAIL}\",
@@ -145,7 +145,7 @@ curl -sf -X POST "${PB_URL}/api/collections/_superusers/records" \
 echo "    OK"
 
 echo "==> Authenticating as PocketBase superuser..."
-PB_AUTH=$(curl -sf -X POST "${PB_URL}/api/collections/_superusers/auth-with-password" \
+PB_AUTH=$(curl -f --show-error -X POST "${PB_URL}/api/collections/_superusers/auth-with-password" \
   -H "Content-Type: application/json" \
   -d "{\"identity\":\"${PB_ADMIN_EMAIL}\",\"password\":\"${PB_ADMIN_PASSWORD}\"}")
 PB_TOKEN=$(echo "$PB_AUTH" | grep -o '"token":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -160,7 +160,7 @@ pb_header="-H Authorization:${PB_TOKEN} -H Content-Type:application/json"
 pb_req() {
   method="$1"; path="$2"; shift 2
   # shellcheck disable=SC2086
-  curl -sf $pb_header -X "$method" "${PB_URL}${path}" "$@"
+  curl -f --show-error $pb_header -X "$method" "${PB_URL}${path}" "$@"
 }
 
 echo "==> Creating demo users in PocketBase..."

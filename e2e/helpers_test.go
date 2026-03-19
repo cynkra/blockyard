@@ -46,8 +46,8 @@ func composeUp(t *testing.T, composeFile string) {
 		}
 	}
 
-	run("up", "-d", "--wait")
-
+	// Register cleanup BEFORE starting — ensures logs are dumped and
+	// containers torn down even if compose up fails.
 	t.Cleanup(func() {
 		if t.Failed() {
 			dump := exec.Command("docker", "compose", "-f", absPath, "logs", "--no-color")
@@ -60,6 +60,8 @@ func composeUp(t *testing.T, composeFile string) {
 		down.Stderr = os.Stderr
 		_ = down.Run()
 	})
+
+	run("up", "-d", "--wait")
 }
 
 // ---------------------------------------------------------------------------
