@@ -1,0 +1,17 @@
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - io.Copy
+      - (*database/sql.Tx).Rollback
+      - (*net/http.ResponseWriter).Write
+      - (net/http.ResponseWriter).Write
+      - (*encoding/json.Encoder).Encode
+      - (*html/template.Template).ExecuteTemplate
+      - (*nhooyr.io/websocket.Conn).CloseNow
+      - (*github.com/coder/websocket.Conn).CloseNow
+
+issues:
+  exclude-rules:
+    - path: (_test\.go|internal/testutil/)
+      linters:
+        - errcheck

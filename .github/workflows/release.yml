@@ -16,8 +16,12 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
-  server-image:
+  e2e:
     needs: ci
+    uses: ./.github/workflows/merge.yml
+
+  server-image:
+    needs: e2e
     strategy:
       matrix:
         include:
@@ -88,10 +92,17 @@ jobs:
         with:
           go-version: '1.24'
 
-      - run: CGO_ENABLED=0 go build -o blockyard ./cmd/blockyard
+      - name: Build release binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          CGO_ENABLED=0 GOARCH=amd64 go build -ldflags "$LDFLAGS" -o blockyard-linux-amd64 ./cmd/blockyard
+          CGO_ENABLED=0 GOARCH=arm64 go build -ldflags "$LDFLAGS" -o blockyard-linux-arm64 ./cmd/blockyard
 
       # TODO: bump to v3 once released with node24 support
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: blockyard
+          files: |
+            blockyard-linux-amd64
+            blockyard-linux-arm64

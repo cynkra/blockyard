@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/BurntSushi/toml"
+	"encoding"
 )
 
 // Secret wraps a secret string. Its String() and GoString() methods
@@ -114,4 +114,4 @@ func (s *Secret) UnmarshalText(text []byte) error {
 }
 
 // Verify interface compliance.
-var _ toml.TextUnmarshaler = (*Secret)(nil)
+var _ encoding.TextUnmarshaler = (*Secret)(nil)
