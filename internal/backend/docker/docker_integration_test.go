@@ -593,7 +593,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 
 	// --- Setup: DB, base dirs, app row ---
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

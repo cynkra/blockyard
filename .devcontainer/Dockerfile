@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libsqlite3-dev \
     openssh-client \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI

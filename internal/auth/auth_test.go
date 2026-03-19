@@ -945,7 +945,7 @@ func TestCallbackDeactivatedUser(t *testing.T) {
 	router := buildTestRouter(deps)
 
 	// Set up an in-memory database with a deactivated user.
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -997,7 +997,7 @@ func TestMiddlewareWithRoleCache(t *testing.T) {
 	deps := buildTestDeps(t, idp)
 
 	// Open an in-memory database and create a user with publisher role.
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1054,7 +1054,7 @@ func TestMiddlewareDeactivatedUserNoCaller(t *testing.T) {
 	deps := buildTestDeps(t, idp)
 
 	// Open an in-memory database and create a deactivated user.
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1115,7 +1115,7 @@ func TestMiddlewareValidUserHasCallerAndUser(t *testing.T) {
 	deps := buildTestDeps(t, idp)
 
 	// Open an in-memory database and create an active user with admin role.
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

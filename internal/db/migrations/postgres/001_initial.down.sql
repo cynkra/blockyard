@@ -1,0 +1,8 @@
+DROP TABLE IF EXISTS app_tags;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS personal_access_tokens;
+DROP TABLE IF EXISTS app_access;
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS fk_apps_active_bundle;
+DROP TABLE IF EXISTS bundles;
+DROP TABLE IF EXISTS apps;
+DROP TABLE IF EXISTS users;
