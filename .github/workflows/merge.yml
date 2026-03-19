@@ -15,7 +15,7 @@ on:
           - TestHelloBlockr
 
 jobs:
-  e2e:
+  run:
     name: ${{ matrix.example }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -54,3 +54,9 @@ jobs:
         run: |
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
+
+  e2e:
+    needs: [run]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All e2e tests passed."
