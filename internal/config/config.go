@@ -73,6 +73,7 @@ type ProxyConfig struct {
 	LogRetention       Duration `toml:"log_retention"`
 	SessionIdleTTL     Duration `toml:"session_idle_ttl"`
 	IdleWorkerTimeout  Duration `toml:"idle_worker_timeout"`
+	HTTPForwardTimeout Duration `toml:"http_forward_timeout"`
 }
 
 type OidcConfig struct {
@@ -187,6 +188,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Proxy.IdleWorkerTimeout.Duration == 0 {
 		cfg.Proxy.IdleWorkerTimeout.Duration = 5 * time.Minute
+	}
+	if cfg.Proxy.HTTPForwardTimeout.Duration == 0 {
+		cfg.Proxy.HTTPForwardTimeout.Duration = 5 * time.Minute
 	}
 	if cfg.OIDC != nil {
 		oidcDefaults(cfg.OIDC)

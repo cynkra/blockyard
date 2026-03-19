@@ -1,17 +1,31 @@
 package proxy
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 // forwardHTTP proxies an HTTP request to the worker at addr. The
 // /app/{name} prefix is stripped from the path before forwarding.
-func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName, externalURL string, transport http.RoundTripper) {
+// httpTimeout caps the total request lifetime (dial + headers + body)
+// to prevent a worker from holding connections indefinitely.
+func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName, externalURL string, transport http.RoundTripper, httpTimeout time.Duration) {
+	// Apply a deadline so the entire round-trip is bounded. This
+	// prevents a worker from holding resources by trickling response
+	// bytes indefinitely.
+	ctx, cancel := r.Context(), func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		ctx, cancel = context.WithTimeout(ctx, httpTimeout)
+	}
+	defer cancel()
+	r = r.WithContext(ctx)
+
 	slog.Debug("proxy: forwarding HTTP",
 		"app", appName, "backend", addr,
 		"path", stripAppPrefix(r.URL.Path, appName))

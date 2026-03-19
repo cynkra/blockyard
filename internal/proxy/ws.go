@@ -14,14 +14,18 @@ import (
 )
 
 // wsOriginPatterns derives WebSocket origin patterns from the external URL.
-// Falls back to allowing all origins if the URL is empty or unparseable.
+// Rejects all cross-origin requests when the URL is empty or unparseable
+// to prevent cross-site WebSocket hijacking in misconfigured deployments.
 func wsOriginPatterns(externalURL string) []string {
 	if externalURL == "" {
-		return []string{"*"}
+		slog.Warn("ws: external_url not configured, rejecting all cross-origin WebSocket requests")
+		return []string{}
 	}
 	u, err := url.Parse(externalURL)
 	if err != nil || u.Host == "" {
-		return []string{"*"}
+		slog.Warn("ws: external_url unparseable, rejecting all cross-origin WebSocket requests",
+			"external_url", externalURL)
+		return []string{}
 	}
 	// Allow both http and https variants of the configured host.
 	return []string{u.Host}
