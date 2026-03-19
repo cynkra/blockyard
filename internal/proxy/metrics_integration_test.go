@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -156,7 +155,7 @@ func TestMetricsSessionActive(t *testing.T) {
 	}
 
 	// Second request without cookie creates another session
-	resp, err = http.Get(ts.URL + "/app/sess-metrics/")
+	_, err = http.Get(ts.URL + "/app/sess-metrics/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,23 +324,3 @@ func TestMetricsCapacityDoesNotSpawn(t *testing.T) {
 	}
 }
 
-// --- helpers ---
-
-func getAppID(t *testing.T, ts *httptest.Server, name string) string {
-	t.Helper()
-	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps", nil)
-	req.Header.Set("Authorization", "Bearer "+testPAT)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var apps []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&apps)
-	for _, a := range apps {
-		if a["name"] == name {
-			return a["id"].(string)
-		}
-	}
-	t.Fatalf("app %q not found", name)
-	return ""
-}

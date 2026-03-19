@@ -1,0 +1,34 @@
+name: Merge
+
+on:
+  merge_group:
+  workflow_call:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build blockyard image from source
+        run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
+      - name: Build and pull images used by examples
+        run: |
+          docker build -t ghcr.io/cynkra/blockyard-r-worker:latest -f docker/r-worker.Dockerfile .
+          docker pull dexidp/dex:v2.41.1
+          docker pull ghcr.io/openbao/openbao:latest
+      - name: Block cloud metadata endpoint for containers
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
+      - name: Run e2e tests
+        run: sudo --preserve-env=PATH go test -v -tags e2e -timeout 20m ./e2e/...
+      - name: Dump compose logs on failure
+        if: failure()
+        run: |
+          for dir in examples/hello-shiny examples/hello-blockr; do
+            echo "=== $dir ==="
+            docker compose -f "$dir/docker-compose.yml" logs --no-color 2>/dev/null || true
+            docker compose -f "$dir/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
+          done

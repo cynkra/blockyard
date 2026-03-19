@@ -195,7 +195,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 
 	a, err := srv.Backend.Addr(ctx, wid)
 	if err != nil {
-		srv.Backend.Stop(ctx, wid)
+		srv.Backend.Stop(ctx, wid) //nolint:errcheck // best-effort cleanup
 		return "", "", fmt.Errorf("resolve worker address: %w", err)
 	}
 
@@ -213,7 +213,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 			"error", err)
 		srv.Workers.Delete(wid)
 		srv.Registry.Delete(wid)
-		srv.Backend.Stop(context.Background(), wid)
+		srv.Backend.Stop(context.Background(), wid) //nolint:errcheck // best-effort cleanup
 		return "", "", err
 	}
 	coldStartElapsed := time.Since(coldStartBegin)

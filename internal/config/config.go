@@ -260,10 +260,6 @@ var (
 	secretType           = reflect.TypeOf(Secret{})
 	secretPtrType        = reflect.TypeOf((*Secret)(nil))
 	stringSliceType      = reflect.TypeOf([]string{})
-	oidcCfgPtrType       = reflect.TypeOf((*OidcConfig)(nil))
-	openbaoCfgPtrType    = reflect.TypeOf((*OpenbaoConfig)(nil))
-	auditCfgPtrType      = reflect.TypeOf((*AuditConfig)(nil))
-	telemetryCfgPtrType  = reflect.TypeOf((*TelemetryConfig)(nil))
 )
 
 func applyEnvToStruct(v reflect.Value, prefix string) {

@@ -668,7 +668,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		return backend.BuildResult{}, fmt.Errorf("build: %w", err)
 	}
 	defer func() {
-		d.client.NetworkRemove(ctx, buildNetworkName)
+		d.client.NetworkRemove(ctx, buildNetworkName) //nolint:errcheck // best-effort cleanup
 	}()
 
 	if err := d.blockMetadataEndpoint(ctx, buildNetworkName, "build-"+spec.BundleID); err != nil {

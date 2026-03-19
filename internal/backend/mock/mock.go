@@ -91,8 +91,7 @@ func (b *MockBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
 	httpH := b.httpHandler
 	b.mu.Unlock()
 
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Upgrade") == "websocket" && wsH != nil {
 			wsH(w, r)
 			return

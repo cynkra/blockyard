@@ -502,7 +502,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 		if err := pollWorkerHealthy(r.Context(), srv, workerID); err != nil {
 			srv.Workers.Delete(workerID)
 			srv.Registry.Delete(workerID)
-			srv.Backend.Stop(context.Background(), workerID)
+			srv.Backend.Stop(context.Background(), workerID) //nolint:errcheck // best-effort cleanup
 			serviceUnavailable(w, "worker failed to start: "+err.Error())
 			return
 		}
