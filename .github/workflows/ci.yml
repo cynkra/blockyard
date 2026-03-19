@@ -93,11 +93,8 @@ jobs:
           merge-multiple: true
       - name: Enforce 80% coverage threshold
         run: |
-          go tool covdata textfmt -i=. -o=merged.out || {
-            # Fallback: merge profiles manually if covdata fails
-            head -1 coverage-check.out > merged.out
-            tail -n +2 -q coverage-*.out >> merged.out
-          }
+          head -1 coverage-check.out > merged.out
+          tail -n +2 -q coverage-*.out | sort -u >> merged.out
           TOTAL=$(go tool cover -func=merged.out | grep ^total: | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${TOTAL}%"
           if [ "$(echo "$TOTAL < 80" | bc -l)" -eq 1 ]; then
