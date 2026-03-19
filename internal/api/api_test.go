@@ -43,7 +43,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 		Proxy: config.ProxyConfig{MaxWorkers: 100},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 		},
 		Proxy: config.ProxyConfig{MaxWorkers: 0}, // no workers allowed
 	}
-	database, _ := db.Open(":memory:")
+	database, _ := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	t.Cleanup(func() { database.Close() })
 	seedTestAdmin(t, database)
 	be := mock.New()
@@ -975,7 +975,7 @@ func TestUploadBundleOversized(t *testing.T) {
 		},
 		Proxy: config.ProxyConfig{MaxWorkers: 100},
 	}
-	database, _ := db.Open(":memory:")
+	database, _ := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	t.Cleanup(func() { database.Close() })
 	seedTestAdmin(t, database)
 	be := mock.New()
@@ -1080,7 +1080,7 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 		Audit: &config.AuditConfig{Path: auditPath},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1183,7 +1183,7 @@ func TestTracingMiddlewareEnabled(t *testing.T) {
 		},
 	}
 
-	database, _ := db.Open(":memory:")
+	database, _ := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	t.Cleanup(func() { database.Close() })
 	seedTestAdmin(t, database)
 	be := mock.New()
@@ -1470,7 +1470,7 @@ func testServerWithBackend(t *testing.T, be backend.Backend) (*server.Server, *h
 		Proxy: config.ProxyConfig{MaxWorkers: 100},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

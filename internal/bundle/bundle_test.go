@@ -12,6 +12,7 @@ import (
 	"time"
 
 	mockmock "github.com/cynkra/blockyard/internal/backend/mock"
+	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/testutil"
@@ -284,7 +285,7 @@ func TestValidateEntrypoint_Missing(t *testing.T) {
 
 func openTestDB(t *testing.T) *db.DB {
 	t.Helper()
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,102 +3,62 @@ package db
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	migratedb "github.com/golang-migrate/migrate/v4/database"
+	migratepostgres "github.com/golang-migrate/migrate/v4/database/postgres"
+	migratesqlite "github.com/golang-migrate/migrate/v4/database/sqlite3"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+
+	"github.com/cynkra/blockyard/internal/config"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS apps (
-    id                      TEXT PRIMARY KEY,
-    name                    TEXT NOT NULL UNIQUE,
-    owner                   TEXT NOT NULL DEFAULT 'admin',
-    access_type             TEXT NOT NULL DEFAULT 'acl' CHECK (access_type IN ('acl', 'logged_in', 'public')),
-    active_bundle           TEXT REFERENCES bundles(id) ON DELETE SET NULL,
-    max_workers_per_app     INTEGER,
-    max_sessions_per_worker INTEGER DEFAULT 1,
-    memory_limit            TEXT,
-    cpu_limit               REAL,
-    title                   TEXT,
-    description             TEXT,
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL
-);
+//go:embed migrations/sqlite/*.sql
+var sqliteMigrations embed.FS
 
-CREATE TABLE IF NOT EXISTS bundles (
-    id          TEXT PRIMARY KEY,
-    app_id      TEXT NOT NULL REFERENCES apps(id),
-    status      TEXT NOT NULL DEFAULT 'pending',
-    uploaded_at TEXT NOT NULL
-);
+//go:embed migrations/postgres/*.sql
+var postgresMigrations embed.FS
 
-CREATE INDEX IF NOT EXISTS idx_bundles_app_id ON bundles(app_id);
+// Dialect identifies the SQL dialect in use.
+type Dialect int
 
-CREATE TABLE IF NOT EXISTS app_access (
-    app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    principal   TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('user')),
-    role        TEXT NOT NULL CHECK (role IN ('viewer', 'collaborator')),
-    granted_by  TEXT NOT NULL,
-    granted_at  TEXT NOT NULL,
-    PRIMARY KEY (app_id, principal, kind)
-);
+const (
+	DialectSQLite Dialect = iota
+	DialectPostgres
+)
 
-CREATE TABLE IF NOT EXISTS users (
-    sub        TEXT PRIMARY KEY,
-    email      TEXT NOT NULL DEFAULT '',
-    name       TEXT NOT NULL DEFAULT '',
-    role       TEXT NOT NULL DEFAULT 'viewer',
-    active     INTEGER NOT NULL DEFAULT 1,
-    last_login TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS personal_access_tokens (
-    id           TEXT PRIMARY KEY,
-    token_hash   BLOB NOT NULL UNIQUE,
-    user_sub     TEXT NOT NULL REFERENCES users(sub),
-    name         TEXT NOT NULL,
-    created_at   TEXT NOT NULL,
-    expires_at   TEXT,
-    last_used_at TEXT,
-    revoked      INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_pat_token_hash
-    ON personal_access_tokens(token_hash);
-CREATE INDEX IF NOT EXISTS idx_pat_user_sub
-    ON personal_access_tokens(user_sub);
-
-CREATE TABLE IF NOT EXISTS tags (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS app_tags (
-    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-    PRIMARY KEY (app_id, tag_id)
-);
-`
-
+// DB wraps sqlx.DB with dialect awareness.
 type DB struct {
-	*sql.DB
-	tempPath string // non-empty when using a temp file for :memory:
+	*sqlx.DB
+	dialect  Dialect
+	tempPath string // non-empty when using a temp file for SQLite :memory:
 }
 
-// IsUniqueConstraintError reports whether err is a SQLite UNIQUE
-// constraint violation.
-func IsUniqueConstraintError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+// Open opens a database connection based on the config.
+func Open(cfg config.DatabaseConfig) (*DB, error) {
+	switch cfg.Driver {
+	case "sqlite":
+		return openSQLite(cfg.Path)
+	case "postgres":
+		return openPostgres(cfg.URL)
+	default:
+		return nil, fmt.Errorf("unsupported database driver: %q", cfg.Driver)
+	}
 }
 
-func Open(path string) (*DB, error) {
+func openSQLite(path string) (*DB, error) {
 	var tempPath string
 	dsn := path + "?_pragma=foreign_keys(1)"
 	if path == ":memory:" {
@@ -118,26 +78,119 @@ func Open(path string) (*DB, error) {
 		}
 	}
 
-	sqlDB, err := sql.Open("sqlite", dsn)
+	db, err := sqlx.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
 	// SQLite does not benefit from multiple concurrent connections and
 	// in-memory databases are per-connection, so pin to a single conn.
-	sqlDB.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(1)
 
-	if err := sqlDB.Ping(); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("ping database: %w", err)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
-	if _, err := sqlDB.Exec(schema); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("create schema: %w", err)
+	d := &DB{DB: db, dialect: DialectSQLite, tempPath: tempPath}
+	if err := d.runMigrations(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+func openPostgres(url string) (*DB, error) {
+	db, err := sqlx.Open("pgx", url)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
 	}
 
-	return &DB{DB: sqlDB, tempPath: tempPath}, nil
+	// Reasonable pool defaults — tune via connection string parameters
+	// if needed (e.g. ?pool_max_conns=20).
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+
+	d := &DB{DB: db, dialect: DialectPostgres, tempPath: ""}
+	if err := d.runMigrations(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+func (db *DB) runMigrations() error {
+	var fsys fs.FS
+	var err error
+
+	switch db.dialect {
+	case DialectSQLite:
+		fsys, err = fs.Sub(sqliteMigrations, "migrations/sqlite")
+	case DialectPostgres:
+		fsys, err = fs.Sub(postgresMigrations, "migrations/postgres")
+	}
+	if err != nil {
+		return fmt.Errorf("migration fs: %w", err)
+	}
+
+	source, err := iofs.New(fsys, ".")
+	if err != nil {
+		return fmt.Errorf("migration source: %w", err)
+	}
+
+	driver, err := db.migrateDriver()
+	if err != nil {
+		return fmt.Errorf("migration driver: %w", err)
+	}
+
+	m, err := migrate.NewWithInstance("iofs", source, db.driverName(), driver)
+	if err != nil {
+		return fmt.Errorf("create migrator: %w", err)
+	}
+
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("run migrations: %w", err)
+	}
+
+	return nil
+}
+
+func (db *DB) migrateDriver() (migratedb.Driver, error) {
+	switch db.dialect {
+	case DialectPostgres:
+		return migratepostgres.WithInstance(db.DB.DB, &migratepostgres.Config{})
+	default:
+		return migratesqlite.WithInstance(db.DB.DB, &migratesqlite.Config{})
+	}
+}
+
+func (db *DB) driverName() string {
+	switch db.dialect {
+	case DialectPostgres:
+		return "postgres"
+	default:
+		return "sqlite3"
+	}
+}
+
+// rebind rewrites ? placeholders for the active dialect.
+func (db *DB) rebind(query string) string {
+	return sqlx.Rebind(db.bindType(), query)
+}
+
+func (db *DB) bindType() int {
+	switch db.dialect {
+	case DialectPostgres:
+		return sqlx.DOLLAR
+	default:
+		return sqlx.QUESTION
+	}
 }
 
 // Close closes the database and removes any temp file created for :memory:.
@@ -149,27 +202,29 @@ func (db *DB) Close() error {
 	return err
 }
 
+// --- Row types ---
+
 type AppRow struct {
-	ID                   string
-	Name                 string
-	Owner                string
-	AccessType           string
-	ActiveBundle         *string
-	MaxWorkersPerApp     *int
-	MaxSessionsPerWorker int
-	MemoryLimit          *string
-	CPULimit             *float64
-	Title                *string
-	Description          *string
-	CreatedAt            string
-	UpdatedAt            string
+	ID                   string   `db:"id" json:"id"`
+	Name                 string   `db:"name" json:"name"`
+	Owner                string   `db:"owner" json:"owner"`
+	AccessType           string   `db:"access_type" json:"access_type"`
+	ActiveBundle         *string  `db:"active_bundle" json:"active_bundle"`
+	MaxWorkersPerApp     *int     `db:"max_workers_per_app" json:"max_workers_per_app"`
+	MaxSessionsPerWorker int      `db:"max_sessions_per_worker" json:"max_sessions_per_worker"`
+	MemoryLimit          *string  `db:"memory_limit" json:"memory_limit"`
+	CPULimit             *float64 `db:"cpu_limit" json:"cpu_limit"`
+	Title                *string  `db:"title" json:"title"`
+	Description          *string  `db:"description" json:"description"`
+	CreatedAt            string   `db:"created_at" json:"created_at"`
+	UpdatedAt            string   `db:"updated_at" json:"updated_at"`
 }
 
 type BundleRow struct {
-	ID         string `json:"id"`
-	AppID      string `json:"app_id"`
-	Status     string `json:"status"`
-	UploadedAt string `json:"uploaded_at"`
+	ID         string `db:"id" json:"id"`
+	AppID      string `db:"app_id" json:"app_id"`
+	Status     string `db:"status" json:"status"`
+	UploadedAt string `db:"uploaded_at" json:"uploaded_at"`
 }
 
 // Ping verifies the database connection is alive.
@@ -178,13 +233,15 @@ func (db *DB) Ping(ctx context.Context) error {
 	return err
 }
 
+// --- Apps ---
+
 func (db *DB) CreateApp(name, owner string) (*AppRow, error) {
 	id := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	_, err := db.Exec(
+	_, err := db.Exec(db.rebind(
 		`INSERT INTO apps (id, name, owner, max_sessions_per_worker, created_at, updated_at)
-		 VALUES (?, ?, ?, 1, ?, ?)`,
+		 VALUES (?, ?, ?, 1, ?, ?)`),
 		id, name, owner, now, now,
 	)
 	if err != nil {
@@ -194,53 +251,61 @@ func (db *DB) CreateApp(name, owner string) (*AppRow, error) {
 	return db.GetApp(id)
 }
 
-const appColumns = `id, name, owner, access_type, active_bundle, max_workers_per_app,
-		max_sessions_per_worker, memory_limit, cpu_limit, title, description, created_at, updated_at`
-
 func (db *DB) GetApp(id string) (*AppRow, error) {
-	row := db.QueryRow(`SELECT `+appColumns+` FROM apps WHERE id = ?`, id)
-	return scanApp(row)
-}
-
-func (db *DB) GetAppByName(name string) (*AppRow, error) {
-	row := db.QueryRow(`SELECT `+appColumns+` FROM apps WHERE name = ?`, name)
-	return scanApp(row)
-}
-
-func (db *DB) ListApps() ([]AppRow, error) {
-	rows, err := db.Query(`SELECT ` + appColumns + ` FROM apps ORDER BY created_at DESC`)
+	var app AppRow
+	err := db.DB.Get(&app, db.rebind(`SELECT * FROM apps WHERE id = ?`), id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanApps(rows)
+	return &app, nil
+}
+
+func (db *DB) GetAppByName(name string) (*AppRow, error) {
+	var app AppRow
+	err := db.DB.Get(&app, db.rebind(`SELECT * FROM apps WHERE name = ?`), name)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
+}
+
+func (db *DB) ListApps() ([]AppRow, error) {
+	var apps []AppRow
+	err := db.DB.Select(&apps, `SELECT * FROM apps ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	return apps, nil
 }
 
 // ListAccessibleApps returns apps the caller can see: owned apps + apps
 // with a user ACL grant + logged_in apps + public apps.
 func (db *DB) ListAccessibleApps(sub string) ([]AppRow, error) {
-	query := fmt.Sprintf(
-		`SELECT DISTINCT a.%s
+	query := db.rebind(
+		`SELECT DISTINCT a.*
 		 FROM apps a
 		 LEFT JOIN app_access aa ON a.id = aa.app_id
 		 WHERE a.access_type IN ('public', 'logged_in')
 		    OR a.owner = ?
 		    OR (aa.kind = 'user' AND aa.principal = ?)
-		 ORDER BY a.created_at DESC`,
-		strings.ReplaceAll(appColumns, "\n\t\t", " "),
-	)
+		 ORDER BY a.created_at DESC`)
 
-	rows, err := db.Query(query, sub, sub)
+	var apps []AppRow
+	err := db.DB.Select(&apps, query, sub, sub)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanApps(rows)
+	return apps, nil
 }
 
-
 func (db *DB) DeleteApp(id string) (bool, error) {
-	result, err := db.Exec(`DELETE FROM apps WHERE id = ?`, id)
+	result, err := db.Exec(db.rebind(`DELETE FROM apps WHERE id = ?`), id)
 	if err != nil {
 		return false, err
 	}
@@ -248,11 +313,13 @@ func (db *DB) DeleteApp(id string) (bool, error) {
 	return n > 0, nil
 }
 
+// --- Bundles ---
+
 func (db *DB) CreateBundle(id, appID string) (*BundleRow, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
+	_, err := db.Exec(db.rebind(
 		`INSERT INTO bundles (id, app_id, status, uploaded_at)
-		 VALUES (?, ?, 'pending', ?)`,
+		 VALUES (?, ?, 'pending', ?)`),
 		id, appID, now,
 	)
 	if err != nil {
@@ -262,11 +329,8 @@ func (db *DB) CreateBundle(id, appID string) (*BundleRow, error) {
 }
 
 func (db *DB) GetBundle(id string) (*BundleRow, error) {
-	row := db.QueryRow(
-		`SELECT id, app_id, status, uploaded_at FROM bundles WHERE id = ?`, id,
-	)
 	var b BundleRow
-	err := row.Scan(&b.ID, &b.AppID, &b.Status, &b.UploadedAt)
+	err := db.DB.Get(&b, db.rebind(`SELECT * FROM bundles WHERE id = ?`), id)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -277,38 +341,25 @@ func (db *DB) GetBundle(id string) (*BundleRow, error) {
 }
 
 func (db *DB) ListBundlesByApp(appID string) ([]BundleRow, error) {
-	rows, err := db.Query(
-		`SELECT id, app_id, status, uploaded_at
-		 FROM bundles WHERE app_id = ?
-		 ORDER BY uploaded_at DESC`, appID,
-	)
+	var bundles []BundleRow
+	err := db.DB.Select(&bundles, db.rebind(
+		`SELECT * FROM bundles WHERE app_id = ? ORDER BY uploaded_at DESC`), appID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	bundles := make([]BundleRow, 0)
-	for rows.Next() {
-		var b BundleRow
-		if err := rows.Scan(&b.ID, &b.AppID, &b.Status, &b.UploadedAt); err != nil {
-			return nil, err
-		}
-		bundles = append(bundles, b)
-	}
-	return bundles, rows.Err()
+	return bundles, nil
 }
 
 func (db *DB) UpdateBundleStatus(id, status string) error {
-	_, err := db.Exec(
-		`UPDATE bundles SET status = ? WHERE id = ?`, status, id,
-	)
+	_, err := db.Exec(db.rebind(
+		`UPDATE bundles SET status = ? WHERE id = ?`), status, id)
 	return err
 }
 
 func (db *DB) SetActiveBundle(appID, bundleID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
-		`UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?`,
+	_, err := db.Exec(db.rebind(
+		`UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?`),
 		bundleID, now, appID,
 	)
 	return err
@@ -317,18 +368,18 @@ func (db *DB) SetActiveBundle(appID, bundleID string) error {
 // ActivateBundle marks a bundle as ready and sets it as the app's active
 // bundle in a single transaction.
 func (db *DB) ActivateBundle(appID, bundleID string) error {
-	tx, err := db.Begin()
+	tx, err := db.Beginx()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`UPDATE bundles SET status = 'ready' WHERE id = ?`, bundleID); err != nil {
+	if _, err := tx.Exec(db.rebind(`UPDATE bundles SET status = 'ready' WHERE id = ?`), bundleID); err != nil {
 		return fmt.Errorf("update bundle status: %w", err)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := tx.Exec(`UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?`, bundleID, now, appID); err != nil {
+	if _, err := tx.Exec(db.rebind(`UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?`), bundleID, now, appID); err != nil {
 		return fmt.Errorf("set active bundle: %w", err)
 	}
 
@@ -336,13 +387,15 @@ func (db *DB) ActivateBundle(appID, bundleID string) error {
 }
 
 func (db *DB) DeleteBundle(id string) (bool, error) {
-	result, err := db.Exec(`DELETE FROM bundles WHERE id = ?`, id)
+	result, err := db.Exec(db.rebind(`DELETE FROM bundles WHERE id = ?`), id)
 	if err != nil {
 		return false, err
 	}
 	n, _ := result.RowsAffected()
 	return n > 0, nil
 }
+
+// --- App update ---
 
 // AppUpdate holds optional fields for updating an app's configuration.
 type AppUpdate struct {
@@ -389,7 +442,7 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = db.Exec(
+	_, err = db.Exec(db.rebind(
 		`UPDATE apps SET
 			max_workers_per_app = ?,
 			max_sessions_per_worker = ?,
@@ -399,7 +452,7 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 			title = ?,
 			description = ?,
 			updated_at = ?
-		WHERE id = ?`,
+		WHERE id = ?`),
 		app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
 		app.MemoryLimit, app.CPULimit,
 		app.AccessType,
@@ -416,8 +469,8 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 // ClearActiveBundle sets active_bundle to NULL for the given app.
 func (db *DB) ClearActiveBundle(appID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
-		`UPDATE apps SET active_bundle = NULL, updated_at = ? WHERE id = ?`,
+	_, err := db.Exec(db.rebind(
+		`UPDATE apps SET active_bundle = NULL, updated_at = ? WHERE id = ?`),
 		now, appID,
 	)
 	return err
@@ -433,48 +486,16 @@ func (db *DB) FailStaleBuilds() (int64, error) {
 	return result.RowsAffected()
 }
 
-func scanApp(row *sql.Row) (*AppRow, error) {
-	var app AppRow
-	err := row.Scan(&app.ID, &app.Name, &app.Owner, &app.AccessType,
-		&app.ActiveBundle, &app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
-		&app.MemoryLimit, &app.CPULimit,
-		&app.Title, &app.Description,
-		&app.CreatedAt, &app.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &app, nil
-}
-
-func scanApps(rows *sql.Rows) ([]AppRow, error) {
-	var apps []AppRow
-	for rows.Next() {
-		var app AppRow
-		if err := rows.Scan(&app.ID, &app.Name, &app.Owner, &app.AccessType,
-			&app.ActiveBundle, &app.MaxWorkersPerApp, &app.MaxSessionsPerWorker,
-			&app.MemoryLimit, &app.CPULimit,
-			&app.Title, &app.Description,
-			&app.CreatedAt, &app.UpdatedAt); err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
-}
-
 // --- Users ---
 
 // UserRow represents a row from the users table.
 type UserRow struct {
-	Sub       string `json:"sub"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	Active    bool   `json:"active"`
-	LastLogin string `json:"last_login"`
+	Sub       string `db:"sub" json:"sub"`
+	Email     string `db:"email" json:"email"`
+	Name      string `db:"name" json:"name"`
+	Role      string `db:"role" json:"role"`
+	Active    bool   `db:"active" json:"active"`
+	LastLogin string `db:"last_login" json:"last_login"`
 }
 
 // UpsertUser creates or updates a user record on OIDC login.
@@ -482,13 +503,13 @@ type UserRow struct {
 // but preserves role and active status set by admins.
 func (db *DB) UpsertUser(sub, email, name string) (*UserRow, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
+	_, err := db.Exec(db.rebind(
 		`INSERT INTO users (sub, email, name, last_login)
 		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT (sub) DO UPDATE SET
 		     email = excluded.email,
 		     name = excluded.name,
-		     last_login = excluded.last_login`,
+		     last_login = excluded.last_login`),
 		sub, email, name, now,
 	)
 	if err != nil {
@@ -501,13 +522,13 @@ func (db *DB) UpsertUser(sub, email, name string) (*UserRow, error) {
 // If the user already exists, only updates email, name, and last_login.
 func (db *DB) UpsertUserWithRole(sub, email, name, role string) (*UserRow, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
+	_, err := db.Exec(db.rebind(
 		`INSERT INTO users (sub, email, name, role, last_login)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (sub) DO UPDATE SET
 		     email = excluded.email,
 		     name = excluded.name,
-		     last_login = excluded.last_login`,
+		     last_login = excluded.last_login`),
 		sub, email, name, role, now,
 	)
 	if err != nil {
@@ -518,9 +539,7 @@ func (db *DB) UpsertUserWithRole(sub, email, name, role string) (*UserRow, error
 
 func (db *DB) GetUser(sub string) (*UserRow, error) {
 	var u UserRow
-	err := db.QueryRow(
-		"SELECT sub, email, name, role, active, last_login FROM users WHERE sub = ?", sub,
-	).Scan(&u.Sub, &u.Email, &u.Name, &u.Role, &u.Active, &u.LastLogin)
+	err := db.DB.Get(&u, db.rebind(`SELECT * FROM users WHERE sub = ?`), sub)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -531,23 +550,12 @@ func (db *DB) GetUser(sub string) (*UserRow, error) {
 }
 
 func (db *DB) ListUsers() ([]UserRow, error) {
-	rows, err := db.Query(
-		"SELECT sub, email, name, role, active, last_login FROM users ORDER BY last_login DESC",
-	)
+	var users []UserRow
+	err := db.DB.Select(&users, `SELECT * FROM users ORDER BY last_login DESC`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var users []UserRow
-	for rows.Next() {
-		var u UserRow
-		if err := rows.Scan(&u.Sub, &u.Email, &u.Name, &u.Role, &u.Active, &u.LastLogin); err != nil {
-			return nil, err
-		}
-		users = append(users, u)
-	}
-	return users, rows.Err()
+	return users, nil
 }
 
 // UserUpdate holds optional fields for updating a user.
@@ -572,8 +580,8 @@ func (db *DB) UpdateUser(sub string, u UserUpdate) (*UserRow, error) {
 		user.Active = *u.Active
 	}
 
-	_, err = db.Exec(
-		"UPDATE users SET role = ?, active = ? WHERE sub = ?",
+	_, err = db.Exec(db.rebind(
+		"UPDATE users SET role = ?, active = ? WHERE sub = ?"),
 		user.Role, user.Active, sub,
 	)
 	if err != nil {
@@ -587,52 +595,41 @@ func (db *DB) UpdateUser(sub string, u UserUpdate) (*UserRow, error) {
 
 // AppAccessRow represents a row from the app_access table.
 type AppAccessRow struct {
-	AppID     string
-	Principal string
-	Kind      string
-	Role      string
-	GrantedBy string
-	GrantedAt string
+	AppID     string `db:"app_id"`
+	Principal string `db:"principal"`
+	Kind      string `db:"kind"`
+	Role      string `db:"role"`
+	GrantedBy string `db:"granted_by"`
+	GrantedAt string `db:"granted_at"`
 }
 
 func (db *DB) ListAppAccess(appID string) ([]AppAccessRow, error) {
-	rows, err := db.Query(
-		"SELECT app_id, principal, kind, role, granted_by, granted_at FROM app_access WHERE app_id = ?",
-		appID,
-	)
+	var grants []AppAccessRow
+	err := db.DB.Select(&grants, db.rebind(
+		`SELECT * FROM app_access WHERE app_id = ?`), appID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var grants []AppAccessRow
-	for rows.Next() {
-		var g AppAccessRow
-		if err := rows.Scan(&g.AppID, &g.Principal, &g.Kind, &g.Role, &g.GrantedBy, &g.GrantedAt); err != nil {
-			return nil, err
-		}
-		grants = append(grants, g)
-	}
-	return grants, rows.Err()
+	return grants, nil
 }
 
 func (db *DB) GrantAppAccess(appID, principal, kind, role, grantedBy string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
+	_, err := db.Exec(db.rebind(
 		`INSERT INTO app_access (app_id, principal, kind, role, granted_by, granted_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (app_id, principal, kind)
 		 DO UPDATE SET role = excluded.role,
 		               granted_by = excluded.granted_by,
-		               granted_at = excluded.granted_at`,
+		               granted_at = excluded.granted_at`),
 		appID, principal, kind, role, grantedBy, now,
 	)
 	return err
 }
 
 func (db *DB) RevokeAppAccess(appID, principal, kind string) (bool, error) {
-	result, err := db.Exec(
-		"DELETE FROM app_access WHERE app_id = ? AND principal = ? AND kind = ?",
+	result, err := db.Exec(db.rebind(
+		"DELETE FROM app_access WHERE app_id = ? AND principal = ? AND kind = ?"),
 		appID, principal, kind,
 	)
 	if err != nil {
@@ -646,16 +643,16 @@ func (db *DB) RevokeAppAccess(appID, principal, kind string) (bool, error) {
 
 // TagRow represents a row from the tags table.
 type TagRow struct {
-	ID        string
-	Name      string
-	CreatedAt string
+	ID        string `db:"id"`
+	Name      string `db:"name"`
+	CreatedAt string `db:"created_at"`
 }
 
 func (db *DB) CreateTag(name string) (*TagRow, error) {
 	id := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
-		"INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)",
+	_, err := db.Exec(db.rebind(
+		"INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)"),
 		id, name, now,
 	)
 	if err != nil {
@@ -666,8 +663,7 @@ func (db *DB) CreateTag(name string) (*TagRow, error) {
 
 func (db *DB) GetTag(id string) (*TagRow, error) {
 	var t TagRow
-	err := db.QueryRow("SELECT id, name, created_at FROM tags WHERE id = ?", id).
-		Scan(&t.ID, &t.Name, &t.CreatedAt)
+	err := db.DB.Get(&t, db.rebind(`SELECT * FROM tags WHERE id = ?`), id)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -678,24 +674,16 @@ func (db *DB) GetTag(id string) (*TagRow, error) {
 }
 
 func (db *DB) ListTags() ([]TagRow, error) {
-	rows, err := db.Query("SELECT id, name, created_at FROM tags ORDER BY name")
+	var tags []TagRow
+	err := db.DB.Select(&tags, `SELECT * FROM tags ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var tags []TagRow
-	for rows.Next() {
-		var t TagRow
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
-			return nil, err
-		}
-		tags = append(tags, t)
-	}
-	return tags, rows.Err()
+	return tags, nil
 }
 
 func (db *DB) DeleteTag(id string) (bool, error) {
-	result, err := db.Exec("DELETE FROM tags WHERE id = ?", id)
+	result, err := db.Exec(db.rebind("DELETE FROM tags WHERE id = ?"), id)
 	if err != nil {
 		return false, err
 	}
@@ -704,16 +692,16 @@ func (db *DB) DeleteTag(id string) (bool, error) {
 }
 
 func (db *DB) AddAppTag(appID, tagID string) error {
-	_, err := db.Exec(
-		"INSERT OR IGNORE INTO app_tags (app_id, tag_id) VALUES (?, ?)",
+	_, err := db.Exec(db.rebind(
+		"INSERT INTO app_tags (app_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING"),
 		appID, tagID,
 	)
 	return err
 }
 
 func (db *DB) RemoveAppTag(appID, tagID string) (bool, error) {
-	result, err := db.Exec(
-		"DELETE FROM app_tags WHERE app_id = ? AND tag_id = ?",
+	result, err := db.Exec(db.rebind(
+		"DELETE FROM app_tags WHERE app_id = ? AND tag_id = ?"),
 		appID, tagID,
 	)
 	if err != nil {
@@ -724,27 +712,17 @@ func (db *DB) RemoveAppTag(appID, tagID string) (bool, error) {
 }
 
 func (db *DB) ListAppTags(appID string) ([]TagRow, error) {
-	rows, err := db.Query(
+	var tags []TagRow
+	err := db.DB.Select(&tags, db.rebind(
 		`SELECT t.id, t.name, t.created_at
 		 FROM tags t
 		 JOIN app_tags at ON t.id = at.tag_id
 		 WHERE at.app_id = ?
-		 ORDER BY t.name`,
-		appID,
-	)
+		 ORDER BY t.name`), appID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var tags []TagRow
-	for rows.Next() {
-		var t TagRow
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
-			return nil, err
-		}
-		tags = append(tags, t)
-	}
-	return tags, rows.Err()
+	return tags, nil
 }
 
 // --- Catalog ---
@@ -798,10 +776,10 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 		args = append(args, params.Tag)
 	}
 
-	// Search filter
+	// Search filter — wrap in LOWER() for cross-dialect case-insensitive matching
 	if params.Search != "" {
 		conditions = append(conditions,
-			"(apps.name LIKE ? ESCAPE '\\' OR apps.title LIKE ? ESCAPE '\\' OR apps.description LIKE ? ESCAPE '\\')")
+			"(LOWER(apps.name) LIKE LOWER(?) ESCAPE '\\' OR LOWER(apps.title) LIKE LOWER(?) ESCAPE '\\' OR LOWER(apps.description) LIKE LOWER(?) ESCAPE '\\')")
 		like := "%" + escapeLike(params.Search) + "%"
 		args = append(args, like, like, like)
 	}
@@ -813,25 +791,20 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 
 	// Count total
 	var total int
-	countQuery := "SELECT COUNT(*) FROM apps " + where
-	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+	countQuery := db.rebind("SELECT COUNT(*) FROM apps " + where)
+	if err := db.DB.Get(&total, countQuery, args...); err != nil {
 		return nil, 0, err
 	}
 
 	// Fetch page
-	query := fmt.Sprintf(
-		`SELECT %s FROM apps %s ORDER BY apps.updated_at DESC LIMIT ? OFFSET ?`,
-		appColumns, where,
-	)
+	query := db.rebind(fmt.Sprintf(
+		`SELECT * FROM apps %s ORDER BY apps.updated_at DESC LIMIT ? OFFSET ?`,
+		where,
+	))
 	pageArgs := append(append([]any{}, args...), params.PerPage, (params.Page-1)*params.PerPage)
 
-	rows, err := db.Query(query, pageArgs...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	apps, err := scanApps(rows)
-	if err != nil {
+	var apps []AppRow
+	if err := db.DB.Select(&apps, query, pageArgs...); err != nil {
 		return nil, 0, err
 	}
 
@@ -849,13 +822,13 @@ func escapeLike(s string) string {
 
 // PATRow represents a row from the personal_access_tokens table.
 type PATRow struct {
-	ID         string  `json:"id"`
-	UserSub    string  `json:"user_sub,omitempty"`
-	Name       string  `json:"name"`
-	CreatedAt  string  `json:"created_at"`
-	ExpiresAt  *string `json:"expires_at"`
-	LastUsedAt *string `json:"last_used_at"`
-	Revoked    bool    `json:"revoked"`
+	ID         string  `db:"id" json:"id"`
+	UserSub    string  `db:"user_sub" json:"user_sub,omitempty"`
+	Name       string  `db:"name" json:"name"`
+	CreatedAt  string  `db:"created_at" json:"created_at"`
+	ExpiresAt  *string `db:"expires_at" json:"expires_at"`
+	LastUsedAt *string `db:"last_used_at" json:"last_used_at"`
+	Revoked    bool    `db:"revoked" json:"revoked"`
 }
 
 // PATLookupResult is the result of looking up a PAT by hash,
@@ -867,9 +840,9 @@ type PATLookupResult struct {
 
 func (db *DB) CreatePAT(id string, tokenHash []byte, userSub, name string, expiresAt *string) (*PATRow, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
+	_, err := db.Exec(db.rebind(
 		`INSERT INTO personal_access_tokens (id, token_hash, user_sub, name, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?)`),
 		id, tokenHash, userSub, name, now, expiresAt,
 	)
 	if err != nil {
@@ -889,12 +862,12 @@ func (db *DB) CreatePAT(id string, tokenHash []byte, userSub, name string, expir
 func (db *DB) LookupPATByHash(tokenHash []byte) (*PATLookupResult, error) {
 	var pat PATRow
 	var user UserRow
-	err := db.QueryRow(
+	err := db.QueryRow(db.rebind(
 		`SELECT p.id, p.user_sub, p.name, p.created_at, p.expires_at, p.last_used_at, p.revoked,
 		        u.sub, u.email, u.name, u.role, u.active, u.last_login
 		 FROM personal_access_tokens p
 		 JOIN users u ON p.user_sub = u.sub
-		 WHERE p.token_hash = ?`,
+		 WHERE p.token_hash = ?`),
 		tokenHash,
 	).Scan(&pat.ID, &pat.UserSub, &pat.Name, &pat.CreatedAt, &pat.ExpiresAt, &pat.LastUsedAt, &pat.Revoked,
 		&user.Sub, &user.Email, &user.Name, &user.Role, &user.Active, &user.LastLogin)
@@ -908,32 +881,23 @@ func (db *DB) LookupPATByHash(tokenHash []byte) (*PATLookupResult, error) {
 }
 
 func (db *DB) ListPATsByUser(userSub string) ([]PATRow, error) {
-	rows, err := db.Query(
-		`SELECT id, name, created_at, expires_at, last_used_at, revoked
+	var pats []PATRow
+	err := db.DB.Select(&pats, db.rebind(
+		`SELECT id, user_sub, name, created_at, expires_at, last_used_at, revoked
 		 FROM personal_access_tokens
 		 WHERE user_sub = ?
-		 ORDER BY created_at DESC`,
+		 ORDER BY created_at DESC`),
 		userSub,
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var pats []PATRow
-	for rows.Next() {
-		var p PATRow
-		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedAt, &p.ExpiresAt, &p.LastUsedAt, &p.Revoked); err != nil {
-			return nil, err
-		}
-		pats = append(pats, p)
-	}
-	return pats, rows.Err()
+	return pats, nil
 }
 
 func (db *DB) RevokePAT(id, userSub string) (bool, error) {
-	result, err := db.Exec(
-		"UPDATE personal_access_tokens SET revoked = 1 WHERE id = ? AND user_sub = ?",
+	result, err := db.Exec(db.rebind(
+		"UPDATE personal_access_tokens SET revoked = 1 WHERE id = ? AND user_sub = ?"),
 		id, userSub,
 	)
 	if err != nil {
@@ -944,8 +908,8 @@ func (db *DB) RevokePAT(id, userSub string) (bool, error) {
 }
 
 func (db *DB) RevokeAllPATs(userSub string) (int64, error) {
-	result, err := db.Exec(
-		"UPDATE personal_access_tokens SET revoked = 1 WHERE user_sub = ? AND revoked = 0",
+	result, err := db.Exec(db.rebind(
+		"UPDATE personal_access_tokens SET revoked = 1 WHERE user_sub = ? AND revoked = 0"),
 		userSub,
 	)
 	if err != nil {
@@ -956,8 +920,8 @@ func (db *DB) RevokeAllPATs(userSub string) (int64, error) {
 
 func (db *DB) UpdatePATLastUsed(ctx context.Context, id string) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = db.ExecContext(ctx,
-		"UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?",
+	_, _ = db.ExecContext(ctx, db.rebind(
+		"UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?"),
 		now, id,
 	)
 }

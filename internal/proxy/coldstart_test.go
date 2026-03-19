@@ -41,7 +41,7 @@ func testColdstartServer(t *testing.T) *server.Server {
 		},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func testColdstartServerWithBackend(t *testing.T, be backend.Backend) *server.Se
 		},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

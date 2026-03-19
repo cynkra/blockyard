@@ -941,6 +941,115 @@ func TestAuditAutoConstructFromEnvVars(t *testing.T) {
 	}
 }
 
+// --- Database driver config tests ---
+
+func TestDatabaseDriverDefaultsSQLite(t *testing.T) {
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Database.Driver != "sqlite" {
+		t.Errorf("expected default driver sqlite, got %q", cfg.Database.Driver)
+	}
+}
+
+func TestValidPostgresConfig(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+driver = "postgres"
+url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+`, bundlePath)
+	cfg := loadFromString(t, toml)
+	if cfg.Database.Driver != "postgres" {
+		t.Errorf("expected driver postgres, got %q", cfg.Database.Driver)
+	}
+	if cfg.Database.URL == "" {
+		t.Error("expected non-empty database URL")
+	}
+}
+
+func TestValidationRejectsPostgresWithoutURL(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+driver = "postgres"
+`, bundlePath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "database.url is required") {
+		t.Errorf("expected database.url error, got: %v", err)
+	}
+}
+
+func TestValidationRejectsUnsupportedDriver(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+driver = "banana"
+`, bundlePath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), `"banana"`) {
+		t.Errorf("expected error about unsupported driver, got: %v", err)
+	}
+}
+
+func TestEnvVarOverrideDatabaseDriver(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+`, bundlePath)
+
+	t.Setenv("BLOCKYARD_DATABASE_DRIVER", "postgres")
+	t.Setenv("BLOCKYARD_DATABASE_URL", "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable")
+
+	cfg := loadFromString(t, toml)
+	if cfg.Database.Driver != "postgres" {
+		t.Errorf("expected driver postgres from env, got %q", cfg.Database.Driver)
+	}
+	if cfg.Database.URL != "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable" {
+		t.Errorf("expected URL from env, got %q", cfg.Database.URL)
+	}
+}
+
 // --- Telemetry config tests ---
 
 func telemetryTOML(t *testing.T) string {
