@@ -21,34 +21,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - example: hello-shiny
-            test: TestHelloShiny
-          - example: hello-blockr
-            test: TestHelloBlockr
+        include: ${{ fromJSON(
+          inputs.test == 'TestHelloShiny'  && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
+          inputs.test == 'TestHelloBlockr' && '[{"example":"hello-blockr","test":"TestHelloBlockr"}]' ||
+          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-blockr","test":"TestHelloBlockr"}]'
+          ) }}
     steps:
-      - if: github.event_name == 'pull_request'
-        run: echo "Skipped on PRs — e2e runs in merge queue only."
       - uses: actions/checkout@v6
-        if: github.event_name != 'pull_request' && (inputs.test == '' || inputs.test == matrix.test)
+        if: github.event_name != 'pull_request'
       - uses: actions/setup-go@v6
-        if: github.event_name != 'pull_request' && (inputs.test == '' || inputs.test == matrix.test)
+        if: github.event_name != 'pull_request'
         with:
           go-version-file: go.mod
       - name: Build blockyard image from source
-        if: github.event_name != 'pull_request' && (inputs.test == '' || inputs.test == matrix.test)
+        if: github.event_name != 'pull_request'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
       - name: Pre-pull images used by examples
-        if: github.event_name != 'pull_request' && (inputs.test == '' || inputs.test == matrix.test)
+        if: github.event_name != 'pull_request'
         run: |
           docker pull dexidp/dex:v2.41.1
           docker pull ghcr.io/openbao/openbao:latest
           docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - name: Block cloud metadata endpoint for containers
-        if: github.event_name != 'pull_request' && (inputs.test == '' || inputs.test == matrix.test)
+        if: github.event_name != 'pull_request'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Run e2e tests
-        if: github.event_name != 'pull_request' && (inputs.test == '' || inputs.test == matrix.test)
+        if: github.event_name != 'pull_request'
         run: sudo --preserve-env=PATH go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
       - name: Dump compose logs on failure
         if: failure()
