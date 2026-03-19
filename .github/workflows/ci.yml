@@ -36,7 +36,7 @@ jobs:
         with:
           go-version: '1.25'
       - run: docker pull alpine:latest && docker pull ghcr.io/rocker-org/r-ver:latest && docker pull ghcr.io/rocker-org/r-ver:4.4.3
-      - run: sudo go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
+      - run: sudo --preserve-env=PATH go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker
