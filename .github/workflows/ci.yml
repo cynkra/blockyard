@@ -24,6 +24,22 @@ jobs:
   check:
     if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'check')
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: blockyard
+          POSTGRES_PASSWORD: blockyard
+          POSTGRES_DB: blockyard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blockyard"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      BLOCKYARD_TEST_POSTGRES_URL: postgres://blockyard:blockyard@localhost:5432/blockyard_test?sslmode=disable
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6

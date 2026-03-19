@@ -29,7 +29,7 @@ func (b *failingBackend) ListManaged(_ context.Context) ([]backend.ManagedResour
 
 func testServerForReadyz(t *testing.T) *server.Server {
 	t.Helper()
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestReadyzWithOIDCFail(t *testing.T) {
 }
 
 func TestReadyzDockerFail(t *testing.T) {
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +565,7 @@ func TestReadyzResponseContentType(t *testing.T) {
 
 func TestReadyzMultipleFailures(t *testing.T) {
 	// Both database and docker fail simultaneously.
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

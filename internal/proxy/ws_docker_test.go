@@ -198,7 +198,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 		},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

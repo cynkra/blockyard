@@ -28,7 +28,7 @@ func testServer(t *testing.T) (*server.Server, *mock.MockBackend) {
 			LogRetention:   config.Duration{Duration: 1 * time.Hour},
 		},
 	}
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
