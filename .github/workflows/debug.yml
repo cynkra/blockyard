@@ -1,0 +1,102 @@
+name: Debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Job to run
+        required: true
+        type: choice
+        options:
+          - check
+          - docker
+          - idp
+          - openbao
+          - e2e-hello-shiny
+          - e2e-hello-blockr
+
+jobs:
+  check:
+    if: inputs.job == 'check'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v7
+      - name: Check for known vulnerabilities
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
+      - run: go test -coverprofile=coverage-check.out ./...
+
+  docker:
+    if: inputs.job == 'docker'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: docker pull alpine:latest && docker pull ghcr.io/rocker-org/r-ver:latest && docker pull ghcr.io/rocker-org/r-ver:4.4.3
+      - run: sudo --preserve-env=PATH go test -tags docker_test -coverpkg=./... ./...
+
+  idp:
+    if: inputs.job == 'idp'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: docker pull quay.io/keycloak/keycloak:26.0
+      - run: go test -tags idp_test -coverpkg=./... ./internal/auth/...
+
+  openbao:
+    if: inputs.job == 'openbao'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: docker pull ghcr.io/openbao/openbao:latest
+      - run: go test -tags openbao_test -coverpkg=./... ./internal/integration/...
+
+  e2e:
+    if: startsWith(inputs.job, 'e2e-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build blockyard image from source
+        run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
+      - name: Pre-pull images used by examples
+        run: |
+          docker pull dexidp/dex:v2.41.1
+          docker pull ghcr.io/openbao/openbao:latest
+          docker pull ghcr.io/rocker-org/r-ver:4.4.3
+      - name: Block cloud metadata endpoint for containers
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
+      - name: Run e2e test
+        env:
+          E2E_JOB: ${{ inputs.job }}
+        run: |
+          case "$E2E_JOB" in
+            e2e-hello-shiny)  TEST=TestHelloShiny;  DIR=hello-shiny  ;;
+            e2e-hello-blockr) TEST=TestHelloBlockr; DIR=hello-blockr ;;
+          esac
+          sudo --preserve-env=PATH go test -v -tags e2e -run "$TEST" -timeout 20m ./e2e/...
+      - name: Dump compose logs on failure
+        if: failure()
+        env:
+          E2E_JOB: ${{ inputs.job }}
+        run: |
+          case "$E2E_JOB" in
+            e2e-hello-shiny)  DIR=hello-shiny  ;;
+            e2e-hello-blockr) DIR=hello-blockr ;;
+          esac
+          docker compose -f "examples/${DIR}/docker-compose.yml" logs --no-color 2>/dev/null || true
+          docker compose -f "examples/${DIR}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
