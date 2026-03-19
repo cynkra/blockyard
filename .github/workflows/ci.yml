@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-  merge_group:
   workflow_call:
 
 concurrency:
@@ -10,7 +9,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  branch:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate branch name
+        run: |
+          branch="${{ github.head_ref }}"
+          prefix_re='^(feat|fix|ci|docs|refactor|chore)/'
+          slug_re='^[a-z0-9][a-z0-9-]{0,19}$'
+          slug="${branch#*/}"
+          if ! echo "$branch" | grep -qE "$prefix_re"; then
+            echo "::error::Branch '$branch' must start with feat/, fix/, ci/, docs/, refactor/, or chore/"
+            exit 1
+          fi
+          if ! echo "$slug" | grep -qE "$slug_re"; then
+            echo "::error::Slug '$slug' must be lowercase alphanumeric + hyphens, max 20 chars"
+            exit 1
+          fi
+          hyphens=$(echo "$slug" | tr -cd '-' | wc -c)
+          if [ "$hyphens" -gt 3 ]; then
+            echo "::error::Slug '$slug' has $hyphens hyphens (max 3)"
+            exit 1
+          fi
+
   check:
+    needs: [branch]
+    if: ${{ !cancelled() && needs.branch.result != 'failure' }}
     runs-on: ubuntu-latest
     services:
       postgres:
