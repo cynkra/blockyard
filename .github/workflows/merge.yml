@@ -10,13 +10,15 @@ jobs:
     if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: hello-shiny
+            test: TestHelloShiny
+          - example: hello-blockr
+            test: TestHelloBlockr
     steps:
-      - name: Clean up stale containers from previous runs
-        run: |
-          for dir in examples/hello-shiny examples/hello-blockr; do
-            docker compose -f "$dir/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-          done
-          docker container prune -f 2>/dev/null || true
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
@@ -31,12 +33,9 @@ jobs:
       - name: Block cloud metadata endpoint for containers
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Run e2e tests
-        run: sudo --preserve-env=PATH go test -v -tags e2e -timeout 20m ./e2e/...
+        run: sudo --preserve-env=PATH go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
       - name: Dump compose logs on failure
         if: failure()
         run: |
-          for dir in examples/hello-shiny examples/hello-blockr; do
-            echo "=== $dir ==="
-            docker compose -f "$dir/docker-compose.yml" logs --no-color 2>/dev/null || true
-            docker compose -f "$dir/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-          done
+          docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
+          docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
