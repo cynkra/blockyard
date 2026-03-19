@@ -91,23 +91,55 @@ original DNS aliases preserved. Workers can resolve `openbao` and
 
 ## PocketBase
 
-### Board storage model
+### Schema
 
-The `boards` collection has the following fields:
+The board storage model implements the rack API contract (see
+[board-storage.md](../../docs/design/board-storage.md#rack-api-contract))
+using two PocketBase collections. Board identity and metadata are
+separated from versioned data so that sharing, tags, and visibility
+apply to the board as a whole, not to individual versions.
 
-| Field        | Type     | Purpose                                    |
-|--------------|----------|--------------------------------------------|
-| `name`       | text     | Board name                                 |
-| `data`       | json     | Board content (JSON blob)                  |
-| `owner`      | relation | User who created the board                 |
-| `shared_with`| relation | Users the board is shared with (multi)     |
+**`boards`** — identity, metadata, and access control:
+
+| Field        | Type                    | Purpose                            |
+|--------------|-------------------------|------------------------------------|
+| `name`       | text, required          | Board name (unique per owner)      |
+| `owner`      | relation → users, required | User who created the board      |
+| `shared_with`| relation → users, multi | Users the board is shared with     |
+| `acl_type`   | select, required        | `"private"`, `"restricted"`, or `"public"` |
+| `tags`       | json                    | User-defined labels (`["analysis", "demo"]`) |
+
+PocketBase auto-provides `id`, `created`, and `updated` on all
+records.
+
+**`board_versions`** — versioned data snapshots:
+
+| Field      | Type                      | Purpose                          |
+|------------|---------------------------|----------------------------------|
+| `board`    | relation → boards, required | Parent board                   |
+| `data`     | json, required            | Board content (opaque blob)      |
+| `metadata` | json, required            | Key-value pairs (includes `format`) |
+
+Each save creates a new `board_versions` record. Loading retrieves the
+most recent version (sorted by `created` descending).
 
 ### Access rules
 
-- **List/View** — owner sees own boards; shared users see boards shared
-  with them
+**`boards`:**
+
+- **List/View** — owner, shared users (when `acl_type` is
+  `"restricted"`), or any authenticated user (when `acl_type` is
+  `"public"`)
 - **Create** — any authenticated user, owner must be self
 - **Update/Delete** — owner only
+
+**`board_versions`:**
+
+Rules delegate to the parent board via relation dot notation:
+
+- **List/View** — same visibility as the parent board
+- **Create** — owner of the parent board only
+- **Delete** — owner of the parent board only
 
 ### Admin UI
 

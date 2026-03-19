@@ -59,7 +59,7 @@ echo "    OK"
 
 echo "==> Creating blockyard-user policy..."
 bao_post /v1/sys/policy/blockyard-user -d '{
-  "policy": "path \"secret/data/users/{{identity.entity.aliases.auth_jwt_*.name}}/*\" {\n  capabilities = [\"read\"]\n}"
+  "policy": "path \"secret/data/users/{{identity.entity.aliases.auth_jwt_*.name}}/*\" {\n  capabilities = [\"read\"]\n}\npath \"auth/token/lookup-self\" {\n  capabilities = [\"read\"]\n}"
 }'
 echo "    OK"
 
@@ -68,6 +68,7 @@ bao_post /v1/auth/jwt/role/blockyard-user -d '{
   "role_type":       "jwt",
   "bound_audiences": ["blockyard"],
   "user_claim":      "sub",
+  "claim_mappings":  {"sub": "sub"},
   "token_policies":  ["blockyard-user"],
   "token_ttl":       "1h"
 }'
@@ -186,12 +187,13 @@ BOARDS_PAYLOAD=$(cat <<PAYLOAD
   "type": "base",
   "fields": [
     {"name": "name", "type": "text", "required": true},
-    {"name": "data", "type": "json", "required": true},
     {"name": "owner", "type": "relation", "required": true, "collectionId": "${USERS_ID}", "maxSelect": 1},
-    {"name": "shared_with", "type": "relation", "collectionId": "${USERS_ID}"}
+    {"name": "shared_with", "type": "relation", "collectionId": "${USERS_ID}"},
+    {"name": "acl_type", "type": "select", "required": true, "options": {"values": ["private", "restricted", "public"]}},
+    {"name": "tags", "type": "json"}
   ],
-  "listRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",
-  "viewRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",
+  "listRule": "owner = @request.auth.id || (acl_type = 'restricted' && shared_with ?= @request.auth.id) || acl_type = 'public'",
+  "viewRule": "owner = @request.auth.id || (acl_type = 'restricted' && shared_with ?= @request.auth.id) || acl_type = 'public'",
   "createRule": "owner = @request.auth.id",
   "updateRule": "owner = @request.auth.id",
   "deleteRule": "owner = @request.auth.id"
@@ -199,6 +201,32 @@ BOARDS_PAYLOAD=$(cat <<PAYLOAD
 PAYLOAD
 )
 pb_req POST /api/collections -d "$BOARDS_PAYLOAD" > /dev/null
+echo "    OK"
+
+echo "==> Getting boards collection ID..."
+BOARDS_COL=$(pb_req GET /api/collections/boards)
+BOARDS_ID=$(echo "$BOARDS_COL" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "    id=${BOARDS_ID}"
+
+echo "==> Creating board_versions collection..."
+VERSIONS_PAYLOAD=$(cat <<PAYLOAD
+{
+  "name": "board_versions",
+  "type": "base",
+  "fields": [
+    {"name": "board", "type": "relation", "required": true, "collectionId": "${BOARDS_ID}", "maxSelect": 1, "cascadeDelete": true},
+    {"name": "data", "type": "json", "required": true},
+    {"name": "metadata", "type": "json", "required": true}
+  ],
+  "listRule": "board.owner = @request.auth.id || (board.acl_type = 'restricted' && board.shared_with ?= @request.auth.id) || board.acl_type = 'public'",
+  "viewRule": "board.owner = @request.auth.id || (board.acl_type = 'restricted' && board.shared_with ?= @request.auth.id) || board.acl_type = 'public'",
+  "createRule": "board.owner = @request.auth.id",
+  "updateRule": "",
+  "deleteRule": "board.owner = @request.auth.id"
+}
+PAYLOAD
+)
+pb_req POST /api/collections -d "$VERSIONS_PAYLOAD" > /dev/null
 echo "    OK"
 
 echo "==> PocketBase configured."
