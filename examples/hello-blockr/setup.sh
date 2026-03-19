@@ -160,7 +160,14 @@ pb_header="-H Authorization:${PB_TOKEN} -H Content-Type:application/json"
 pb_req() {
   method="$1"; path="$2"; shift 2
   # shellcheck disable=SC2086
-  curl -f --show-error $pb_header -X "$method" "${PB_URL}${path}" "$@"
+  RESP=$(curl -s -w "\n%{http_code}" $pb_header -X "$method" "${PB_URL}${path}" "$@")
+  HTTP_CODE=$(echo "$RESP" | tail -1)
+  BODY=$(echo "$RESP" | sed '$d')
+  if [ "$HTTP_CODE" -ge 400 ]; then
+    echo "ERROR: ${method} ${path} returned ${HTTP_CODE}: ${BODY}" >&2
+    return 1
+  fi
+  echo "$BODY"
 }
 
 echo "==> Creating demo users in PocketBase..."
