@@ -16,7 +16,7 @@ on:
 
 jobs:
   e2e:
-    name: e2e (${{ matrix.example }})
+    name: ${{ matrix.example }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
