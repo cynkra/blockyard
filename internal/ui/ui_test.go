@@ -20,7 +20,7 @@ import (
 // newTestServer creates a minimal server and mounts UI routes for testing.
 func newTestServer(t *testing.T, cfg *config.Config) (*server.Server, *httptest.Server) {
 	t.Helper()
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func oidcConfig() *config.Config {
 // dashboard tests. Returns the server and test URL.
 func dashboardServer(t *testing.T, cfg *config.Config, sub string, role auth.Role) (*server.Server, *httptest.Server) {
 	t.Helper()
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestDashboardAppStoppedStatus(t *testing.T) {
 
 func TestDashboardNoCaller(t *testing.T) {
 	// When user is authenticated but caller identity is nil
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestBuildServiceEntriesWithVaultMock(t *testing.T) {
 		},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

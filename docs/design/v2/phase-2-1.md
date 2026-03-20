@@ -134,7 +134,7 @@ CREATE TABLE apps (
     owner                   TEXT NOT NULL DEFAULT 'admin',
     access_type             TEXT NOT NULL DEFAULT 'acl'
                             CHECK (access_type IN ('acl', 'logged_in', 'public')),
-    active_bundle           TEXT,
+    active_bundle           TEXT REFERENCES bundles(id) ON DELETE SET NULL,
     max_workers_per_app     INTEGER,
     max_sessions_per_worker INTEGER DEFAULT 1,
     memory_limit            TEXT,
@@ -154,10 +154,11 @@ CREATE TABLE bundles (
 
 CREATE INDEX idx_bundles_app_id ON bundles(app_id);
 
--- Deferred FK: apps.active_bundle → bundles.id.
--- SQLite cannot add a FK after table creation, so we rely on application
--- logic to enforce the reference (same as current behavior). The column
--- is nullable to allow app creation before any bundle exists.
+-- Forward FK reference: apps.active_bundle → bundles.id is declared
+-- inline above. SQLite validates FK references at DML time, not DDL
+-- time, so the forward reference works correctly. This keeps FK
+-- enforcement consistent with the PostgreSQL migration (which uses
+-- ALTER TABLE to add the same constraint after both tables exist).
 
 CREATE TABLE app_access (
     app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
@@ -474,7 +475,6 @@ func openPostgres(url string) (*DB, error) {
 
 ```go
 func (db *DB) runMigrations() error {
-    var source iofs.PartialDriver
     var fsys fs.FS
     var err error
 
@@ -488,7 +488,8 @@ func (db *DB) runMigrations() error {
         return fmt.Errorf("migration fs: %w", err)
     }
 
-    if err := source.Open(fsys); err != nil {
+    source, err := iofs.New(fsys, ".")
+    if err != nil {
         return fmt.Errorf("migration source: %w", err)
     }
 
@@ -497,7 +498,7 @@ func (db *DB) runMigrations() error {
         return fmt.Errorf("migration driver: %w", err)
     }
 
-    m, err := migrate.NewWithInstance("iofs", &source, db.driverName(), driver)
+    m, err := migrate.NewWithInstance("iofs", source, db.driverName(), driver)
     if err != nil {
         return fmt.Errorf("create migrator: %w", err)
     }
@@ -605,9 +606,23 @@ Every query method gets two changes:
 ```go
 // rebind rewrites ? placeholders for the active dialect.
 func (db *DB) rebind(query string) string {
-    return sqlx.Rebind(db.BindType(), query)
+    return sqlx.Rebind(db.bindType(), query)
+}
+
+func (db *DB) bindType() int {
+    switch db.dialect {
+    case DialectPostgres:
+        return sqlx.DOLLAR
+    default:
+        return sqlx.QUESTION
+    }
 }
 ```
+
+We use a custom `bindType()` rather than the inherited `sqlx.DB.BindType()`
+because sqlx's auto-detection expects driver name `"sqlite3"` while
+`modernc.org/sqlite` registers as `"sqlite"`. Explicit mapping avoids
+the mismatch.
 
 **Conversion patterns:**
 
@@ -810,7 +825,7 @@ func (db *DB) driverName() string {
     case DialectPostgres:
         return "postgres"
     default:
-        return "sqlite"
+        return "sqlite3"
     }
 }
 ```
@@ -857,7 +872,11 @@ services:
     volumes:
       - ..:/workspace:cached
       - blockyard-gomodcache:/home/dev/go/pkg/mod
-    env_file: .env
+    environment:
+      BLOCKYARD_TEST_POSTGRES_URL: postgres://blockyard:blockyard@postgres:5432/blockyard_test?sslmode=disable
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -893,11 +912,11 @@ Dockerfile build:
 }
 ```
 
-Set `BLOCKYARD_TEST_POSTGRES_URL` in `.devcontainer/.env`:
-
-```
-BLOCKYARD_TEST_POSTGRES_URL=postgres://blockyard:blockyard@postgres:5432/blockyard_test?sslmode=disable
-```
+`BLOCKYARD_TEST_POSTGRES_URL` is set directly in the compose
+`environment:` block so it works out of the box. The `env_file`
+directive loads `.devcontainer/.env` when present (`required: false`)
+for local overrides. A `.devcontainer/.env.example` is provided as
+reference.
 
 ### Step 10: Test infrastructure
 

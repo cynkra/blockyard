@@ -69,7 +69,7 @@ func main() {
 	}
 
 	// Initialize database
-	database, err := db.Open(cfg.Database.Path)
+	database, err := db.Open(cfg.Database)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)

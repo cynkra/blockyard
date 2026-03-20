@@ -1,0 +1,33 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspace:cached
+      - blockyard-gomodcache:/home/dev/go/pkg/mod
+    environment:
+      BLOCKYARD_TEST_POSTGRES_URL: postgres://blockyard:blockyard@postgres:5432/blockyard_test?sslmode=disable
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: blockyard
+      POSTGRES_PASSWORD: blockyard
+      POSTGRES_DB: blockyard_test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blockyard"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  blockyard-gomodcache:

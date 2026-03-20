@@ -197,7 +197,7 @@ func networkLabels(appID, workerID string) map[string]string {
 // --- Image pulling ---
 
 func (d *DockerBackend) ensureImage(ctx context.Context, img string) error {
-	_, _, err := d.client.ImageInspectWithRaw(ctx, img)
+	_, err := d.client.ImageInspect(ctx, img)
 	if err == nil {
 		return nil // already present
 	}

@@ -9,14 +9,6 @@ feedback.
 Be concise and critical. Skip compliments and pleasantries — focus on
 problems, trade-offs, and things that might be wrong.
 
-## Git workflow
-
-- Pushes to `main` are blocked. All changes go through branches and PRs.
-- After every `git push`, monitor CI and fix failures without being
-  asked. After merge queue submission, monitor workflow runs (not PR
-  state) and fix failures. See `/commit`, `/pr`, `/merge` skills for
-  details.
-
 ## Development environment
 
 This project uses a devcontainer (`.devcontainer/`). Do not install tools

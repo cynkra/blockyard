@@ -1,16 +1,9 @@
 {
   "name": "blockyard (Go)",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
-  },
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
   "remoteUser": "dev",
   "workspaceFolder": "/workspace",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
-  "mounts": [
-    "source=blockyard-gomodcache,target=/home/dev/go/pkg/mod,type=volume"
-  ],
-  "runArgs": ["--env-file", ".devcontainer/.env"],
   "initializeCommand": "mkdir -p .devcontainer/.claude .devcontainer/.ssh",
   "postCreateCommand": {
     "claude": "rm -rf /home/dev/.claude && ln -sf /workspace/.devcontainer/.claude /home/dev/.claude && ln -sf /home/dev/.claude/claude.json /home/dev/.claude.json",
