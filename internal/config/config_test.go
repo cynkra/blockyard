@@ -102,6 +102,28 @@ func TestEnvVarOverridesWsCacheTTL(t *testing.T) {
 	}
 }
 
+func TestEnvVarOverridesMaxCPULimit(t *testing.T) {
+	t.Setenv("BLOCKYARD_PROXY_MAX_CPU_LIMIT", "8.5")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Proxy.MaxCPULimit == nil {
+		t.Fatal("expected MaxCPULimit to be set")
+	}
+	if *cfg.Proxy.MaxCPULimit != 8.5 {
+		t.Errorf("expected 8.5, got %f", *cfg.Proxy.MaxCPULimit)
+	}
+}
+
+func TestEnvVarOverridesMaxCPULimitZero(t *testing.T) {
+	t.Setenv("BLOCKYARD_PROXY_MAX_CPU_LIMIT", "0")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Proxy.MaxCPULimit == nil {
+		t.Fatal("expected MaxCPULimit to be set")
+	}
+	if *cfg.Proxy.MaxCPULimit != 0 {
+		t.Errorf("expected 0, got %f", *cfg.Proxy.MaxCPULimit)
+	}
+}
+
 func TestValidationRejectsEmptyImage(t *testing.T) {
 	tomlContent := `
 [server]

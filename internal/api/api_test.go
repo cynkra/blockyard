@@ -75,10 +75,37 @@ func seedTestAdmin(t *testing.T, database *db.DB) {
 	}
 }
 
-// authReq creates a request with the test PAT bearer token.
+// authReq creates a request with the test PAT bearer token (admin).
 func authReq(method, url string, body io.Reader) *http.Request {
 	req, _ := http.NewRequest(method, url, body)
 	req.Header.Set("Authorization", "Bearer "+testPAT)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req
+}
+
+// viewerPAT is a fixed PAT for a viewer-role user. Created by seedTestViewer.
+const viewerPAT = "by_viewertoken0000000000000000000000000000000"
+
+// seedTestViewer creates a viewer user and PAT.
+func seedTestViewer(t *testing.T, database *db.DB) {
+	t.Helper()
+	_, err := database.UpsertUserWithRole("viewer", "viewer@test", "Viewer", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := auth.HashPAT(viewerPAT)
+	_, err = database.CreatePAT("viewer-pat-id", hash, "viewer", "viewer-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// viewerReq creates a request with the viewer PAT bearer token.
+func viewerReq(method, url string, body io.Reader) *http.Request {
+	req, _ := http.NewRequest(method, url, body)
+	req.Header.Set("Authorization", "Bearer "+viewerPAT)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -2170,6 +2197,57 @@ func TestListDeletedAppsAdmin(t *testing.T) {
 	}
 	if apps[0]["id"] != id {
 		t.Errorf("expected deleted app id=%s, got %v", id, apps[0]["id"])
+	}
+}
+
+func TestListDeletedAppsNonAdminForbidden(t *testing.T) {
+	srv, ts := testServerWithSoftDelete(t)
+	seedTestViewer(t, srv.DB)
+
+	req := viewerReq("GET", ts.URL+"/api/v1/apps?deleted=true", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 403 {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestRollbackWithoutDeployPermission(t *testing.T) {
+	srv, ts := testServer(t)
+	seedTestViewer(t, srv.DB)
+
+	// Admin creates app and bundles.
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+	srv.DB.CreateBundle("b-1", id)
+	srv.DB.UpdateBundleStatus("b-1", "ready")
+	srv.DB.SetActiveBundle(id, "b-1")
+	srv.DB.CreateBundle("b-2", id)
+	srv.DB.UpdateBundleStatus("b-2", "ready")
+
+	// Viewer tries to rollback → 404 (permission denied, masked as not found).
+	body := `{"bundle_id":"b-2"}`
+	req := viewerReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRestoreWithoutPermission(t *testing.T) {
+	srv, ts := testServerWithSoftDelete(t)
+	seedTestViewer(t, srv.DB)
+
+	// Admin creates and deletes an app.
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	http.DefaultClient.Do(req)
+
+	// Viewer tries to restore → 404 (permission denied, masked as not found).
+	req = viewerReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
 }
 

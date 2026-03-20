@@ -303,6 +303,37 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 			continue
 		}
 
+		// Pointer-to-primitive (e.g. *float64 for MaxCPULimit):
+		// parse the env var and set the pointer.
+		if field.Type.Kind() == reflect.Ptr {
+			val, ok := os.LookupEnv(envName)
+			if !ok {
+				continue
+			}
+			switch field.Type.Elem().Kind() {
+			case reflect.Float64:
+				if f, err := strconv.ParseFloat(val, 64); err == nil {
+					fv.Set(reflect.ValueOf(&f))
+				}
+			case reflect.Int:
+				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+					v := int(n)
+					fv.Set(reflect.ValueOf(&v))
+				}
+			case reflect.Int64:
+				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+					fv.Set(reflect.ValueOf(&n))
+				}
+			case reflect.Bool:
+				if b, err := strconv.ParseBool(val); err == nil {
+					fv.Set(reflect.ValueOf(&b))
+				}
+			case reflect.String:
+				fv.Set(reflect.ValueOf(&val))
+			}
+			continue
+		}
+
 		// Recurse into nested config sections (but not Duration/Secret,
 		// which are struct wrappers).
 		if field.Type.Kind() == reflect.Struct && field.Type != durationType && field.Type != secretType {
