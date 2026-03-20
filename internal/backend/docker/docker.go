@@ -220,9 +220,9 @@ func (d *DockerBackend) ensureImage(ctx context.Context, img string) error {
 
 // --- Memory limit parsing ---
 
-// parseMemoryLimit converts human-readable memory strings like "512m", "1g",
+// ParseMemoryLimit converts human-readable memory strings like "512m", "1g",
 // "256mb" to bytes. Returns (bytes, true) on success.
-func parseMemoryLimit(s string) (int64, bool) {
+func ParseMemoryLimit(s string) (int64, bool) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	var numStr string
 	var multiplier int64
@@ -379,7 +379,7 @@ func (d *DockerBackend) createWorkerContainer(
 
 	var resources container.Resources
 	if spec.MemoryLimit != "" {
-		if mem, ok := parseMemoryLimit(spec.MemoryLimit); ok {
+		if mem, ok := ParseMemoryLimit(spec.MemoryLimit); ok {
 			resources.Memory = mem
 		}
 	}
@@ -501,6 +501,9 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 		return fmt.Errorf("spawn: start container: %w", err)
 	}
 
+	// Verify resource limits match what was requested.
+	d.verifyResourceLimits(ctx, containerID, spec)
+
 	// Record internal state
 	d.mu.Lock()
 	d.workers[spec.WorkerID] = &workerState{
@@ -515,6 +518,43 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 		"elapsed_ms", time.Since(spawnStart).Milliseconds())
 
 	return nil
+}
+
+// verifyResourceLimits inspects a running container and warns if
+// actual resource limits don't match what was requested.
+func (d *DockerBackend) verifyResourceLimits(
+	ctx context.Context,
+	containerID string,
+	spec backend.WorkerSpec,
+) {
+	info, err := d.client.ContainerInspect(ctx, containerID)
+	if err != nil {
+		slog.Warn("spawn: failed to verify resource limits",
+			"worker_id", spec.WorkerID, "error", err)
+		return
+	}
+
+	if spec.MemoryLimit != "" {
+		expected, ok := ParseMemoryLimit(spec.MemoryLimit)
+		if ok && info.HostConfig.Resources.Memory != expected {
+			slog.Warn("spawn: memory limit mismatch",
+				"worker_id", spec.WorkerID,
+				"requested", spec.MemoryLimit,
+				"expected_bytes", expected,
+				"actual_bytes", info.HostConfig.Resources.Memory)
+		}
+	}
+
+	if spec.CPULimit > 0 {
+		expected := int64(spec.CPULimit * 1e9)
+		if info.HostConfig.Resources.NanoCPUs != expected {
+			slog.Warn("spawn: CPU limit mismatch",
+				"worker_id", spec.WorkerID,
+				"requested_cpus", spec.CPULimit,
+				"expected_nanocpus", expected,
+				"actual_nanocpus", info.HostConfig.Resources.NanoCPUs)
+		}
+	}
 }
 
 func (d *DockerBackend) Stop(ctx context.Context, id string) error {

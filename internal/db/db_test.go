@@ -145,12 +145,9 @@ func TestDuplicateNameFails(t *testing.T) {
 func TestDeleteApp(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		deleted, err := db.DeleteApp(app.ID)
+		err := db.HardDeleteApp(app.ID)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if !deleted {
-			t.Error("expected deletion")
 		}
 
 		fetched, _ := db.GetApp(app.ID)
@@ -675,12 +672,9 @@ func TestGetBundleNonexistent(t *testing.T) {
 
 func TestDeleteAppNonexistent(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
-		deleted, err := db.DeleteApp("00000000-0000-0000-0000-000000000000")
+		err := db.HardDeleteApp("00000000-0000-0000-0000-000000000000")
 		if err != nil {
 			t.Fatal(err)
-		}
-		if deleted {
-			t.Error("expected false for nonexistent app")
 		}
 	})
 }
@@ -1207,4 +1201,222 @@ func TestOpenUnsupportedDriver(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unsupported driver")
 	}
+}
+
+// --- Soft-delete tests ---
+
+func TestSoftDeleteApp(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("my-app", "admin")
+
+		if err := db.SoftDeleteApp(app.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// App should not be visible via GetApp.
+		fetched, _ := db.GetApp(app.ID)
+		if fetched != nil {
+			t.Error("expected nil from GetApp after soft delete")
+		}
+
+		// App should be visible via GetAppIncludeDeleted.
+		fetched, _ = db.GetAppIncludeDeleted(app.ID)
+		if fetched == nil {
+			t.Fatal("expected non-nil from GetAppIncludeDeleted")
+		}
+		if fetched.DeletedAt == nil {
+			t.Error("expected deleted_at to be set")
+		}
+	})
+}
+
+func TestSoftDeleteAppIdempotent(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("my-app", "admin")
+		db.SoftDeleteApp(app.ID)
+
+		// Second soft-delete should be a no-op (WHERE deleted_at IS NULL).
+		if err := db.SoftDeleteApp(app.ID); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestRestoreApp(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("my-app", "admin")
+		db.SoftDeleteApp(app.ID)
+
+		if err := db.RestoreApp(app.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		fetched, _ := db.GetApp(app.ID)
+		if fetched == nil {
+			t.Fatal("expected app to reappear after restore")
+		}
+		if fetched.DeletedAt != nil {
+			t.Error("expected deleted_at to be nil after restore")
+		}
+	})
+}
+
+func TestRestoreNonDeletedApp(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("my-app", "admin")
+
+		// Restore on a non-deleted app is a no-op.
+		if err := db.RestoreApp(app.ID); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestListAppsExcludesDeleted(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		db.CreateApp("app-a", "admin")
+		app2, _ := db.CreateApp("app-b", "admin")
+		db.SoftDeleteApp(app2.ID)
+
+		apps, _ := db.ListApps()
+		if len(apps) != 1 {
+			t.Fatalf("expected 1 app, got %d", len(apps))
+		}
+		if apps[0].Name != "app-a" {
+			t.Errorf("expected app-a, got %s", apps[0].Name)
+		}
+	})
+}
+
+func TestListDeletedApps(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("app-a", "admin")
+		db.CreateApp("app-b", "admin")
+		db.SoftDeleteApp(app1.ID)
+
+		deleted, _ := db.ListDeletedApps()
+		if len(deleted) != 1 {
+			t.Fatalf("expected 1 deleted app, got %d", len(deleted))
+		}
+		if deleted[0].ID != app1.ID {
+			t.Error("expected deleted app to be app-a")
+		}
+	})
+}
+
+func TestListExpiredDeletedApps(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("app-a", "admin")
+		db.SoftDeleteApp(app1.ID)
+
+		// Use a cutoff in the future — all soft-deleted apps are expired.
+		future := "2099-01-01T00:00:00Z"
+		expired, _ := db.ListExpiredDeletedApps(future)
+		if len(expired) != 1 {
+			t.Fatalf("expected 1 expired app, got %d", len(expired))
+		}
+
+		// Use a cutoff in the past — no apps are expired.
+		past := "2000-01-01T00:00:00Z"
+		expired, _ = db.ListExpiredDeletedApps(past)
+		if len(expired) != 0 {
+			t.Fatalf("expected 0 expired apps, got %d", len(expired))
+		}
+	})
+}
+
+func TestListCatalogExcludesDeleted(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("app-a", "admin")
+		db.CreateApp("app-b", "admin")
+		db.SoftDeleteApp(app1.ID)
+
+		apps, total, err := db.ListCatalog(CatalogParams{
+			CallerRole: "admin",
+			Page:       1,
+			PerPage:    10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected total 1, got %d", total)
+		}
+		if len(apps) != 1 || apps[0].Name != "app-b" {
+			t.Errorf("expected app-b, got %v", apps)
+		}
+	})
+}
+
+func TestListAccessibleAppsExcludesDeleted(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("app-a", "admin")
+		db.CreateApp("app-b", "admin")
+		db.SoftDeleteApp(app1.ID)
+
+		apps, _ := db.ListAccessibleApps("admin")
+		if len(apps) != 1 {
+			t.Fatalf("expected 1 accessible app, got %d", len(apps))
+		}
+	})
+}
+
+func TestHardDeleteApp(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("my-app", "admin")
+		if err := db.HardDeleteApp(app.ID); err != nil {
+			t.Fatal(err)
+		}
+		fetched, _ := db.GetAppIncludeDeleted(app.ID)
+		if fetched != nil {
+			t.Error("expected nil after hard delete")
+		}
+	})
+}
+
+func TestSoftDeletedNameReusable(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("my-app", "admin")
+		db.SoftDeleteApp(app.ID)
+
+		// Creating a new app with the same name should succeed.
+		app2, err := db.CreateApp("my-app", "admin")
+		if err != nil {
+			t.Fatalf("expected name reuse to succeed: %v", err)
+		}
+		if app2.Name != "my-app" {
+			t.Error("expected new app to have the same name")
+		}
+	})
+}
+
+func TestRestoreWithNameCollision(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("my-app", "admin")
+		db.SoftDeleteApp(app1.ID)
+
+		// Create a new app with the same name.
+		db.CreateApp("my-app", "admin")
+
+		// Restoring the original should fail with unique constraint error.
+		err := db.RestoreApp(app1.ID)
+		if err == nil {
+			t.Fatal("expected unique constraint error on restore")
+		}
+		if !IsUniqueConstraintError(err) {
+			t.Fatalf("expected unique constraint error, got: %v", err)
+		}
+	})
+}
+
+func TestGetAppByNameExcludesDeleted(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("my-app", "admin")
+		db.SoftDeleteApp(app.ID)
+
+		fetched, _ := db.GetAppByName("my-app")
+		if fetched != nil {
+			t.Error("expected nil from GetAppByName for soft-deleted app")
+		}
+	})
 }

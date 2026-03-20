@@ -22,6 +22,8 @@ const (
 	ActionBundleUpload      Action = "bundle.upload"
 	ActionBundleRestoreOK   Action = "bundle.restore.success"
 	ActionBundleRestoreFail Action = "bundle.restore.fail"
+	ActionAppRollback       Action = "app.rollback"
+	ActionAppRestore        Action = "app.restore"
 	ActionAccessGrant       Action = "access.grant"
 	ActionAccessRevoke      Action = "access.revoke"
 	ActionCredentialEnroll  Action = "credential.enroll"

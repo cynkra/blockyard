@@ -166,7 +166,9 @@ func (db *DB) migrateDriver() (migratedb.Driver, error) {
 	case DialectPostgres:
 		return migratepostgres.WithInstance(db.DB.DB, &migratepostgres.Config{})
 	default:
-		return migratesqlite.WithInstance(db.DB.DB, &migratesqlite.Config{})
+		return migratesqlite.WithInstance(db.DB.DB, &migratesqlite.Config{
+			NoTxWrap: true,
+		})
 	}
 }
 
@@ -218,6 +220,7 @@ type AppRow struct {
 	Description          *string  `db:"description" json:"description"`
 	CreatedAt            string   `db:"created_at" json:"created_at"`
 	UpdatedAt            string   `db:"updated_at" json:"updated_at"`
+	DeletedAt            *string  `db:"deleted_at" json:"deleted_at,omitempty"`
 }
 
 type BundleRow struct {
@@ -253,7 +256,8 @@ func (db *DB) CreateApp(name, owner string) (*AppRow, error) {
 
 func (db *DB) GetApp(id string) (*AppRow, error) {
 	var app AppRow
-	err := db.DB.Get(&app, db.rebind(`SELECT * FROM apps WHERE id = ?`), id)
+	err := db.DB.Get(&app, db.rebind(
+		`SELECT * FROM apps WHERE id = ? AND deleted_at IS NULL`), id)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -265,7 +269,8 @@ func (db *DB) GetApp(id string) (*AppRow, error) {
 
 func (db *DB) GetAppByName(name string) (*AppRow, error) {
 	var app AppRow
-	err := db.DB.Get(&app, db.rebind(`SELECT * FROM apps WHERE name = ?`), name)
+	err := db.DB.Get(&app, db.rebind(
+		`SELECT * FROM apps WHERE name = ? AND deleted_at IS NULL`), name)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -277,7 +282,8 @@ func (db *DB) GetAppByName(name string) (*AppRow, error) {
 
 func (db *DB) ListApps() ([]AppRow, error) {
 	var apps []AppRow
-	err := db.DB.Select(&apps, `SELECT * FROM apps ORDER BY created_at DESC`)
+	err := db.DB.Select(&apps,
+		`SELECT * FROM apps WHERE deleted_at IS NULL ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -291,9 +297,10 @@ func (db *DB) ListAccessibleApps(sub string) ([]AppRow, error) {
 		`SELECT DISTINCT a.*
 		 FROM apps a
 		 LEFT JOIN app_access aa ON a.id = aa.app_id
-		 WHERE a.access_type IN ('public', 'logged_in')
-		    OR a.owner = ?
-		    OR (aa.kind = 'user' AND aa.principal = ?)
+		 WHERE a.deleted_at IS NULL
+		   AND (a.access_type IN ('public', 'logged_in')
+		        OR a.owner = ?
+		        OR (aa.kind = 'user' AND aa.principal = ?))
 		 ORDER BY a.created_at DESC`)
 
 	var apps []AppRow
@@ -304,13 +311,71 @@ func (db *DB) ListAccessibleApps(sub string) ([]AppRow, error) {
 	return apps, nil
 }
 
-func (db *DB) DeleteApp(id string) (bool, error) {
-	result, err := db.Exec(db.rebind(`DELETE FROM apps WHERE id = ?`), id)
-	if err != nil {
-		return false, err
+// GetAppIncludeDeleted returns an app by ID regardless of soft-delete
+// status. Used by the restore endpoint and the sweeper.
+func (db *DB) GetAppIncludeDeleted(id string) (*AppRow, error) {
+	var app AppRow
+	err := db.DB.Get(&app, db.rebind(`SELECT * FROM apps WHERE id = ?`), id)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	n, _ := result.RowsAffected()
-	return n > 0, nil
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
+}
+
+// SoftDeleteApp sets deleted_at on an app.
+func (db *DB) SoftDeleteApp(id string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE apps SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`),
+		now, now, id,
+	)
+	return err
+}
+
+// RestoreApp clears deleted_at on a soft-deleted app.
+func (db *DB) RestoreApp(id string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE apps SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL`),
+		now, id,
+	)
+	return err
+}
+
+// HardDeleteApp permanently removes an app row. Used by the sweeper
+// after all associated resources (bundles, files) have been cleaned up.
+func (db *DB) HardDeleteApp(id string) error {
+	_, err := db.Exec(db.rebind(`DELETE FROM apps WHERE id = ?`), id)
+	return err
+}
+
+// ListDeletedApps returns all soft-deleted apps, newest deletion first.
+func (db *DB) ListDeletedApps() ([]AppRow, error) {
+	var apps []AppRow
+	err := db.DB.Select(&apps,
+		`SELECT * FROM apps WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	return apps, nil
+}
+
+// ListExpiredDeletedApps returns soft-deleted apps whose deleted_at is
+// older than the given cutoff time. Used by the sweeper.
+func (db *DB) ListExpiredDeletedApps(cutoff string) ([]AppRow, error) {
+	var apps []AppRow
+	err := db.DB.Select(&apps, db.rebind(
+		`SELECT * FROM apps WHERE deleted_at IS NOT NULL AND deleted_at < ?
+		 ORDER BY deleted_at ASC`),
+		cutoff,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return apps, nil
 }
 
 // --- Bundles ---
@@ -744,7 +809,7 @@ type CatalogParams struct {
 // ListCatalog returns apps visible to the caller with access control,
 // tag filtering, search, and pagination.
 func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
-	var conditions []string
+	conditions := []string{"apps.deleted_at IS NULL"}
 	var args []any
 
 	// Access control filter

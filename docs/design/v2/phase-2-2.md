@@ -104,7 +104,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
         previousBundle := app.ActiveBundle
 
         // Drain and stop running workers.
-        // stopAppSync waits up to shutdown_timeout/2 for sessions to end,
+        // stopAppSync waits up to shutdown_timeout for sessions to end,
         // then force-evicts. If no workers are running, this is a no-op.
         stopAppSync(srv, app.ID)
 
@@ -143,7 +143,7 @@ func stringOrNil(s *string) any {
 ```
 
 **Rollback is synchronous.** The drain takes at most
-`shutdown_timeout / 2` (default 15s). This is acceptable for a
+`shutdown_timeout` (default 30s). This is acceptable for a
 deployment operation — the caller (CLI, CI/CD, admin) needs to know the
 rollback is complete before proceeding. If the app has no running
 workers, the drain is a no-op and the response is instant.
@@ -843,8 +843,8 @@ if body.CPULimit != nil {
         badRequest(w, "cpu_limit must be non-negative")
         return
     }
-    if srv.Config.Proxy.MaxCPULimit > 0 && *body.CPULimit > srv.Config.Proxy.MaxCPULimit {
-        badRequest(w, fmt.Sprintf("cpu_limit must not exceed %.1f", srv.Config.Proxy.MaxCPULimit))
+    if *srv.Config.Proxy.MaxCPULimit > 0 && *body.CPULimit > *srv.Config.Proxy.MaxCPULimit {
+        badRequest(w, fmt.Sprintf("cpu_limit must not exceed %.1f", *srv.Config.Proxy.MaxCPULimit))
         return
     }
 }
@@ -878,16 +878,21 @@ check applies).
 Add `MaxCPULimit` to `ProxyConfig` in `internal/config/config.go`:
 
 ```go
-MaxCPULimit float64 `toml:"max_cpu_limit"`
+MaxCPULimit *float64 `toml:"max_cpu_limit"`
 ```
 
 Default in `applyDefaults()`:
 
 ```go
-if cfg.Proxy.MaxCPULimit == 0 {
-    cfg.Proxy.MaxCPULimit = 16
+if cfg.Proxy.MaxCPULimit == nil {
+    v := 16.0
+    cfg.Proxy.MaxCPULimit = &v
 }
 ```
+
+A pointer distinguishes "absent" (`nil` → apply default 16) from
+"explicitly set to 0" (`*0.0` → no ceiling). Same pattern as
+`AppRow.MaxWorkersPerApp`.
 
 Env var: `BLOCKYARD_PROXY_MAX_CPU_LIMIT`.
 

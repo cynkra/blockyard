@@ -237,6 +237,81 @@ func GracefulShutdown(ctx context.Context, srv *server.Server) {
 	}
 }
 
+// StopAppSync stops all workers for an app synchronously.
+// Marks workers as draining, waits for sessions to end (up to
+// shutdown_timeout), then force-evicts. If no workers are running,
+// this is a no-op.
+func StopAppSync(srv *server.Server, appID string) {
+	workerIDs := srv.Workers.MarkDraining(appID)
+	if len(workerIDs) == 0 {
+		return
+	}
+
+	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
+	for {
+		remaining := srv.Sessions.CountForWorkers(workerIDs)
+		if remaining == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	for _, wid := range workerIDs {
+		EvictWorker(context.Background(), srv, wid)
+	}
+}
+
+// SpawnSoftDeleteSweeper periodically purges soft-deleted apps whose
+// retention period has expired. Blocks until ctx is cancelled.
+// Does not start if soft_delete_retention is zero (soft-delete
+// disabled — nothing to sweep).
+func SpawnSoftDeleteSweeper(ctx context.Context, srv *server.Server) {
+	retention := srv.Config.Storage.SoftDeleteRetention.Duration
+	if retention == 0 {
+		<-ctx.Done()
+		return
+	}
+
+	// Sweep every hour or every retention period, whichever is shorter.
+	interval := 1 * time.Hour
+	if retention < interval {
+		interval = retention
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweepDeletedApps(srv)
+		}
+	}
+}
+
+func sweepDeletedApps(srv *server.Server) {
+	retention := srv.Config.Storage.SoftDeleteRetention.Duration
+	cutoff := time.Now().Add(-retention).UTC().Format(time.RFC3339)
+
+	apps, err := srv.DB.ListExpiredDeletedApps(cutoff)
+	if err != nil {
+		slog.Warn("soft-delete sweeper: list failed", "error", err)
+		return
+	}
+
+	if len(apps) == 0 {
+		return
+	}
+
+	slog.Info("soft-delete sweeper: purging expired apps", "count", len(apps))
+	for _, app := range apps {
+		StopAppSync(srv, app.ID)
+		PurgeApp(srv, &app)
+	}
+}
+
 // SpawnLogRetentionCleaner periodically prunes expired log entries.
 // Blocks until ctx is cancelled.
 func SpawnLogRetentionCleaner(ctx context.Context, srv *server.Server) {
