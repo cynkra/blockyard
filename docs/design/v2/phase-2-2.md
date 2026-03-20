@@ -100,8 +100,11 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
             "app_id", app.ID, "name", app.Name,
             "target_bundle", body.BundleID, "caller", caller.Sub)
 
+        // Capture previous bundle before switching.
+        previousBundle := app.ActiveBundle
+
         // Drain and stop running workers.
-        // stopAppSync waits up to shutdown_timeout/2 for sessions to end,
+        // stopAppSync waits up to shutdown_timeout for sessions to end,
         // then force-evicts. If no workers are running, this is a no-op.
         stopAppSync(srv, app.ID)
 
@@ -122,7 +125,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
             srv.AuditLog.Emit(auditEntry(r, audit.ActionAppRollback, app.ID,
                 map[string]any{
                     "bundle_id":          body.BundleID,
-                    "previous_bundle_id": stringOrNil(app.ActiveBundle),
+                    "previous_bundle_id": stringOrNil(previousBundle),
                 }))
         }
 
@@ -140,7 +143,7 @@ func stringOrNil(s *string) any {
 ```
 
 **Rollback is synchronous.** The drain takes at most
-`shutdown_timeout / 2` (default 15s). This is acceptable for a
+`shutdown_timeout` (default 30s). This is acceptable for a
 deployment operation — the caller (CLI, CI/CD, admin) needs to know the
 rollback is complete before proceeding. If the app has no running
 workers, the drain is a no-op and the response is instant.
@@ -191,23 +194,39 @@ Add migration files under `internal/db/migrations/`:
 
 ```sql
 ALTER TABLE apps ADD COLUMN deleted_at TEXT;
+
+-- Replace the column-level UNIQUE on name with a partial unique index
+-- that only covers live (non-deleted) apps. This allows a new app to
+-- reuse the name of a soft-deleted app. The app ID (UUID) remains the
+-- stable identifier for soft-deleted rows.
+DROP INDEX IF EXISTS sqlite_autoindex_apps_1;
+CREATE UNIQUE INDEX idx_apps_name_live ON apps(name) WHERE deleted_at IS NULL;
 ```
 
 **`sqlite/002_v2_soft_delete.down.sql`:**
 
 ```sql
+DROP INDEX IF EXISTS idx_apps_name_live;
 ALTER TABLE apps DROP COLUMN deleted_at;
+-- The column-level UNIQUE constraint is restored by dropping and
+-- recreating the column (SQLite rebuilds the table).
 ```
 
 **`postgres/002_v2_soft_delete.up.sql`:**
 
 ```sql
 ALTER TABLE apps ADD COLUMN deleted_at TEXT;
+
+-- Replace the column-level UNIQUE on name with a partial unique index.
+ALTER TABLE apps DROP CONSTRAINT apps_name_key;
+CREATE UNIQUE INDEX idx_apps_name_live ON apps(name) WHERE deleted_at IS NULL;
 ```
 
 **`postgres/002_v2_soft_delete.down.sql`:**
 
 ```sql
+DROP INDEX IF EXISTS idx_apps_name_live;
+ALTER TABLE apps ADD CONSTRAINT apps_name_key UNIQUE (name);
 ALTER TABLE apps DROP COLUMN deleted_at;
 ```
 
@@ -590,6 +609,10 @@ func RestoreApp(srv *server.Server) http.HandlerFunc {
         }
 
         if err := srv.DB.RestoreApp(app.ID); err != nil {
+            if db.IsUniqueConstraintError(err) {
+                conflict(w, "another app already uses the name "+app.Name)
+                return
+            }
             serverError(w, "restore app: "+err.Error())
             return
         }
@@ -770,8 +793,9 @@ go ops.SpawnSoftDeleteSweeper(bgCtx, srv)
 - `ListCatalog` excludes soft-deleted apps
 - `ListAccessibleApps` excludes soft-deleted apps
 - `HardDeleteApp` permanently removes the row
-- Soft-deleted app name is still reserved (creating an app with the
-  same name fails with unique constraint)
+- Soft-deleted app name is reusable (creating a new app with the
+  same name succeeds)
+- Restore with name collision → unique constraint error
 
 **API tests** (in `internal/api/api_test.go`):
 
@@ -780,6 +804,7 @@ go ops.SpawnSoftDeleteSweeper(bgCtx, srv)
 - `DELETE /api/v1/apps/{id}` with soft-delete disabled
   (retention unset/zero) → 204, app fully removed
 - `POST /api/v1/apps/{id}/restore` → 200, app reappears in listings
+- Restore when name is taken by a new app → 409
 - Restore non-existent app → 404
 - Restore non-deleted app → 404
 - Restore without permission → 404
@@ -818,8 +843,8 @@ if body.CPULimit != nil {
         badRequest(w, "cpu_limit must be non-negative")
         return
     }
-    if *body.CPULimit > 128 {
-        badRequest(w, "cpu_limit must not exceed 128")
+    if *srv.Config.Proxy.MaxCPULimit > 0 && *body.CPULimit > *srv.Config.Proxy.MaxCPULimit {
+        badRequest(w, fmt.Sprintf("cpu_limit must not exceed %.1f", *srv.Config.Proxy.MaxCPULimit))
         return
     }
 }
@@ -844,11 +869,37 @@ user-supplied strings. Validation belongs at the system boundary (the
 API handler) where meaningful error messages can be returned. The DB is
 a storage layer, not a validation layer.
 
-**Why 128 as the CPU limit ceiling?** It's a sanity check, not a hard
-constraint. No single Docker host has 128 cores as a typical
-deployment. The point is to catch typos like `cpu_limit: 1000` (meant
-1.0). Operators who actually need higher values can raise this in a
-future config option.
+**CPU ceiling is configurable.** The `[proxy] max_cpu_limit` setting
+(default 16) is a server-level guardrail against typos like
+`cpu_limit: 1000` (meant 1.0). Operators on larger hosts can raise it.
+Setting `max_cpu_limit = 0` disables the ceiling (only the `>= 0`
+check applies).
+
+Add `MaxCPULimit` to `ProxyConfig` in `internal/config/config.go`:
+
+```go
+MaxCPULimit *float64 `toml:"max_cpu_limit"`
+```
+
+Default in `applyDefaults()`:
+
+```go
+if cfg.Proxy.MaxCPULimit == nil {
+    v := 16.0
+    cfg.Proxy.MaxCPULimit = &v
+}
+```
+
+A pointer distinguishes "absent" (`nil` → apply default 16) from
+"explicitly set to 0" (`*0.0` → no ceiling). Same pattern as
+`AppRow.MaxWorkersPerApp`.
+
+Env var: `BLOCKYARD_PROXY_MAX_CPU_LIMIT`.
+
+```toml
+[proxy]
+max_cpu_limit = 16   # max per-app cpu_limit; 0 = no ceiling
+```
 
 ### Step 2: Runtime verification in Docker backend
 
@@ -944,6 +995,9 @@ Add a note to the `PATCH /api/v1/apps/{id}` response documentation
   `TestParseMemoryLimitEdgeCases`)
 - `UpdateApp` with invalid `memory_limit` → 400
 - `UpdateApp` with negative `cpu_limit` → 400
+- `UpdateApp` with `cpu_limit` exceeding `max_cpu_limit` → 400
+- `UpdateApp` with `cpu_limit` within ceiling → 200
+- `UpdateApp` with `max_cpu_limit = 0` (disabled) → any positive value accepted
 - `UpdateApp` with valid limits → 200
 
 **Integration tests:**
@@ -971,14 +1025,17 @@ Add a note to the `PATCH /api/v1/apps/{id}` response documentation
    the exact same behavior: mark workers as draining, wait for sessions
    to end, force-evict. No new drain logic needed.
 
-3. **Soft-deleted apps retain their name.** The UNIQUE constraint on
-   `apps.name` is unchanged — a soft-deleted app's name is reserved
-   until it is purged or restored. This avoids edge cases: if a new app
-   took the old name, restoring the old app would fail with a name
-   collision. The trade-off is that operators must wait for purge (or
-   manually hard-delete) to reuse a name. A partial unique index
-   (`WHERE deleted_at IS NULL`) could lift this restriction but adds
-   complexity without a concrete use case.
+3. **Soft-deleted app names are reusable.** The column-level UNIQUE
+   constraint on `apps.name` is replaced by a partial unique index
+   (`WHERE deleted_at IS NULL`). This allows a new app to reuse the
+   name of a soft-deleted app immediately — operators don't need to
+   wait for the sweeper or manually hard-delete. The app ID (UUID) is
+   the stable identifier for soft-deleted rows. If a name-colliding
+   soft-deleted app is later restored, the restore fails with a
+   unique constraint error and returns 409 — the operator must rename
+   or delete the new app first. This is a rare edge case and a clear
+   error, preferable to blocking name reuse for the entire retention
+   period.
 
 4. **Soft-delete stops workers.** When an app is soft-deleted, its
    workers are stopped immediately. Keeping workers running for a
@@ -1044,7 +1101,7 @@ Add a note to the `PATCH /api/v1/apps/{id}` response documentation
 | `internal/db/db.go` | `AppRow.DeletedAt` field; `deleted_at IS NULL` filters on `GetApp`, `GetAppByName`, `ListApps`, `ListAccessibleApps`, `ListCatalog`; new methods `SoftDeleteApp`, `RestoreApp`, `HardDeleteApp`, `GetAppIncludeDeleted`, `ListDeletedApps`, `ListExpiredDeletedApps`; rename `DeleteApp` → `HardDeleteApp` |
 | `internal/api/apps.go` | `RollbackApp` handler, `RestoreApp` handler; `DeleteApp` handler soft-delete logic; `AppResponse.DeletedAt` field; `ListApps` handler `?deleted=true` support; resource limit validation in `UpdateApp`; `purgeApp` → `ops.PurgeApp` |
 | `internal/api/router.go` | Add `/apps/{id}/rollback` and `/apps/{id}/restore` routes |
-| `internal/config/config.go` | `StorageConfig.SoftDeleteRetention` field; default in `applyDefaults` |
+| `internal/config/config.go` | `StorageConfig.SoftDeleteRetention` field; `ProxyConfig.MaxCPULimit` field (default 16); defaults in `applyDefaults` |
 | `internal/ops/ops.go` | `SpawnSoftDeleteSweeper`, `sweepDeletedApps`; `StopAppSync` (moved from api) |
 | `internal/audit/audit.go` | `ActionAppRollback`, `ActionAppRestore` constants |
 | `internal/backend/docker/docker.go` | Export `ParseMemoryLimit`; `verifyResourceLimits` method; call from `Spawn` |
@@ -1071,13 +1128,16 @@ Add a note to the `PATCH /api/v1/apps/{id}` response documentation
 - `soft_delete_retention` absent/zero → immediate hard delete
   (default, current behavior)
 - `GET /api/v1/apps?deleted=true` (admin) → lists soft-deleted apps
-- Soft-deleted app name is reserved (no reuse until purge)
+- Soft-deleted app name is reusable (new app can take the name)
+- Restore with name collision → 409
 - Migration 002 applies cleanly on both SQLite and PostgreSQL
 
 **Resource limits:**
 
 - `PATCH /api/v1/apps/{id}` with `memory_limit: "banana"` → 400
 - `PATCH /api/v1/apps/{id}` with `cpu_limit: -1` → 400
+- `PATCH /api/v1/apps/{id}` with `cpu_limit` exceeding `max_cpu_limit` → 400
+- `max_cpu_limit = 0` disables ceiling check
 - Valid limits accepted and stored
 - Spawn logs warning if actual container limits don't match requested
 - No warning when limits match or are unset

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/backend"
+	docker "github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
@@ -41,6 +40,7 @@ type AppResponse struct {
 	Description          *string  `json:"description"`
 	CreatedAt            string   `json:"created_at"`
 	UpdatedAt            string   `json:"updated_at"`
+	DeletedAt            *string  `json:"deleted_at,omitempty"`
 	Status               string   `json:"status"`
 	Workers              []string `json:"workers"`
 }
@@ -68,6 +68,7 @@ func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
 		Description:          app.Description,
 		CreatedAt:            app.CreatedAt,
 		UpdatedAt:            app.UpdatedAt,
+		DeletedAt:            app.DeletedAt,
 		Status:               status,
 		Workers:              workerIDs,
 	}
@@ -224,7 +225,15 @@ func ListApps(srv *server.Server) http.HandlerFunc {
 			forbidden(w, "insufficient permissions")
 			return
 		}
-		if caller.Role.CanViewAllApps() {
+
+		// ?deleted=true — admin-only, returns soft-deleted apps
+		if r.URL.Query().Get("deleted") == "true" {
+			if !caller.Role.CanViewAllApps() {
+				forbidden(w, "admin only")
+				return
+			}
+			apps, err = srv.DB.ListDeletedApps()
+		} else if caller.Role.CanViewAllApps() {
 			apps, err = srv.DB.ListApps()
 		} else {
 			apps, err = srv.DB.ListAccessibleApps(caller.Sub)
@@ -287,6 +296,22 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 		if body.MaxWorkersPerApp != nil && *body.MaxWorkersPerApp < 1 {
 			badRequest(w, "max_workers_per_app must be >= 1")
 			return
+		}
+		if body.MemoryLimit != nil && *body.MemoryLimit != "" {
+			if _, ok := docker.ParseMemoryLimit(*body.MemoryLimit); !ok {
+				badRequest(w, `invalid memory_limit format: use e.g. "256m", "1g", "512mb"`)
+				return
+			}
+		}
+		if body.CPULimit != nil {
+			if *body.CPULimit < 0 {
+				badRequest(w, "cpu_limit must be non-negative")
+				return
+			}
+			if srv.Config.Proxy.MaxCPULimit != nil && *srv.Config.Proxy.MaxCPULimit > 0 && *body.CPULimit > *srv.Config.Proxy.MaxCPULimit {
+				badRequest(w, fmt.Sprintf("cpu_limit must not exceed %.1f", *srv.Config.Proxy.MaxCPULimit))
+				return
+			}
 		}
 
 		app, relation, ok := resolveAppRelation(srv, w, caller, id)
@@ -353,45 +378,18 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 		slog.Info("deleting app",
 			"app_id", app.ID, "name", app.Name, "caller", caller.Sub)
 
-		// 1. Stop all workers for this app (synchronous for delete).
-		stopAppSync(srv, app.ID)
+		// Always stop running workers.
+		ops.StopAppSync(srv, app.ID)
 
-		// 2. Delete bundle files from disk
-		bundles, err := srv.DB.ListBundlesByApp(app.ID)
-		if err != nil {
-			serverError(w, "list bundles: "+err.Error())
-			return
-		}
-		for _, b := range bundles {
-			paths := bundle.NewBundlePaths(srv.Config.Storage.BundleServerPath, app.ID, b.ID)
-			bundle.DeleteFiles(paths)
-		}
-
-		// 3. Clear active_bundle FK before deleting bundles
-		if err := srv.DB.ClearActiveBundle(app.ID); err != nil {
-			serverError(w, "clear active bundle: "+err.Error())
-			return
-		}
-
-		// 4. Delete bundle rows
-		for _, b := range bundles {
-			if _, err := srv.DB.DeleteBundle(b.ID); err != nil {
-				slog.Warn("failed to delete bundle row",
-					"bundle_id", b.ID, "app_id", app.ID, "error", err)
+		if srv.Config.Storage.SoftDeleteRetention.Duration > 0 {
+			// Soft-delete: mark as deleted, retain files and rows.
+			if err := srv.DB.SoftDeleteApp(app.ID); err != nil {
+				serverError(w, "soft delete: "+err.Error())
+				return
 			}
-		}
-
-		// 5. Delete app row
-		if _, err := srv.DB.DeleteApp(app.ID); err != nil {
-			serverError(w, "delete app: "+err.Error())
-			return
-		}
-
-		// 6. Remove app directory from disk (best-effort)
-		appDir := filepath.Join(srv.Config.Storage.BundleServerPath, app.ID)
-		if err := os.RemoveAll(appDir); err != nil {
-			slog.Warn("failed to remove app directory",
-				"app_id", app.ID, "path", appDir, "error", err)
+		} else {
+			// Immediate hard delete (legacy behavior).
+			ops.PurgeApp(srv, app)
 		}
 
 		if srv.AuditLog != nil {
@@ -401,6 +399,152 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+type rollbackRequest struct {
+	BundleID string `json:"bundle_id"`
+}
+
+func RollbackApp(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		id := chi.URLParam(r, "id")
+
+		var body rollbackRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			badRequest(w, "invalid JSON body")
+			return
+		}
+
+		if body.BundleID == "" {
+			badRequest(w, "bundle_id is required")
+			return
+		}
+
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
+		if !ok {
+			return
+		}
+		if !relation.CanDeploy() {
+			notFound(w, "app not found")
+			return
+		}
+
+		// Validate target bundle.
+		b, err := srv.DB.GetBundle(body.BundleID)
+		if err != nil {
+			serverError(w, "db error: "+err.Error())
+			return
+		}
+		if b == nil || b.AppID != app.ID {
+			notFound(w, "bundle not found")
+			return
+		}
+		if b.Status != "ready" {
+			badRequest(w, "bundle is not ready (status: "+b.Status+")")
+			return
+		}
+		if app.ActiveBundle != nil && *app.ActiveBundle == body.BundleID {
+			badRequest(w, "bundle is already active")
+			return
+		}
+
+		slog.Info("rolling back app",
+			"app_id", app.ID, "name", app.Name,
+			"target_bundle", body.BundleID, "caller", caller.Sub)
+
+		// Capture previous bundle before switching.
+		previousBundle := app.ActiveBundle
+
+		// Drain and stop running workers.
+		ops.StopAppSync(srv, app.ID)
+
+		// Switch active bundle.
+		if err := srv.DB.SetActiveBundle(app.ID, body.BundleID); err != nil {
+			serverError(w, "set active bundle: "+err.Error())
+			return
+		}
+
+		// Re-read app to get updated state.
+		app, err = srv.DB.GetApp(app.ID)
+		if err != nil || app == nil {
+			serverError(w, "get app after rollback")
+			return
+		}
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppRollback, app.ID,
+				map[string]any{
+					"bundle_id":          body.BundleID,
+					"previous_bundle_id": stringOrNil(previousBundle),
+				}))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+	}
+}
+
+func RestoreApp(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		id := chi.URLParam(r, "id")
+
+		if caller == nil {
+			forbidden(w, "insufficient permissions")
+			return
+		}
+
+		// Look up the app including deleted — GetApp filters them out.
+		app, err := srv.DB.GetAppIncludeDeleted(id)
+		if err != nil {
+			serverError(w, "db error: "+err.Error())
+			return
+		}
+		if app == nil || app.DeletedAt == nil {
+			notFound(w, "deleted app not found")
+			return
+		}
+
+		// Only admins and the original owner can restore.
+		if !caller.Role.CanViewAllApps() && app.Owner != caller.Sub {
+			notFound(w, "deleted app not found")
+			return
+		}
+
+		if err := srv.DB.RestoreApp(app.ID); err != nil {
+			if db.IsUniqueConstraintError(err) {
+				conflict(w, "another app already uses the name "+app.Name)
+				return
+			}
+			serverError(w, "restore app: "+err.Error())
+			return
+		}
+
+		app, err = srv.DB.GetApp(app.ID)
+		if err != nil || app == nil {
+			serverError(w, "get app after restore")
+			return
+		}
+
+		slog.Info("app restored",
+			"app_id", app.ID, "name", app.Name, "caller", caller.Sub)
+
+		if srv.AuditLog != nil {
+			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppRestore, app.ID,
+				map[string]any{"name": app.Name}))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+	}
+}
+
+func stringOrNil(s *string) any {
+	if s == nil {
+		return nil
+	}
+	return *s
 }
 
 // --- App lifecycle ---
@@ -606,29 +750,6 @@ func drainWorkers(srv *server.Server, appID string, workerIDs []string, sender t
 	sender.Write(fmt.Sprintf("stopped %d workers", len(workerIDs)))
 }
 
-// stopAppSync stops all workers for an app synchronously.
-// Used by DeleteApp where we must wait for workers to stop before
-// deleting the app row. Not suitable for the stop endpoint (use
-// the async drainWorkers path instead).
-func stopAppSync(srv *server.Server, appID string) {
-	workerIDs := srv.Workers.MarkDraining(appID)
-	if len(workerIDs) == 0 {
-		return
-	}
-
-	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
-	for {
-		remaining := srv.Sessions.CountForWorkers(workerIDs)
-		if remaining == 0 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(time.Second)
-	}
-
-	for _, wid := range workerIDs {
-		ops.EvictWorker(context.Background(), srv, wid)
-	}
-}
 
 // AppLogs streams logs from the LogStore for a specific worker.
 func AppLogs(srv *server.Server) http.HandlerFunc {

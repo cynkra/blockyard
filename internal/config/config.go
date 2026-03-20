@@ -55,10 +55,11 @@ type DockerConfig struct {
 }
 
 type StorageConfig struct {
-	BundleServerPath string `toml:"bundle_server_path"`
-	BundleWorkerPath string `toml:"bundle_worker_path"`
-	BundleRetention  int    `toml:"bundle_retention"`
-	MaxBundleSize    int64  `toml:"max_bundle_size"`
+	BundleServerPath    string   `toml:"bundle_server_path"`
+	BundleWorkerPath    string   `toml:"bundle_worker_path"`
+	BundleRetention     int      `toml:"bundle_retention"`
+	MaxBundleSize       int64    `toml:"max_bundle_size"`
+	SoftDeleteRetention Duration `toml:"soft_delete_retention"`
 }
 
 type DatabaseConfig struct {
@@ -76,6 +77,7 @@ type ProxyConfig struct {
 	SessionIdleTTL     Duration `toml:"session_idle_ttl"`
 	IdleWorkerTimeout  Duration `toml:"idle_worker_timeout"`
 	HTTPForwardTimeout Duration `toml:"http_forward_timeout"`
+	MaxCPULimit        *float64 `toml:"max_cpu_limit"`
 }
 
 type OidcConfig struct {
@@ -196,6 +198,10 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Proxy.HTTPForwardTimeout.Duration == 0 {
 		cfg.Proxy.HTTPForwardTimeout.Duration = 5 * time.Minute
+	}
+	if cfg.Proxy.MaxCPULimit == nil {
+		v := 16.0
+		cfg.Proxy.MaxCPULimit = &v
 	}
 	if cfg.OIDC != nil {
 		oidcDefaults(cfg.OIDC)

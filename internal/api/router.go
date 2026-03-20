@@ -219,6 +219,9 @@ func NewRouter(srv *server.Server) http.Handler {
 
 		r.Get("/apps/{id}/bundles", ListBundles(srv))
 
+		r.Post("/apps/{id}/rollback", RollbackApp(srv))
+		r.Post("/apps/{id}/restore", RestoreApp(srv))
+
 		r.Post("/apps/{id}/start", StartApp(srv))
 		r.Post("/apps/{id}/stop", StopApp(srv))
 		r.Get("/apps/{id}/logs", AppLogs(srv))

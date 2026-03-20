@@ -23,13 +23,13 @@ func TestParseMemoryLimit(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, ok := parseMemoryLimit(tt.input)
+		got, ok := ParseMemoryLimit(tt.input)
 		if ok != tt.ok {
-			t.Errorf("parseMemoryLimit(%q) ok = %v, want %v", tt.input, ok, tt.ok)
+			t.Errorf("ParseMemoryLimit(%q) ok = %v, want %v", tt.input, ok, tt.ok)
 			continue
 		}
 		if ok && got != tt.want {
-			t.Errorf("parseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("ParseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }

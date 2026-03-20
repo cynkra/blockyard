@@ -1843,3 +1843,481 @@ func TestTaskLogsNotFound2(t *testing.T) {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
 }
+
+// --- Rollback tests ---
+
+func TestRollbackAppValidBundle(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Create two ready bundles.
+	srv.DB.CreateBundle("b-1", id)
+	srv.DB.UpdateBundleStatus("b-1", "ready")
+	srv.DB.SetActiveBundle(id, "b-1")
+
+	srv.DB.CreateBundle("b-2", id)
+	srv.DB.UpdateBundleStatus("b-2", "ready")
+
+	// Rollback to b-2.
+	body := `{"bundle_id":"b-2"}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["active_bundle"] != "b-2" {
+		t.Errorf("expected active_bundle=b-2, got %v", result["active_bundle"])
+	}
+}
+
+func TestRollbackToNonexistentBundle(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	body := `{"bundle_id":"nonexistent"}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRollbackToBundleOfDifferentApp(t *testing.T) {
+	srv, ts := testServer(t)
+	app1 := createApp(t, ts, "app-one")
+	id1 := app1["id"].(string)
+	app2 := createApp(t, ts, "app-two")
+	id2 := app2["id"].(string)
+
+	srv.DB.CreateBundle("b-other", id2)
+	srv.DB.UpdateBundleStatus("b-other", "ready")
+
+	body := `{"bundle_id":"b-other"}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id1+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRollbackToFailedBundle(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	srv.DB.CreateBundle("b-fail", id)
+	srv.DB.UpdateBundleStatus("b-fail", "failed")
+
+	body := `{"bundle_id":"b-fail"}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRollbackToAlreadyActiveBundle(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	srv.DB.CreateBundle("b-1", id)
+	srv.DB.UpdateBundleStatus("b-1", "ready")
+	srv.DB.SetActiveBundle(id, "b-1")
+
+	body := `{"bundle_id":"b-1"}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRollbackWithoutBundleID(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	body := `{}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRollbackStopsRunningWorkers(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Upload bundle and wait for restore.
+	req, _ := http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/bundles",
+		bytes.NewReader(testutil.MakeBundle(t)))
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	http.DefaultClient.Do(req)
+	time.Sleep(200 * time.Millisecond)
+
+	// Start app.
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	http.DefaultClient.Do(req)
+	if srv.Workers.Count() != 1 {
+		t.Fatalf("expected 1 worker, got %d", srv.Workers.Count())
+	}
+
+	// Create a second ready bundle.
+	srv.DB.CreateBundle("b-rollback", id)
+	srv.DB.UpdateBundleStatus("b-rollback", "ready")
+
+	// Rollback to the new bundle.
+	body := `{"bundle_id":"b-rollback"}`
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	// Workers should be stopped.
+	if srv.Workers.Count() != 0 {
+		t.Errorf("expected 0 workers after rollback, got %d", srv.Workers.Count())
+	}
+
+	// Active bundle should be changed.
+	app, _ := srv.DB.GetApp(id)
+	if app.ActiveBundle == nil || *app.ActiveBundle != "b-rollback" {
+		t.Errorf("expected active bundle b-rollback, got %v", app.ActiveBundle)
+	}
+}
+
+// --- Soft-delete API tests ---
+
+func testServerWithSoftDelete(t *testing.T) (*server.Server, *httptest.Server) {
+	t.Helper()
+	tmp := t.TempDir()
+
+	cfg := &config.Config{
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Storage: config.StorageConfig{
+			BundleServerPath:    tmp,
+			BundleWorkerPath:    "/app",
+			BundleRetention:     50,
+			MaxBundleSize:       10 * 1024 * 1024,
+			SoftDeleteRetention: config.Duration{Duration: 720 * time.Hour},
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+	}
+
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	seedTestAdmin(t, database)
+
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return srv, ts
+}
+
+func TestSoftDeleteApp(t *testing.T) {
+	srv, ts := testServerWithSoftDelete(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Delete (soft).
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 204 {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+
+	// App should be gone from listings.
+	req = authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+
+	// But still in DB with deleted_at set.
+	app, _ := srv.DB.GetAppIncludeDeleted(id)
+	if app == nil {
+		t.Fatal("expected app to still be in DB")
+	}
+	if app.DeletedAt == nil {
+		t.Error("expected deleted_at to be set")
+	}
+}
+
+func TestHardDeleteAppWhenSoftDeleteDisabled(t *testing.T) {
+	srv, ts := testServer(t) // no soft_delete_retention
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 204 {
+		t.Errorf("expected 204, got %d", resp.StatusCode)
+	}
+
+	// Should be fully gone.
+	app, _ := srv.DB.GetAppIncludeDeleted(id)
+	if app != nil {
+		t.Error("expected app to be completely removed")
+	}
+}
+
+func TestRestoreAppAPI(t *testing.T) {
+	_, ts := testServerWithSoftDelete(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Soft delete.
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	http.DefaultClient.Do(req)
+
+	// Restore.
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	// App should be back in listings.
+	req = authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestRestoreWithNameCollisionAPI(t *testing.T) {
+	_, ts := testServerWithSoftDelete(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Soft delete.
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	http.DefaultClient.Do(req)
+
+	// Create another app with the same name.
+	createApp(t, ts, "my-app")
+
+	// Restore should fail with 409.
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 409 {
+		t.Errorf("expected 409, got %d", resp.StatusCode)
+	}
+}
+
+func TestRestoreNonexistentApp(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/restore", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRestoreNonDeletedApp(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestListDeletedAppsAdmin(t *testing.T) {
+	_, ts := testServerWithSoftDelete(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+	createApp(t, ts, "live-app")
+
+	// Soft delete one app.
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	http.DefaultClient.Do(req)
+
+	// List deleted apps.
+	req = authReq("GET", ts.URL+"/api/v1/apps?deleted=true", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var apps []map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&apps)
+	if len(apps) != 1 {
+		t.Fatalf("expected 1 deleted app, got %d", len(apps))
+	}
+	if apps[0]["id"] != id {
+		t.Errorf("expected deleted app id=%s, got %v", id, apps[0]["id"])
+	}
+}
+
+// --- Resource limit validation tests ---
+
+func TestUpdateAppInvalidMemoryLimit(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	body := `{"memory_limit":"banana"}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppNegativeCPULimit(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	body := `{"cpu_limit":-1}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppCPULimitExceedsCeiling(t *testing.T) {
+	tmp := t.TempDir()
+	maxCPU := 4.0
+	cfg := &config.Config{
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+		},
+		Proxy: config.ProxyConfig{
+			MaxWorkers:  100,
+			MaxCPULimit: &maxCPU,
+		},
+	}
+	database, _ := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	body := `{"cpu_limit":5.0}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+
+	// Within ceiling should succeed.
+	body = `{"cpu_limit":2.0}`
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppCPULimitCeilingDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	zeroCPU := 0.0
+	cfg := &config.Config{
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+		},
+		Proxy: config.ProxyConfig{
+			MaxWorkers:  100,
+			MaxCPULimit: &zeroCPU,
+		},
+	}
+	database, _ := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Any positive value should be accepted.
+	body := `{"cpu_limit":100.0}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppValidResourceLimits(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	body := `{"memory_limit":"512m","cpu_limit":2.0}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["memory_limit"] != "512m" {
+		t.Errorf("expected memory_limit=512m, got %v", result["memory_limit"])
+	}
+	if result["cpu_limit"] != 2.0 {
+		t.Errorf("expected cpu_limit=2, got %v", result["cpu_limit"])
+	}
+}
+
+func TestUpdateAppEmptyMemoryLimitAccepted(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Empty string clears the limit — should not be validated.
+	body := `{"memory_limit":""}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+}

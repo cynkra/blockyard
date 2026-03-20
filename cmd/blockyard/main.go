@@ -243,6 +243,12 @@ func main() {
 		proxy.RunAutoscaler(bgCtx, srv)
 	}()
 
+	bgWg.Add(1)
+	go func() {
+		defer bgWg.Done()
+		ops.SpawnSoftDeleteSweeper(bgCtx, srv)
+	}()
+
 	// Start audit log background writer.
 	if srv.AuditLog != nil {
 		bgWg.Add(1)
