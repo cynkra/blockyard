@@ -3,6 +3,7 @@ package proxy
 import (
 	_ "embed"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -38,12 +39,14 @@ func serveLoadingPage(w http.ResponseWriter, app *db.AppRow, appName string, srv
 	// doesn't race the server-side spawn.
 	clientTimeout := timeout + 10*time.Second
 
-	loadingTmpl.Execute(w, loadingData{
+	if err := loadingTmpl.Execute(w, loadingData{
 		AppName:   displayName(app),
 		ReadyURL:  template.JSStr(readyPath),
 		AppURL:    template.JSStr(appPath),
 		TimeoutMs: clientTimeout.Milliseconds(),
-	})
+	}); err != nil {
+		slog.Warn("loading page: template execute failed", "error", err)
+	}
 }
 
 // displayName returns the app's title if set, otherwise its name.
