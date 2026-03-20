@@ -2399,3 +2399,66 @@ func TestUpdateAppEmptyMemoryLimitAccepted(t *testing.T) {
 		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 }
+
+func TestUpdateAppPreWarmedSeats(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"pre_warmed_seats":1}`))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var updated map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&updated)
+	if v := updated["pre_warmed_seats"]; v != float64(1) {
+		t.Errorf("expected pre_warmed_seats=1, got %v", v)
+	}
+}
+
+func TestUpdateAppPreWarmedSeatsNegative(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"pre_warmed_seats":-1}`))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppPreWarmedSeatsExceedsCap(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"pre_warmed_seats":11}`))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetAppIncludesPreWarmedSeats(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, _ := http.DefaultClient.Do(req)
+	var app map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&app)
+
+	if _, ok := app["pre_warmed_seats"]; !ok {
+		t.Error("expected pre_warmed_seats in response")
+	}
+	if v := app["pre_warmed_seats"]; v != float64(0) {
+		t.Errorf("expected pre_warmed_seats=0, got %v", v)
+	}
+}

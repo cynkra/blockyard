@@ -188,7 +188,7 @@ func TestAutoscaleSkipsDrainingApps(t *testing.T) {
 	}
 }
 
-func TestAutoscaleKeepsLastWorker(t *testing.T) {
+func TestAutoscaleScaleToZero(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
@@ -198,17 +198,20 @@ func TestAutoscaleKeepsLastWorker(t *testing.T) {
 	})
 	app, _ = srv.DB.GetApp(app.ID)
 
-	// Single worker with 0 sessions — should NOT be evicted (keep at least 1).
+	// Single worker with 0 sessions — should be evicted (scale to zero).
 	_, _, err := spawnWorker(context.Background(), srv, app)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// Set a short idle worker timeout so the test triggers eviction.
+	srv.Config.Proxy.IdleWorkerTimeout.Duration = 0
+
 	autoscaleTick(context.Background(), srv)
 
 	workerIDs := srv.Workers.ForApp(app.ID)
-	if len(workerIDs) != 1 {
-		t.Errorf("expected 1 worker (keep last), got %d", len(workerIDs))
+	if len(workerIDs) != 0 {
+		t.Errorf("expected 0 workers (scale to zero), got %d", len(workerIDs))
 	}
 }
 
@@ -355,6 +358,160 @@ func TestEvictUnhealthyReturnsHealthy(t *testing.T) {
 	healthy = evictUnhealthy(context.Background(), srv, []string{wid4, wid5})
 	if len(healthy) != 2 {
 		t.Errorf("expected 2 healthy workers, got %d", len(healthy))
+	}
+}
+
+func TestEnsurePreWarmedSpawnsWorkers(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 2
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	ensurePreWarmed(context.Background(), srv, app)
+
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 2 {
+		t.Errorf("expected 2 pre-warmed workers, got %d", len(workerIDs))
+	}
+}
+
+func TestEnsurePreWarmedPoolAlreadyFull(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	// Spawn one idle worker — pool is already full.
+	spawnWorker(context.Background(), srv, app)
+
+	before := srv.Workers.Count()
+	ensurePreWarmed(context.Background(), srv, app)
+
+	if srv.Workers.Count() != before {
+		t.Errorf("expected no new workers (pool full), got %d total", srv.Workers.Count())
+	}
+}
+
+func TestEnsurePreWarmedRespectsPerAppLimit(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 3
+	maxWorkers := 2
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{
+		PreWarmedSeats:   &seats,
+		MaxWorkersPerApp: &maxWorkers,
+	})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	ensurePreWarmed(context.Background(), srv, app)
+
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 2 {
+		t.Errorf("expected 2 workers (capped by per-app limit), got %d", len(workerIDs))
+	}
+}
+
+func TestEnsurePreWarmedRespectsGlobalLimit(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	srv.Config.Proxy.MaxWorkers = 1
+
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 3
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	ensurePreWarmed(context.Background(), srv, app)
+
+	if srv.Workers.Count() != 1 {
+		t.Errorf("expected 1 worker (global limit), got %d", srv.Workers.Count())
+	}
+}
+
+func TestEnsurePreWarmedZeroSeatsNoop(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	// pre_warmed_seats = 0 (default) — should be a no-op.
+	ensurePreWarmed(context.Background(), srv, app)
+
+	if srv.Workers.Count() != 0 {
+		t.Errorf("expected 0 workers, got %d", srv.Workers.Count())
+	}
+}
+
+func TestPreWarmAppsFromDB(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+
+	// preWarmApps queries the DB — should find the app and spawn.
+	preWarmApps(context.Background(), srv)
+
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 1 {
+		t.Errorf("expected 1 pre-warmed worker from DB query, got %d", len(workerIDs))
+	}
+}
+
+func TestAutoscalePreWarmAfterEviction(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	// Spawn a worker, then make it idle and evict it.
+	wid, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = wid
+
+	// Set idle timeout to 0 so the worker gets evicted.
+	srv.Config.Proxy.IdleWorkerTimeout.Duration = 0
+
+	// Run autoscale tick — should evict idle worker then pre-warm a new one.
+	autoscaleTick(context.Background(), srv)
+
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 1 {
+		t.Errorf("expected 1 worker (pre-warmed after eviction), got %d", len(workerIDs))
+	}
+}
+
+func TestEnsurePreWarmedClaimedWorkerReplacement(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	// Spawn one idle worker (the warm pool).
+	wid, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate claiming: add session and clear idle.
+	setSession(srv, "s1", wid)
+	srv.Workers.ClearIdleSince(wid)
+
+	// Now the pool has a deficit — ensurePreWarmed should spawn a replacement.
+	ensurePreWarmed(context.Background(), srv, app)
+
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 2 {
+		t.Errorf("expected 2 workers (original + replacement), got %d", len(workerIDs))
 	}
 }
 

@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestWorkerMapCountForApp(t *testing.T) {
 	m := NewWorkerMap()
@@ -68,5 +71,75 @@ func TestWorkerMapAll(t *testing.T) {
 	all := m.All()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 workers, got %d", len(all))
+	}
+}
+
+func TestIdleWorkersScaleToZero(t *testing.T) {
+	m := NewWorkerMap()
+	// Single worker for app, idle beyond timeout — should be returned.
+	m.Set("w1", ActiveWorker{
+		AppID:     "app-a",
+		IdleSince: time.Now().Add(-10 * time.Minute),
+	})
+
+	idle := m.IdleWorkers(5 * time.Minute)
+	if len(idle) != 1 {
+		t.Errorf("expected 1 idle worker (scale to zero), got %d", len(idle))
+	}
+}
+
+func TestIdleWorkersExcludesDraining(t *testing.T) {
+	m := NewWorkerMap()
+	m.Set("w1", ActiveWorker{
+		AppID:     "app-a",
+		Draining:  true,
+		IdleSince: time.Now().Add(-10 * time.Minute),
+	})
+
+	idle := m.IdleWorkers(5 * time.Minute)
+	if len(idle) != 0 {
+		t.Errorf("expected 0 idle workers (draining excluded), got %d", len(idle))
+	}
+}
+
+func TestIdleWorkersExcludesNotYetIdle(t *testing.T) {
+	m := NewWorkerMap()
+	m.Set("w1", ActiveWorker{
+		AppID:     "app-a",
+		IdleSince: time.Now().Add(-1 * time.Minute),
+	})
+
+	idle := m.IdleWorkers(5 * time.Minute)
+	if len(idle) != 0 {
+		t.Errorf("expected 0 idle workers (not yet idle enough), got %d", len(idle))
+	}
+}
+
+func TestClearIdleSinceReturnsBool(t *testing.T) {
+	m := NewWorkerMap()
+	m.Set("w1", ActiveWorker{
+		AppID:     "app-a",
+		IdleSince: time.Now().Add(-5 * time.Minute),
+	})
+	m.Set("w2", ActiveWorker{AppID: "app-b"}) // not idle
+
+	// Clearing an idle worker returns true.
+	if wasIdle := m.ClearIdleSince("w1"); !wasIdle {
+		t.Error("expected ClearIdleSince to return true for idle worker")
+	}
+
+	// Clearing a non-idle worker returns false.
+	if wasIdle := m.ClearIdleSince("w2"); wasIdle {
+		t.Error("expected ClearIdleSince to return false for non-idle worker")
+	}
+
+	// Clearing nonexistent worker returns false.
+	if wasIdle := m.ClearIdleSince("nonexistent"); wasIdle {
+		t.Error("expected ClearIdleSince to return false for nonexistent worker")
+	}
+
+	// After clearing, the worker is no longer idle.
+	if wasIdle := m.ClearIdleSince("w1"); wasIdle {
+		t.Error("expected ClearIdleSince to return false after already cleared")
 	}
 }

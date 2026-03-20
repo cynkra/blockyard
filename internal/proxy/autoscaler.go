@@ -15,11 +15,11 @@ import (
 // On each tick it:
 //   - Sweeps sessions that have been idle longer than the configured TTL.
 //   - Marks workers with zero sessions as idle (sets IdleSince).
-//   - Evicts workers that have been idle beyond idle_worker_timeout,
-//     keeping at least one worker per app (no scale-to-zero).
+//   - Evicts workers that have been idle beyond idle_worker_timeout.
 //   - Evicts workers that have crashed (health check fails).
 //   - Spawns a new worker if all existing workers are at capacity and
 //     the per-app and global limits allow it (eager scale-up).
+//   - Maintains pre-warmed worker pools for configured apps.
 //
 // Blocks until ctx is cancelled.
 func RunAutoscaler(ctx context.Context, srv *server.Server) {
@@ -94,6 +94,13 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 
 		tryScaleUp(ctx, srv, app, workerIDs)
 	}
+
+	// Pre-warming: maintain warm pools for all configured apps.
+	// This runs after eviction so deficit counts are accurate.
+	// Also checks apps that currently have zero workers (not in
+	// appIDs above) — they may have pre_warmed_seats > 0 and need
+	// workers spawned from scratch.
+	preWarmApps(ctx, srv)
 }
 
 // evictUnhealthy checks each worker's health and evicts any that have
@@ -143,6 +150,75 @@ func tryScaleUp(ctx context.Context, srv *server.Server, app *db.AppRow, workerI
 	if err != nil {
 		slog.Warn("autoscaler: scale-up failed",
 			"app_id", app.ID, "error", err)
+	}
+}
+
+// preWarmApps checks all apps with pre_warmed_seats > 0 and spawns
+// standby workers to maintain the target pool size. Runs on each
+// autoscaler tick as a safety net for the event-driven trigger.
+func preWarmApps(ctx context.Context, srv *server.Server) {
+	apps, err := srv.DB.ListPreWarmedApps()
+	if err != nil {
+		slog.Warn("pre-warm: list apps failed", "error", err)
+		return
+	}
+	for _, app := range apps {
+		if srv.Workers.IsDraining(app.ID) {
+			continue
+		}
+		ensurePreWarmed(ctx, srv, &app)
+	}
+}
+
+// ensurePreWarmed spawns workers to maintain the pre-warmed pool for an
+// app. Called from both the autoscaler tick and the proxy handler (when
+// a warm worker is claimed). Respects per-app and global worker limits.
+// Spawns are routed through spawnGroup to deduplicate against concurrent
+// callers (event-driven trigger vs autoscaler tick) and the loading page
+// triggerSpawn path.
+func ensurePreWarmed(ctx context.Context, srv *server.Server, app *db.AppRow) {
+	if app.PreWarmedSeats <= 0 {
+		return
+	}
+
+	// Count non-draining workers with zero sessions (the idle pool).
+	idleCount := 0
+	for _, wid := range srv.Workers.ForAppAvailable(app.ID) {
+		if srv.Sessions.CountForWorker(wid) == 0 {
+			idleCount++
+		}
+	}
+
+	deficit := app.PreWarmedSeats - idleCount
+	if deficit <= 0 {
+		return
+	}
+
+	// Per-app limit check.
+	currentWorkers := len(srv.Workers.ForAppAvailable(app.ID))
+	for i := 0; i < deficit; i++ {
+		if app.MaxWorkersPerApp != nil && currentWorkers >= *app.MaxWorkersPerApp {
+			slog.Debug("pre-warm: per-app limit reached",
+				"app_id", app.ID, "limit", *app.MaxWorkersPerApp)
+			break
+		}
+		if srv.Workers.Count() >= srv.Config.Proxy.MaxWorkers {
+			slog.Debug("pre-warm: global limit reached",
+				"app_id", app.ID, "limit", srv.Config.Proxy.MaxWorkers)
+			break
+		}
+
+		slog.Info("pre-warm: spawning standby worker",
+			"app_id", app.ID, "deficit", deficit-i)
+		_, _, err := spawnGroup.do(app.ID, func() (string, string, error) {
+			return spawnWorker(ctx, srv, app)
+		})
+		if err != nil {
+			slog.Warn("pre-warm: spawn failed",
+				"app_id", app.ID, "error", err)
+			break
+		}
+		currentWorkers++
 	}
 }
 

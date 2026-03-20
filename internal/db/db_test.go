@@ -1409,6 +1409,75 @@ func TestRestoreWithNameCollision(t *testing.T) {
 	})
 }
 
+// --- Pre-warming tests ---
+
+func TestCreateAppDefaultPreWarmedSeats(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, err := db.CreateApp("warm-app", "admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if app.PreWarmedSeats != 0 {
+			t.Errorf("expected pre_warmed_seats=0, got %d", app.PreWarmedSeats)
+		}
+	})
+}
+
+func TestUpdateAppPreWarmedSeats(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("warm-app", "admin")
+
+		seats := 2
+		updated, err := db.UpdateApp(app.ID, AppUpdate{
+			PreWarmedSeats: &seats,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.PreWarmedSeats != 2 {
+			t.Errorf("expected pre_warmed_seats=2, got %d", updated.PreWarmedSeats)
+		}
+	})
+}
+
+func TestListPreWarmedApps(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("warm-app", "admin")
+		db.CreateApp("cold-app", "admin")
+
+		seats := 1
+		db.UpdateApp(app1.ID, AppUpdate{PreWarmedSeats: &seats})
+
+		apps, err := db.ListPreWarmedApps()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(apps) != 1 {
+			t.Fatalf("expected 1 pre-warmed app, got %d", len(apps))
+		}
+		if apps[0].ID != app1.ID {
+			t.Errorf("expected app %s, got %s", app1.ID, apps[0].ID)
+		}
+	})
+}
+
+func TestListPreWarmedAppsExcludesDeleted(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("warm-app", "admin")
+		seats := 1
+		db.UpdateApp(app.ID, AppUpdate{PreWarmedSeats: &seats})
+		db.SoftDeleteApp(app.ID)
+
+		apps, err := db.ListPreWarmedApps()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(apps) != 0 {
+			t.Errorf("expected 0 pre-warmed apps (deleted excluded), got %d", len(apps))
+		}
+	})
+}
+
 func TestGetAppByNameExcludesDeleted(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
