@@ -1,22 +1,61 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
   merge_group:
   workflow_call:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Run a single job (leave empty for all)"
+        type: choice
+        options:
+          - ""
+          - check
+          - docker
+          - idp
+          - openbao
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'check')
     runs-on: ubuntu-latest
-    if: github.event_name != 'merge_group'
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: blockyard
+          POSTGRES_PASSWORD: blockyard
+          POSTGRES_DB: blockyard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blockyard"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      BLOCKYARD_TEST_POSTGRES_URL: postgres://blockyard:blockyard@localhost:5432/blockyard_test?sslmode=disable
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
-      - run: go vet ./...
+          go-version-file: go.mod
+      - name: Verify Go version consistency
+        run: |
+          GO_MINOR=$(awk '/^go /{print $2}' go.mod | grep -oP '^\d+\.\d+')
+          for f in docker/server.Dockerfile .devcontainer/Dockerfile; do
+            if ! grep -qP "golang:${GO_MINOR}|GO_VERSION=${GO_MINOR}" "$f"; then
+              echo "::error file=$f::Go version mismatch — expected $GO_MINOR (from go.mod)" && exit 1
+            fi
+          done
+      - uses: golangci/golangci-lint-action@v7
+      - name: Check for known vulnerabilities
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
       - run: go test -coverprofile=coverage-check.out ./...
       - uses: actions/upload-artifact@v7
         with:
@@ -26,14 +65,14 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     needs: [check]
-    if: github.event_name != 'merge_group'
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'docker')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
       - run: docker pull alpine:latest && docker pull ghcr.io/rocker-org/r-ver:latest && docker pull ghcr.io/rocker-org/r-ver:4.4.3
-      - run: sudo go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
+      - run: sudo --preserve-env=PATH go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker
@@ -42,12 +81,12 @@ jobs:
   idp:
     runs-on: ubuntu-latest
     needs: [check]
-    if: github.event_name != 'merge_group'
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'idp')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
       - run: docker pull quay.io/keycloak/keycloak:26.0
       - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./... ./internal/auth/...
       - uses: actions/upload-artifact@v7
@@ -58,12 +97,12 @@ jobs:
   openbao:
     runs-on: ubuntu-latest
     needs: [check]
-    if: github.event_name != 'merge_group'
+    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'openbao')
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
       - run: docker pull ghcr.io/openbao/openbao:latest
       - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./... ./internal/integration/...
       - uses: actions/upload-artifact@v7
@@ -71,68 +110,32 @@ jobs:
           name: coverage-openbao
           path: coverage-openbao.out
 
-  e2e:
+  coverage:
     runs-on: ubuntu-latest
-    if: github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    timeout-minutes: 25
+    if: github.event_name != 'merge_group' && inputs.job == ''
+    needs: [check, docker, idp, openbao]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
-      - name: Build blockyard image from source
-        run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
-      - name: Pre-pull images used by examples
-        run: |
-          docker pull dexidp/dex:v2.41.1
-          docker pull ghcr.io/openbao/openbao:latest
-          docker pull ghcr.io/rocker-org/r-ver:4.4.3
-      - name: Block cloud metadata endpoint for containers
-        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
-      - name: Run e2e tests
-        run: sudo go test -v -tags e2e -timeout 20m ./e2e/...
-      - name: Dump compose logs on failure
-        if: failure()
-        run: |
-          for dir in examples/hello-shiny examples/hello-blockr; do
-            echo "=== $dir ==="
-            docker compose -f "$dir/docker-compose.yml" logs --no-color 2>/dev/null || true
-            docker compose -f "$dir/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
-          done
-
-  publish-latest:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: [e2e]
-    permissions:
-      packages: write
-    steps:
-      - uses: actions/checkout@v6
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/server.Dockerfile
-          push: true
-          tags: ghcr.io/cynkra/blockyard:latest
-
-  coverage:
-    runs-on: ubuntu-latest
-    needs: [check, docker, idp, openbao]
-    if: github.event_name != 'merge_group'
-    steps:
-      - uses: actions/checkout@v6
+          go-version-file: go.mod
       - uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           merge-multiple: true
+      - name: Enforce 80% coverage threshold
+        run: |
+          head -1 coverage-check.out > merged.out
+          tail -n +2 -q coverage-*.out | sort -u >> merged.out
+          TOTAL=$(go tool cover -func=merged.out | grep ^total: | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${TOTAL}%"
+          if [ "$(echo "$TOTAL < 80" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${TOTAL}% is below 80% threshold"
+            exit 1
+          fi
       - uses: codecov/codecov-action@v5
+        if: always()
         with:
           files: coverage-check.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out
           flags: unit,docker,idp,openbao
-          fail_ci_if_error: true
+          fail_ci_if_error: false

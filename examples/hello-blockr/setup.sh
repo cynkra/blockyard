@@ -6,7 +6,7 @@
 # Runs as a one-shot init container after OpenBao, Dex, and PocketBase
 # are started.
 #
-set -eu
+set -eux
 
 BAO_ADDR="${BAO_ADDR:-http://openbao:8200}"
 BAO_TOKEN="${BAO_TOKEN:-root-dev-token}"
@@ -25,7 +25,7 @@ bao_header="-H X-Vault-Token:${BAO_TOKEN} -H Content-Type:application/json"
 bao_post() {
   path="$1"; shift
   # shellcheck disable=SC2086
-  curl -sf $bao_header -X POST "${BAO_ADDR}${path}" "$@"
+  curl -f --show-error $bao_header -X POST "${BAO_ADDR}${path}" "$@"
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -39,6 +39,19 @@ for i in $(seq 1 60); do
   fi
   if [ "$i" -eq 60 ]; then
     echo "ERROR: Dex did not become ready" >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "    OK"
+
+echo "==> Waiting for OpenBao API..."
+for i in $(seq 1 30); do
+  if curl -sf -H "X-Vault-Token:${BAO_TOKEN}" "${BAO_ADDR}/v1/sys/health" > /dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "ERROR: OpenBao API did not become ready" >&2
     exit 1
   fi
   sleep 1
@@ -59,7 +72,7 @@ echo "    OK"
 
 echo "==> Creating blockyard-user policy..."
 bao_post /v1/sys/policy/blockyard-user -d '{
-  "policy": "path \"secret/data/users/{{identity.entity.aliases.auth_jwt_*.name}}/*\" {\n  capabilities = [\"read\"]\n}"
+  "policy": "path \"secret/data/users/{{identity.entity.aliases.auth_jwt_*.name}}/*\" {\n  capabilities = [\"read\"]\n}\npath \"auth/token/lookup-self\" {\n  capabilities = [\"read\"]\n}"
 }'
 echo "    OK"
 
@@ -68,6 +81,7 @@ bao_post /v1/auth/jwt/role/blockyard-user -d '{
   "role_type":       "jwt",
   "bound_audiences": ["blockyard"],
   "user_claim":      "sub",
+  "claim_mappings":  {"sub": "sub"},
   "token_policies":  ["blockyard-user"],
   "token_ttl":       "1h"
 }'
@@ -121,7 +135,7 @@ done
 echo "    OK"
 
 echo "==> Creating PocketBase superuser..."
-curl -sf -X POST "${PB_URL}/api/collections/_superusers/records" \
+curl -f --show-error -X POST "${PB_URL}/api/collections/_superusers/records" \
   -H "Content-Type: application/json" \
   -d "{
     \"email\":           \"${PB_ADMIN_EMAIL}\",
@@ -131,7 +145,7 @@ curl -sf -X POST "${PB_URL}/api/collections/_superusers/records" \
 echo "    OK"
 
 echo "==> Authenticating as PocketBase superuser..."
-PB_AUTH=$(curl -sf -X POST "${PB_URL}/api/collections/_superusers/auth-with-password" \
+PB_AUTH=$(curl -f --show-error -X POST "${PB_URL}/api/collections/_superusers/auth-with-password" \
   -H "Content-Type: application/json" \
   -d "{\"identity\":\"${PB_ADMIN_EMAIL}\",\"password\":\"${PB_ADMIN_PASSWORD}\"}")
 PB_TOKEN=$(echo "$PB_AUTH" | grep -o '"token":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -146,7 +160,14 @@ pb_header="-H Authorization:${PB_TOKEN} -H Content-Type:application/json"
 pb_req() {
   method="$1"; path="$2"; shift 2
   # shellcheck disable=SC2086
-  curl -sf $pb_header -X "$method" "${PB_URL}${path}" "$@"
+  RESP=$(curl -s -w "\n%{http_code}" $pb_header -X "$method" "${PB_URL}${path}" "$@")
+  HTTP_CODE=$(echo "$RESP" | tail -1)
+  BODY=$(echo "$RESP" | sed '$d')
+  if [ "$HTTP_CODE" -ge 400 ]; then
+    echo "ERROR: ${method} ${path} returned ${HTTP_CODE}: ${BODY}" >&2
+    return 1
+  fi
+  echo "$BODY"
 }
 
 echo "==> Creating demo users in PocketBase..."
@@ -186,12 +207,13 @@ BOARDS_PAYLOAD=$(cat <<PAYLOAD
   "type": "base",
   "fields": [
     {"name": "name", "type": "text", "required": true},
-    {"name": "data", "type": "json", "required": true},
     {"name": "owner", "type": "relation", "required": true, "collectionId": "${USERS_ID}", "maxSelect": 1},
-    {"name": "shared_with", "type": "relation", "collectionId": "${USERS_ID}"}
+    {"name": "shared_with", "type": "relation", "collectionId": "${USERS_ID}"},
+    {"name": "acl_type", "type": "select", "required": true, "values": ["private", "restricted", "public"]},
+    {"name": "tags", "type": "json"}
   ],
-  "listRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",
-  "viewRule": "owner = @request.auth.id || shared_with ?= @request.auth.id",
+  "listRule": "owner = @request.auth.id || (acl_type = 'restricted' && shared_with ?= @request.auth.id) || acl_type = 'public'",
+  "viewRule": "owner = @request.auth.id || (acl_type = 'restricted' && shared_with ?= @request.auth.id) || acl_type = 'public'",
   "createRule": "owner = @request.auth.id",
   "updateRule": "owner = @request.auth.id",
   "deleteRule": "owner = @request.auth.id"
@@ -199,6 +221,32 @@ BOARDS_PAYLOAD=$(cat <<PAYLOAD
 PAYLOAD
 )
 pb_req POST /api/collections -d "$BOARDS_PAYLOAD" > /dev/null
+echo "    OK"
+
+echo "==> Getting boards collection ID..."
+BOARDS_COL=$(pb_req GET /api/collections/boards)
+BOARDS_ID=$(echo "$BOARDS_COL" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "    id=${BOARDS_ID}"
+
+echo "==> Creating board_versions collection..."
+VERSIONS_PAYLOAD=$(cat <<PAYLOAD
+{
+  "name": "board_versions",
+  "type": "base",
+  "fields": [
+    {"name": "board", "type": "relation", "required": true, "collectionId": "${BOARDS_ID}", "maxSelect": 1, "cascadeDelete": true},
+    {"name": "data", "type": "json", "required": true},
+    {"name": "metadata", "type": "json", "required": true}
+  ],
+  "listRule": "board.owner = @request.auth.id || (board.acl_type = 'restricted' && board.shared_with ?= @request.auth.id) || board.acl_type = 'public'",
+  "viewRule": "board.owner = @request.auth.id || (board.acl_type = 'restricted' && board.shared_with ?= @request.auth.id) || board.acl_type = 'public'",
+  "createRule": "board.owner = @request.auth.id",
+  "updateRule": "",
+  "deleteRule": "board.owner = @request.auth.id"
+}
+PAYLOAD
+)
+pb_req POST /api/collections -d "$VERSIONS_PAYLOAD" > /dev/null
 echo "    OK"
 
 echo "==> PocketBase configured."

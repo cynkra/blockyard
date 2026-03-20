@@ -60,7 +60,7 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 		},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,6 +810,9 @@ func TestRevokeAllTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create token %q: expected 201, got %d", name, resp.StatusCode)
+		}
 	}
 
 	// Revoke all.

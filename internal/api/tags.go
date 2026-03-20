@@ -31,12 +31,9 @@ func ListTags(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		resp := make([]tagResponse, len(tags))
-		for i, t := range tags {
-			resp[i] = tagResponse{ID: t.ID, Name: t.Name, CreatedAt: t.CreatedAt}
-		}
-		if resp == nil {
-			resp = []tagResponse{}
+		resp := make([]tagResponse, 0, len(tags))
+		for _, t := range tags {
+			resp = append(resp, tagResponse{ID: t.ID, Name: t.Name, CreatedAt: t.CreatedAt})
 		}
 
 		w.Header().Set("Content-Type", "application/json")

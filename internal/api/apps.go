@@ -481,14 +481,20 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 		slog.Info("starting app via API",
 			"app_id", app.ID, "name", app.Name, "worker_id", workerID)
 
-		if err := srv.Backend.Spawn(r.Context(), spec); err != nil {
+		// Use a dedicated context so client disconnects don't cancel
+		// Docker operations mid-flight.
+		spawnCtx, spawnCancel := context.WithTimeout(context.Background(),
+			srv.Config.Proxy.WorkerStartTimeout.Duration)
+		defer spawnCancel()
+
+		if err := srv.Backend.Spawn(spawnCtx, spec); err != nil {
 			serverError(w, "spawn worker: "+err.Error())
 			return
 		}
 
 		srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID})
 
-		addr, err := srv.Backend.Addr(r.Context(), workerID)
+		addr, err := srv.Backend.Addr(spawnCtx, workerID)
 		if err != nil {
 			slog.Warn("failed to get worker address", "worker_id", workerID, "error", err)
 		} else {
@@ -499,10 +505,10 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 		ops.SpawnLogCapture(context.Background(), srv, workerID, app.ID)
 
 		// Wait for the worker to become healthy before reporting success.
-		if err := pollWorkerHealthy(r.Context(), srv, workerID); err != nil {
+		if err := pollWorkerHealthy(spawnCtx, srv, workerID); err != nil {
 			srv.Workers.Delete(workerID)
 			srv.Registry.Delete(workerID)
-			srv.Backend.Stop(context.Background(), workerID)
+			srv.Backend.Stop(context.Background(), workerID) //nolint:errcheck // best-effort cleanup
 			serviceUnavailable(w, "worker failed to start: "+err.Error())
 			return
 		}
@@ -711,10 +717,8 @@ func floatOrZero(f *float64) float64 {
 }
 
 // pollWorkerHealthy polls the backend health check with exponential backoff
-// until the worker is healthy or worker_start_timeout expires.
+// until the worker is healthy or the context expires (worker_start_timeout).
 func pollWorkerHealthy(ctx context.Context, srv *server.Server, workerID string) error {
-	timeout := srv.Config.Proxy.WorkerStartTimeout.Duration
-	deadline := time.Now().Add(timeout)
 	interval := 100 * time.Millisecond
 	maxInterval := 2 * time.Second
 
@@ -722,12 +726,9 @@ func pollWorkerHealthy(ctx context.Context, srv *server.Server, workerID string)
 		if srv.Backend.HealthCheck(ctx, workerID) {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("worker did not become healthy within %s", timeout)
-		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("worker did not become healthy within timeout")
 		case <-time.After(interval):
 		}
 		interval = min(interval*2, maxInterval)

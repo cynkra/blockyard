@@ -1,0 +1,67 @@
+name: Merge
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Run a single e2e test (leave empty for all)"
+        type: choice
+        options:
+          - ""
+          - TestHelloShiny
+          - TestHelloBlockr
+
+jobs:
+  run:
+    name: ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(
+          inputs.test == 'TestHelloShiny'  && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
+          inputs.test == 'TestHelloBlockr' && '[{"example":"hello-blockr","test":"TestHelloBlockr"}]' ||
+          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-blockr","test":"TestHelloBlockr"}]'
+          ) }}
+    steps:
+      - uses: actions/checkout@v6
+        if: github.event_name != 'pull_request'
+      - uses: actions/setup-go@v6
+        if: github.event_name != 'pull_request'
+        with:
+          go-version-file: go.mod
+      - name: Build blockyard image from source
+        if: github.event_name != 'pull_request'
+        run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
+      - name: Pre-pull images used by examples
+        if: github.event_name != 'pull_request'
+        run: |
+          docker pull dexidp/dex:v2.41.1
+          docker pull ghcr.io/openbao/openbao:latest
+          docker pull ghcr.io/rocker-org/r-ver:4.4.3
+      - name: Block cloud metadata endpoint for containers
+        if: github.event_name != 'pull_request'
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
+      - name: Run e2e tests
+        if: github.event_name != 'pull_request'
+        run: sudo --preserve-env=PATH go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
+      - name: Dump compose logs on failure
+        if: failure()
+        run: |
+          docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
+          docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
+
+  e2e:
+    if: always()
+    needs: [run]
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.run.result != 'success'
+        run: |
+          echo "::error::e2e failed (run result: ${{ needs.run.result }})"
+          exit 1
+      - run: echo "All e2e tests passed."

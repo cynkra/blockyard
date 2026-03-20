@@ -47,7 +47,7 @@ func TestHelloBlockr(t *testing.T) {
 		client1 = &APIClient{BaseURL: baseURL, Token: token1}
 
 		appID = client1.CreateApp(t, "hello-blockr")
-		client1.UpdateApp(t, appID, `{"access_type":"logged_in"}`)
+		client1.UpdateApp(t, appID, `{"access_type":"logged_in","max_sessions_per_worker":10}`)
 
 		bundle := makeBundle(t, "../examples/hello-blockr/app")
 		taskID, _ := client1.UploadBundle(t, appID, bundle)

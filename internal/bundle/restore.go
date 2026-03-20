@@ -168,6 +168,9 @@ func runRestore(p RestoreParams) error {
 		return fmt.Errorf("build: %w", err)
 	}
 	if !result.Success {
+		slog.Error("build container failed",
+			"app_id", p.AppID, "bundle_id", p.BundleID,
+			"exit_code", result.ExitCode, "logs", result.Logs)
 		return fmt.Errorf("build failed with exit code %d", result.ExitCode)
 	}
 

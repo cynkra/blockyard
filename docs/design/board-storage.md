@@ -104,6 +104,7 @@ CREATE TABLE board_versions (
     owner_sub   TEXT NOT NULL,
     board_id    TEXT NOT NULL,
     data        JSONB NOT NULL,
+    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ DEFAULT now(),
     FOREIGN KEY (owner_sub, board_id)
         REFERENCES boards(owner_sub, board_id) ON DELETE CASCADE
@@ -213,11 +214,12 @@ only credential needed — no vault token required for board storage.
 
 ```
 Save:    POST   /boards          { owner_sub, board_id }
-                                 → creates board metadata
-         POST   /board_versions  { owner_sub, board_id, data }
+                                 → creates board metadata (upsert)
+         POST   /board_versions  { owner_sub, board_id, data, metadata }
                                  → creates versioned snapshot
 Load:    GET    /board_versions?owner_sub=eq.{sub}&board_id=eq.{id}
                                  &order=created_at.desc&limit=1
+                                 → returns data + metadata
 List:    GET    /boards          (RLS filters automatically)
 Delete:  DELETE /boards?owner_sub=eq.{sub}&board_id=eq.{id}
 Share:   POST   /board_shares   { owner_sub, board_id, shared_with_sub }
@@ -316,6 +318,266 @@ R app at runtime. No blockyard code changes are needed.
 | S3 / MinIO            | Access key → vault   | Bucket policies (limited) | Via object versions |
 | Gitea                 | User + token → vault | Collaborators (per-repo)  | Git history |
 | Vault KV v2           | None (existing token)| Broadcast only (no targeted sharing) | Built-in |
+
+## Rack API Contract
+
+The rack API is a backend-agnostic interface for board storage in
+blockr. It defines the operations any storage backend must support,
+and uses S3 dispatch to route calls to backend-specific
+implementations. The contract below specifies what backends must
+implement; the internal behavior of each operation (error handling,
+notifications, caching) is the rack layer's responsibility.
+
+### Operations
+
+All rack operations at a glance, grouped by concern. Operations that
+produce board references dispatch on `backend`; operations that
+consume them dispatch on `id`.
+
+```r
+# Board CRUD
+rack_list(backend, ..., tags = NULL)          → list of rack_id
+rack_save(backend, data, ..., name,
+          metadata = list())                  → rack_id (with version)
+rack_load(id, backend)                        → board data (R list)
+rack_delete(id, backend)                      → invisible
+rack_purge(id, backend)                       → invisible
+
+# Versioning
+rack_info(id, backend)                        → data.frame(version, created, hash)
+
+# Tags
+rack_tags(id, backend)                        → character vector
+rack_set_tags(id, backend, tags)              → invisible
+
+# Visibility
+rack_acl(id, backend)                         → "private" | "restricted" | "public"
+rack_set_acl(id, backend, acl_type)           → invisible
+
+# Sharing
+rack_share(id, backend, with_sub)             → invisible
+rack_unshare(id, backend, with_sub)           → invisible
+rack_shares(id, backend)                      → data.frame(sub, name, email, shared_at)
+
+# User discovery
+rack_find_users(backend, query)               → data.frame(id, name, email)
+
+# Capabilities
+rack_capabilities(backend)                    → named list of logicals
+
+# Board reference accessors (on rack_id)
+display_name(id)                              → character
+last_saved(id, backend)                       → POSIXct
+```
+
+Detailed behavior, return values, and backend-specific implementation
+notes follow in the sections below.
+
+### Board References
+
+A `rack_id` is an opaque reference to a board (and optionally a
+specific version). Each backend defines its own ID shape — callers
+treat IDs as opaque tokens. IDs are produced by `rack_list` and
+`rack_save`, consumed by all other operations.
+
+Examples of backend-specific shapes:
+
+| Backend | Fields |
+|---|---|
+| Pins (local) | name, version |
+| Pins (Connect) | user, name, version |
+| PocketBase | record_id, name |
+| PostgREST | owner_sub, board_id |
+
+Accessor generics on `rack_id`:
+
+- `display_name(id)` — human-readable label for UI display
+- `last_saved(id, backend)` — timestamp of most recent version
+
+### Capabilities
+
+Backends declare which features they support via
+`rack_capabilities(backend)`. The UI checks capabilities before
+rendering feature-specific controls. Backends that don't support a
+feature should error explicitly when the corresponding operation is
+called.
+
+| Capability       | Description                              |
+|------------------|------------------------------------------|
+| `versioning`     | Multiple versions per board              |
+| `tags`           | Per-board labels for filtering           |
+| `metadata`       | Per-version key-value pairs              |
+| `sharing`        | Grant/revoke per-user access             |
+| `visibility`     | ACL modes (private/restricted/public)    |
+| `user_discovery` | Search for users to share with           |
+
+### Board CRUD
+
+```
+rack_list(backend, ..., tags)                → list of rack_id
+rack_save(backend, data, ..., name, metadata) → rack_id (with version)
+rack_load(id, backend)                       → board data (R list)
+rack_delete(id, backend)                     → delete single version
+rack_purge(id, backend)                      → delete board + all versions
+```
+
+`rack_list` dispatches on `backend`. Returns boards the current user
+owns or has been shared with. Optional `tags` parameter filters by
+tag.
+
+`rack_save` dispatches on `backend`. Creates a new version of the
+board. The `metadata` parameter is a named list of arbitrary
+key-value pairs (see [Data and Metadata](#data-and-metadata)).
+Returns a `rack_id` with the newly created version.
+
+`rack_load` dispatches on `id`. If the ID includes a version, loads
+that specific version. Otherwise loads the latest. Reads
+`metadata$format` to dispatch deserialization.
+
+`rack_delete` dispatches on `id`. If the ID includes a version,
+deletes that version. If no version, deletes the most recent.
+
+`rack_purge` dispatches on `id`. Deletes the board and all its
+versions, shares, and tags.
+
+### Versioning
+
+```
+rack_info(id, backend)  → data.frame(version, created, hash)
+```
+
+Dispatches on `id`. Returns the version history for a board, sorted
+newest-first. Backends that don't support versioning return a
+single-row data frame representing the current state.
+
+### Data and Metadata
+
+Each version stores two things:
+
+- **data** — the board content, an opaque blob. Currently JSON;
+  future formats (binary, CRDT) are possible. The rack layer
+  handles serialization via `serialize_board()` / `restore_board()`.
+- **metadata** — a named list of arbitrary key-value pairs.
+  Open-ended so new keys can be added without schema changes.
+
+Currently defined metadata keys:
+
+| Key      | Purpose                                           |
+|----------|---------------------------------------------------|
+| `format` | Serialization format (`"v1"`) for deserialization |
+
+Future keys (blockr version, description, author notes, etc.) slot
+in without backend changes.
+
+Backend storage:
+
+| Backend    | metadata storage                                    |
+|------------|-----------------------------------------------------|
+| Pins       | `pin_upload(..., metadata = list(format = "v1"))` — stored in pin metadata, read via `pin_meta(...)$user` |
+| PostgREST  | `metadata JSONB` column on `board_versions`         |
+| PocketBase | `metadata` JSON field on `board_versions` collection |
+
+### Tags
+
+```
+rack_tags(id, backend)            → character vector
+rack_set_tags(id, backend, tags)  → replace all tags
+```
+
+Tags are per-board (not per-version) labels for discovery and
+filtering. `rack_list` accepts an optional `tags` parameter to
+filter results.
+
+Backend storage:
+
+| Backend    | tags storage                                        |
+|------------|-----------------------------------------------------|
+| Pins       | Pin tags (merged with blockr session marker tags)   |
+| PostgREST  | `tags TEXT[]` column on `boards` table              |
+| PocketBase | `tags` JSON field on `boards` collection            |
+
+Note: the pins backend uses special session marker tags
+(`blockr_session_tags()`) to distinguish blockr boards from other
+pins. These are a pins-specific concern — database backends don't
+need them because the `boards` table contains only blockr boards by
+definition. The rack layer handles merging/stripping session markers
+transparently.
+
+### Visibility
+
+```
+rack_acl(id, backend)                   → "private" | "restricted" | "public"
+rack_set_acl(id, backend, acl_type)
+```
+
+Three modes:
+
+| Mode         | Who can read                        |
+|--------------|-------------------------------------|
+| `private`    | Owner only. Default.                |
+| `restricted` | Owner + explicitly shared users.    |
+| `public`     | Any authenticated user.             |
+
+Backends that don't support visibility always return `"private"`.
+
+Backend implementation:
+
+| Backend    | Mechanism                                            |
+|------------|------------------------------------------------------|
+| PostgREST  | `acl_type` column on `boards`, enforced by RLS       |
+| PocketBase | `acl_type` field on `boards`, enforced by record rules |
+| Connect    | Content access type via Connect API                  |
+| Local pins | Always private (not supported)                       |
+
+### Sharing
+
+```
+rack_share(id, backend, with_sub)
+rack_unshare(id, backend, with_sub)
+rack_shares(id, backend)       → data.frame(sub, name, email, shared_at)
+```
+
+All dispatch on `id`. Only the board owner can share/unshare.
+`rack_shares` returns information about users who currently have
+access.
+
+Backend implementation:
+
+| Backend    | Share mechanism                                      |
+|------------|------------------------------------------------------|
+| PostgREST  | CRUD on `board_shares` table via REST                |
+| PocketBase | PATCH `shared_with` multi-relation field on board    |
+| Connect    | `POST/DELETE /v1/content/{guid}/permissions`         |
+| Local pins | Not supported (error)                                |
+
+### User Discovery
+
+```
+rack_find_users(backend, query)  → data.frame(id, name, email)
+```
+
+Dispatches on `backend`. Searches for users matching `query`
+(prefix/substring match on name or email). Used by the sharing UI
+to let users find others to share with.
+
+| Backend    | Mechanism                                            |
+|------------|------------------------------------------------------|
+| Connect    | `GET /v1/users?prefix=...` — available to any authenticated user |
+| PocketBase | `GET /api/collections/users/records?filter=...`      |
+| PostgREST  | `GET /users?name=like.*query*` — self-populating table (users recorded on first interaction) |
+| Local pins | Not supported                                        |
+
+### Backend Summary
+
+| Feature        | Pins (local) | Pins (Connect) | PocketBase | PostgREST     |
+|----------------|:---:|:---:|:---:|:---:|
+| Board CRUD     | ✓ | ✓ | ✓ | ✓ |
+| Versioning     | ✓ | ✓ | ✓ | ✓ |
+| Metadata       | ✓ | ✓ | ✓ | ✓ |
+| Tags           | ✓ | ✓ | ✓ | ✓ |
+| Visibility     | — | via Connect ACL | ✓ | ✓ (RLS) |
+| Sharing        | — | via Connect API | ✓ | ✓ (RLS) |
+| User discovery | — | via Connect API | ✓ | ✓ (users table) |
 
 ## Appendix: Real-Time Collaborative Editing
 

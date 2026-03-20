@@ -28,9 +28,17 @@ import (
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "blockyard.toml", "path to config file")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -61,7 +69,7 @@ func main() {
 	}
 
 	// Initialize database
-	database, err := db.Open(cfg.Database.Path)
+	database, err := db.Open(cfg.Database)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
@@ -295,7 +303,7 @@ func main() {
 
 	// 4. Flush tracing spans
 	if tracingShutdown != nil {
-		tracingShutdown(context.Background())
+		tracingShutdown(context.Background()) //nolint:errcheck // best-effort flush during shutdown
 	}
 
 	slog.Info("shutdown complete")

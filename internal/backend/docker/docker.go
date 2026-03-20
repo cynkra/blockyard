@@ -197,7 +197,7 @@ func networkLabels(appID, workerID string) map[string]string {
 // --- Image pulling ---
 
 func (d *DockerBackend) ensureImage(ctx context.Context, img string) error {
-	_, _, err := d.client.ImageInspectWithRaw(ctx, img)
+	_, err := d.client.ImageInspect(ctx, img)
 	if err == nil {
 		return nil // already present
 	}
@@ -668,7 +668,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		return backend.BuildResult{}, fmt.Errorf("build: %w", err)
 	}
 	defer func() {
-		d.client.NetworkRemove(ctx, buildNetworkName)
+		d.client.NetworkRemove(ctx, buildNetworkName) //nolint:errcheck // best-effort cleanup
 	}()
 
 	if err := d.blockMetadataEndpoint(ctx, buildNetworkName, "build-"+spec.BundleID); err != nil {

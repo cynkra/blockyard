@@ -38,7 +38,7 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 		},
 	}
 
-	database, err := db.Open(":memory:")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}

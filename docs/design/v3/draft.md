@@ -32,6 +32,12 @@ Documentation and tooling for running the process backend directly on a
 Linux host without an outer container. Operator provisions R, bwrap, and
 system libraries.
 
+**CI note:** The release workflow currently produces a single
+`linux/amd64` binary. For the native deployment mode, multi-platform
+release binaries will be needed (`linux/amd64`, `linux/arm64`,
+`darwin/amd64`, `darwin/arm64`). Go cross-compilation makes this
+straightforward — no special runners required.
+
 ### Custom Seccomp Profile
 
 A JSON seccomp profile based on Docker's default, adding `CLONE_NEWUSER`

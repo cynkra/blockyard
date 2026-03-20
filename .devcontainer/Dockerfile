@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libsqlite3-dev \
     openssh-client \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
@@ -33,7 +34,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go
-ARG GO_VERSION=1.24.1
+ARG GO_VERSION=1.25.8
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz \
       | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"

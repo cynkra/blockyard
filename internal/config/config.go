@@ -62,7 +62,9 @@ type StorageConfig struct {
 }
 
 type DatabaseConfig struct {
-	Path string `toml:"path"`
+	Driver string `toml:"driver"` // "sqlite" (default) or "postgres"
+	Path   string `toml:"path"`   // used when driver = "sqlite"
+	URL    string `toml:"url"`    // PostgreSQL connection string; used when driver = "postgres"
 }
 
 type ProxyConfig struct {
@@ -155,6 +157,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Storage.BundleServerPath == "" {
 		cfg.Storage.BundleServerPath = "/data/bundles"
+	}
+	if cfg.Database.Driver == "" {
+		cfg.Database.Driver = "sqlite"
 	}
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = "/data/db/blockyard.db"
@@ -260,10 +265,6 @@ var (
 	secretType           = reflect.TypeOf(Secret{})
 	secretPtrType        = reflect.TypeOf((*Secret)(nil))
 	stringSliceType      = reflect.TypeOf([]string{})
-	oidcCfgPtrType       = reflect.TypeOf((*OidcConfig)(nil))
-	openbaoCfgPtrType    = reflect.TypeOf((*OpenbaoConfig)(nil))
-	auditCfgPtrType      = reflect.TypeOf((*AuditConfig)(nil))
-	telemetryCfgPtrType  = reflect.TypeOf((*TelemetryConfig)(nil))
 )
 
 func applyEnvToStruct(v reflect.Value, prefix string) {
@@ -415,9 +416,19 @@ func validate(cfg *Config) error {
 	if err := ensureDirWritable(cfg.Storage.BundleServerPath, "storage.bundle_server_path"); err != nil {
 		return err
 	}
-	dbDir := filepath.Dir(cfg.Database.Path)
-	if err := ensureDirWritable(dbDir, "database.path parent directory"); err != nil {
-		return err
+
+	switch cfg.Database.Driver {
+	case "sqlite":
+		dbDir := filepath.Dir(cfg.Database.Path)
+		if err := ensureDirWritable(dbDir, "database.path parent directory"); err != nil {
+			return err
+		}
+	case "postgres":
+		if cfg.Database.URL == "" {
+			return fmt.Errorf("config: database.url is required when driver = \"postgres\"")
+		}
+	default:
+		return fmt.Errorf("config: database.driver must be \"sqlite\" or \"postgres\", got %q", cfg.Database.Driver)
 	}
 
 	return nil
