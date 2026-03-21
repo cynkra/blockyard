@@ -12,8 +12,8 @@ on:
         options:
           - ""
           - TestHelloShiny
-          - TestHelloBlockr
-          - TestHelloBlockrPostgrest
+          - TestHelloPocketbase
+          - TestHelloPostgrest
 
 jobs:
   run:
@@ -25,9 +25,9 @@ jobs:
       matrix:
         include: ${{ fromJSON(
           inputs.test == 'TestHelloShiny'            && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
-          inputs.test == 'TestHelloBlockr'           && '[{"example":"hello-blockr","test":"TestHelloBlockr"}]' ||
-          inputs.test == 'TestHelloBlockrPostgrest'  && '[{"example":"hello-blockr-postgrest","test":"TestHelloBlockrPostgrest"}]' ||
-          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-blockr","test":"TestHelloBlockr"},{"example":"hello-blockr-postgrest","test":"TestHelloBlockrPostgrest"}]'
+          inputs.test == 'TestHelloPocketbase'  && '[{"example":"hello-pocketbase","test":"TestHelloPocketbase"}]' ||
+          inputs.test == 'TestHelloPostgrest'   && '[{"example":"hello-postgrest","test":"TestHelloPostgrest"}]' ||
+          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-pocketbase","test":"TestHelloPocketbase"},{"example":"hello-postgrest","test":"TestHelloPostgrest"}]'
           ) }}
     steps:
       - uses: actions/checkout@v6

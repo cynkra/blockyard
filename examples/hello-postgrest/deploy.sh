@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Deploy the hello-blockr app to blockyard (PostgREST board storage).
+# Deploy the hello-postgrest app to blockyard (PostgREST board storage).
 #
 # Automates the full flow:
 #   1. OIDC login via Dex (using static demo credentials)
@@ -16,7 +16,7 @@ BASE_URL="${BLOCKYARD_URL:-http://localhost:8080}"
 DEX_URL="${DEX_URL:-http://localhost:5556}"
 DEX_EMAIL="demo@example.com"
 DEX_PASSWORD="password"
-APP_NAME="hello-blockr"
+APP_NAME="hello-postgrest"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="${SCRIPT_DIR}/app"

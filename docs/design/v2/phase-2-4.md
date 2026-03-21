@@ -626,8 +626,8 @@ requests fresh PostgREST JWTs as needed.
 
 ## Step 7: Docker compose example
 
-A new `examples/hello-blockr-postgrest/` directory alongside the
-existing `examples/hello-blockr/` (PocketBase). The two examples
+A new `examples/hello-postgrest/` directory alongside the
+existing `examples/hello-pocketbase/` (PocketBase). The two examples
 demonstrate different board storage patterns and have fundamentally
 different configurations — the PostgREST example requires PostgreSQL
 as blockyard's primary database, while the PocketBase example uses

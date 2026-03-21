@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-func TestHelloBlockrPostgrest(t *testing.T) {
-	composeUp(t, "../examples/hello-blockr-postgrest/docker-compose.yml")
+func TestHelloPostgrest(t *testing.T) {
+	composeUp(t, "../examples/hello-postgrest/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"
 	dexURL := "http://localhost:5556"
@@ -92,10 +92,10 @@ func TestHelloBlockrPostgrest(t *testing.T) {
 		token1 = createPAT(t, baseURL, cookies1)
 		client1 = &APIClient{BaseURL: baseURL, Token: token1}
 
-		appID = client1.CreateApp(t, "hello-blockr")
+		appID = client1.CreateApp(t, "hello-postgrest")
 		client1.UpdateApp(t, appID, `{"access_type":"logged_in","max_sessions_per_worker":10}`)
 
-		bundle := makeBundle(t, "../examples/hello-blockr-postgrest/app")
+		bundle := makeBundle(t, "../examples/hello-postgrest/app")
 		taskID, _ := client1.UploadBundle(t, appID, bundle)
 		client1.PollTask(t, taskID, 10*time.Minute)
 
@@ -107,7 +107,7 @@ func TestHelloBlockrPostgrest(t *testing.T) {
 			t.Skip("depends on user1_deploy")
 		}
 
-		status, body := fetchAppPage(t, baseURL, "hello-blockr", cookies1, 60*time.Second)
+		status, body := fetchAppPage(t, baseURL, "hello-postgrest", cookies1, 60*time.Second)
 		if status != 200 {
 			t.Fatalf("expected 200, got %d", status)
 		}
@@ -121,7 +121,7 @@ func TestHelloBlockrPostgrest(t *testing.T) {
 			t.Skip("depends on user1_deploy")
 		}
 
-		dialAppWebSocket(t, baseURL, "hello-blockr", cookies1)
+		dialAppWebSocket(t, baseURL, "hello-postgrest", cookies1)
 	})
 
 	t.Run("user2_access", func(t *testing.T) {
@@ -131,7 +131,7 @@ func TestHelloBlockrPostgrest(t *testing.T) {
 
 		cookies2 = dexLogin(t, baseURL, dexURL, dexEmail2, dexPassword)
 
-		status, _ := fetchAppPage(t, baseURL, "hello-blockr", cookies2, 60*time.Second)
+		status, _ := fetchAppPage(t, baseURL, "hello-postgrest", cookies2, 60*time.Second)
 		if status != 200 {
 			t.Fatalf("user2 access: expected 200, got %d", status)
 		}
@@ -142,7 +142,7 @@ func TestHelloBlockrPostgrest(t *testing.T) {
 			t.Skip("depends on user2_access")
 		}
 
-		dialAppWebSocket(t, baseURL, "hello-blockr", cookies2)
+		dialAppWebSocket(t, baseURL, "hello-postgrest", cookies2)
 	})
 
 	t.Run("stop_and_cleanup", func(t *testing.T) {
