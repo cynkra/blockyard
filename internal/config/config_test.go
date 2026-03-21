@@ -1138,6 +1138,194 @@ func TestEnvVarOverrideTelemetryOTLPEndpoint(t *testing.T) {
 	}
 }
 
+// --- Board storage config tests ---
+
+// boardStorageTOML returns a valid config with board_storage, postgres, oidc, and openbao.
+func boardStorageTOML(t *testing.T) string {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	return fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+driver = "postgres"
+url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+
+[oidc]
+issuer_url = "https://idp.example.com"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[openbao]
+address = "https://bao.example.com"
+role_id = "blockyard-server"
+
+[board_storage]
+postgrest_url = "http://postgrest:3000"
+`, bundlePath)
+}
+
+func TestParseBoardStorageConfig(t *testing.T) {
+	cfg := loadFromString(t, boardStorageTOML(t))
+	if cfg.BoardStorage == nil {
+		t.Fatal("expected BoardStorage config to be parsed")
+	}
+	if cfg.BoardStorage.PostgrestURL != "http://postgrest:3000" {
+		t.Errorf("postgrest_url = %q", cfg.BoardStorage.PostgrestURL)
+	}
+}
+
+func TestParseConfigWithoutBoardStorage(t *testing.T) {
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.BoardStorage != nil {
+		t.Error("expected BoardStorage config to be nil when section is absent")
+	}
+}
+
+func TestBoardStorageAutoConstructFromEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+driver = "postgres"
+url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+
+[oidc]
+issuer_url = "https://idp.example.com"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[openbao]
+address = "https://bao.example.com"
+role_id = "blockyard-server"
+`, bundlePath)
+
+	t.Setenv("BLOCKYARD_BOARD_STORAGE_POSTGREST_URL", "http://postgrest:3000")
+	cfg := loadFromString(t, toml)
+	if cfg.BoardStorage == nil {
+		t.Fatal("expected BoardStorage section to be auto-constructed from env vars")
+	}
+	if cfg.BoardStorage.PostgrestURL != "http://postgrest:3000" {
+		t.Errorf("postgrest_url = %q, want http://postgrest:3000", cfg.BoardStorage.PostgrestURL)
+	}
+}
+
+func TestValidationRejectsBoardStorageWithoutPostgres(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	dbPath := filepath.Join(dir, "db", "blockyard.db")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+path = %q
+
+[oidc]
+issuer_url = "https://idp.example.com"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[openbao]
+address = "https://bao.example.com"
+role_id = "blockyard-server"
+
+[board_storage]
+postgrest_url = "http://postgrest:3000"
+`, bundlePath, dbPath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "board_storage requires database.driver") {
+		t.Errorf("expected board_storage requires postgres error, got: %v", err)
+	}
+}
+
+func TestValidationRejectsBoardStorageWithoutOpenbao(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+driver = "postgres"
+url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+
+[board_storage]
+postgrest_url = "http://postgrest:3000"
+`, bundlePath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "board_storage requires [openbao]") {
+		t.Errorf("expected board_storage requires openbao error, got: %v", err)
+	}
+}
+
+func TestValidationRejectsBoardStorageEmptyURL(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundles")
+	toml := fmt.Sprintf(`
+[server]
+
+[docker]
+image = "ghcr.io/rocker-org/r-ver:latest"
+
+[storage]
+bundle_server_path = %q
+
+[database]
+driver = "postgres"
+url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+
+[oidc]
+issuer_url = "https://idp.example.com"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[openbao]
+address = "https://bao.example.com"
+role_id = "blockyard-server"
+
+[board_storage]
+postgrest_url = ""
+`, bundlePath)
+	cfgDir := t.TempDir()
+	path := filepath.Join(cfgDir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "board_storage.postgrest_url must not be empty") {
+		t.Errorf("expected empty postgrest_url error, got: %v", err)
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	tests := []struct {
 		input string

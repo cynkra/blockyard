@@ -20,10 +20,15 @@ type Config struct {
 	Storage   StorageConfig    `toml:"storage"`
 	Database  DatabaseConfig   `toml:"database"`
 	Proxy     ProxyConfig      `toml:"proxy"`
-	OIDC      *OidcConfig      `toml:"oidc"`       // nil when not configured
-	Openbao   *OpenbaoConfig   `toml:"openbao"`     // nil when not configured
-	Audit     *AuditConfig     `toml:"audit"`       // nil when not configured
-	Telemetry *TelemetryConfig `toml:"telemetry"`   // nil when not configured
+	OIDC         *OidcConfig         `toml:"oidc"`          // nil when not configured
+	Openbao      *OpenbaoConfig      `toml:"openbao"`       // nil when not configured
+	BoardStorage *BoardStorageConfig `toml:"board_storage"` // nil when not configured
+	Audit        *AuditConfig        `toml:"audit"`         // nil when not configured
+	Telemetry    *TelemetryConfig    `toml:"telemetry"`     // nil when not configured
+}
+
+type BoardStorageConfig struct {
+	PostgrestURL string `toml:"postgrest_url"`
 }
 
 type AuditConfig struct {
@@ -242,6 +247,11 @@ func applyEnvOverrides(cfg *Config) {
 		openbaoDefaults(cfg.Openbao)
 	}
 
+	// Auto-construct [board_storage] section if any BLOCKYARD_BOARD_STORAGE_* env var is set.
+	if cfg.BoardStorage == nil && envPrefixExists("BLOCKYARD_BOARD_STORAGE_") {
+		cfg.BoardStorage = &BoardStorageConfig{}
+	}
+
 	// Auto-construct [audit] section if any BLOCKYARD_AUDIT_* env var is set.
 	if cfg.Audit == nil && envPrefixExists("BLOCKYARD_AUDIT_") {
 		cfg.Audit = &AuditConfig{}
@@ -435,6 +445,18 @@ func validate(cfg *Config) error {
 				return fmt.Errorf("config: duplicate openbao.services id %q", svc.ID)
 			}
 			seen[svc.ID] = true
+		}
+	}
+
+	if cfg.BoardStorage != nil {
+		if cfg.BoardStorage.PostgrestURL == "" {
+			return fmt.Errorf("config: board_storage.postgrest_url must not be empty")
+		}
+		if cfg.Database.Driver != "postgres" {
+			return fmt.Errorf("config: board_storage requires database.driver = \"postgres\"")
+		}
+		if cfg.Openbao == nil {
+			return fmt.Errorf("config: board_storage requires [openbao] for vault Identity OIDC")
 		}
 	}
 

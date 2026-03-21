@@ -1,0 +1,145 @@
+networks:
+  default:
+  services:
+    name: blockyard-services
+
+volumes:
+  pgdata:
+  jwks:
+
+services:
+
+  # --- Dex: OIDC identity provider ---
+  dex:
+    image: dexidp/dex:v2.41.1
+    command: ["dex", "serve", "/etc/dex/config.yml"]
+    volumes:
+      - ./dex.yml:/etc/dex/config.yml:ro
+    ports:
+      - "5556:5556"
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:5556/.well-known/openid-configuration"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 20
+
+  # --- PostgreSQL: primary database (blockyard + board storage) ---
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: blockyard
+      POSTGRES_USER: blockyard
+      POSTGRES_PASSWORD: dev-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    networks: [default, services]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "blockyard"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- OpenBao: secrets management + Identity OIDC provider ---
+  openbao:
+    image: ghcr.io/openbao/openbao:latest
+    command: ["server", "-dev", "-dev-root-token-id=root-dev-token", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: root-dev-token
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    networks: [default, services]
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- PostgREST: REST API for board storage ---
+  postgrest:
+    image: postgrest/postgrest:v12.2.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    environment:
+      PGRST_DB_URI: postgres://authenticator:dev-password@postgres:5432/blockyard
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_AUD: postgrest
+      PGRST_JWT_SECRET: "@/etc/postgrest/vault-jwks.json"
+      PGRST_JWT_ROLE_CLAIM_KEY: ".role"
+    volumes:
+      - jwks:/etc/postgrest:ro
+    ports:
+      - "3001:3000"
+    networks: [default, services]
+
+  # --- One-shot init: configure OpenBao, vault Identity OIDC, JWKS ---
+  init:
+    image: curlimages/curl:latest
+    depends_on:
+      openbao:
+        condition: service_healthy
+      dex:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./setup.sh:/setup.sh:ro
+      - jwks:/jwks
+    entrypoint: ["/bin/sh", "/setup.sh"]
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: root-dev-token
+      DEX_ISSUER: http://localhost:5556
+      DEX_INTERNAL: http://dex:5556
+      DEMO_SUB: Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA
+      DEMO2_SUB: Cg1kZW1vLXVzZXItMDAyEgVsb2NhbA
+
+  # --- Blockyard: Shiny app hosting platform ---
+  blockyard:
+    image: ghcr.io/cynkra/blockyard:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      dex:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data/bundles
+      - ./blockyard.toml:/etc/blockyard/blockyard.toml:ro
+    environment:
+      # OIDC (Dex)
+      BLOCKYARD_SERVER_EXTERNAL_URL: http://localhost:8080
+      BLOCKYARD_OIDC_ISSUER_URL: http://localhost:5556
+      BLOCKYARD_OIDC_ISSUER_DISCOVERY_URL: http://dex:5556
+      BLOCKYARD_OIDC_CLIENT_ID: blockyard
+      BLOCKYARD_OIDC_CLIENT_SECRET: blockyard-dex-secret
+      BLOCKYARD_OIDC_INITIAL_ADMIN: Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA
+      # OpenBao (AppRole auth — session_secret is auto-generated via vault)
+      BLOCKYARD_OPENBAO_ADDRESS: http://openbao:8200
+      BLOCKYARD_OPENBAO_ROLE_ID: blockyard-server
+      BLOCKYARD_OPENBAO_SECRET_ID: dev-secret-id-for-local-use-only
+      # Database (PostgreSQL)
+      BLOCKYARD_DATABASE_DRIVER: postgres
+      BLOCKYARD_DATABASE_URL: postgres://blockyard:dev-password@postgres:5432/blockyard?sslmode=disable
+      # Board storage (PostgREST)
+      BLOCKYARD_BOARD_STORAGE_POSTGREST_URL: http://postgrest:3000
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

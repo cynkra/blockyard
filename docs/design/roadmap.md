@@ -33,7 +33,8 @@ users. v1 adds user auth (OIDC), identity injection, per-user credential
 management (the integration system), and load balancing. Nothing beyond v1 is
 required to call the product useful. v2 adds single-node production
 completeness (CLI, scale-to-zero, pre-warming, runtime package install,
-board storage via PostgreSQL + PostgREST, cold-start loading page). v3 adds
+board storage via PostgreSQL + PostgREST + vault Identity OIDC, cold-start
+loading page). v3 adds
 the lightweight process backend plus deferred single-node features (data
 mounts, Docker daemon hardening, multiple execution environment images, UI
 branding). v4 adds Kubernetes for multi-node scaling.
@@ -646,10 +647,11 @@ existing Docker deployment. No Kubernetes dependency.
 
 - **Board storage.** Per-user board save/restore and sharing for blockr.
   The production backend is PostgreSQL with Row-Level Security, accessed
-  via PostgREST using the user's existing OIDC JWT — no per-user
-  provisioning, no admin tokens, no blockyard involvement in the data
-  path. Lightweight alternatives (PocketBase) are available for dev and
-  example setups via operator-provisioned credentials in OpenBao.
+  via PostgREST. Auth is mediated by vault's Identity OIDC provider —
+  the R app uses its existing vault token to request PostgREST-scoped
+  JWTs on demand. Blockyard is not in the data path or auth path at
+  runtime. Lightweight alternatives (PocketBase) are available for dev
+  and example setups via operator-provisioned credentials in OpenBao.
   See [board-storage.md](board-storage.md) for the full design.
 
 - **Runtime package installation.** Allow users to install additional block

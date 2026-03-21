@@ -24,52 +24,59 @@ A board is a JSON string. The storage backend must support:
 
 ## Recommended Backend: PostgreSQL + PostgREST
 
-PostgreSQL with Row-Level Security (RLS) enforced via PostgREST. This
-is the recommended backend because it requires **zero provisioning** —
-the user's existing OIDC JWT flows through to the database with no
-onboarding hooks, no admin tokens, and no blockyard involvement in the
-data path.
+PostgreSQL with Row-Level Security (RLS) enforced via PostgREST. Auth
+is mediated by vault's Identity OIDC provider — the R app uses its
+existing vault token to request PostgREST-scoped JWTs on demand.
+Blockyard is not in the data path or the auth path at runtime.
 
 Blockyard provisions the schema (via its own migration system —
-`golang-migrate` with embedded SQL files) and PostgREST roles.
-PostgREST validates JWTs against the IdP's JWKS endpoint. PostgreSQL
-evaluates RLS policies on every query. Blockyard is not in the data
-path at runtime.
+`golang-migrate` with embedded SQL files) and PostgREST roles. Vault
+issues JWTs containing the user's identity. PostgREST validates them
+against vault's JWKS endpoint. PostgreSQL evaluates RLS policies on
+every query.
 
-See [v2/plan.md](v2/plan.md) (Phase 2-4) for the full implementation
-plan including migration files, JWT injection, and example updates.
+See [v2/phase-2-4.md](v2/phase-2-4.md) for the full implementation
+plan including migration files, vault setup, and example updates.
 
 ### Why This Combination
 
-- **JWT pass-through.** PostgREST validates the user's OIDC access token
-  against the IdP's JWKS endpoint. The JWT's `sub` claim becomes the
-  database identity. No separate user creation, no credential
-  provisioning.
+- **Vault-issued JWTs.** The R app already has a vault token (existing
+  credential injection). It requests PostgREST JWTs from vault's
+  Identity OIDC provider on demand — no new headers, no token refresh
+  concerns. Direct OIDC access token pass-through is not viable because
+  Shiny's WebSocket architecture provides no mechanism to refresh HTTP
+  headers mid-session, and OIDC access tokens are short-lived (5–15 min).
 - **Database-enforced access control.** RLS policies are evaluated by
   PostgreSQL itself, regardless of how the query arrives. A bug in blockr
   or PostgREST cannot bypass them.
-- **No admin tokens in the hot path.** The R app sends its JWT as
-  `Authorization: Bearer ...` to PostgREST. No shared database password,
-  no `SET` tricks, no impersonation risk.
+- **No admin tokens in the hot path.** The R app sends its vault-issued
+  JWT as `Authorization: Bearer ...` to PostgREST. No shared database
+  password, no `SET` tricks, no impersonation risk.
 - **Sharing is native SQL.** A `board_shares` table with RLS policies
   handles targeted per-user sharing. No storage-backend-specific ACL
   APIs to learn.
+- **Blockyard not in the security path.** Auth is entirely between
+  vault (token issuance), PostgREST (token verification), and
+  PostgreSQL (access enforcement). Blockyard only provisions the schema.
 
 ### Architecture
 
 ```
 blockr (R app)
   │
-  ├── Authorization: Bearer <OIDC access token>
+  ├── 1. Vault token from X-Blockyard-Vault-Token (existing flow)
+  ├── 2. GET /identity/oidc/token/postgrest → vault-signed JWT
+  ├── 3. Authorization: Bearer <vault-issued JWT>
   │
   ▼
-PostgREST ──JWKS──→ IdP (JWT signature verification)
+PostgREST ──JWKS──→ OpenBao (/identity/oidc/.well-known/keys)
   │
   ▼
 PostgreSQL (RLS enforces per-user scoping + sharing)
 ```
 
-Blockyard is not in this path. The R app talks directly to PostgREST.
+Blockyard is not in this path. The R app talks directly to vault
+(for JWT issuance) and PostgREST (for data operations).
 
 ### Schema
 
@@ -136,11 +143,14 @@ Three visibility modes via `acl_type`:
 ### Identity Helper
 
 PostgREST sets the JWT claims as a PostgreSQL session variable. A helper
-function extracts the `sub` claim:
+function extracts the original IdP subject from the `keycloak_sub`
+custom claim (vault's Identity OIDC provider hardcodes the standard
+`sub` to the vault entity ID, so the original IdP subject is emitted
+as a custom claim in the OIDC role's claims template):
 
 ```sql
 CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-  SELECT current_setting('request.jwt.claims', true)::json->>'sub'
+  SELECT current_setting('request.jwt.claims', true)::json->>'keycloak_sub'
 $$ LANGUAGE sql STABLE;
 ```
 
@@ -208,9 +218,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON boards, board_versions, board_shares
 
 ### Operations from R
 
-The R app uses `httr2` to talk to PostgREST. The OIDC access token
-(available via `session$request$HTTP_X_BLOCKYARD_ACCESS_TOKEN`) is the
-only credential needed — no vault token required for board storage.
+The R app uses `httr2` to talk to PostgREST. The PostgREST JWT is
+obtained from vault's Identity OIDC provider using the existing vault
+token — no additional credential injection needed.
 
 ```
 Save:    POST   /boards          { owner_sub, board_id }
@@ -228,32 +238,39 @@ Tags:    PATCH  /boards?owner_sub=eq.{sub}&board_id=eq.{id}
 Fork:    Load shared board, POST as new board with own owner_sub
 ```
 
-### Passing the JWT to the R App
+### Obtaining the PostgREST JWT
 
-Blockyard injects the user's OIDC access token as an
-`X-Blockyard-Access-Token` HTTP header on every proxied request when
-OIDC is configured — the same injection pattern as the existing
-`X-Blockyard-Vault-Token`. The header is injected per-request (not
-per-container), so it always carries the current, refreshed token.
+The R app uses its existing vault token (from
+`X-Blockyard-Vault-Token`) to request PostgREST JWTs from vault's
+Identity OIDC provider on demand:
 
-The R app reads it from
-`session$request$HTTP_X_BLOCKYARD_ACCESS_TOKEN` and uses it as the
-Bearer token for PostgREST calls. Since the access token is short-lived
-(typically 5–15 minutes, configured on the IdP), the R app should read
-the header on each save operation rather than caching it at session
-start. Blockyard refreshes the token transparently via the OIDC refresh
-flow, so the header always carries a valid token as long as the user's
-session is active.
+```r
+vault_token <- session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN
+vault_addr  <- Sys.getenv("VAULT_ADDR")
 
-The trust model is the same as vault token injection: the R process
-runs arbitrary code and can exfiltrate any header it receives.
-Injecting the access token does not change the blast radius.
+# Request a PostgREST JWT from vault
+resp <- httr2::request(paste0(vault_addr, "/v1/identity/oidc/token/postgrest")) |>
+  httr2::req_headers("X-Vault-Token" = vault_token) |>
+  httr2::req_perform()
+
+postgrest_jwt <- httr2::resp_body_json(resp)$data$token
+```
+
+The vault-issued JWT contains a `keycloak_sub` custom claim (the
+user's original IdP subject) and a `role` claim (`"blockr_user"`)
+for PostgREST role switching. Token TTL is configurable on the vault
+OIDC role (default 1h). When it expires, the R app requests a new
+one — no blockyard involvement.
+
+The vault token itself is renewable by the R app via
+`POST /auth/token/renew-self`. For sessions shorter than the vault
+token TTL (default 1h), no renewal is needed.
 
 ### PostgREST Configuration
 
 PostgREST needs:
 - The PostgreSQL connection string
-- The JWKS URL from the IdP's `/.well-known/openid-configuration`
+- The JWKS from vault's Identity OIDC provider
 - A database role for authenticated requests (`blockr_user`)
 - An anonymous role with no access (denies unauthenticated requests)
 
@@ -261,9 +278,15 @@ PostgREST needs:
 db-uri = "postgres://authenticator:password@db:5432/blockyard"
 db-schemas = "public"
 db-anon-role = "anon"
-jwt-aud = "blockyard"
-jwt-secret = "@/path/to/jwks.json"  # or fetched from IdP JWKS endpoint
+jwt-aud = "postgrest"
+jwt-secret = "@/path/to/vault-jwks.json"
+jwt-role-claim-key = ".role"
 ```
+
+The JWKS file is downloaded from vault's unauthenticated endpoint
+(`/v1/identity/oidc/.well-known/keys`) during init. On vault key
+rotation (default 24h), a sidecar or cron job refreshes the file
+and sends `SIGUSR2` to PostgREST to reload.
 
 ### Example Docker Compose Services
 
@@ -290,11 +313,19 @@ postgrest:
     PGRST_DB_URI: postgres://authenticator:dev-password@postgres:5432/blockyard
     PGRST_DB_SCHEMAS: public
     PGRST_DB_ANON_ROLE: anon
-    PGRST_JWT_AUD: blockyard
-    PGRST_JWT_SECRET: "@/etc/postgrest/jwks.json"
+    PGRST_JWT_AUD: postgrest
+    PGRST_JWT_SECRET: "@/etc/postgrest/vault-jwks.json"
+    PGRST_JWT_ROLE_CLAIM_KEY: ".role"
+  volumes:
+    - jwks:/etc/postgrest:ro
   ports:
     - "3001:3000"
 ```
+
+The init container downloads vault's JWKS to a shared volume and
+configures the vault Identity OIDC provider (named key, role with
+claims template, policy updates). See
+[v2/phase-2-4.md](v2/phase-2-4.md) Steps 4–5 for the full setup.
 
 ## Alternative Backends
 
@@ -311,13 +342,13 @@ at `secret/data/users/{sub}/apikeys/{service}`. Blockyard's existing
 credential injection (vault token + `VAULT_ADDR`) delivers them to the
 R app at runtime. No blockyard code changes are needed.
 
-| Backend               | Provisioning         | Sharing model             | Versioning  |
-|-----------------------|----------------------|---------------------------|-------------|
-| PostgreSQL + PostgREST | None (JWT)          | RLS + shares table        | Via schema  |
-| PocketBase            | User + token → vault | Record-level rules        | Manual      |
-| S3 / MinIO            | Access key → vault   | Bucket policies (limited) | Via object versions |
-| Gitea                 | User + token → vault | Collaborators (per-repo)  | Git history |
-| Vault KV v2           | None (existing token)| Broadcast only (no targeted sharing) | Built-in |
+| Backend               | Provisioning              | Sharing model             | Versioning  |
+|-----------------------|---------------------------|---------------------------|-------------|
+| PostgreSQL + PostgREST | Vault Identity OIDC setup | RLS + shares table        | Via schema  |
+| PocketBase            | User + token → vault      | Record-level rules        | Manual      |
+| S3 / MinIO            | Access key → vault        | Bucket policies (limited) | Via object versions |
+| Gitea                 | User + token → vault      | Collaborators (per-repo)  | Git history |
+| Vault KV v2           | None (existing token)     | Broadcast only (no targeted sharing) | Built-in |
 
 ## Rack API Contract
 
