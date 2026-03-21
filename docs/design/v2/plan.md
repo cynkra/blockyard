@@ -11,7 +11,8 @@ and adds usability improvements, safety nets, and blockr-specific features:
 dual-database support (SQLite + PostgreSQL), bundle rollback, soft-delete,
 resource limit enforcement, scale-to-zero with pre-warming, a cold-start
 loading page, board storage (PostgreSQL + PostgREST + vault Identity OIDC),
-runtime package installation, web UI expansion, and a CLI tool.
+build pipeline modernization (rv → pak), a content-addressable package
+store, web UI expansion, and a CLI tool.
 
 ## New Packages
 
@@ -525,155 +526,60 @@ Tags:    PATCH  /boards?owner_sub=eq.{sub}&board_id=eq.{id}
                                  { tags: ["analysis", "demo"] }
 ```
 
-### Phase 2-5: Runtime Package Installation
+### Phase 2-5: Build Pipeline — rv → pak
 
-The most complex feature in v2. Allows users to install additional R
-packages during a live session. The design separates three concerns: a
-server-level package store, per-worker library views, and an API that
-blockr calls to request packages.
+Replace rv with pak as the build-time dependency manager. Make lockfiles
+optional. Support three build modes depending on what the bundle ships:
+lockfile (`pkg.lock` → `pak::lockfile_install()`), DESCRIPTION
+(`pak::local_install_deps()`), or bare scripts (`pak::scan_deps()` +
+`pak::pkg_install()`). This simplifies the deployment workflow and
+aligns blockyard with the standard R ecosystem.
 
 **Deliverables:**
 
-1. **Package store** (`internal/pkgstore/store.go`) — a
-   content-addressable directory on the host:
+1. **pak cache** — download and cache pak's pre-built bundle on the
+   server, replacing the rv binary cache (`internal/pakcache/`). pak
+   vendors all 16 of its dependencies into a single self-contained
+   package — one download, instant install.
+2. **Build mode detection** — inspect bundle contents to select the
+   resolution strategy: lockfile > DESCRIPTION > script scan.
+3. **Build container command** — R script that loads pak (mounted
+   read-only) and runs the appropriate strategy.
+4. **BuildSpec extension** — add `Cmd` and `Mounts` fields to
+   `BuildSpec` so the `Build` method supports flexible commands.
+5. **Config changes** — replace `rv_version` with `pak_version`.
+6. **Bundle validation** — relax lockfile requirement; only `app.R`
+   is mandatory.
+7. **Remove rv** — delete `internal/rvcache/`, `SetLibraryPath()`,
+   `RvBinaryPath`, update examples.
 
-   ```
-   {bundle_server_path}/.pkg-store/
-   ├── ggplot2/
-   │   ├── 3.4.0-cran/          ← installed R package tree
-   │   └── 3.5.0-cran/
-   ├── blockr.ggplot/
-   │   ├── 0.2.0-cran/
-   │   └── 0.2.1-gh-blockr/     ← same version, different source
-   └── ...
-   ```
+### Phase 2-6: Package Store and Runtime Assembly
 
-   Keyed by `{package}/{version}-{source}`. Multiple versions and
-   sources coexist. Append-only — packages are never modified after
-   installation. The store key includes the R major.minor version to
-   handle R upgrades (e.g., `ggplot2/3.5.0-cran-R4.4/`).
+A server-level content-addressable package store populated during
+builds and consumed at runtime. Every dependency restore catalogs its
+installed packages into the store. Workers assemble additional packages
+from store entries via hard links — near-instant, zero disk overhead.
 
-   ```go
-   type Store struct {
-       basePath   string    // {bundle_server_path}/.pkg-store
-       rVersion   string    // e.g. "4.4" — from the configured image
-       mu         sync.Mutex
-       installing map[string]chan struct{} // dedup concurrent installs
-   }
+**Deliverables:**
 
-   // Has checks if a package version exists in the store.
-   func (s *Store) Has(pkg, version, source string) bool
+1. **Package store** (`internal/pkgstore/store.go`) — content-
+   addressable directory keyed by `{package}/{version}-{source}`.
+   Populated during builds via `Store.Ingest()`. Append-only.
+2. **Build integration** — after a successful restore, hard-link all
+   installed packages into the store.
+3. **Per-worker library views** (`internal/pkgstore/view.go`) — flat
+   directories populated with hard links from the store. Mounted
+   read-only at `/extra-lib/` in worker containers.
+4. **Worker lifecycle integration** — create view directories on spawn,
+   mount them, clean up on eviction.
+5. **Runtime assembly API** — `POST /api/v1/packages` endpoint that
+   hard-links packages from the store into a running worker's view.
+   Store hits are instant. Store misses are reported to the caller
+   (no build containers at runtime).
+6. **Worker authentication** — HMAC-based worker tokens for
+   in-container API access.
 
-   // Install runs a build container to install a package into the store.
-   // Blocks until complete. Concurrent requests for the same package
-   // coalesce — only one build runs; others wait on the channel.
-   func (s *Store) Install(ctx context.Context, backend backend.Backend,
-       req InstallRequest) error
-
-   // Path returns the store path for a package entry.
-   func (s *Store) Path(pkg, version, source string) string
-   ```
-
-2. **Per-worker library views** (`internal/pkgstore/view.go`) — flat
-   directories populated with hard links into the store:
-
-   ```
-   {bundle_server_path}/.worker-libs/{worker-id}/
-   ├── ggplot2/     ← hard-linked from .pkg-store/ggplot2/3.5.0-cran-R4.4/
-   ├── blockr.ggplot/
-   └── ...
-   ```
-
-   Mounted read-only at `/extra-lib/` in the worker container.
-   R's `.libPaths()` is set to `c("/extra-lib/", "/blockyard-lib")` —
-   live-installed packages shadow the base library.
-
-   ```go
-   type View struct {
-       basePath string // {bundle_server_path}/.worker-libs
-   }
-
-   // Create creates a view directory for a worker.
-   func (v *View) Create(workerID string) error
-
-   // Link hard-links a package from the store into a worker's view.
-   func (v *View) Link(workerID string, storePath string) error
-
-   // Cleanup removes a worker's view directory.
-   func (v *View) Cleanup(workerID string) error
-   ```
-
-   Hard links (`cp -al`) give zero additional disk usage. Creating a
-   linked tree takes milliseconds. Cleanup is `rm -rf` on the view
-   directory — the store is unaffected.
-
-3. **Package install API** — new endpoint:
-
-   ```
-   POST /api/v1/packages
-   {
-       "worker_id": "...",
-       "packages": [
-           { "name": "blockr.ggplot" },
-           { "name": "ggplot2", "version": "3.5.0", "source": "cran" }
-       ]
-   }
-   ```
-
-   Flow:
-
-   ```
-   1. Validate worker exists and caller has access to the app
-   2. For each package:
-      a. Check store — if present, skip to step (d)
-      b. Spawn build container: same base image, mounts store rw,
-         runs pak::pkg_install() with the store as the library
-      c. Record installed package in store index
-      d. Hard-link from store into the worker's view
-   3. Return 200 with list of installed packages
-   ```
-
-   Build containers carry the same isolation as workers: cap-drop ALL,
-   no-new-privileges, isolated network. The store is mounted read-write
-   (the only writable mount). The existing base R library is mounted
-   read-only as an additional lib path so `pak` sees already-installed
-   dependencies and only installs the delta.
-
-   Open installs — no allowlist, no source restrictions. The threat
-   model is unchanged from the worker containers themselves.
-
-4. **Worker lifecycle integration** — on `Spawn`, create a view
-   directory and mount it. On `evictWorker`, clean up the view. The
-   view directory is created alongside the existing bundle and library
-   mounts.
-
-5. **Board restore integration** — when a board is loaded, blockr
-   records its dependency set (package names, versions, sources) in
-   the board metadata. On restore, blockr checks which packages are
-   available and requests missing ones via the API. Since packages
-   likely exist in the store from prior sessions, this is a
-   hard-link operation — near-instant.
-
-**Build container for package installation:**
-
-```go
-type PkgBuildSpec struct {
-    Image         string            // same base R image
-    StorePath     string            // host path to .pkg-store (rw mount)
-    BaseLibPath   string            // host path to bundle's rv library (ro mount)
-    Package       string            // e.g. "blockr.ggplot"
-    Version       string            // optional; empty = latest
-    Source        string            // "cran", "gh-blockr", etc.
-    Labels        map[string]string
-}
-```
-
-The build command runs `pak::pkg_install()` targeting a package-specific
-output directory within the store. Transitive dependencies that already
-exist in the store or base library are reused — `pak` sees them via the
-read-only library mount.
-
-### Phase 2-6: Web UI Expansion
+### Phase 2-7: Web UI Expansion
 
 Extends the v1 dashboard with per-app management and operational
 visibility. Server-rendered HTML, no JavaScript framework.
@@ -707,7 +613,7 @@ visibility. Server-rendered HTML, no JavaScript framework.
 
 No new navigation chrome (navbar, app switcher) — deferred to v3.
 
-### Phase 2-7: CLI Tool
+### Phase 2-8: CLI Tool
 
 A dedicated Go binary (`cmd/by/`) for interacting with the server via
 the REST API. Built last to target the stable, final v2 API surface.
@@ -753,31 +659,35 @@ Phase 2-1: Database Dual-Backend Foundation
 
 Phase 2-2: Quick Wins (Rollback, Soft-Delete, Resource Limits)
   └── depends on: phase 2-1 (migrations)
-  └── independent of: phases 2-3 through 2-7
+  └── independent of: phases 2-3 through 2-6
 
 Phase 2-3: Worker Lifecycle (Scale-to-Zero, Pre-Warming, Loading Page)
   └── depends on: phase 2-1 (pre_warmed_seats column)
-  └── independent of: phases 2-4, 2-5
+  └── independent of: phases 2-4 through 2-6
 
 Phase 2-4: Board Storage
   └── depends on: phase 2-1 (PostgreSQL support)
-  └── independent of: phases 2-3, 2-5
+  └── independent of: phases 2-3, 2-5, 2-6
 
-Phase 2-5: Runtime Package Installation
-  └── depends on: phase 2-1 (migrations for any new tables)
+Phase 2-5: Build Pipeline (rv → pak)
+  └── independent of: phases 2-2 through 2-4
+  └── can be developed in parallel with everything after 2-1
+
+Phase 2-6: Package Store and Runtime Assembly
+  └── depends on: phase 2-5 (pak-based builds populate the store)
   └── independent of: phases 2-3, 2-4
 
-Phase 2-6: Web UI Expansion
+Phase 2-7: Web UI Expansion
   └── depends on: phases 2-2 (rollback, soft-delete UI),
       2-3 (pre-warming config), 2-4 (board storage optional)
 
-Phase 2-7: CLI Tool
-  └── depends on: all API-changing phases (2-2 through 2-5)
+Phase 2-8: CLI Tool
+  └── depends on: all API-changing phases (2-2 through 2-6)
   └── built last to target final API surface
 ```
 
 Phases 2-3, 2-4, and 2-5 are independent of each other and can be
-developed in parallel after the foundation.
+developed in parallel after the foundation. Phase 2-6 requires 2-5.
 
 ## Test Strategy
 
