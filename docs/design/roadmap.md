@@ -32,8 +32,9 @@ plane. v1 is the MVP: the minimum needed to host a real blockr app for real
 users. v1 adds user auth (OIDC), identity injection, per-user credential
 management (the integration system), and load balancing. Nothing beyond v1 is
 required to call the product useful. v2 adds single-node production
-completeness (CLI, scale-to-zero, pre-warming, runtime package install,
-board storage via PostgreSQL + PostgREST + vault Identity OIDC, cold-start
+completeness (CLI, scale-to-zero, pre-warming, build pipeline
+modernization with pak, a content-addressable package store, board
+storage via PostgreSQL + PostgREST + vault Identity OIDC, cold-start
 loading page). v3 adds
 the lightweight process backend plus deferred single-node features (data
 mounts, Docker daemon hardening, multiple execution environment images, UI
@@ -77,7 +78,7 @@ log_level        = "info"  # trace, debug, info, warn, error
 socket     = "/var/run/docker.sock"  # or Podman socket path
 image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838                    # internal port Shiny listens on
-rv_version = "latest"                # rv release tag, e.g. "v0.18.0"
+pak_version = "stable"               # pak release channel: "stable", "devel"
 
 [storage]
 bundle_server_path = "/data/bundles"   # where the server reads/writes bundles
@@ -250,8 +251,10 @@ plane protected by a single static bearer token in config.
   REST endpoint, unpack it to a content directory, trigger dependency
   restoration, and register it in the content database. App name and all
   configuration are supplied via the API — there is no in-bundle manifest file.
-  The conventional entrypoint is `app.R`; an `rv.lock` at the bundle root is
-  required for dependency restoration. Each upload creates a new versioned
+  The conventional entrypoint is `app.R`. Dependency restoration is
+  flexible: a `pkg.lock` (pak lockfile) provides exact reproducibility,
+  a `DESCRIPTION` file declares standard R package dependencies, or
+  bare scripts are scanned automatically for `library()`/`::` calls. Each upload creates a new versioned
   bundle; previous bundles are retained up to a configurable limit, enabling
   rollback. Typical deploy flow:
 
@@ -283,9 +286,9 @@ plane protected by a single static bearer token in config.
       {bundle-id}.tar.gz    # uploaded archive
       {bundle-id}/          # unpacked app code
         app.R
-        rv.lock
+        DESCRIPTION   # or pkg.lock, or neither
         ...
-      {bundle-id}_lib/      # R package library restored by rv
+      {bundle-id}_lib/      # R package library restored by pak
   ```
 
   Archives are written to a temp path first and moved atomically into place on
@@ -306,23 +309,29 @@ plane protected by a single static bearer token in config.
   packages at runtime.
 
 - **Dependency restoration.** After uploading a bundle, restore R package
-  dependencies from `rv.lock` using [`rv`](https://github.com/A2-ai/rv).
-  `rv` is a hard runtime requirement. Restore runs via the backend's build
-  method — how the build step executes is backend-specific: a run-to-completion
-  container on Docker/Podman, an init container or Job on Kubernetes. The `rv`
-  binary is downloaded from GitHub releases and cached locally in
-  `{bundle_server_path}/.rv-cache/` (`internal/rvcache`). Pinned versions are
-  cached indefinitely; `latest` is re-fetched when the cache is older than one
-  hour. Downloads are serialized via a global mutex and written atomically to
-  prevent partial-file corruption.
-  A shared cache avoids re-downloading packages on every deploy.
+  dependencies using [`pak`](https://pak.r-lib.org/). Restore runs via the
+  backend's build method — how the build step executes is backend-specific:
+  a run-to-completion container on Docker/Podman, an init container or Job
+  on Kubernetes. pak's pre-built bundle (which vendors all dependencies into
+  a single R package) is downloaded once and cached on the server in
+  `{bundle_server_path}/.pak-cache/` (`internal/pakcache`). It is mounted
+  read-only into build containers.
+
+  Three build modes are supported, selected by bundle contents:
+  - **Lockfile** (`pkg.lock`): `pak::lockfile_install()` — exact versions.
+  - **DESCRIPTION**: `pak::local_install_deps()` — standard R package deps
+    with optional `Remotes` field for GitHub/git sources.
+  - **Script scan** (fallback): `pak::scan_deps()` discovers `library()`,
+    `require()`, `::` calls in R scripts, then `pak::pkg_install()` resolves
+    and installs them. Zero-config deploys.
+
   The restored library is written to `{bundle-id}_lib/` alongside the unpacked
   bundle and mounted read-only into app workers at `/blockyard-lib`.
   The R version is configured server-wide — no per-deployment version selection
   or version matching logic.
 
-  Restore output (stdout/stderr from `rv`) is streamed to the caller via the
-  task log endpoint. The task lifecycle is managed by an in-memory task store.
+  Restore output is streamed to the caller via the task log endpoint. The task
+  lifecycle is managed by an in-memory task store.
 
 - **Content registry.** A SQLite database. Core v0 tables:
 
