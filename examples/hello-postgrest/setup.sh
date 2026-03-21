@@ -154,28 +154,11 @@ bao_post /v1/identity/oidc/config -d "{
 echo "    OK"
 
 echo "==> Updating blockyard-user policy (add OIDC token + token renewal)..."
-# Build the policy with the JWT accessor for path templating.
-POLICY=$(cat <<ENDPOLICY
-path "secret/data/users/{{identity.entity.aliases.${JWT_ACCESSOR}.name}}/*" {
-  capabilities = ["read"]
-}
-
-path "identity/oidc/token/postgrest" {
-  capabilities = ["read"]
-}
-
-path "auth/token/lookup-self" {
-  capabilities = ["read"]
-}
-
-path "auth/token/renew-self" {
-  capabilities = ["update"]
-}
-ENDPOLICY
-)
-# Escape the policy for JSON embedding.
-POLICY_JSON=$(printf '%s' "$POLICY" | awk '{printf "%s\\n", $0}')
-bao_post /v1/sys/policy/blockyard-user -d "{\"policy\": \"${POLICY_JSON}\"}"
+# Single-line policy with escaped quotes — same pattern as the
+# hello-pocketbase example. The JWT accessor is interpolated into the path.
+bao_post /v1/sys/policy/blockyard-user -d "{
+  \"policy\": \"path \\\"secret/data/users/{{identity.entity.aliases.${JWT_ACCESSOR}.name}}/*\\\" {\\n  capabilities = [\\\"read\\\"]\\n}\\npath \\\"identity/oidc/token/postgrest\\\" {\\n  capabilities = [\\\"read\\\"]\\n}\\npath \\\"auth/token/lookup-self\\\" {\\n  capabilities = [\\\"read\\\"]\\n}\\npath \\\"auth/token/renew-self\\\" {\\n  capabilities = [\\\"update\\\"]\\n}\"
+}"
 echo "    OK"
 
 # ══════════════════════════════════════════════════════════════════════
