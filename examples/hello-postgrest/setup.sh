@@ -77,7 +77,7 @@ bao_post /v1/auth/jwt/role/blockyard-user -d '{
   "role_type":       "jwt",
   "bound_audiences": ["blockyard"],
   "user_claim":      "sub",
-  "claim_mappings":  {"sub": "keycloak_sub"},
+  "claim_mappings":  {"sub": "idp_sub"},
   "token_policies":  ["blockyard-user"],
   "token_ttl":       "1h"
 }'
@@ -135,9 +135,9 @@ bao_post /v1/identity/oidc/key/postgrest -d '{
 echo "    OK"
 
 echo "==> Creating OIDC role 'postgrest' with claims template..."
-# The template emits keycloak_sub (original IdP subject from entity alias
+# The template emits idp_sub (original IdP subject from entity alias
 # name) and a fixed role for PostgREST role switching.
-TEMPLATE=$(printf '{"keycloak_sub": {{identity.entity.aliases.%s.name}}, "role": "blockr_user"}' "${JWT_ACCESSOR}")
+TEMPLATE=$(printf '{"idp_sub": {{identity.entity.aliases.%s.name}}, "role": "blockr_user"}' "${JWT_ACCESSOR}")
 TEMPLATE_B64=$(echo -n "${TEMPLATE}" | base64 | tr -d '\n')
 bao_post /v1/identity/oidc/role/postgrest -d "{
   \"key\":       \"postgrest\",

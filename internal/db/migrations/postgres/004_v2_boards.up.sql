@@ -53,11 +53,11 @@ CREATE TABLE board_shares (
 );
 
 -- Identity helper for RLS.
--- Reads keycloak_sub (custom claim) because vault's Identity OIDC
+-- Reads idp_sub (custom claim) because vault's Identity OIDC
 -- provider hardcodes the standard sub to the vault entity ID. The
--- keycloak_sub claim carries the original IdP subject.
+-- idp_sub claim carries the original IdP subject.
 CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-    SELECT current_setting('request.jwt.claims', true)::json->>'keycloak_sub'
+    SELECT current_setting('request.jwt.claims', true)::json->>'idp_sub'
 $$ LANGUAGE sql STABLE;
 
 -- RLS: boards

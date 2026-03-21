@@ -182,10 +182,10 @@ CREATE TABLE board_shares (
 );
 
 -- Identity helper for RLS.
--- Reads keycloak_sub (custom claim) because vault's Identity OIDC
+-- Reads idp_sub (custom claim) because vault's Identity OIDC
 -- provider hardcodes the standard sub to the vault entity ID.
 CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-    SELECT current_setting('request.jwt.claims', true)::json->>'keycloak_sub'
+    SELECT current_setting('request.jwt.claims', true)::json->>'idp_sub'
 $$ LANGUAGE sql STABLE;
 
 -- RLS: boards
@@ -481,7 +481,7 @@ See [phase-2-4.md](phase-2-4.md) for the full implementation plan.
 
 4. **Vault Identity OIDC setup** — operator/init-container configures
    vault's Identity secrets engine to issue PostgREST-scoped JWTs
-   containing the user's original IdP subject as a `keycloak_sub`
+   containing the user's original IdP subject as a `idp_sub`
    custom claim.
 
 5. **PostgREST board storage example** — docker-compose with

@@ -143,14 +143,14 @@ Three visibility modes via `acl_type`:
 ### Identity Helper
 
 PostgREST sets the JWT claims as a PostgreSQL session variable. A helper
-function extracts the original IdP subject from the `keycloak_sub`
+function extracts the original IdP subject from the `idp_sub`
 custom claim (vault's Identity OIDC provider hardcodes the standard
 `sub` to the vault entity ID, so the original IdP subject is emitted
 as a custom claim in the OIDC role's claims template):
 
 ```sql
 CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-  SELECT current_setting('request.jwt.claims', true)::json->>'keycloak_sub'
+  SELECT current_setting('request.jwt.claims', true)::json->>'idp_sub'
 $$ LANGUAGE sql STABLE;
 ```
 
@@ -256,7 +256,7 @@ resp <- httr2::request(paste0(vault_addr, "/v1/identity/oidc/token/postgrest")) 
 postgrest_jwt <- httr2::resp_body_json(resp)$data$token
 ```
 
-The vault-issued JWT contains a `keycloak_sub` custom claim (the
+The vault-issued JWT contains a `idp_sub` custom claim (the
 user's original IdP subject) and a `role` claim (`"blockr_user"`)
 for PostgREST role switching. Token TTL is configurable on the vault
 OIDC role (default 1h). When it expires, the R app requests a new

@@ -159,11 +159,11 @@ CREATE TABLE board_shares (
 );
 
 -- Identity helper for RLS.
--- Reads keycloak_sub (custom claim) because vault's Identity OIDC
+-- Reads idp_sub (custom claim) because vault's Identity OIDC
 -- provider hardcodes the standard sub to the vault entity ID. The
--- keycloak_sub claim carries the original IdP subject.
+-- idp_sub claim carries the original IdP subject.
 CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-    SELECT current_setting('request.jwt.claims', true)::json->>'keycloak_sub'
+    SELECT current_setting('request.jwt.claims', true)::json->>'idp_sub'
 $$ LANGUAGE sql STABLE;
 
 -- RLS: boards
@@ -279,10 +279,10 @@ DROP FUNCTION IF EXISTS current_sub();
 
 ### Key schema decisions
 
-- **`current_sub()` reads `keycloak_sub`, not `sub`.** Vault's
+- **`current_sub()` reads `idp_sub`, not `sub`.** Vault's
   Identity OIDC provider hardcodes the JWT `sub` claim to the vault
   entity ID (a UUID). The original IdP subject is emitted as a custom
-  `keycloak_sub` claim via the OIDC role's claims template (see
+  `idp_sub` claim via the OIDC role's claims template (see
   Step 4). All RLS policies use `current_sub()`, so this is the only
   place this mapping is defined.
 
@@ -391,7 +391,7 @@ PostgREST-scoped JWTs.
 
 The existing JWT auth role (`blockyard-user`) already sets
 `user_claim="sub"`. Add `claim_mappings` to copy the IdP `sub` into
-entity alias metadata as `keycloak_sub` (belt and suspenders for
+entity alias metadata as `idp_sub` (belt and suspenders for
 template references — the OIDC template uses `.name` which is already
 the IdP subject, but having it in metadata under a descriptive key
 makes the mapping explicit):
@@ -400,7 +400,7 @@ makes the mapping explicit):
 bao write auth/jwt/role/blockyard-user \
     role_type="jwt" \
     user_claim="sub" \
-    claim_mappings='{"sub":"keycloak_sub"}' \
+    claim_mappings='{"sub":"idp_sub"}' \
     bound_audiences="blockyard" \
     token_policies="blockyard-user" \
     token_ttl="1h"
@@ -422,7 +422,7 @@ bao write identity/oidc/key/postgrest \
 
 ### 4c. Create an OIDC role with claims template
 
-The template emits the original IdP subject as `keycloak_sub` and a
+The template emits the original IdP subject as `idp_sub` and a
 fixed `role` for PostgREST role switching:
 
 ```bash
@@ -431,7 +431,7 @@ JWT_ACCESSOR=$(bao auth list -format=json | jq -r '.["jwt/"].accessor')
 
 TEMPLATE=$(cat <<EOF
 {
-  "keycloak_sub": {{identity.entity.aliases.${JWT_ACCESSOR}.name}},
+  "idp_sub": {{identity.entity.aliases.${JWT_ACCESSOR}.name}},
   "role": "blockr_user"
 }
 EOF
@@ -448,7 +448,7 @@ bao write identity/oidc/role/postgrest \
   validates this via `jwt-aud`.
 - `ttl="1h"` — the R app requests a new token from vault when the
   current one expires. 1h balances security with refresh frequency.
-- `keycloak_sub` carries the original IdP subject — this is what
+- `idp_sub` carries the original IdP subject — this is what
   `current_sub()` in PostgreSQL reads for RLS evaluation.
 - `role` is `"blockr_user"` — PostgREST does
   `SET LOCAL ROLE blockr_user` for every authenticated request.
@@ -679,7 +679,7 @@ Identity OIDC steps from Step 4.
   - Restricted boards are visible only to shared users.
   - `board_versions` inherit access from parent `boards`.
   - `board_shares` are manageable only by owner.
-  - `current_sub()` correctly reads `keycloak_sub` from JWT claims.
+  - `current_sub()` correctly reads `idp_sub` from JWT claims.
   - `users` table is readable by `blockr_user` (user discovery).
   - `boards.updated_at` auto-updates on board row changes and
     version inserts.
@@ -690,7 +690,7 @@ RLS tests can run without PostgREST by using `SET LOCAL ROLE` and
 ```sql
 BEGIN;
 SET LOCAL ROLE blockr_user;
-SET LOCAL "request.jwt.claims" = '{"keycloak_sub": "user-a"}';
+SET LOCAL "request.jwt.claims" = '{"idp_sub": "user-a"}';
 -- now run queries and verify RLS behavior
 ROLLBACK;
 ```
