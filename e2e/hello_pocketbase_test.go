@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-func TestHelloBlockr(t *testing.T) {
-	composeUp(t, "../examples/hello-blockr/docker-compose.yml")
+func TestHelloPocketbase(t *testing.T) {
+	composeUp(t, "../examples/hello-pocketbase/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"
 	dexURL := "http://localhost:5556"
@@ -46,10 +46,10 @@ func TestHelloBlockr(t *testing.T) {
 		token1 = createPAT(t, baseURL, cookies1)
 		client1 = &APIClient{BaseURL: baseURL, Token: token1}
 
-		appID = client1.CreateApp(t, "hello-blockr")
+		appID = client1.CreateApp(t, "hello-pocketbase")
 		client1.UpdateApp(t, appID, `{"access_type":"logged_in","max_sessions_per_worker":10}`)
 
-		bundle := makeBundle(t, "../examples/hello-blockr/app")
+		bundle := makeBundle(t, "../examples/hello-pocketbase/app")
 		taskID, _ := client1.UploadBundle(t, appID, bundle)
 		client1.PollTask(t, taskID, 10*time.Minute)
 
@@ -61,7 +61,7 @@ func TestHelloBlockr(t *testing.T) {
 			t.Skip("depends on user1_deploy")
 		}
 
-		status, body := fetchAppPage(t, baseURL, "hello-blockr", cookies1, 60*time.Second)
+		status, body := fetchAppPage(t, baseURL, "hello-pocketbase", cookies1, 60*time.Second)
 		if status != 200 {
 			t.Fatalf("expected 200, got %d", status)
 		}
@@ -75,7 +75,7 @@ func TestHelloBlockr(t *testing.T) {
 			t.Skip("depends on user1_deploy")
 		}
 
-		dialAppWebSocket(t, baseURL, "hello-blockr", cookies1)
+		dialAppWebSocket(t, baseURL, "hello-pocketbase", cookies1)
 	})
 
 	t.Run("user2_access", func(t *testing.T) {
@@ -87,7 +87,7 @@ func TestHelloBlockr(t *testing.T) {
 		cookies2 = dexLogin(t, baseURL, dexURL, dexEmail2, dexPassword)
 
 		// User2 should be able to access the app (access_type=logged_in).
-		status, _ := fetchAppPage(t, baseURL, "hello-blockr", cookies2, 60*time.Second)
+		status, _ := fetchAppPage(t, baseURL, "hello-pocketbase", cookies2, 60*time.Second)
 		if status != 200 {
 			t.Fatalf("user2 access: expected 200, got %d", status)
 		}
@@ -98,7 +98,7 @@ func TestHelloBlockr(t *testing.T) {
 			t.Skip("depends on user2_access")
 		}
 
-		dialAppWebSocket(t, baseURL, "hello-blockr", cookies2)
+		dialAppWebSocket(t, baseURL, "hello-pocketbase", cookies2)
 	})
 
 	t.Run("enroll_credential_via_api", func(t *testing.T) {

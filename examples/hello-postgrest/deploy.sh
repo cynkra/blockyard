@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Deploy the hello-blockr app to blockyard.
+# Deploy the hello-postgrest app to blockyard (PostgREST board storage).
 #
 # Automates the full flow:
 #   1. OIDC login via Dex (using static demo credentials)
@@ -16,7 +16,7 @@ BASE_URL="${BLOCKYARD_URL:-http://localhost:8080}"
 DEX_URL="${DEX_URL:-http://localhost:5556}"
 DEX_EMAIL="demo@example.com"
 DEX_PASSWORD="password"
-APP_NAME="hello-blockr"
+APP_NAME="hello-postgrest"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="${SCRIPT_DIR}/app"
@@ -175,9 +175,9 @@ echo ""
 echo "  User 1:  ${DEX_EMAIL} / ${DEX_PASSWORD}"
 echo "  User 2:  demo2@example.com / ${DEX_PASSWORD}"
 echo ""
-echo "PocketBase credentials for both users are pre-enrolled in OpenBao."
-echo "View them on the dashboard under credential management."
+echo "Board storage uses PostgREST backed by PostgreSQL with RLS."
+echo "Auth tokens are issued by vault's Identity OIDC provider."
 echo ""
-echo "  PocketBase API: http://localhost:8090/api/"
-echo "  PocketBase Admin: http://localhost:8090/_/"
+echo "  PostgREST API: http://localhost:3001/"
+echo "  PostgreSQL:    postgres://blockyard:dev-password@localhost:5432/blockyard"
 echo ""

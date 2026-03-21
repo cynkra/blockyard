@@ -567,3 +567,33 @@ func TestStopAppSyncDrainsAndEvicts(t *testing.T) {
 		t.Error("expected backend workers to be stopped")
 	}
 }
+
+func TestPurgeAppWithBundles(t *testing.T) {
+	srv, _ := testServer(t)
+
+	app, err := srv.DB.CreateApp("purge-app", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create bundles.
+	srv.DB.CreateBundle("b-1", app.ID)
+	srv.DB.UpdateBundleStatus("b-1", "ready")
+	srv.DB.SetActiveBundle(app.ID, "b-1")
+	srv.DB.CreateBundle("b-2", app.ID)
+	srv.DB.UpdateBundleStatus("b-2", "ready")
+
+	PurgeApp(srv, app)
+
+	// App should be hard-deleted.
+	got, _ := srv.DB.GetAppIncludeDeleted(app.ID)
+	if got != nil {
+		t.Error("expected app to be hard-deleted")
+	}
+
+	// Bundles should be gone.
+	bundles, _ := srv.DB.ListBundlesByApp(app.ID)
+	if len(bundles) != 0 {
+		t.Errorf("expected 0 bundles, got %d", len(bundles))
+	}
+}

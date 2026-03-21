@@ -1,4 +1,4 @@
-# hello-blockr
+# hello-pocketbase
 
 Blockr app with OIDC authentication (Dex), per-user secrets (OpenBao),
 and PocketBase for board storage with per-user scoping and sharing.

@@ -62,7 +62,7 @@ credential.
 ### Initial bootstrap
 
 1. Configure the AppRole role in OpenBao (see the `setup-openbao.sh` script
-   in the hello-blockr example for reference)
+   in the hello-pocketbase example for reference)
 2. Set `role_id` in your config (this is a role identifier, not a secret)
 3. Deliver the `secret_id` via environment variable:
 

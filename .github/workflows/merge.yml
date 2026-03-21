@@ -12,7 +12,8 @@ on:
         options:
           - ""
           - TestHelloShiny
-          - TestHelloBlockr
+          - TestHelloPocketbase
+          - TestHelloPostgrest
 
 jobs:
   run:
@@ -23,9 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(
-          inputs.test == 'TestHelloShiny'  && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
-          inputs.test == 'TestHelloBlockr' && '[{"example":"hello-blockr","test":"TestHelloBlockr"}]' ||
-          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-blockr","test":"TestHelloBlockr"}]'
+          inputs.test == 'TestHelloShiny'            && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
+          inputs.test == 'TestHelloPocketbase'  && '[{"example":"hello-pocketbase","test":"TestHelloPocketbase"}]' ||
+          inputs.test == 'TestHelloPostgrest'   && '[{"example":"hello-postgrest","test":"TestHelloPostgrest"}]' ||
+          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-pocketbase","test":"TestHelloPocketbase"},{"example":"hello-postgrest","test":"TestHelloPostgrest"}]'
           ) }}
     steps:
       - uses: actions/checkout@v6
@@ -43,6 +45,8 @@ jobs:
           docker pull dexidp/dex:v2.41.1
           docker pull ghcr.io/openbao/openbao:latest
           docker pull ghcr.io/rocker-org/r-ver:4.4.3
+          docker pull postgres:17
+          docker pull postgrest/postgrest:v12.2.3
       - name: Block cloud metadata endpoint for containers
         if: github.event_name != 'pull_request'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true

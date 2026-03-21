@@ -10,8 +10,8 @@ v2 builds on v1's infrastructure (OIDC, RBAC, OpenBao, autoscaling, web UI)
 and adds usability improvements, safety nets, and blockr-specific features:
 dual-database support (SQLite + PostgreSQL), bundle rollback, soft-delete,
 resource limit enforcement, scale-to-zero with pre-warming, a cold-start
-loading page, board storage (PostgreSQL + PostgREST), runtime package
-installation, web UI expansion, and a CLI tool.
+loading page, board storage (PostgreSQL + PostgREST + vault Identity OIDC),
+runtime package installation, web UI expansion, and a CLI tool.
 
 ## New Packages
 
@@ -104,7 +104,9 @@ url = ""                             # PostgreSQL connection string; used when d
 
 [board_storage]
 # When set, enables board storage. Injected as POSTGREST_URL into worker
-# containers. Requires driver = "postgres".
+# containers. Requires driver = "postgres". Auth is handled by vault's
+# Identity OIDC provider — the R app requests PostgREST JWTs from vault
+# using its existing vault token.
 postgrest_url = ""
 
 [proxy]
@@ -179,9 +181,11 @@ CREATE TABLE board_shares (
         REFERENCES boards(owner_sub, board_id) ON DELETE CASCADE
 );
 
--- Identity helper for RLS
+-- Identity helper for RLS.
+-- Reads idp_sub (custom claim) because vault's Identity OIDC
+-- provider hardcodes the standard sub to the vault entity ID.
 CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-    SELECT current_setting('request.jwt.claims', true)::json->>'sub'
+    SELECT current_setting('request.jwt.claims', true)::json->>'idp_sub'
 $$ LANGUAGE sql STABLE;
 
 -- RLS: boards
@@ -245,8 +249,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON boards, board_versions, board_shares
 
 Security enforcement is entirely PostgreSQL's responsibility via RLS.
 Blockyard provisions the schema and policies; PostgREST validates JWTs
-against the IdP's JWKS endpoint; PostgreSQL evaluates RLS policies on
-every query. Blockyard is not in the data path at runtime.
+against vault's JWKS endpoint (`/identity/oidc/.well-known/keys`);
+PostgreSQL evaluates RLS policies on every query. Blockyard is not in
+the data path at runtime.
 
 ## Build Phases
 
@@ -455,58 +460,56 @@ Built together because they interact tightly.
 ### Phase 2-4: Board Storage
 
 Add PostgreSQL-backed board storage with PostgREST as the API layer.
-Blockyard owns the schema; PostgREST + RLS enforce access control.
+Blockyard owns the schema; vault's Identity OIDC provider issues JWTs;
+PostgREST validates them; PostgreSQL enforces access control via RLS.
+
+See [phase-2-4.md](phase-2-4.md) for the full implementation plan.
 
 **Deliverables:**
 
 1. **Board schema migration** — `migrations/postgres/004_v2_boards.up.sql`
    creates the `boards`, `board_versions`, `board_shares` tables, RLS
-   policies, and PostgREST roles. Only runs on PostgreSQL — SQLite
-   deployments skip this migration.
+   policies, and PostgREST roles. PostgreSQL only — SQLite deployments
+   skip this migration.
 
-2. **JWT injection** — inject `X-Blockyard-Access-Token` on every
-   proxied request when OIDC is configured. The header carries the
-   user's current OIDC access token (refreshed transparently by the
-   server-side session store). Same injection pattern as the existing
-   `X-Blockyard-Vault-Token`.
-
-   ```go
-   // internal/proxy/identity.go — addition to existing identity injection
-   if accessToken := auth.AccessTokenFromContext(r.Context()); accessToken != "" {
-       proxyReq.Header.Set("X-Blockyard-Access-Token", accessToken)
-   }
-   ```
+2. **Config addition** — `[board_storage]` section with `postgrest_url`.
 
 3. **PostgREST URL injection** — when `[board_storage] postgrest_url`
    is configured, inject `POSTGREST_URL` as an environment variable
    into worker containers (alongside existing `VAULT_ADDR` and
    `BLOCKYARD_API_URL` injection in `WorkerSpec`).
 
-4. **Add PostgreSQL board storage example** — add a new example
-   docker-compose showing PostgreSQL + PostgREST board storage
-   alongside the existing PocketBase example. Include `setup.sh` to
-   initialize the board schema (or rely on blockyard's migrations).
-   Demonstrate board save/load/share from the blockr app.
+4. **Vault Identity OIDC setup** — operator/init-container configures
+   vault's Identity secrets engine to issue PostgREST-scoped JWTs
+   containing the user's original IdP subject as a `idp_sub`
+   custom claim.
 
-**Architecture (unchanged from design doc):**
+5. **PostgREST board storage example** — docker-compose with
+   PostgreSQL + PostgREST + vault Identity OIDC alongside the existing
+   PocketBase example.
+
+**Architecture:**
 
 ```
 blockr (R app)
   │
-  ├── Authorization: Bearer <OIDC access token>
+  ├── 1. Vault token from X-Blockyard-Vault-Token (existing flow)
+  ├── 2. GET /identity/oidc/token/postgrest → vault-signed JWT
+  ├── 3. Authorization: Bearer <vault-issued JWT>
   │
   ▼
-PostgREST ──JWKS──→ IdP (JWT signature verification)
+PostgREST ──JWKS──→ OpenBao (/identity/oidc/.well-known/keys)
   │
   ▼
 PostgreSQL (RLS enforces per-user scoping + sharing)
 ```
 
-Blockyard is not in the data path. The R app reads the access token
-from `session$request$HTTP_X_BLOCKYARD_ACCESS_TOKEN` and sends it as
-a Bearer token to PostgREST.
+Blockyard is not in the data path. The R app uses its existing vault
+token to request PostgREST JWTs from vault on demand — no new header
+injection, no token refresh concerns. The vault token is renewable by
+the R app via `POST /auth/token/renew-self`.
 
-**Board operations from R:**
+**Board operations from R (via PostgREST):**
 
 ```
 Save:    POST   /boards          { owner_sub, board_id }

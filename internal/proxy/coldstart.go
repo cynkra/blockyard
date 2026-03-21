@@ -281,6 +281,10 @@ func WorkerEnv(srv *server.Server) map[string]string {
 		"VAULT_ADDR":        srv.Config.Openbao.Address,
 		"BLOCKYARD_API_URL": apiURL,
 	}
+	// Board storage: inject PostgREST URL so R apps can discover it.
+	if srv.Config.BoardStorage != nil && srv.Config.BoardStorage.PostgrestURL != "" {
+		env["POSTGREST_URL"] = srv.Config.BoardStorage.PostgrestURL
+	}
 	if len(srv.Config.Openbao.Services) > 0 {
 		svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
 		for _, svc := range srv.Config.Openbao.Services {

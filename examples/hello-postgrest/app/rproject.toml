@@ -1,5 +1,5 @@
 [project]
-name = "hello-blockr"
+name = "hello-postgrest"
 r_version = "4.4"
 
 repositories = [

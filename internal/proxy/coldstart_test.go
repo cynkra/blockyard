@@ -697,6 +697,45 @@ func TestWorkerEnvServiceNetworkOverridesExternalURL(t *testing.T) {
 	}
 }
 
+// TestWorkerEnvWithBoardStorage verifies that WorkerEnv includes
+// POSTGREST_URL when board_storage is configured.
+func TestWorkerEnvWithBoardStorage(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Openbao = &config.OpenbaoConfig{
+		Address: "http://vault:8200",
+	}
+	srv.Config.Server.ExternalURL = "http://blockyard:8080"
+	srv.Config.BoardStorage = &config.BoardStorageConfig{
+		PostgrestURL: "http://postgrest:3000",
+	}
+
+	env := WorkerEnv(srv)
+	if env == nil {
+		t.Fatal("expected non-nil env map")
+	}
+	if got, want := env["POSTGREST_URL"], "http://postgrest:3000"; got != want {
+		t.Errorf("POSTGREST_URL = %q, want %q", got, want)
+	}
+}
+
+// TestWorkerEnvWithoutBoardStorage verifies that WorkerEnv does not
+// include POSTGREST_URL when board_storage is not configured.
+func TestWorkerEnvWithoutBoardStorage(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Openbao = &config.OpenbaoConfig{
+		Address: "http://vault:8200",
+	}
+	srv.Config.Server.ExternalURL = "http://blockyard:8080"
+
+	env := WorkerEnv(srv)
+	if env == nil {
+		t.Fatal("expected non-nil env map")
+	}
+	if _, ok := env["POSTGREST_URL"]; ok {
+		t.Error("expected POSTGREST_URL to be absent when board_storage is not configured")
+	}
+}
+
 // TestTriggerSpawnSpawnsWorker verifies that triggerSpawn spawns a worker
 // for an app with no available workers.
 func TestTriggerSpawnSpawnsWorker(t *testing.T) {
