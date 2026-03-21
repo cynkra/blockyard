@@ -84,6 +84,7 @@ services:
   # --- One-shot init: configure OpenBao, vault Identity OIDC, JWKS ---
   init:
     image: curlimages/curl:latest
+    user: "0:0"  # root — needed to write JWKS to the shared volume
     depends_on:
       openbao:
         condition: service_healthy
