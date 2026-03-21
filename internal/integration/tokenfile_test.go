@@ -86,6 +86,9 @@ func TestReadTokenFileTrimsWhitespace(t *testing.T) {
 }
 
 func TestReadTokenFilePermissionError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("skipping: root bypasses file permissions")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".vault-token")
 	os.WriteFile(path, []byte("secret"), 0o600)
