@@ -3,6 +3,7 @@ package integration
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +82,48 @@ func TestReadTokenFileTrimsWhitespace(t *testing.T) {
 	}
 	if got != "hvs.token" {
 		t.Errorf("got %q, want hvs.token", got)
+	}
+}
+
+func TestReadTokenFilePermissionError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".vault-token")
+	os.WriteFile(path, []byte("secret"), 0o600)
+	// Make directory unreadable so the file can't be read.
+	os.Chmod(dir, 0o000)
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	_, err := ReadTokenFile(path)
+	if err == nil {
+		t.Fatal("expected error for permission-denied read")
+	}
+	if !strings.Contains(err.Error(), "read token file") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestWriteTokenFileBadDirectory(t *testing.T) {
+	// Writing to a non-existent directory should fail at CreateTemp.
+	path := filepath.Join(t.TempDir(), "no-such-dir", ".vault-token")
+	err := WriteTokenFile(path, "token")
+	if err == nil {
+		t.Fatal("expected error for non-existent directory")
+	}
+	if !strings.Contains(err.Error(), "create temp") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestWriteTokenFileRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	// Create a subdirectory as the target path — rename onto a directory fails.
+	path := filepath.Join(dir, "subdir")
+	os.Mkdir(path, 0o755)
+	// Place a file inside so the directory is non-empty and rename fails.
+	os.WriteFile(filepath.Join(path, "blocker"), []byte("x"), 0o644)
+
+	err := WriteTokenFile(path, "token")
+	if err == nil {
+		t.Fatal("expected error for rename onto directory")
 	}
 }

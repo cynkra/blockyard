@@ -1871,6 +1871,63 @@ func TestTaskLogsNotFound2(t *testing.T) {
 	}
 }
 
+func TestTaskLogsClientDisconnect(t *testing.T) {
+	srv, ts := testServer(t)
+	sender := srv.Tasks.Create("task-disconnect", "")
+	sender.Write("initial line")
+
+	// Use a context with cancel to simulate client disconnect.
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "GET",
+		ts.URL+"/api/v1/tasks/task-disconnect/logs", nil)
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+
+	// Start request in a goroutine since it will block.
+	done := make(chan struct{})
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		close(done)
+	}()
+
+	// Give time for the handler to start streaming, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	// Wait for the client goroutine to finish.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for client to finish")
+	}
+
+	// Cleanup: complete the task so it doesn't leak.
+	sender.Complete(task.Completed)
+}
+
+func TestTaskLogsWithAppAccess(t *testing.T) {
+	srv, ts := testServer(t)
+
+	// Create a task associated with an app.
+	created := createApp(t, ts, "my-app")
+	appID := created["id"].(string)
+	sender := srv.Tasks.Create("task-with-app", appID)
+	sender.Write("app-specific log")
+	sender.Complete(task.Completed)
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-with-app/logs", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "app-specific log") {
+		t.Errorf("expected 'app-specific log' in output, got %q", body)
+	}
+}
+
 // --- Rollback tests ---
 
 func TestRollbackAppValidBundle(t *testing.T) {
@@ -2460,5 +2517,177 @@ func TestGetAppIncludesPreWarmedSeats(t *testing.T) {
 	}
 	if v := app["pre_warmed_seats"]; v != float64(0) {
 		t.Errorf("expected pre_warmed_seats=0, got %v", v)
+	}
+}
+
+// --- Audit log coverage for rollback and restore ---
+
+func TestRollbackAppAuditLog(t *testing.T) {
+	srv, ts, auditPath := testServerWithAudit(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Create two ready bundles and activate the first.
+	srv.DB.CreateBundle("b-1", id)
+	srv.DB.UpdateBundleStatus("b-1", "ready")
+	srv.DB.SetActiveBundle(id, "b-1")
+	srv.DB.CreateBundle("b-2", id)
+	srv.DB.UpdateBundleStatus("b-2", "ready")
+
+	// Rollback to b-2.
+	body := `{"bundle_id":"b-2"}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	// Check audit log contains rollback entry.
+	time.Sleep(100 * time.Millisecond)
+	data, _ := io.ReadAll(openFile(t, auditPath))
+	if !strings.Contains(string(data), "app.rollback") {
+		t.Errorf("expected app.rollback in audit log, got:\n%s", data)
+	}
+	if !strings.Contains(string(data), "previous_bundle_id") {
+		t.Errorf("expected previous_bundle_id in audit log")
+	}
+}
+
+func testServerWithSoftDeleteAndAudit(t *testing.T) (*server.Server, *httptest.Server, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	auditPath := tmp + "/audit.jsonl"
+
+	cfg := &config.Config{
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Storage: config.StorageConfig{
+			BundleServerPath:    tmp,
+			BundleWorkerPath:    "/app",
+			BundleRetention:     50,
+			MaxBundleSize:       10 * 1024 * 1024,
+			SoftDeleteRetention: config.Duration{Duration: 720 * time.Hour},
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+		Audit: &config.AuditConfig{Path: auditPath},
+	}
+
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
+
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	auditLog := audit.New(auditPath)
+	srv.AuditLog = auditLog
+	ctx, cancel := context.WithCancel(context.Background())
+	go auditLog.Run(ctx, auditPath)
+	t.Cleanup(cancel)
+
+	handler := NewRouter(srv)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return srv, ts, auditPath
+}
+
+func TestRestoreAppAuditLog(t *testing.T) {
+	_, ts, auditPath := testServerWithSoftDeleteAndAudit(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Soft delete.
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	http.DefaultClient.Do(req)
+
+	// Restore.
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	// Check audit log contains restore entry.
+	time.Sleep(100 * time.Millisecond)
+	data, _ := io.ReadAll(openFile(t, auditPath))
+	if !strings.Contains(string(data), "app.restore") {
+		t.Errorf("expected app.restore in audit log, got:\n%s", data)
+	}
+}
+
+func TestRollbackAppInvalidJSON(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback",
+		strings.NewReader("not json"))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRollbackAppPendingBundle(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Create a pending bundle (default status).
+	srv.DB.CreateBundle("b-pending", id)
+
+	body := `{"bundle_id":"b-pending"}`
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// --- Upload bundle edge cases ---
+
+func TestUploadBundleTooLarge(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Send a body that exceeds MaxBundleSize (10 MiB).
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
+		strings.NewReader(strings.Repeat("x", 11*1024*1024)))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 413 {
+		t.Errorf("expected 413, got %d", resp.StatusCode)
+	}
+}
+
+func TestUploadBundleInvalidArchive(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
+		strings.NewReader("not a tar.gz"))
+	resp, _ := http.DefaultClient.Do(req)
+	// Should fail during unpack with 500.
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestUploadBundleNoDeployPermission(t *testing.T) {
+	srv, ts := testServer(t)
+	seedTestViewer(t, srv.DB)
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	req := viewerReq("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
+		strings.NewReader("data"))
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
 }

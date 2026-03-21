@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -417,6 +418,28 @@ func TestSecretIsEmpty(t *testing.T) {
 	}
 	if NewSecret("x").IsEmpty() {
 		t.Error("expected non-empty secret to not be empty")
+	}
+}
+
+func TestSecretMarshalJSON(t *testing.T) {
+	s := NewSecret("super-secret")
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `"[REDACTED]"` {
+		t.Errorf("MarshalJSON() = %s, want %q", data, "[REDACTED]")
+	}
+}
+
+func TestSecretMarshalText(t *testing.T) {
+	s := NewSecret("super-secret")
+	data, err := s.MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "[REDACTED]" {
+		t.Errorf("MarshalText() = %q, want [REDACTED]", data)
 	}
 }
 
