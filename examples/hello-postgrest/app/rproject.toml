@@ -1,0 +1,11 @@
+[project]
+name = "hello-postgrest"
+r_version = "4.4"
+
+repositories = [
+    {alias = "P3M", url = "https://p3m.dev/cran/__linux__/noble/2026-03-18"},
+]
+
+dependencies = [
+    "blockr",
+]
