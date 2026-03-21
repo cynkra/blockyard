@@ -515,6 +515,57 @@ func TestEnsurePreWarmedClaimedWorkerReplacement(t *testing.T) {
 	}
 }
 
+func TestPreWarmAppsSkipsDraining(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	seats := 2
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+
+	// Register a draining worker so IsDraining returns true.
+	srv.Workers.Set("drain-w", server.ActiveWorker{AppID: app.ID})
+	srv.Workers.MarkDraining(app.ID)
+
+	before := srv.Workers.Count()
+	preWarmApps(context.Background(), srv)
+
+	if srv.Workers.Count() != before {
+		t.Errorf("expected no new workers for draining app, got %d total", srv.Workers.Count())
+	}
+}
+
+func TestPreWarmAppsNoPreWarmedApps(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	// Create an app with 0 pre-warmed seats (default).
+	createTestApp(t, srv, "no-warm-app", true)
+
+	// Should be a no-op — must not panic.
+	preWarmApps(context.Background(), srv)
+
+	if srv.Workers.Count() != 0 {
+		t.Errorf("expected 0 workers, got %d", srv.Workers.Count())
+	}
+}
+
+func TestPreWarmAppsMultipleApps(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app1 := createTestApp(t, srv, "app-a", true)
+	app2 := createTestApp(t, srv, "app-b", true)
+
+	seats := 1
+	srv.DB.UpdateApp(app1.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	srv.DB.UpdateApp(app2.ID, db.AppUpdate{PreWarmedSeats: &seats})
+
+	preWarmApps(context.Background(), srv)
+
+	if srv.Workers.CountForApp(app1.ID) != 1 {
+		t.Errorf("expected 1 worker for app-a, got %d", srv.Workers.CountForApp(app1.ID))
+	}
+	if srv.Workers.CountForApp(app2.ID) != 1 {
+		t.Errorf("expected 1 worker for app-b, got %d", srv.Workers.CountForApp(app2.ID))
+	}
+}
+
 func TestTryScaleUpFailure(t *testing.T) {
 	fb := &faultyBackend{
 		MockBackend: mock.New(),

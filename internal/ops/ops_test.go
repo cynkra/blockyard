@@ -395,3 +395,175 @@ func TestLogCaptureHandlesStreamError(t *testing.T) {
 		t.Error("log should be marked ended after stream closes")
 	}
 }
+
+func TestSweepDeletedAppsPurgesExpired(t *testing.T) {
+	srv, be := testServer(t)
+	srv.Config.Storage.SoftDeleteRetention = config.Duration{Duration: 1 * time.Second}
+
+	// Create an app with a bundle, then soft-delete it.
+	app, err := srv.DB.CreateApp("expired-app", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Spawn a worker for the app so StopAppSync has something to stop.
+	spawnWorker(t, srv, be, "w-exp", app.ID)
+
+	if err := srv.DB.SoftDeleteApp(app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for retention to expire. RFC3339 has second granularity so
+	// both deleted_at and cutoff truncate — need retention + 1s margin.
+	time.Sleep(2200 * time.Millisecond)
+
+	sweepDeletedApps(srv)
+
+	// App should be hard-deleted (GetAppIncludeDeleted returns nil, nil).
+	got, _ := srv.DB.GetAppIncludeDeleted(app.ID)
+	if got != nil {
+		t.Error("expected app to be hard-deleted after sweep")
+	}
+
+	// Worker should be evicted.
+	if be.HasWorker("w-exp") {
+		t.Error("expected worker to be stopped after sweep")
+	}
+}
+
+func TestSweepDeletedAppsSkipsUnexpired(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.Config.Storage.SoftDeleteRetention = config.Duration{Duration: 1 * time.Hour}
+
+	app, err := srv.DB.CreateApp("recent-app", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.DB.SoftDeleteApp(app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepDeletedApps(srv)
+
+	// App should still exist (retention not expired).
+	got, err := srv.DB.GetAppIncludeDeleted(app.ID)
+	if err != nil {
+		t.Fatal("expected app to survive sweep, got error:", err)
+	}
+	if got.DeletedAt == nil {
+		t.Error("expected app to still be soft-deleted")
+	}
+}
+
+func TestSweepDeletedAppsNoop(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.Config.Storage.SoftDeleteRetention = config.Duration{Duration: 1 * time.Hour}
+
+	// No soft-deleted apps — should not panic.
+	sweepDeletedApps(srv)
+}
+
+func TestSpawnSoftDeleteSweeperStopsOnCancel(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.Config.Storage.SoftDeleteRetention = config.Duration{Duration: 50 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		SpawnSoftDeleteSweeper(ctx, srv)
+		close(done)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// Returned — success.
+	case <-time.After(2 * time.Second):
+		t.Fatal("SpawnSoftDeleteSweeper did not return after context cancel")
+	}
+}
+
+func TestSpawnSoftDeleteSweeperZeroRetentionNoop(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.Config.Storage.SoftDeleteRetention = config.Duration{Duration: 0}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		SpawnSoftDeleteSweeper(ctx, srv)
+		close(done)
+	}()
+
+	// With zero retention, the sweeper just blocks on ctx.Done().
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// Returned — success.
+	case <-time.After(2 * time.Second):
+		t.Fatal("SpawnSoftDeleteSweeper did not return after context cancel (zero retention)")
+	}
+}
+
+func TestSpawnSoftDeleteSweeperSweepsOnTick(t *testing.T) {
+	srv, _ := testServer(t)
+	// Use a 1s retention so RFC3339 cutoff comparison works reliably.
+	srv.Config.Storage.SoftDeleteRetention = config.Duration{Duration: 1 * time.Second}
+
+	// Create and soft-delete an app.
+	app, err := srv.DB.CreateApp("sweep-tick-app", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.DB.SoftDeleteApp(app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		SpawnSoftDeleteSweeper(ctx, srv)
+		close(done)
+	}()
+
+	// Wait for retention to expire (1s) and for the ticker to fire (also 1s).
+	time.Sleep(2500 * time.Millisecond)
+	cancel()
+	<-done
+
+	got, _ := srv.DB.GetAppIncludeDeleted(app.ID)
+	if got != nil {
+		t.Error("expected app to be purged by sweeper")
+	}
+}
+
+func TestStopAppSyncNoWorkers(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Should be a no-op — must not panic.
+	StopAppSync(srv, "nonexistent-app")
+}
+
+func TestStopAppSyncDrainsAndEvicts(t *testing.T) {
+	srv, be := testServer(t)
+	srv.Config.Server.ShutdownTimeout = config.Duration{Duration: 100 * time.Millisecond}
+
+	spawnWorker(t, srv, be, "w1", "app1")
+	spawnWorker(t, srv, be, "w2", "app1")
+	srv.Sessions.Set("sess1", session.Entry{WorkerID: "w1"})
+
+	StopAppSync(srv, "app1")
+
+	if len(srv.Workers.ForApp("app1")) != 0 {
+		t.Errorf("expected all workers for app1 evicted, got %d", len(srv.Workers.ForApp("app1")))
+	}
+	if be.HasWorker("w1") || be.HasWorker("w2") {
+		t.Error("expected backend workers to be stopped")
+	}
+}
