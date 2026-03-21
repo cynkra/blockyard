@@ -298,3 +298,28 @@ func ptrOr[T any](p *T, fallback T) T {
 	}
 	return *p
 }
+
+// hasAvailableWorker returns true if the app has at least one available
+// (non-draining) worker registered in the worker map.
+func hasAvailableWorker(srv *server.Server, appID string) bool {
+	return len(srv.Workers.ForAppAvailable(appID)) > 0
+}
+
+// triggerSpawn spawns a worker for the app in the background. Uses
+// spawnGroup to deduplicate concurrent calls. Errors are logged
+// but not returned — the loading page polls for readiness.
+func triggerSpawn(srv *server.Server, app *db.AppRow) {
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		srv.Config.Proxy.WorkerStartTimeout.Duration,
+	)
+	defer cancel()
+
+	_, _, err := spawnGroup.do(app.ID, func() (string, string, error) {
+		return spawnWorker(ctx, srv, app)
+	})
+	if err != nil {
+		slog.Warn("triggerSpawn: background spawn failed",
+			"app_id", app.ID, "error", err)
+	}
+}

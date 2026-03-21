@@ -208,42 +208,32 @@ func (m *WorkerMap) SetIdleSinceIfZero(workerID string, t time.Time) {
 }
 
 // ClearIdleSince resets the idle timer (a new session was assigned).
-func (m *WorkerMap) ClearIdleSince(workerID string) {
+// Returns true if the worker was idle before clearing.
+func (m *WorkerMap) ClearIdleSince(workerID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if w, ok := m.workers[workerID]; ok {
+		wasIdle := !w.IdleSince.IsZero()
 		w.IdleSince = time.Time{}
 		m.workers[workerID] = w
+		return wasIdle
 	}
+	return false
 }
 
 // IdleWorkers returns workers that have been idle longer than the
-// given timeout, excluding the last worker for each app (don't scale
-// to zero) and excluding draining workers (they have their own lifecycle).
+// given timeout, excluding draining workers (they have their own lifecycle).
 func (m *WorkerMap) IdleWorkers(timeout time.Duration) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := time.Now()
-
-	// Count non-draining workers per app.
-	appWorkerCount := make(map[string]int)
-	for _, w := range m.workers {
-		if !w.Draining {
-			appWorkerCount[w.AppID]++
-		}
-	}
-
 	var idle []string
 	for id, w := range m.workers {
 		if w.IdleSince.IsZero() || w.Draining {
 			continue
 		}
 		if now.Sub(w.IdleSince) < timeout {
-			continue
-		}
-		// Don't remove the last worker for an app (no scale-to-zero).
-		if appWorkerCount[w.AppID] <= 1 {
 			continue
 		}
 		idle = append(idle, id)

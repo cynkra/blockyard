@@ -58,12 +58,13 @@ func createTestApp(t *testing.T, srv *server.Server, name string, withBundle boo
 		t.Fatal(err)
 	}
 	if withBundle {
-		_, err := srv.DB.CreateBundle("bundle-1", app.ID)
+		bundleID := "bundle-" + app.ID
+		_, err := srv.DB.CreateBundle(bundleID, app.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		srv.DB.UpdateBundleStatus("bundle-1", "ready")
-		srv.DB.SetActiveBundle(app.ID, "bundle-1")
+		srv.DB.UpdateBundleStatus(bundleID, "ready")
+		srv.DB.SetActiveBundle(app.ID, bundleID)
 		// Re-fetch to get active_bundle
 		app, err = srv.DB.GetApp(app.ID)
 		if err != nil {
@@ -693,5 +694,120 @@ func TestWorkerEnvServiceNetworkOverridesExternalURL(t *testing.T) {
 	env := WorkerEnv(srv)
 	if got, want := env["BLOCKYARD_API_URL"], "http://blockyard:9090"; got != want {
 		t.Errorf("BLOCKYARD_API_URL = %q, want %q", got, want)
+	}
+}
+
+// TestTriggerSpawnSpawnsWorker verifies that triggerSpawn spawns a worker
+// for an app with no available workers.
+func TestTriggerSpawnSpawnsWorker(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Proxy.WorkerStartTimeout = config.Duration{Duration: 5 * time.Second}
+
+	app := createTestApp(t, srv, "spawn-app", true)
+
+	if srv.Workers.CountForApp(app.ID) != 0 {
+		t.Fatal("expected 0 workers before triggerSpawn")
+	}
+
+	triggerSpawn(srv, app)
+
+	if srv.Workers.CountForApp(app.ID) != 1 {
+		t.Errorf("expected 1 worker after triggerSpawn, got %d", srv.Workers.CountForApp(app.ID))
+	}
+}
+
+// TestTriggerSpawnDeduplicates verifies that concurrent triggerSpawn calls
+// for the same app only spawn one worker (via spawnGroup).
+func TestTriggerSpawnDeduplicates(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Proxy.WorkerStartTimeout = config.Duration{Duration: 5 * time.Second}
+
+	app := createTestApp(t, srv, "dedup-app", true)
+
+	// Launch multiple concurrent triggerSpawn calls.
+	done := make(chan struct{}, 5)
+	for range 5 {
+		go func() {
+			triggerSpawn(srv, app)
+			done <- struct{}{}
+		}()
+	}
+	for range 5 {
+		<-done
+	}
+
+	// All should have shared one spawn — at most 1 worker.
+	count := srv.Workers.CountForApp(app.ID)
+	if count != 1 {
+		t.Errorf("expected 1 worker after deduplication, got %d", count)
+	}
+}
+
+// TestTriggerSpawnNoBundle verifies that triggerSpawn logs a warning but
+// does not panic when the app has no active bundle.
+func TestTriggerSpawnNoBundle(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Config.Proxy.WorkerStartTimeout = config.Duration{Duration: 1 * time.Second}
+
+	app := createTestApp(t, srv, "no-bundle-app", false)
+
+	// Should not panic.
+	triggerSpawn(srv, app)
+
+	if srv.Workers.CountForApp(app.ID) != 0 {
+		t.Errorf("expected 0 workers for app with no bundle, got %d", srv.Workers.CountForApp(app.ID))
+	}
+}
+
+// TestTriggerSpawnBackendFailure verifies that triggerSpawn handles
+// backend failures gracefully (logs warning, does not panic).
+func TestTriggerSpawnBackendFailure(t *testing.T) {
+	fb := &faultyBackend{
+		MockBackend: mock.New(),
+		spawnErr:    fmt.Errorf("out of memory"),
+	}
+	srv := testColdstartServerWithBackend(t, fb)
+	srv.Config.Proxy.WorkerStartTimeout = config.Duration{Duration: 1 * time.Second}
+
+	app := createTestApp(t, srv, "fail-app", true)
+
+	// Should not panic.
+	triggerSpawn(srv, app)
+
+	if srv.Workers.CountForApp(app.ID) != 0 {
+		t.Errorf("expected 0 workers after spawn failure, got %d", srv.Workers.CountForApp(app.ID))
+	}
+}
+
+// TestHasAvailableWorkerTrue verifies hasAvailableWorker returns true
+// when a non-draining worker exists.
+func TestHasAvailableWorkerTrue(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Workers.Set("w1", server.ActiveWorker{AppID: "app1"})
+
+	if !hasAvailableWorker(srv, "app1") {
+		t.Error("expected hasAvailableWorker to return true")
+	}
+}
+
+// TestHasAvailableWorkerFalseNoWorkers verifies hasAvailableWorker
+// returns false when no workers exist.
+func TestHasAvailableWorkerFalseNoWorkers(t *testing.T) {
+	srv := testColdstartServer(t)
+
+	if hasAvailableWorker(srv, "app1") {
+		t.Error("expected hasAvailableWorker to return false with no workers")
+	}
+}
+
+// TestHasAvailableWorkerFalseDraining verifies hasAvailableWorker
+// returns false when all workers are draining.
+func TestHasAvailableWorkerFalseDraining(t *testing.T) {
+	srv := testColdstartServer(t)
+	srv.Workers.Set("w1", server.ActiveWorker{AppID: "app1"})
+	srv.Workers.MarkDraining("app1")
+
+	if hasAvailableWorker(srv, "app1") {
+		t.Error("expected hasAvailableWorker to return false when draining")
 	}
 }

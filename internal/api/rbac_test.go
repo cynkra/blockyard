@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
@@ -35,6 +36,7 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 			IssuerURL:    idp.IssuerURL(),
 			ClientID:     "blockyard",
 			ClientSecret: config.NewSecret("test-secret"),
+			CookieMaxAge: config.Duration{Duration: 24 * time.Hour},
 		},
 	}
 

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -107,6 +108,11 @@ func Handler(srv *server.Server) http.Handler {
 			}
 		}
 
+		// Intercept /__blockyard/ internal endpoints before session routing.
+		if handleBlockyardInternal(w, r, app, appName, srv) {
+			return
+		}
+
 		// 2. Session resolution
 		sessionID := extractSessionID(r)
 		var workerID, addr string
@@ -149,6 +155,15 @@ func Handler(srv *server.Server) http.Handler {
 			slog.Debug("proxy: creating new session",
 				"app", appName, "session_id", sessionID)
 
+			// Check if any workers exist before calling ensureWorker.
+			// If none exist and this is a browser request, serve the loading
+			// page instead of blocking.
+			if !hasAvailableWorker(srv, app.ID) && isBrowserRequest(r) {
+				go triggerSpawn(srv, app)
+				serveLoadingPage(w, app, appName, srv)
+				return
+			}
+
 			wid, a, err := ensureWorker(r.Context(), srv, app)
 			if err != nil {
 				switch err {
@@ -170,13 +185,18 @@ func Handler(srv *server.Server) http.Handler {
 				return
 			}
 			workerID, addr = wid, a
-			srv.Workers.ClearIdleSince(workerID)
+			wasIdle := srv.Workers.ClearIdleSince(workerID)
 			srv.Sessions.Set(sessionID, session.Entry{
 				WorkerID:   workerID,
 				UserSub:    callerSub,
 				LastAccess: time.Now(),
 			})
 			telemetry.SessionsActive.Inc()
+
+			// Trigger pre-warm replacement if we just claimed a warm worker.
+			if wasIdle && app.PreWarmedSeats > 0 {
+				go ensurePreWarmed(context.Background(), srv, app)
+			}
 		}
 
 		// 3. Set cookie on new sessions

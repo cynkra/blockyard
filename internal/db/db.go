@@ -221,6 +221,7 @@ type AppRow struct {
 	CreatedAt            string   `db:"created_at" json:"created_at"`
 	UpdatedAt            string   `db:"updated_at" json:"updated_at"`
 	DeletedAt            *string  `db:"deleted_at" json:"deleted_at,omitempty"`
+	PreWarmedSeats       int      `db:"pre_warmed_seats" json:"pre_warmed_seats"`
 }
 
 type BundleRow struct {
@@ -471,6 +472,7 @@ type AppUpdate struct {
 	AccessType           *string
 	Title                *string
 	Description          *string
+	PreWarmedSeats       *int
 }
 
 // UpdateApp applies partial updates to an app's configuration.
@@ -505,6 +507,9 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	if u.Description != nil {
 		app.Description = u.Description
 	}
+	if u.PreWarmedSeats != nil {
+		app.PreWarmedSeats = *u.PreWarmedSeats
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(db.rebind(
@@ -516,12 +521,14 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 			access_type = ?,
 			title = ?,
 			description = ?,
+			pre_warmed_seats = ?,
 			updated_at = ?
 		WHERE id = ?`),
 		app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
 		app.MemoryLimit, app.CPULimit,
 		app.AccessType,
 		app.Title, app.Description,
+		app.PreWarmedSeats,
 		now, id,
 	)
 	if err != nil {
@@ -529,6 +536,17 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	}
 
 	return db.GetApp(id)
+}
+
+// ListPreWarmedApps returns all non-deleted apps with pre_warmed_seats > 0.
+func (db *DB) ListPreWarmedApps() ([]AppRow, error) {
+	var apps []AppRow
+	err := db.DB.Select(&apps,
+		`SELECT * FROM apps WHERE pre_warmed_seats > 0 AND deleted_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	return apps, nil
 }
 
 // ClearActiveBundle sets active_bundle to NULL for the given app.

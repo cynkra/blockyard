@@ -38,6 +38,7 @@ type AppResponse struct {
 	CPULimit             *float64 `json:"cpu_limit"`
 	Title                *string  `json:"title"`
 	Description          *string  `json:"description"`
+	PreWarmedSeats       int      `json:"pre_warmed_seats"`
 	CreatedAt            string   `json:"created_at"`
 	UpdatedAt            string   `json:"updated_at"`
 	DeletedAt            *string  `json:"deleted_at,omitempty"`
@@ -66,6 +67,7 @@ func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
 		CPULimit:             app.CPULimit,
 		Title:                app.Title,
 		Description:          app.Description,
+		PreWarmedSeats:       app.PreWarmedSeats,
 		CreatedAt:            app.CreatedAt,
 		UpdatedAt:            app.UpdatedAt,
 		DeletedAt:            app.DeletedAt,
@@ -276,6 +278,7 @@ type updateAppRequest struct {
 	AccessType           *string  `json:"access_type"`
 	Title                *string  `json:"title"`
 	Description          *string  `json:"description"`
+	PreWarmedSeats       *int     `json:"pre_warmed_seats"`
 }
 
 func UpdateApp(srv *server.Server) http.HandlerFunc {
@@ -313,6 +316,16 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 				return
 			}
 		}
+		if body.PreWarmedSeats != nil {
+			if *body.PreWarmedSeats < 0 {
+				badRequest(w, "pre_warmed_seats must be non-negative")
+				return
+			}
+			if *body.PreWarmedSeats > 10 {
+				badRequest(w, "pre_warmed_seats must not exceed 10")
+				return
+			}
+		}
 
 		app, relation, ok := resolveAppRelation(srv, w, caller, id)
 		if !ok {
@@ -344,6 +357,7 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			AccessType:           body.AccessType,
 			Title:                body.Title,
 			Description:          body.Description,
+			PreWarmedSeats:       body.PreWarmedSeats,
 		}
 		app, err := srv.DB.UpdateApp(app.ID, update)
 		if err != nil {
