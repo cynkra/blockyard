@@ -154,11 +154,11 @@ bao_post /v1/identity/oidc/config -d "{
 echo "    OK"
 
 echo "==> Updating blockyard-user policy (add OIDC token + token renewal)..."
-# Single-line policy with escaped quotes — same pattern as the
-# hello-pocketbase example. The JWT accessor is interpolated into the path.
-bao_post /v1/sys/policy/blockyard-user -d "{
-  \"policy\": \"path \\\"secret/data/users/{{identity.entity.aliases.${JWT_ACCESSOR}.name}}/*\\\" {\\n  capabilities = [\\\"read\\\"]\\n}\\npath \\\"identity/oidc/token/postgrest\\\" {\\n  capabilities = [\\\"read\\\"]\\n}\\npath \\\"auth/token/lookup-self\\\" {\\n  capabilities = [\\\"read\\\"]\\n}\\npath \\\"auth/token/renew-self\\\" {\\n  capabilities = [\\\"update\\\"]\\n}\"
-}"
+# Use auth_jwt_* glob (same as hello-pocketbase) so we can use
+# single-quoted JSON and avoid double-quote escaping issues.
+bao_post /v1/sys/policy/blockyard-user -d '{
+  "policy": "path \"secret/data/users/{{identity.entity.aliases.auth_jwt_*.name}}/*\" {\n  capabilities = [\"read\"]\n}\npath \"identity/oidc/token/postgrest\" {\n  capabilities = [\"read\"]\n}\npath \"auth/token/lookup-self\" {\n  capabilities = [\"read\"]\n}\npath \"auth/token/renew-self\" {\n  capabilities = [\"update\"]\n}"
+}'
 echo "    OK"
 
 # ══════════════════════════════════════════════════════════════════════
