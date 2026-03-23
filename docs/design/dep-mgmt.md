@@ -251,6 +251,8 @@ unparsed field content. The CLI produces this by splitting the
 DESCRIPTION file on its top-level fields. Conversion in either
 direction (DESCRIPTION ↔ JSON) is trivial.
 
+The `files` checksums are SHA-256 hex strings.
+
 The `repositories` array works identically in both shapes:
 platform-neutral URLs, snapshot dates encoded in PPM URLs where
 applicable. When `repositories` is absent or empty, the server
@@ -311,7 +313,9 @@ maps to a URL via the top-level `repositories` array.
 The `version` field is a positive integer. The server rejects
 manifests with a version it does not understand and returns an
 error asking the user to update their CLI (or the server). No
-backward compatibility across major versions — a clean break.
+backward compatibility across versions — a clean break. Changes
+are expected to be rare; the field is an escape hatch, not a
+versioning scheme.
 
 ### Design Rationale
 
@@ -358,7 +362,7 @@ source of truth wins.
 
 ---
 
-## CLI Integration (Phase 2-8)
+## CLI Integration (Phase 2-9)
 
 The CLI (`cmd/by/`) prepares the bundle for upload. From the user's
 perspective, there are two choices: deploy with pinned dependencies
@@ -455,18 +459,30 @@ for bare scripts is always the server's responsibility.
 
 ### renv Invocation (Pinning Only)
 
-The CLI only shells out to R for pinning (1c). Following rsconnect's
-pattern (`snapshotRenvDependencies()`):
+The CLI only shells out to R for pinning (1c). To avoid modifying
+the user's project directory (renv initialization creates
+`.Rprofile`, `renv/`, etc.), the CLI runs renv in a temporary
+directory:
 
 ```r
+tmp <- tempfile()
+file.copy("/app", tmp, recursive = TRUE)
 options(renv.consent = TRUE)
-deps <- renv::dependencies(".", quiet = TRUE, progress = FALSE)
-renv::snapshot(".", packages = deps$Package, prompt = FALSE)
+renv::init(project = tmp, bare = TRUE)
+deps <- renv::dependencies(tmp, quiet = TRUE, progress = FALSE)
+renv::snapshot(tmp, packages = deps$Package,
+               library = .libPaths(), prompt = FALSE)
 ```
 
-The CLI runs this via `Rscript -e`, reads the resulting `renv.lock`,
-converts it to a manifest (pure Go), then cleans up (`renv.lock`,
-`renv/` directory) unless they pre-existed.
+The `library = .libPaths()` parameter tells `renv::snapshot()` to
+read installed versions from the user's actual library instead of
+the empty temp project library. All renv infrastructure (`.Rprofile`,
+`renv/`, `renv.lock`) is created inside the temp directory — the
+user's project is never touched.
+
+The CLI runs this via `Rscript -e`, reads `{tmp}/renv.lock`,
+converts it to a manifest (pure Go), and discards the temp
+directory. No cleanup logic needed.
 
 For unpinned deploys (DESCRIPTION or bare scripts), the CLI never
 invokes R. Dependency scanning for bare scripts happens server-side
@@ -514,9 +530,15 @@ it is the entrypoint. The DESCRIPTION case is either a plain
 directory with `app.R` + `DESCRIPTION` side by side, or a proper
 R package with an `.Rbuildignore`'d `app.R` in the root.
 
-**`Suggests` are never installed.** pak's default is to install
-`Imports` and `Depends` only, and we do not override this. If an
-app needs a package that is only a transitive `Suggests` dependency
+**`Suggests` are never installed.** In the unpinned path, the
+`deps::` ref tells pak to read `Imports` and `Depends` only —
+`Suggests` are excluded by design. In the pinned path, `Suggests`
+are absent for a different reason: the CLI passes
+`renv::dependencies()` output (which scans for actual usage —
+`library()`, `::`, etc.) as the explicit `packages` list to
+`renv::snapshot()`, so only packages the app actually uses end up
+in the lockfile. The net effect is the same in both modes. If an app
+needs a package that is only a transitive `Suggests` dependency
 (e.g., `pkg.B` is suggested by `pkg.A`), the user declares `pkg.B`
 in their own DESCRIPTION `Imports` or adds a `library(pkg.B)` call
 so the scanner picks it up. This keeps dependency trees lean and
@@ -686,7 +708,12 @@ lock <- jsonlite::fromJSON(file.path(build_lib, "pak.lock"))
 for (pkg in lock$packages) {
   key <- store_key(pkg)  # curated hash of identity fields (see below)
   store_path <- file.path("/store", build_platform, pkg$package, key)
+  meta_path <- paste0(store_path, ".json")
   if (dir.exists(store_path)) {
+    # ABI check: for source-compiled packages with LinkingTo,
+    # verify that the linked deps match the current lockfile.
+    if (!linkingto_matches(meta_path, lock)) next  # store miss — recompile
+    touch(meta_path)  # update last-accessed mtime
     link_package(store_path, file.path(build_lib, pkg$package))
   }
 }
@@ -699,13 +726,15 @@ for (pkg in lock$packages) {
 pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 
 # ── Phase 4: Ingest newly installed packages into store ─────────
-# Same filesystem as the store → atomic rename(), no copy.
 for (pkg in lock$packages) {
   key <- store_key(pkg)
   store_dir <- file.path("/store", build_platform, pkg$package, key)
+  meta_path <- paste0(store_dir, ".json")
   pkg_path <- file.path(build_lib, pkg$package)
   if (!dir.exists(store_dir) && dir.exists(pkg_path)) {
-    ingest_to_store(pkg_path, store_dir)  # atomic rename
+    # Under lock: copy package tree, then write metadata file.
+    ingest_to_store(pkg_path, store_dir)
+    write_store_meta(meta_path, pkg, lock)  # created_at, source_compiled, linkingto
   }
 }
 
@@ -789,46 +818,56 @@ even when the system runs a single R version today. When
 user-supplied build images or multi-arch support are added, the
 store handles it correctly without migration.
 
-**Curated hash computation.** The hash is a SHA-256 of selected
-identity fields from the lockfile entry — fields that determine
-*what source code was compiled*, not how or where it was
-discovered:
+**Curated hash computation.** The hash dispatches on `RemoteType`
+so that each package source includes only the fields that
+determine *what source code was compiled* — no redundant or
+absent fields:
 
-```
-curated_hash = SHA256(
-  package || version || RemoteType || sha256 || RemoteSha || RemoteSubdir
-)
+```r
+store_key <- function(pkg) {
+  fields <- switch(pkg$RemoteType,
+    standard = c(pkg$package, pkg$version, pkg$sha256),
+    github =, gitlab =, git =
+      c(pkg$package, pkg$RemoteSha, pkg$RemoteSubdir %||% ""),
+    stop("Unsupported RemoteType for store: ", pkg$RemoteType)
+  )
+  digest::digest(
+    paste(pkg$RemoteType, paste(fields, collapse = "\x00"), sep = "\x00"),
+    algo = "sha256"
+  )
+}
 ```
 
-| Field | Source | Present for |
+`RemoteType` is always the first element in the hash input to
+prevent cross-type collisions (e.g., a CRAN package and a GitHub
+package with the same name). Fields are joined with a `\x00`
+delimiter to prevent concatenation collisions.
+
+| RemoteType | Identity fields | Rationale |
 |---|---|---|
-| `package` | `pkg.package` | all types |
-| `version` | `pkg.version` | all types |
-| `RemoteType` | `pkg.metadata.RemoteType` | all types (`"standard"`, `"github"`, `"gitlab"`, etc.) |
-| `sha256` | `pkg.sha256` | CRAN/Bioc (archive hash); absent for GitHub |
-| `RemoteSha` | `pkg.metadata.RemoteSha` | all types (version string for CRAN, commit hash for GitHub) |
-| `RemoteSubdir` | `pkg.metadata.RemoteSubdir` | subdirectory packages only |
-
-Absent fields contribute an empty string. The `||` separator is a
-literal delimiter (e.g., `\x00`) to prevent field concatenation
-collisions.
+| `standard` | `package`, `version`, `sha256` | `sha256` (archive hash) is the strongest identifier — catches PPM rebuilds where the version is unchanged but the binary differs. |
+| `github`, `gitlab`, `git` | `package`, `RemoteSha`, `RemoteSubdir` | The commit hash fully identifies the source code. `version` is redundant (it's whatever DESCRIPTION contains at that commit). `RemoteSubdir` selects which package within a monorepo. |
 
 What this produces per package type:
 
 | Type | Key identity (hashed) |
 |---|---|
-| CRAN binary | `shiny\|1.9.1\|standard\|a1b2c3...\|1.9.1\|` |
-| CRAN source | `niche\|0.3.0\|standard\|d4e5f6...\|0.3.0\|` |
-| GitHub | `blockr\|0.2.1\|github\|\|a1b2c3d4e5...\|` |
-| GitHub subdir | `mypkg\|1.0.0\|github\|\|f9e8d7...\|src/mypkg` |
-| GitLab | `other\|2.0.0\|gitlab\|\|c3d4e5...\|` |
+| CRAN binary | `standard\|shiny\|1.9.1\|a1b2c3...` |
+| CRAN source | `standard\|niche\|0.3.0\|d4e5f6...` |
+| Bioc | `standard\|GenomicRanges\|1.56.0\|b7c8d9...` |
+| GitHub | `github\|blockr\|a1b2c3d4e5...\|` |
+| GitHub subdir | `github\|mypkg\|f9e8d7...\|src/mypkg` |
+| GitLab | `gitlab\|other\|c3d4e5...\|` |
+| git | `git\|mypkg\|e4f5a6...\|` |
 
-For CRAN/Bioc packages, the `sha256` field (hash of the archive)
-is the strongest identifier — different binaries of the same
-version (e.g., PPM rebuilds after an Rcpp update) get different
-hashes. For GitHub packages, `RemoteSha` (the git commit hash)
-identifies the exact source code. `RemoteType` prevents collisions
-across package source types.
+**Unsupported ref types.** `url::` and `local::` refs are not
+supported. `url::` packages lack a content hash in the pak
+lockfile (pak records an HTTP ETag rather than a `sha256` for
+url-type downloads, which is too weak for store identity).
+`local::` packages would require content-hashing the source tree,
+which is outside our current scope. Both are niche; `store_key()`
+errors with a clear message if encountered. Support can be added
+later if demand appears.
 
 Examples:
 ```
@@ -851,18 +890,36 @@ packages were compiled against, ABI mismatch is possible.
 
 This is a narrow edge case (GitHub install + compiled code +
 `LinkingTo` a package that changed ABI between the installed version
-and the version in the store). The server detects and aborts:
+and the version in the store).
 
-1. At install time, read the GitHub package's `LinkingTo` field.
-2. For each linked package, check whether it is already loaded in
-   the session at a version different from what is installed in
-   the build library.
-3. If there is a mismatch, abort with a clear error: "package X
-   links against Y, but Y is loaded at a different version.
-   Rebuild required."
+The store key does not include the versions of `LinkingTo`
+dependencies — adding them would complicate the hash scheme
+significantly. Instead, ABI safety for source-compiled packages is
+enforced via the **store metadata file** (see Store Layout below).
 
-This avoids silent ABI corruption. The user's recourse is to
-rebuild the app with updated dependencies.
+At ingestion, the metadata file records the store keys of each
+`LinkingTo` dependency that was present in the build library at
+compile time. At store lookup (phase 2 of the build flow), for
+source-compiled store hits with `LinkingTo` dependencies, the
+server reads the metadata file and compares the recorded
+`LinkingTo` store keys against the current lockfile's entries for
+those packages. If any differ, the store hit is **skipped** — the
+package is treated as a store miss and recompiled against the
+current `LinkingTo` versions.
+
+In practice this check only fires when the `LinkingTo` target is
+itself a floating source (e.g., a GitHub-sourced package without a
+pinned SHA) that moved between builds — dated PPM snapshots fix
+the version of CRAN-sourced linked dependencies, so the check
+passes trivially for typical CRAN-only dependency trees.
+
+**Future simplification:** enrich the curated hash with the identity
+fields of each `LinkingTo` dependency (available in the pak
+lockfile's `deps` entries). This would make the metadata check
+unnecessary — different `LinkingTo` versions would produce
+different store keys. Can be added without migration — old store
+entries become unreferenced under the new hash and are cleaned up
+by the eviction policy (see Open Questions).
 
 ### Store Layout
 
@@ -875,19 +932,51 @@ host path is a deployment concern.
 /store/
 └── 4.4-linux-x86_64/
     ├── shiny/
-    │   ├── e3b0c442.../    ← v1.9.1 from CRAN (sha256 of binary)
-    │   └── 7d865e95.../    ← v1.8.0 from CRAN (different archive → different hash)
+    │   ├── e3b0c442.../        ← installed package tree (v1.9.1 from CRAN)
+    │   ├── e3b0c442....json    ← store metadata (sibling file)
+    │   ├── 7d865e95.../        ← v1.8.0 from CRAN (different archive → different hash)
+    │   └── 7d865e95....json
     ├── ggplot2/
-    │   └── b5bb9d80.../    ← v3.5.0
+    │   ├── b5bb9d80.../        ← v3.5.0
+    │   └── b5bb9d80....json
     ├── blockr/
-    │   ├── 185f8db3.../    ← v0.2.0 from CRAN
-    │   └── a591a6d4.../    ← v0.2.1-dev from GitHub (different RemoteSha → different hash)
+    │   ├── 185f8db3.../        ← v0.2.0 from CRAN
+    │   ├── 185f8db3....json
+    │   ├── a591a6d4.../        ← v0.2.1-dev from GitHub
+    │   └── a591a6d4....json
     └── ...
 ```
 
 Each `{hash}/` directory contains the installed package tree
 directly (`DESCRIPTION`, `R/`, `Meta/`, etc. — no nested package
-name directory).
+name directory). The sibling `{hash}.json` file holds store
+metadata (see below).
+
+**Store metadata file.** Each store entry has a sibling JSON file
+containing metadata used for ABI safety checks and eviction:
+
+```json
+{
+  "created_at": "2026-03-18T14:30:00Z",
+  "source_compiled": true,
+  "linkingto": {
+    "Rcpp": "a7ffc6f8bf1e..."
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `created_at` | Timestamp written once at ingestion. |
+| `source_compiled` | Whether this entry was compiled from source (vs pre-built binary). |
+| `linkingto` | Map of `LinkingTo` dependency names to their store keys at compile time. Empty/absent for packages without `LinkingTo` or for binary installs. |
+
+**Last-accessed tracking** uses the metadata file's filesystem
+`mtime` rather than a JSON field — the server `touch`es the
+metadata file on every store hit. This avoids rewriting JSON on
+every access; `touch` is a metadata-only syscall (`utimes()`).
+Eviction queries can scan `mtime` values efficiently without
+parsing file contents.
 
 An R library is flat — `lib/shiny/` can hold exactly one version.
 The bridge between the multi-version store and R's single-version
@@ -928,8 +1017,13 @@ For each lockfile entry that was not a store hit:
 1. Compute the store key from the lockfile entry (curated hash).
 2. Acquire the lock (`/store/.locks/{platform}/{package}/{hash}.lock`).
 3. If `{platform}/{package}/{hash}/` does not already exist in the
-   store, write the installed package tree into the store
-   (atomic rename from a temp directory).
+   store:
+   a. Copy the installed package tree into the store (from the
+      temp build directory).
+   b. Write the sibling metadata file (`{hash}.json`) with
+      `created_at`, `source_compiled`, and `linkingto` fields
+      (the `LinkingTo` store keys are looked up from the lockfile
+      and the store).
 4. Release the lock.
 
 **On build failure:** packages that were successfully installed
@@ -942,6 +1036,9 @@ packages.
 
 The store is append-only — packages are never modified or deleted
 after insertion. Eviction (LRU, size limits) is a future concern.
+The `mtime` of the metadata file (updated via `touch` on every
+store hit) provides last-accessed tracking for LRU eviction without
+additional bookkeeping.
 
 ### Store Concurrency
 
@@ -965,13 +1062,12 @@ lock to release and then use the store entry.
    (e.g., 30 minutes), the waiting process may claim the lock and
    proceed with its own install.
 
-**Write atomicity:** even with locking, the store entry must be
-written atomically. The build installs into a temporary directory
-(`/store/.tmp/{uuid}/`) and uses `rename()` to move it into
-the final `{platform}/{package}/{hash}/` path. `rename()` is
-atomic on Linux when source and target are on the same filesystem.
-This guarantees that a concurrent reader never sees a half-written
-package tree.
+**Write safety:** the lock serializes all writes to a given store
+path. Under the lock, the build writes the package tree and the
+metadata file as separate operations — no atomicity constraint
+between them. A concurrent reader that sees the `{hash}/`
+directory can trust that it is complete because the lock is only
+released after both writes finish.
 
 ---
 
@@ -995,9 +1091,11 @@ can be reconstructed from any manifest.
 ### Live Package Requests
 
 A running worker can request additional packages via a **blocking**
-API call to the server (`POST /api/v1/packages`). The call blocks
-until the package is available or an error occurs — the R session
-waits on the HTTP response before proceeding.
+API call to the server (`POST /api/v1/packages`). The request body
+includes the package name(s) and the R session's currently loaded
+namespaces (`loadedNamespaces()`). The call blocks until the
+package is available or an error occurs — the R session waits on
+the HTTP response before proceeding.
 
 The server uses the same lockfile-based flow as the build, with
 one addition: the worker's existing `/lib` is passed as a
@@ -1066,12 +1164,16 @@ store, then hardlinks from the store into `/lib` and returns
 success. The API call blocks for the duration of the install —
 the R session waits.
 
-**3. Transfer required (version conflict):** the requested package
-(or a dependency) is already loaded in the R session at a different
-version. R cannot unload and reload a package at a different version
-in the same session. The API returns a `"transfer"` response. The
-R code (blockr) then serializes the board state to a well-known
-path and the server handles the container transfer (see below).
+**3. Transfer required (version conflict):** after resolving, the
+server compares the new lockfile entries against the loaded
+namespaces reported in the request. If any package in the new
+lockfile is already loaded at a different version, R cannot unload
+and reload it in the same session — that's a version conflict. The
+server returns a `"transfer"` response. The R code (blockr) then
+serializes the board state to a well-known path and the server
+handles the container transfer (see below). Packages that are
+installed but not loaded can safely be updated in place (the
+hardlink in `/lib` is replaced).
 
 **Resolution context.** The server resolves runtime package requests
 using the same repository configuration as the original build —
@@ -1151,8 +1253,7 @@ conflicts caused by tool mismatch or time drift are eliminated.
 ### Container Transfer (Version Conflict Case)
 
 The transfer is driven entirely by the API response — no separate
-signaling mechanism is needed. The blocking API call that returns
-`"transfer"` is itself the signal.
+signaling mechanism is needed.
 
 ```
  Worker A (old)              Server              Worker B (new)
@@ -1160,44 +1261,56 @@ signaling mechanism is needed. The blocking API call that returns
  1. POST /api/v1/packages
         ────────────▸ 2. Detect version conflict
                       3. Respond with
-                         {"status": "transfer"}
+                         {"status": "transfer",
+                          "transfer_path": "/transfers/{uuid}"}
  4. blockr serializes
     board to JSON at
-    /transfer/board.json
+    {transfer_path}/board.json.tmp
  5. Atomic rename:
     board.json.tmp →
     board.json
-        ────────────▸ 6. Server detects
-                         board.json exists
+        ────────────▸ 6. Server polls for
+                         board.json (stat() call,
+                         ~100ms interval)
                       7. Spawn Worker B with
-                         updated library view
+                         updated library view,
+                         mount {transfer_path} (ro)
                                    ────────────▸ 8. Worker B reads
-                                                    /transfer/board.json,
+                                                    board.json,
                                                     restores board
                       9. Reroute traffic
                          A → B
                      10. Drain & stop A
+                     11. Clean up {transfer_path}
 ```
 
 **We do NOT serialize the R session.** blockr has built-in board
-serialization (to/from JSON). The transfer path:
+serialization (to/from JSON). The server generates the transfer
+path and includes it in the API response — the R session writes
+where it's told, no path convention shared between client and
+server:
 
 ```
-{bundle_server_path}/.transfer/{worker_id}/board.json
+/transfers/{uuid}/board.json
 ```
 
-Mounted read-write into both workers during the handoff window.
-Cleaned up after transfer completes.
+The `/transfers/` directory is server-managed, mounted read-write
+into Worker A during the handoff. Worker B gets a read-only mount
+of the same path. The server cleans up after the transfer completes.
 
-The only new machinery needed is:
+**Ready signaling:** blockr writes the board state to
+`board.json.tmp`, then `rename()`s to `board.json` (atomic on the
+same filesystem). The server polls for `board.json` via `stat()`
+at ~100ms intervals — a single syscall per check, negligible
+overhead for an operation that happens rarely. When the file
+appears, the write is guaranteed complete. No sentinel file, no
+HTTP callback, no `inotify` dependency. The poll has a timeout
+(e.g., 30 seconds) — if the file does not appear, the server
+aborts the transfer, cleans up the transfer directory, and treats
+the worker as failed.
 
-- **Ready signaling:** blockr writes the board state to
-  `board.json.tmp`, then `rename()`s to `board.json` (atomic on
-  the same filesystem). The server watches for `board.json` to
-  appear — if it exists, the write is complete. No sentinel file
-  or HTTP callback needed.
-- **Traffic rerouting:** the proxy switches the route from A to B.
-  This already exists in the autoscaling/worker eviction path.
+**Traffic rerouting:** the proxy switches the route from A to B.
+This already exists in the autoscaling/worker eviction path.
 
 For apps that are NOT blockr (plain Shiny apps), the version
 conflict case is a hard restart — session is lost, user reconnects.
@@ -1434,15 +1547,17 @@ versions (append-only), so rollback is instant.
    orthogonal to the store (which caches *installed* packages) —
    the download cache helps even for store misses.
 
-9. **Curated hash of lockfile identity fields as cache key.** A
-   SHA-256 of `package`, `version`, `metadata.RemoteType`,
-   `sha256`, `metadata.RemoteSha`, and `metadata.RemoteSubdir`
-   from the pak lockfile entry. This is computable before
+9. **Type-specific hash of lockfile identity fields as cache key.**
+   The store key dispatches on `RemoteType` and hashes only the
+   fields relevant to that source: `package + version + sha256`
+   for standard (CRAN/Bioc), `package + RemoteSha + RemoteSubdir`
+   for github/gitlab/git. `RemoteType` is always included to
+   prevent cross-type collisions. This is computable before
    installation — the lockfile provides everything needed for a
-   store lookup. Same-version packages from different sources
-   (CRAN vs GitHub) get different hashes because `RemoteType` and
-   `RemoteSha`/`sha256` differ. Unlike the renv DESCRIPTION hash,
-   no installed package tree is needed to compute the key.
+   store lookup. Unlike the renv DESCRIPTION hash, no installed
+   package tree is needed to compute the key. `url::` and `local::`
+   refs are unsupported (clear error); both are niche and lack
+   reliable content identifiers in the lockfile.
 
 10. **Platform-aware store key.** The store key includes an
    `{r_version}-{os}-{arch}` prefix (e.g., `4.4-linux-x86_64`).
