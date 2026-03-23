@@ -332,6 +332,126 @@ The manifest's `repositories` array sets the exact repo URLs
 (including dated PPM snapshots), so `pak::pkg_install("shiny@1.9.1")`
 resolves unambiguously within that repo snapshot.
 
+### How pak Works (Relevant Internals)
+
+pak never calls `install.packages()`. It has its own pipeline:
+
+1. **Resolve** — for each ref, query CRAN/Bioc metadata or GitHub
+   API. Also scan the target library (`make_installed_cache()`) to
+   discover already-installed packages.
+2. **Solve** — formulate an Integer Linear Programming problem
+   (via lpSolve). The default "lazy" policy assigns cost 0 to
+   installed packages, 1 to binary downloads, 5 to source builds.
+   Output: an install plan data frame with `lib_status` per package
+   (`current` = already installed, `new`, `update`, etc.).
+3. **Download** — fetch package archives via pkgcache (a
+   content-addressable download cache keyed by URL + ETag).
+4. **Install** — for binary packages: extract archive +
+   `file.rename()` into the library. For source packages:
+   `R CMD INSTALL --build` via pkgbuild, then extract the
+   resulting binary. `install_package_plan()` skips any package
+   with `lib_status == "current"`.
+
+`install_package_plan()` is exported and accepts a plan data frame
+directly. This means we can intercept between steps 3 and 4: get
+the plan, hardlink cache hits from our store into the library, mark
+them as `"current"`, and call `install_package_plan()` to install
+only the remainder.
+
+### Store-Aware Build Flow
+
+Every build mode uses the same pattern: resolve what's needed, check
+our store for cache hits, install only what's missing, then ingest
+newly installed packages back into the store.
+
+**Container mounts:**
+
+```
+/app        (ro)  ← bundle
+/build-lib  (rw)  ← output library (initially empty)
+/pak        (ro)  ← cached pak package
+/pak-cache  (rw)  ← persistent pak download cache (shared across builds)
+/store      (ro)  ← package store (multi-version, shared across builds)
+```
+
+The persistent download cache (`/pak-cache`) is set via
+`Sys.setenv(PKG_CACHE_DIR = "/pak-cache")`. This avoids
+re-downloading archives across builds — pak's pkgcache checks
+ETags and serves from cache when fresh.
+
+**Manifest mode (single solve):**
+
+```r
+library(pak, lib.loc = "/pak")
+library(pkgdepends, lib.loc = "/pak")
+Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
+
+manifest <- jsonlite::fromJSON("/app/manifest.json")
+
+# Build refs from manifest
+repos <- setNames(manifest$repositories$URL, manifest$repositories$Name)
+options(repos = repos)
+
+refs <- vapply(names(manifest$packages), function(name) {
+  pkg <- manifest$packages[[name]]
+  if (identical(pkg$Source, "GitHub")) {
+    sprintf("%s/%s@%s", pkg$GithubUsername, pkg$GithubRepo, pkg$GithubSha1)
+  } else {
+    sprintf("%s@%s", name, pkg$Version)
+  }
+}, character(1))
+
+# Single solve
+proposal <- new_pkg_installation_proposal(
+  refs, config = list(library = "/build-lib")
+)
+proposal$resolve()
+proposal$solve()
+proposal$download()
+plan <- proposal$get_install_plan()
+
+# Pre-populate cache hits from store
+for (i in seq_len(nrow(plan))) {
+  if (plan$lib_status[i] %in% c("new", "update")) {
+    hash <- manifest$packages[[plan$package[i]]]$Hash
+    store_path <- file.path("/store", plan$package[i], hash)
+    if (dir.exists(store_path)) {
+      link_package(store_path, file.path("/build-lib", plan$package[i]))
+      plan$lib_status[i] <- "current"
+    }
+  }
+}
+
+# Install only cache misses
+install_package_plan(plan, lib = "/build-lib", num_workers = 4)
+```
+
+For full cache hits (all packages in the store), the install step
+is a no-op — the build completes in seconds.
+
+**DESCRIPTION and scan modes** follow the same pattern. The only
+difference is how `refs` are constructed:
+
+- DESCRIPTION: `refs <- "deps::/app"` — pkgdepends reads
+  `Imports`, `Depends`, and `Remotes` from the DESCRIPTION file.
+- Scan: `refs <- unique(pak::scan_deps("/app")$package)` — pak
+  scans `.R` files for `library()`, `require()`, and `::` calls.
+
+For these modes there is no manifest with pre-computed hashes, so
+the store lookup uses the resolved `package` + `version` from the
+plan. The hash is computed from the installed DESCRIPTION after the
+build completes (see Store Population below).
+
+**Post-build: store ingestion and manifest generation.** After a
+successful build, the server:
+
+1. Walks `/build-lib` and computes the renv-style hash for each
+   installed package.
+2. For packages not already in the store, copies the installed
+   package tree into the store at `{package}/{hash}/`.
+3. For DESCRIPTION and scan modes, generates a `manifest.json`
+   from the install plan and stores it alongside the bundle.
+
 ---
 
 ## Package Store and Cache Key Design
@@ -415,6 +535,66 @@ and the version in the store). The server detects and aborts:
 
 This avoids silent ABI corruption. The user's recourse is to
 rebuild the app with updated dependencies.
+
+### Store Layout
+
+The store holds multiple versions of the same package, keyed by
+hash. Each entry is a fully installed R package tree:
+
+```
+.pkg-store/
+├── shiny/
+│   ├── a1b2c3d4.../shiny/    ← v1.9.1 from CRAN
+│   └── e5f6a7b8.../shiny/    ← v1.8.0 from CRAN (different hash)
+├── ggplot2/
+│   └── c9d0e1f2.../ggplot2/  ← v3.5.0
+├── blockr/
+│   ├── f3a4b5c6.../blockr/   ← v0.2.0 from CRAN
+│   └── d7e8f9a0.../blockr/   ← v0.2.1-dev from GitHub (different hash)
+└── ...
+```
+
+An R library is flat — `lib/shiny/` can hold exactly one version.
+The bridge between the multi-version store and R's single-version
+library is a **view**: a flat directory assembled per-build (or
+per-worker) by hard-linking the correct version of each package
+from the store.
+
+```
+/build-lib/                      (assembled view)
+├── shiny/    → hardlink from .pkg-store/shiny/a1b2c3d4.../shiny/
+├── ggplot2/  → hardlink from .pkg-store/ggplot2/c9d0e1f2.../ggplot2/
+└── blockr/   → hardlink from .pkg-store/blockr/f3a4b5c6.../blockr/
+```
+
+Version selection depends on context:
+
+- **Manifest mode:** the manifest's `Hash` field maps directly to
+  a store entry. Exact match.
+- **DESCRIPTION / scan modes:** the install plan's resolved
+  `package` + `version` is matched against the store. The hash is
+  computed from the installed DESCRIPTION after the build, then
+  used for future lookups.
+- **Runtime views** (worker `/extra-lib`): the manifest of the
+  running bundle specifies which hashes to link.
+
+Hard links (not symlinks) are used so the store does not need to
+be mounted into worker containers at runtime. The view is
+self-contained.
+
+### Store Population
+
+Packages enter the store after successful builds. The server:
+
+1. Walks the build library (`/build-lib`).
+2. For each installed package, reads its DESCRIPTION and computes
+   the renv-style MD5 hash.
+3. If `{package}/{hash}/` does not exist in the store, copies the
+   installed package tree into the store. If it already exists
+   (another build already installed the same version), skips it.
+
+The store is append-only — packages are never modified or deleted
+after insertion. Eviction (LRU, size limits) is a future concern.
 
 ---
 
@@ -513,6 +693,51 @@ This matches the behavior of a normal redeploy.
 
 ---
 
+## Design Decisions
+
+1. **pak as the dependency resolver, not renv.** pak has a proper
+   constraint solver (ILP via lpSolve), supports three input modes
+   (lockfile, DESCRIPTION, script scanning), and bundles all
+   dependencies into a single self-contained package. renv lacks a
+   solver and is primarily a project isolation tool. renv's global
+   cache is appealing, but the renv + pak integration is broken —
+   when pak is enabled as renv's install backend, the two cache
+   systems don't coordinate (open issues #1846, #1334, #1210).
+   Rather than depend on a broken integration, we implement our own
+   cache layer inspired by renv's design.
+
+2. **Our own cache layer instead of renv's.** renv's cache is
+   designed for interactive development (symlinks, project
+   isolation, sandbox, .Rprofile shims). We need server-side build
+   caching in containers where none of that applies. Our store uses
+   hard links (self-contained views, no runtime dependency on the
+   store mount), renv-compatible hashes (same key algorithm), and
+   integrates directly with pak's install plan. The store is also
+   shared across all apps on the server, not per-project.
+
+3. **Intercept pak's install plan, not `install.packages()`.** pak
+   never calls `install.packages()` — it has its own install
+   pipeline. The only way to integrate caching is at pak's level:
+   inspect the install plan after solving, pre-populate cache hits,
+   and mark them as `"current"` so `install_package_plan()` skips
+   them. This is a single solve step with no redundant work.
+
+4. **Persistent pak download cache across builds.** pak's pkgcache
+   stores downloaded archives keyed by URL + ETag. Mounting a
+   persistent directory at `PKG_CACHE_DIR` across builds avoids
+   re-downloading packages that haven't changed upstream. This is
+   orthogonal to the store (which caches *installed* packages) —
+   the download cache helps even for store misses.
+
+5. **renv-style hash as cache key.** MD5 of selected DESCRIPTION
+   fields, matching renv's algorithm. This means the manifest's
+   `Hash` field (computed client-side or after the first build) is
+   the store lookup key. Same-version packages from different
+   sources (CRAN vs GitHub) get different hashes because the
+   `Remote*` fields differ.
+
+---
+
 ## Open Questions
 
 1. **Manifest signing.** Should the CLI sign the manifest so the
@@ -542,3 +767,19 @@ This matches the behavior of a normal redeploy.
    and Julia support (if added) would follow similar patterns but
    with different tools (uv/pip for Python, Pkg.jl for Julia).
    The manifest format should be extensible to accommodate this.
+
+6. **`install_package_plan()` with modified `lib_status`.** The
+   store-aware build flow relies on setting `lib_status = "current"`
+   for pre-populated packages so `install_package_plan()` skips
+   them. The pkgdepends source shows it marks `"current"` packages
+   as `install_done = TRUE` at init, but this needs validation
+   with actual pak/pkgdepends versions to confirm there is no
+   secondary check that would override our modification.
+
+7. **Download waste for store hits.** The current flow calls
+   `proposal$download()` before inspecting the plan, which
+   downloads archives for packages we already have in the store.
+   With the persistent download cache this is fast (ETag checks,
+   no actual transfer), but it could be eliminated by inspecting
+   the plan before downloading and selectively downloading only
+   cache misses. Worth the complexity?
