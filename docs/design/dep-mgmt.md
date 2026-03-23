@@ -34,33 +34,33 @@ and let the server figure it out). blockyard's scan mode is novel.
  ────────────────────                    ──────
 
  ┌─────────────┐     upload bundle
- │ renv.lock   │──┐  + manifest.json     ┌──────────────────┐
- │ (optional)  │  │                       │ Build pipeline   │
- └─────────────┘  ├─────────────────────▸ │                  │
- ┌─────────────┐  │                       │ Has manifest?    │
- │ DESCRIPTION │──┤                       │  yes → install   │
- │ (optional)  │  │                       │  no  → pak scan  │
- └─────────────┘  │                       │        ↓         │
- ┌─────────────┐  │                       │  generate manifest│
- │ app.R only  │──┘                       │        ↓         │
- └─────────────┘                          │  install deps    │
-                                          │        ↓         │
-                                          │  ingest → store  │
-                                          └──────────────────┘
+ │ renv.lock   │──┐  + manifest.json      ┌────────────────────┐
+ │ (optional)  │  │                       │ Build pipeline     │
+ └─────────────┘  ├─────────────────────▸ │                    │
+ ┌─────────────┐  │                       │ Has manifest?      │
+ │ DESCRIPTION │──┤                       │  yes → install     │
+ │ (optional)  │  │                       │  no  → pak scan    │
+ └─────────────┘  │                       │        ↓           │
+ ┌─────────────┐  │                       │  generate manifest  │
+ │ app.R only  │──┘                       │        ↓           │
+ └─────────────┘                          │  install deps      │
+                                          │        ↓           │
+                                          │  ingest → store    │
+                                          └────────────────────┘
                                                    │
                                                    ▼
-                                          ┌──────────────────┐
-                                          │ Package store    │
-                                          │ (renv-style hash)│
-                                          └──────────────────┘
+                                          ┌────────────────────┐
+                                          │ Package store      │
+                                          │ (renv-style hash)  │
+                                          └────────────────────┘
                                                    │
                                             hard links
                                                    ▼
-                                          ┌──────────────────┐
-                                          │ Worker container  │
-                                          │ /app-lib (ro)    │
-                                          │ /extra-lib (rw)  │
-                                          └──────────────────┘
+                                          ┌────────────────────┐
+                                          │ Worker container   │
+                                          │ /app-lib (ro)      │
+                                          │ /extra-lib (rw)    │
+                                          └────────────────────┘
 ```
 
 Three deployment paths, in order of reproducibility:
@@ -102,6 +102,7 @@ package) and extending where needed.
   ],
   "packages": {
     "shiny": {
+      "Ref": "shiny@1.9.1",
       "Source": "CRAN",
       "Repository": "https://p3m.dev/cran/__linux__/noble/2026-03-18",
       "Version": "1.9.1",
@@ -118,6 +119,7 @@ package) and extending where needed.
       }
     },
     "myghpkg": {
+      "Ref": "owner/myghpkg@a1b2c3d4e5f6789...",
       "Source": "GitHub",
       "Version": "0.3.1",
       "Hash": "d4e5f6a7b8c9...",
@@ -134,6 +136,22 @@ package) and extending where needed.
         "NeedsCompilation": "no",
         "RemoteType": "github",
         "RemoteSha": "a1b2c3d4e5f6789..."
+      }
+    },
+    "GenomicRanges": {
+      "Ref": "bioc::GenomicRanges@1.56.0",
+      "Source": "Bioconductor",
+      "Version": "1.56.0",
+      "Hash": "b3c4d5e6f7a8...",
+      "Requirements": ["BiocGenerics", "S4Vectors", "IRanges", "GenomeInfoDb"],
+      "description": {
+        "Package": "GenomicRanges",
+        "Version": "1.56.0",
+        "Depends": "R (>= 4.0.0), methods, BiocGenerics (>= 0.37.0), S4Vectors (>= 0.27.12), IRanges (>= 2.23.9), GenomeInfoDb (>= 1.15.2)",
+        "Imports": "stats, utils",
+        "LinkingTo": "S4Vectors, IRanges",
+        "NeedsCompilation": "yes",
+        "biocViews": "Genetics, Infrastructure, Sequencing, Annotation, Coverage, GenomeAnnotation"
       }
     }
   },
@@ -158,6 +176,13 @@ deployments.
 - `files` map with checksums
 
 **What we add:**
+- `Ref` — the [pkgdepends ref string](https://r-lib.github.io/pkgdepends/reference/pkg_refs.html)
+  for the package (e.g., `shiny@1.9.1`, `owner/repo@sha`,
+  `bioc::GenomicRanges@1.56.0`). This is the authoritative install
+  instruction — the server can pass it directly to pak. Using
+  pkgdepends' ref format makes the manifest extensible to any
+  source type pak supports (CRAN, Bioconductor, GitHub, GitLab,
+  git, URL, local) without schema changes.
 - `repositories` — structured array of `{Name, URL}`. Connect
   records repo URLs per-package in the `Repository` field and in
   the embedded DESCRIPTION; we also provide them as a top-level
@@ -174,6 +199,13 @@ deployments.
   operationally relevant subset: `Package`, `Version`, `Depends`,
   `Imports`, `LinkingTo`, `NeedsCompilation`, `Repository`, and
   `Remote*` fields. This reduces manifest size by ~5-10x.
+
+### Schema Versioning
+
+The `version` field is a positive integer. The server rejects
+manifests with a version it does not understand and returns an
+error asking the user to update their CLI (or the server). No
+backward compatibility across major versions — a clean break.
 
 ### Design Rationale
 
@@ -235,6 +267,8 @@ renv.lock                          manifest.json
 R.Version               →          platform
 R.Repositories          →          repositories
 Packages.*.Package      →          packages key
+(derived from Source +  →          packages.*.Ref (pkgdepends ref string)
+ Remote* + Version)
 Packages.*.Version      →          packages.*.Version
 Packages.*.Source       →          packages.*.Source
 Packages.*.Repository   →          packages.*.Repository (resolved to URL via R.Repositories)
@@ -246,6 +280,13 @@ Packages.*.RemoteRepo   →          packages.*.GithubRepo
 Packages.*.RemoteRef    →          packages.*.GithubRef
 Packages.*.RemoteSha    →          packages.*.GithubSha1
 ```
+
+The `Ref` is constructed by the CLI from the renv.lock fields:
+- CRAN: `{package}@{version}` (e.g., `shiny@1.9.1`)
+- Bioconductor: `bioc::{package}@{version}`
+- GitHub: `{RemoteUsername}/{RemoteRepo}@{RemoteSha}`
+- GitLab: `gitlab::{RemoteHost}/{RemoteUsername}/{RemoteRepo}@{RemoteSha}`
+- Other remote types: mapped to the corresponding pkgdepends ref format
 
 For the trimmed `description` object, the CLI reads the installed
 package's DESCRIPTION if available (to get `Depends`, `Imports`,
@@ -292,8 +333,21 @@ Checked in priority order:
 | Priority | Condition | Strategy |
 |---|---|---|
 | 1 | `manifest.json` present | Install from manifest |
-| 2 | `DESCRIPTION` present | `pak::local_install_deps()` then generate manifest |
+| 2 | `DESCRIPTION` + `app.R` present | `pak::local_install_deps()` then generate manifest |
 | 3 | Only scripts | `pak::scan_deps()` + `pak::pkg_install()` then generate manifest |
+
+In all modes, `app.R` (or `server.R`/`ui.R`) must be present —
+it is the entrypoint. The DESCRIPTION case is either a plain
+directory with `app.R` + `DESCRIPTION` side by side, or a proper
+R package with an `.Rbuildignore`'d `app.R` in the root.
+
+**`Suggests` are never installed.** pak's default is to install
+`Imports` and `Depends` only, and we do not override this. If an
+app needs a package that is only a transitive `Suggests` dependency
+(e.g., `pkg.B` is suggested by `pkg.A`), the user declares `pkg.B`
+in their own DESCRIPTION `Imports` or adds a `library(pkg.B)` call
+so the scan mode picks it up. This keeps dependency trees lean and
+avoids pulling in dev/test tooling from upstream packages.
 
 In modes 2 and 3 the server generates a `manifest.json` after
 the build completes and stores it alongside the bundle. This
@@ -302,8 +356,9 @@ auditing and for re-building the same bundle without re-resolving.
 
 ### Manifest-Based Install
 
-When a manifest is present, the server installs packages using pak
-with explicit version pins:
+When a manifest is present, the server installs packages using the
+`Ref` field from each package entry — these are pkgdepends ref
+strings that pak can consume directly:
 
 ```r
 library(pak, lib.loc = "/pak")
@@ -314,23 +369,17 @@ manifest <- jsonlite::fromJSON("/app/manifest.json")
 repos <- setNames(manifest$repositories$URL, manifest$repositories$Name)
 options(repos = repos)
 
-# Build ref list with version pins
-refs <- vapply(names(manifest$packages), function(name) {
-  pkg <- manifest$packages[[name]]
-  if (identical(pkg$Source, "GitHub")) {
-    sprintf("%s/%s@%s", pkg$GithubUsername, pkg$GithubRepo, pkg$GithubSha1)
-  } else {
-    # pak ref format: package@version
-    sprintf("%s@%s", name, pkg$Version)
-  }
-}, character(1))
+# Refs are stored in the manifest — no need to reconstruct
+refs <- vapply(manifest$packages, `[[`, character(1), "Ref")
 
 pak::pkg_install(refs, lib = "/build-lib", upgrade = FALSE, ask = FALSE)
 ```
 
 The manifest's `repositories` array sets the exact repo URLs
 (including dated PPM snapshots), so `pak::pkg_install("shiny@1.9.1")`
-resolves unambiguously within that repo snapshot.
+resolves unambiguously within that repo snapshot. The `Ref` field
+supports any source type pak handles (CRAN, Bioconductor, GitHub,
+GitLab, git, URL) without source-specific branching.
 
 ### How pak Works (Relevant Internals)
 
@@ -388,18 +437,11 @@ Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
 manifest <- jsonlite::fromJSON("/app/manifest.json")
 
-# Build refs from manifest
+# Refs from manifest — works for any source type
 repos <- setNames(manifest$repositories$URL, manifest$repositories$Name)
 options(repos = repos)
 
-refs <- vapply(names(manifest$packages), function(name) {
-  pkg <- manifest$packages[[name]]
-  if (identical(pkg$Source, "GitHub")) {
-    sprintf("%s/%s@%s", pkg$GithubUsername, pkg$GithubRepo, pkg$GithubSha1)
-  } else {
-    sprintf("%s@%s", name, pkg$Version)
-  }
-}, character(1))
+refs <- vapply(manifest$packages, `[[`, character(1), "Ref")
 
 # Single solve
 proposal <- new_pkg_installation_proposal(
@@ -414,7 +456,7 @@ plan <- proposal$get_install_plan()
 for (i in seq_len(nrow(plan))) {
   if (plan$lib_status[i] %in% c("new", "update")) {
     hash <- manifest$packages[[plan$package[i]]]$Hash
-    store_path <- file.path("/store", plan$package[i], hash)
+    store_path <- file.path("/store", platform, plan$package[i], hash)
     if (dir.exists(store_path)) {
       link_package(store_path, file.path("/build-lib", plan$package[i]))
       plan$lib_status[i] <- "current"
@@ -442,15 +484,11 @@ the store lookup uses the resolved `package` + `version` from the
 plan. The hash is computed from the installed DESCRIPTION after the
 build completes (see Store Population below).
 
-**Post-build: store ingestion and manifest generation.** After a
-successful build, the server:
-
-1. Walks `/build-lib` and computes the renv-style hash for each
-   installed package.
-2. For packages not already in the store, copies the installed
-   package tree into the store at `{package}/{hash}/`.
-3. For DESCRIPTION and scan modes, generates a `manifest.json`
-   from the install plan and stores it alongside the bundle.
+**Post-build: manifest generation.** Store ingestion happens
+incrementally during the build (see Store Population below). After
+a successful build, the server generates a `manifest.json` for
+DESCRIPTION and scan modes from the install plan and stores it
+alongside the bundle.
 
 ---
 
@@ -494,19 +532,28 @@ the installed package tree.
 **Store key format:**
 
 ```
-{package}/{hash}/
+{platform}/{package}/{hash}/
 ```
 
-Following renv's cache layout: the hash is an MD5 of selected
-DESCRIPTION fields (`Package`, `Version`, `Title`, `Author`,
-`Maintainer`, `Description`, `Depends`, `Imports`, `Suggests`,
-`LinkingTo`, plus `Remote*` fields for non-CRAN packages).
+The `platform` prefix encodes the three dimensions that determine
+binary compatibility: R version (minor), OS, and architecture.
+Format: `{r_major}.{r_minor}-{os}-{arch}`, e.g.,
+`4.4-linux-x86_64`. This ensures packages compiled under different
+R versions, operating systems, or architectures are never mixed —
+even when the system runs a single R version today. When
+user-supplied build images or multi-arch support are added, the
+store handles it correctly without migration.
+
+The hash is an MD5 of selected DESCRIPTION fields (`Package`,
+`Version`, `Title`, `Author`, `Maintainer`, `Description`,
+`Depends`, `Imports`, `Suggests`, `LinkingTo`, plus `Remote*`
+fields for non-CRAN packages), following renv's cache layout.
 
 Examples:
 ```
-shiny/a1b2c3d4e5f6.../
-Rcpp/f8e9d0c1b2a3.../
-blockr/d4e5f6a7b8c9.../
+4.4-linux-x86_64/shiny/a1b2c3d4e5f6.../
+4.4-linux-x86_64/Rcpp/f8e9d0c1b2a3.../
+4.4-linux-x86_64/blockr/d4e5f6a7b8c9.../
 ```
 
 **ABI safety relies on PPM snapshot coherence.** Within a single
@@ -543,15 +590,16 @@ hash. Each entry is a fully installed R package tree:
 
 ```
 .pkg-store/
-├── shiny/
-│   ├── a1b2c3d4.../shiny/    ← v1.9.1 from CRAN
-│   └── e5f6a7b8.../shiny/    ← v1.8.0 from CRAN (different hash)
-├── ggplot2/
-│   └── c9d0e1f2.../ggplot2/  ← v3.5.0
-├── blockr/
-│   ├── f3a4b5c6.../blockr/   ← v0.2.0 from CRAN
-│   └── d7e8f9a0.../blockr/   ← v0.2.1-dev from GitHub (different hash)
-└── ...
+└── 4.4-linux-x86_64/
+    ├── shiny/
+    │   ├── a1b2c3d4.../shiny/    ← v1.9.1 from CRAN
+    │   └── e5f6a7b8.../shiny/    ← v1.8.0 from CRAN (different hash)
+    ├── ggplot2/
+    │   └── c9d0e1f2.../ggplot2/  ← v3.5.0
+    ├── blockr/
+    │   ├── f3a4b5c6.../blockr/   ← v0.2.0 from CRAN
+    │   └── d7e8f9a0.../blockr/   ← v0.2.1-dev from GitHub (different hash)
+    └── ...
 ```
 
 An R library is flat — `lib/shiny/` can hold exactly one version.
@@ -562,9 +610,9 @@ from the store.
 
 ```
 /build-lib/                      (assembled view)
-├── shiny/    → hardlink from .pkg-store/shiny/a1b2c3d4.../shiny/
-├── ggplot2/  → hardlink from .pkg-store/ggplot2/c9d0e1f2.../ggplot2/
-└── blockr/   → hardlink from .pkg-store/blockr/f3a4b5c6.../blockr/
+├── shiny/    → hardlink from .pkg-store/4.4-linux-x86_64/shiny/a1b2c3d4.../shiny/
+├── ggplot2/  → hardlink from .pkg-store/4.4-linux-x86_64/ggplot2/c9d0e1f2.../ggplot2/
+└── blockr/   → hardlink from .pkg-store/4.4-linux-x86_64/blockr/f3a4b5c6.../blockr/
 ```
 
 Version selection depends on context:
@@ -580,21 +628,65 @@ Version selection depends on context:
 
 Hard links (not symlinks) are used so the store does not need to
 be mounted into worker containers at runtime. The view is
-self-contained.
+self-contained. **Constraint:** hard links require the store and
+the target directory (`/build-lib`, `/extra-lib`) to be on the
+same filesystem. The deployment must ensure these paths share a
+filesystem (e.g., same Docker volume).
 
 ### Store Population
 
-Packages enter the store after successful builds. The server:
+Packages are ingested into the store incrementally as each package
+is installed — not as a post-build batch step. For each package:
 
-1. Walks the build library (`/build-lib`).
-2. For each installed package, reads its DESCRIPTION and computes
-   the renv-style MD5 hash.
-3. If `{package}/{hash}/` does not exist in the store, copies the
-   installed package tree into the store. If it already exists
-   (another build already installed the same version), skips it.
+1. Acquire the lockfile (`.pkg-store/.locks/{platform}/{package}/{hash}.lock`).
+2. Install the package (pak builds or extracts the binary).
+3. Read the installed DESCRIPTION and compute the renv-style MD5
+   hash.
+4. If `{platform}/{package}/{hash}/` does not already exist in the
+   store, write the installed package tree into the store
+   (atomic rename from a temp directory).
+5. Release the lockfile.
+
+**On build failure:** packages that were successfully installed
+before the failure remain in the store — they are independently
+valid and useful for future builds. The lockfile for the failed
+package is cleaned up. The build errors out and the operator
+retries (e.g., network issue) or fixes the root cause (e.g.,
+missing system dependency). No rollback of successfully ingested
+packages.
 
 The store is append-only — packages are never modified or deleted
 after insertion. Eviction (LRU, size limits) is a future concern.
+
+### Store Concurrency
+
+The store is shared across all builds running on the same server.
+When concurrent builds need the same package, the first build to
+start installing it takes a lock; subsequent builds wait for the
+lock to release and then use the store entry.
+
+**Lock protocol:**
+
+1. Before installing a package, the build process creates a lockfile
+   at `.pkg-store/.locks/{platform}/{package}/{hash}.lock`. The
+   lockfile contains the build's PID and a timestamp.
+2. If the lockfile already exists, the build knows another process
+   is installing the same package. It waits (polling with backoff)
+   until the lockfile is released and the store entry appears.
+3. After successful installation and ingestion into the store, the
+   build removes the lockfile.
+4. **Stale lock detection:** if the PID in the lockfile is no longer
+   running (crashed build), or the lock is older than a threshold
+   (e.g., 30 minutes), the waiting process may claim the lock and
+   proceed with its own install.
+
+**Write atomicity:** even with locking, the store entry must be
+written atomically. The build installs into a temporary directory
+(`.pkg-store/.tmp/{uuid}/`) and uses `rename()` to move it into
+the final `{platform}/{package}/{hash}/` path. `rename()` is
+atomic on Linux when source and target are on the same filesystem.
+This guarantees that a concurrent reader never sees a half-written
+package tree.
 
 ---
 
@@ -693,6 +785,88 @@ This matches the behavior of a normal redeploy.
 
 ---
 
+## Dependency Refresh
+
+Deployments that ship with a manifest (lockfile-derived) have every
+dependency pinned to an exact version — updating requires a new
+deploy. But deployments that rely on server-side resolution
+(DESCRIPTION or scan modes) only pin dependencies to whatever the
+repo snapshot contained at build time. For these deployments,
+blockyard supports a **refresh** operation that re-resolves
+non-pinned dependencies and rebuilds the app library with the
+latest compatible versions.
+
+### What Refresh Does
+
+A refresh re-runs the build pipeline for an existing bundle without
+re-uploading code:
+
+1. Take the original bundle (code + DESCRIPTION or bare scripts).
+2. Re-resolve dependencies using the current repository state
+   (latest PPM snapshot, latest GitHub commits, etc.).
+3. Build a new library, using the store for cache hits as usual.
+4. Generate a new `manifest.json` reflecting the updated versions.
+5. Swap the worker to the new library (same container transfer
+   protocol as version-conflict updates).
+
+The bundle's code is unchanged — only the dependency versions move
+forward. The previous manifest is kept for rollback.
+
+### What Gets Updated
+
+Refresh updates dependencies that are **not version-pinned** in the
+original deployment metadata:
+
+| Source | What moves forward | What stays pinned |
+|---|---|---|
+| DESCRIPTION `Imports: shiny` | Latest shiny compatible with any version constraints | Nothing — DESCRIPTION rarely pins exact versions |
+| DESCRIPTION `Imports: shiny (>= 1.8.0)` | Latest shiny >= 1.8.0 | Lower bound respected |
+| DESCRIPTION `Remotes: owner/repo` | Latest commit on default branch | — |
+| DESCRIPTION `Remotes: owner/repo@v1.0.0` | Stays at tag v1.0.0 | Tag is a pin |
+| Scan mode (`library(shiny)`) | Latest shiny from repo | Nothing — scan mode has no version constraints |
+
+Transitive dependencies follow the same logic — pak's solver picks
+the latest versions that satisfy all constraints.
+
+### Triggers
+
+- **Manual:** `by refresh <app-id>` from the CLI, or a button in
+  the dashboard. Useful after a known upstream release.
+- **Scheduled:** configurable per-app cron (e.g., weekly). The
+  server runs refresh, and if any dependency versions changed,
+  performs the worker swap. If nothing changed, it's a no-op.
+- **On deploy restart:** optionally, refresh on every cold start
+  (container eviction, scaling event). This keeps long-lived
+  scan-mode apps current without manual intervention.
+
+### Scope and Constraints
+
+Refresh is **only available for DESCRIPTION and scan mode
+deployments** — those without a client-supplied manifest. If a
+manifest was uploaded, the user explicitly chose reproducibility;
+refreshing would violate that contract. The CLI warns about this
+distinction:
+
+```
+$ by refresh my-app
+Error: my-app was deployed with a lockfile-derived manifest.
+Dependencies are pinned. Redeploy to update.
+```
+
+Refresh does **not** update the app's code. If the app source
+needs changes to work with newer dependency versions, that requires
+a new deploy.
+
+### Rollback
+
+Each refresh produces a new manifest. The server retains the
+previous manifest, so rolling back is a library swap to the prior
+version set — same mechanism as the initial refresh, just pointing
+at the old manifest. The store still holds the old package versions
+(append-only), so rollback is instant.
+
+---
+
 ## Design Decisions
 
 1. **pak as the dependency resolver, not renv.** pak has a proper
@@ -735,6 +909,32 @@ This matches the behavior of a normal redeploy.
    the store lookup key. Same-version packages from different
    sources (CRAN vs GitHub) get different hashes because the
    `Remote*` fields differ.
+
+6. **Platform-aware store key.** The store key includes an
+   `{r_version}-{os}-{arch}` prefix (e.g., `4.4-linux-x86_64`).
+   R binary packages are incompatible across minor R versions, and
+   compiled code is architecture- and OS-specific. Including all
+   three dimensions from the start means the store is correct by
+   construction when user-supplied build images or multi-arch
+   support are added — no migration required.
+
+7. **Private package sources via builder config, not manifest.**
+   Credentials for private GitHub repos (`GITHUB_PAT` env var) and
+   private CRAN-like repos (`.netrc` file for HTTP authentication)
+   are injected into the build container via builder configuration.
+   Credentials never appear in the manifest. This follows the same
+   pattern as user-suppliable build images — the builder config is
+   the extensibility surface for deployment-specific concerns.
+
+8. **System dependencies are a build image concern.** R packages
+   with compiled code often require system libraries (`libcurl-dev`,
+   `libxml2-dev`, etc.). The default build image includes common
+   system libraries. For packages requiring uncommon libraries,
+   user-supplied build images are the escape hatch — users provide
+   a custom image with the necessary system dependencies
+   pre-installed. The manifest does not record system dependencies
+   because they are platform-specific and not portable across
+   operating systems.
 
 ---
 
