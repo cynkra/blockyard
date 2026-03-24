@@ -833,7 +833,6 @@ What this produces per package type:
 | Type | Key identity (hashed) |
 |---|---|
 | CRAN binary | `standard\|shiny\|1.9.1\|a1b2c3...` |
-| CRAN source | `standard\|niche\|0.3.0\|d4e5f6...` |
 | Bioc | `standard\|GenomicRanges\|1.56.0\|b7c8d9...` |
 | GitHub | `github\|blockr\|a1b2c3d4e5...\|` |
 | GitHub subdir | `github\|mypkg\|f9e8d7...\|src/mypkg` |
@@ -856,50 +855,37 @@ Examples:
 4.4-linux-x86_64/blockr/2c26b46b68ff.../
 ```
 
-**ABI safety relies on PPM snapshot coherence.** Within a single
-PPM dated snapshot, all binaries are built against each other —
-the library is coherent. Builds that install from a single snapshot
-produce a coherent store population. This is the primary safety
-mechanism.
+**ABI safety relies on two mechanisms:**
 
-The one case where ABI coherence can break is **GitHub dev-installs
-of packages with `LinkingTo`**. A GitHub package compiled from
-source uses headers from whatever version of the linked package is
-currently installed. If that version differs from what other cached
-packages were compiled against, ABI mismatch is possible.
+1. **PPM snapshot coherence (primary).** Within a single PPM dated
+   snapshot, all binaries are built against each other — the library
+   is coherent. Builds that install from a single snapshot produce a
+   coherent store population. This covers the vast majority of cases.
 
-This is a narrow edge case (GitHub install + compiled code +
-`LinkingTo` a package that changed ABI between the installed version
-and the version in the store).
+2. **Metadata-based check for the LinkingTo edge case.** The store
+   key does NOT include `LinkingTo` dependencies — the pak lockfile
+   does not contain `LinkingTo` data at the point where the key is
+   needed (after `lockfile_create` but before `lockfile_install`).
+   Instead, ABI safety for the narrow `LinkingTo` case is enforced
+   via the store metadata file:
 
-The store key does not include the versions of `LinkingTo`
-dependencies — adding them would complicate the hash scheme
-significantly. Instead, ABI safety for source-compiled packages is
-enforced via the **store metadata file** (see Store Layout below).
+   - **At ingestion:** `WriteIngestMeta` reads the installed
+     DESCRIPTION to determine `NeedsCompilation` and `LinkingTo`,
+     then records the store keys of linked packages in the metadata.
+   - **At populate:** `LinkingToMatches` checks the metadata against
+     the current lockfile. If any linked package's store key has
+     changed, the store entry is skipped (treated as a miss).
+   - The stale entry is left in place (append-only store — it may
+     be in use by running workers). pak recompiles the package in
+     phase 3, and a fresh entry with updated metadata is ingested
+     in phase 4.
 
-At ingestion, the metadata file records the store keys of each
-`LinkingTo` dependency that was present in the build library at
-compile time. At store lookup (phase 2 of the build flow), for
-source-compiled store hits with `LinkingTo` dependencies, the
-server reads the metadata file and compares the recorded
-`LinkingTo` store keys against the current lockfile's entries for
-those packages. If any differ, the store hit is **skipped** — the
-package is treated as a store miss and recompiled against the
-current `LinkingTo` versions.
-
-In practice this check only fires when the `LinkingTo` target is
-itself a floating source (e.g., a GitHub-sourced package without a
-pinned SHA) that moved between builds — dated PPM snapshots fix
-the version of CRAN-sourced linked dependencies, so the check
-passes trivially for typical CRAN-only dependency trees.
-
-**Future simplification:** enrich the curated hash with the identity
-fields of each `LinkingTo` dependency (available in the pak
-lockfile's `deps` entries). This would make the metadata check
-unnecessary — different `LinkingTo` versions would produce
-different store keys. Can be added without migration — old store
-entries become unreferenced under the new hash and are cleaned up
-by the eviction policy (see Open Questions).
+   This is a performance trade-off for a narrow edge case. In
+   practice it almost never fires: PPM binaries are pre-built
+   (not source-compiled), and even source-compiled packages only
+   trigger a mismatch when a `LinkingTo` dependency changes between
+   two builds. The main scenario is GitHub dev-installs where the
+   linked package (e.g., Rcpp) is updated independently.
 
 ### Store Layout
 
@@ -933,14 +919,15 @@ name directory). The sibling `{hash}.json` file holds store
 metadata (see below).
 
 **Store metadata file.** Each store entry has a sibling JSON file
-containing metadata used for ABI safety checks and eviction:
+containing metadata for eviction and ABI safety checks.
 
 ```json
 {
   "created_at": "2026-03-18T14:30:00Z",
   "source_compiled": true,
   "linkingto": {
-    "Rcpp": "a7ffc6f8bf1e..."
+    "Rcpp": "a7ffc6f8bf1e...",
+    "s2": "b8e9d7c3f2a1..."
   }
 }
 ```
@@ -948,8 +935,8 @@ containing metadata used for ABI safety checks and eviction:
 | Field | Description |
 |---|---|
 | `created_at` | Timestamp written once at ingestion. |
-| `source_compiled` | Whether this entry was compiled from source (vs pre-built binary). |
-| `linkingto` | Map of `LinkingTo` dependency names to their store keys at compile time. Empty/absent for packages without `LinkingTo` or for binary installs. |
+| `source_compiled` | `true` if the package was compiled from source (`NeedsCompilation: yes` in DESCRIPTION). |
+| `linkingto` | Map of `{package: store_key}` for each `LinkingTo` dependency at compile time. Omitted for binary installs and packages without `LinkingTo`. Used at populate time to detect ABI staleness. |
 
 **Last-accessed tracking** uses the metadata file's filesystem
 `mtime` rather than a JSON field — the server `touch`es the
@@ -1001,9 +988,9 @@ For each lockfile entry that was not a store hit:
    a. Copy the installed package tree into the store (from the
       temp build directory).
    b. Write the sibling metadata file (`{hash}.json`) with
-      `created_at`, `source_compiled`, and `linkingto` fields
-      (the `LinkingTo` store keys are looked up from the lockfile
-      and the store).
+      `created_at`, `source_compiled`, and `linkingto` (recording
+      the store keys of any `LinkingTo` dependencies for ABI safety
+      checks at populate time — see § The ABI Problem).
 4. Release the lock.
 
 **On build failure:** packages that were successfully installed
@@ -1065,12 +1052,19 @@ store based on the bundle's pak lockfile — each lockfile entry
 maps to a store path via the curated hash. R runs with
 `.libPaths("/lib")` — one library, one search path.
 
-A single mutable library is simpler than a dual read-only/read-write
-split: no `.libPaths()` shadowing semantics, no question about
-which library a package lives in, and runtime additions (see below)
-go into the same directory. The store is the source of truth for
-immutability — the per-container library is a disposable view that
-can be reconstructed from any manifest.
+A single library is simpler than a dual read-only/read-write split:
+no `.libPaths()` shadowing semantics, no question about which library
+a package lives in, and runtime additions (see below) go into the same
+directory. The store is the source of truth for immutability — the
+per-container library is a disposable view that can be reconstructed
+from any manifest.
+
+The `/lib` mount is **read-only from inside the container**. Runtime
+package additions are hardlinked from the host side by the server —
+host-side writes are visible through the bind mount regardless of
+the ro flag. Making it ro prevents `install.packages()` from inside
+R, which is correct since installations must go through the server's
+packages API.
 
 ### Live Package Requests
 
@@ -1247,43 +1241,49 @@ signaling mechanism is needed.
  ──────────────              ──────              ──────────────
  1. POST /api/v1/packages
         ────────────▸ 2. Detect version conflict
+                         Copy lockfile to
+                         transfer dir (host side)
                       3. Respond with
                          {"status": "transfer",
-                          "transfer_path": "/transfers/{uuid}"}
+                          "transfer_path": "/transfer"}
+                         (container-side path)
  4. blockr serializes
     board to JSON at
-    {transfer_path}/board.json.tmp
+    /transfer/board.json.tmp
  5. Atomic rename:
     board.json.tmp →
     board.json
-        ────────────▸ 6. Server polls for
+        ────────────▸ 6. Server polls host-side
+                         transfer dir for
                          board.json (stat() call,
                          ~100ms interval)
                       7. Spawn Worker B with
                          updated library view,
-                         mount {transfer_path} (ro)
+                         mount old transfer dir (ro)
                                    ────────────▸ 8. Worker B reads
-                                                    board.json,
+                                                    /transfer/board.json,
                                                     restores board
                       9. Reroute traffic
                          A → B
                      10. Drain & stop A
-                     11. Clean up {transfer_path}
+                     11. Clean up transfer dir
 ```
 
 **We do NOT serialize the R session.** blockr has built-in board
-serialization (to/from JSON). The server generates the transfer
-path and includes it in the API response — the R session writes
-where it's told, no path convention shared between client and
-server:
+serialization (to/from JSON). The API response includes the
+container-side path (`/transfer`) — the R session writes where it's
+told. The server maps this to the host-side path via the bind mount:
 
 ```
-/transfers/{uuid}/board.json
+Container:  /transfer/board.json         (Worker A writes here)
+Host:       {bundle_server_path}/.transfers/{worker_id}/board.json
 ```
 
-The `/transfers/` directory is server-managed, mounted read-write
-into Worker A during the handoff. Worker B gets a read-only mount
-of the same path. The server cleans up after the transfer completes.
+Every worker gets a per-worker transfer directory pre-mounted
+read-write at `/transfer` at spawn time. The directory is empty
+until a transfer is triggered. Worker B gets the old worker's
+transfer directory mounted read-only at the same path. The server
+cleans up after the transfer completes.
 
 **Ready signaling:** blockr writes the board state to
 `board.json.tmp`, then `rename()`s to `board.json` (atomic on the
@@ -1547,13 +1547,14 @@ versions (append-only), so rollback is instant.
    The store key dispatches on `RemoteType` and hashes only the
    fields relevant to that source: `package + version + sha256`
    for standard (CRAN/Bioc), `package + RemoteSha + RemoteSubdir`
-   for github/gitlab/git. `RemoteType` is always included to
-   prevent cross-type collisions. This is computable before
-   installation — the lockfile provides everything needed for a
-   store lookup. Unlike the renv DESCRIPTION hash, no installed
-   package tree is needed to compute the key. `url::` and `local::`
-   refs are unsupported (clear error); both are niche and lack
-   reliable content identifiers in the lockfile.
+   for github/gitlab/git. `RemoteType` is always included to prevent
+   cross-type collisions. The key is fully computable from the
+   lockfile before installation — no installed package tree or
+   metadata file is needed. `url::` and `local::` refs are
+   unsupported (clear error); both are niche and lack reliable
+   content identifiers in the lockfile. ABI safety for `LinkingTo`
+   dependencies is handled via store metadata, not the key itself
+   (see § The ABI Problem).
 
 10. **Platform-aware store key.** The store key includes an
    `{r_version}-{os}-{arch}` prefix (e.g., `4.4-linux-x86_64`).
@@ -1581,20 +1582,25 @@ versions (append-only), so rollback is instant.
    because they are platform-specific and not portable across
    operating systems.
 
-13. **Single per-container library, not dual read-only/read-write.**
-   Each worker gets a single mutable library at `/lib`, assembled
-   from the store via hardlinks at startup. The alternative — a
-   read-only `/app-lib` (build output) plus a read-write
-   `/extra-lib` (runtime additions) with `.libPaths()` shadowing —
-   adds complexity without meaningful benefit. The dual-lib approach
-   requires reasoning about search order, creates ambiguity about
-   which library a package lives in, and makes `find.package()`
-   return paths from different roots depending on when a package was
-   added. With a single library, runtime additions are hardlinked
-   into the same directory as build-time packages — one path, one
-   search. The store is the immutability guarantee, not the mount
-   mode. Any container's library can be reconstructed from its
-   pak lockfile at any time.
+13. **Single per-container library, read-only from inside.**
+   Each worker gets a single library at `/lib`, assembled from the
+   store via hardlinks at startup and mounted **read-only** into the
+   container. The alternative — a read-only `/app-lib` (build output)
+   plus a read-write `/extra-lib` (runtime additions) with
+   `.libPaths()` shadowing — adds complexity without meaningful
+   benefit. The dual-lib approach requires reasoning about search
+   order, creates ambiguity about which library a package lives in,
+   and makes `find.package()` return paths from different roots
+   depending on when a package was added. With a single library,
+   runtime additions are hardlinked into the same directory as
+   build-time packages — one path, one search. Runtime package
+   additions (phase 2-7) are hardlinked from the **host side** by
+   the server — host-side writes to the underlying directory are
+   visible through the bind mount regardless of the ro flag. The ro
+   mount prevents `install.packages()` from inside R, which is
+   correct since installations must go through the server's packages
+   API. The store is the immutability guarantee. Any container's
+   library can be reconstructed from its pak lockfile at any time.
 
 14. **Blocking API for runtime package requests.** The runtime
    package API (`POST /api/v1/packages`) blocks until the package

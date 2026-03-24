@@ -247,6 +247,12 @@ the build pipeline (phase 2-6), differing in resolution context:
 the worker's existing `/lib` is a reference library so pak sees
 what's installed.
 
+Runtime installs are serialized per-worker via `workerInstallMu` — a
+per-worker mutex held for the entire install. This avoids races on the
+worker's `.packages.json` (read-modify-write), prevents two concurrent
+`lockfile_create()` calls from resolving against the same library state,
+and ensures the library is consistent for conflict detection.
+
 ```go
 // internal/server/packages.go
 
@@ -255,6 +261,14 @@ func (srv *Server) InstallPackage(
     appID, workerID string,
     req api.PackageRequest,
 ) (api.PackageResponse, error) {
+
+    // Serialize runtime installs per-worker. A worker can have multiple
+    // sessions (max_sessions_per_worker), and two sessions requesting
+    // different packages simultaneously would race on the library state,
+    // .packages.json, and conflict detection.
+    mu := srv.workerInstallMu(workerID)
+    mu.Lock()
+    defer mu.Unlock()
 
     // 1. Look up the worker and its library path.
     worker, ok := srv.Workers.Get(workerID)
@@ -278,12 +292,17 @@ func (srv *Server) InstallPackage(
     }
     defer srv.PkgStore.CleanupStagingDir(stagingDir)
 
-    // 4. Ensure pak is cached.
+    // 4. Ensure pak and by-builder are cached.
     pakPath, err := pakcache.EnsureInstalled(
         ctx, srv.Backend, srv.Config.Docker.Image,
         srv.Config.Docker.PakVersion, srv.Config.Docker.PakCachePath())
     if err != nil {
         return api.PackageResponse{}, fmt.Errorf("ensure pak: %w", err)
+    }
+    builderPath, err := buildercache.EnsureCached(
+        srv.Config.Docker.BuilderCachePath(), srv.Config.Docker.BuilderVersion)
+    if err != nil {
+        return api.PackageResponse{}, fmt.Errorf("ensure by-builder: %w", err)
     }
 
     // 5. Run the four-phase install in a build container.
@@ -292,6 +311,7 @@ func (srv *Server) InstallPackage(
         WorkerID:     workerID,
         Ref:          req.Name,
         PakPath:      pakPath,
+        BuilderPath:  builderPath,
         StagingDir:   stagingDir,
         WorkerLibDir: workerLibDir,
         StoreRoot:    srv.PkgStore.Root(),
@@ -350,6 +370,30 @@ type runtimeInstallParams struct {
     Repositories []manifest.Repository
 }
 ```
+
+### Server struct additions
+
+```go
+// internal/server/server.go
+
+type Server struct {
+    // ... existing fields from phase 2-6 ...
+
+    // Per-worker mutex for runtime package installs. Serializes
+    // installs to the same worker to avoid races on .packages.json,
+    // library state, and conflict detection.
+    installMus sync.Map // workerID → *sync.Mutex
+}
+
+// workerInstallMu returns a per-worker mutex, creating one if needed.
+func (srv *Server) workerInstallMu(workerID string) *sync.Mutex {
+    v, _ := srv.installMus.LoadOrStore(workerID, &sync.Mutex{})
+    return v.(*sync.Mutex)
+}
+```
+
+The `sync.Map` entry is cleaned up in `EvictWorker` alongside the
+worker library and transfer directory.
 
 ---
 
@@ -655,18 +699,30 @@ func (srv *Server) handleTransfer(
     buildResult *backend.BuildResult,
 ) (api.PackageResponse, error) {
 
+    // The transfer directory was pre-created and mounted into the
+    // worker at spawn time (phase 2-6). It's already at /transfer
+    // inside the container.
     transferDir := srv.TransferDir(workerID)
-    if err := os.MkdirAll(transferDir, 0o755); err != nil {
+
+    // Copy the lockfile to the transfer directory before returning.
+    // The staging directory (where the lockfile lives) is cleaned up
+    // by the caller's defer — completeTransfer reads it from here.
+    transferLockfile := filepath.Join(transferDir, "pak.lock")
+    if err := copyFile(lockfilePath, transferLockfile); err != nil {
         return api.PackageResponse{},
-            fmt.Errorf("create transfer dir: %w", err)
+            fmt.Errorf("copy lockfile to transfer dir: %w", err)
     }
 
-    // Return "transfer" status with the transfer path.
-    // The R session (blockr) will serialize board state to this path.
+    // Start watching for the board state file in a background goroutine.
+    go srv.watchTransfer(ctx, appID, workerID, transferLockfile, transferDir)
+
+    // Return the container-side path. The worker's /transfer mount
+    // maps to transferDir on the host. The R session writes board.json
+    // to this path; the server watches the host-side path.
     return api.PackageResponse{
         Status:       "transfer",
         Message:      "version conflict — container transfer required",
-        TransferPath: transferDir,
+        TransferPath: "/transfer",
     }, nil
 }
 ```
@@ -732,9 +788,9 @@ func (srv *Server) completeTransfer(
             "worker_id", newWorkerID, "missing", missing)
     }
 
-    // 2. Spawn new worker with updated library and transfer dir mounted.
-    // The new worker reads board.json from the transfer path on startup.
-    spec := srv.buildWorkerSpec(appID, newWorkerID, newLibDir, transferDir)
+    // 2. Spawn new worker with updated library. Mount the old worker's
+    // transfer dir (containing board.json) read-only at /transfer.
+    spec := srv.buildTransferWorkerSpec(appID, newWorkerID, newLibDir, transferDir)
     if err := srv.Backend.SpawnWorker(ctx, spec); err != nil {
         slog.Error("transfer: spawn worker", "error", err)
         return
@@ -764,23 +820,22 @@ func (srv *Server) completeTransfer(
 
 ### Worker mount for transfer
 
-When spawning a new worker with a transfer path, mount the transfer
-directory read-only:
+Every worker has a `/transfer` mount pre-created at spawn time
+(phase 2-6). For Worker B (the new worker receiving a board state
+transfer), the old worker's transfer directory is mounted instead of
+the new worker's empty one, and `BLOCKYARD_TRANSFER_PATH` is set:
 
 ```go
-func (srv *Server) buildWorkerSpec(
-    appID, workerID, libDir, transferDir string,
+func (srv *Server) buildTransferWorkerSpec(
+    appID, workerID, libDir, oldTransferDir string,
 ) backend.WorkerSpec {
     spec := srv.defaultWorkerSpec(appID, workerID, libDir)
 
-    if transferDir != "" {
+    if oldTransferDir != "" {
+        // Override the default transfer mount with the old worker's
+        // transfer directory (read-only — Worker B only reads board.json).
+        spec.TransferDir = oldTransferDir
         spec.Env["BLOCKYARD_TRANSFER_PATH"] = "/transfer/board.json"
-        // Mount transfer dir read-only into the new container.
-        spec.TransferMount = &backend.MountEntry{
-            Source:   transferDir,
-            Target:   "/transfer",
-            ReadOnly: true,
-        }
     }
 
     return spec
@@ -818,6 +873,9 @@ request_package <- function(pkg_name) {
 
   if (result$status == "transfer") {
     # Version conflict — serialize board and let server handle transfer.
+    # transfer_path is a container-side path (/transfer) — the directory
+    # was pre-mounted rw at spawn time. The server watches the host-side
+    # path for board.json to appear.
     transfer_path <- result$transfer_path
     board_json <- jsonlite::toJSON(board_state(), auto_unbox = TRUE)
     tmp <- paste0(file.path(transfer_path, "board.json"), ".tmp")
@@ -908,24 +966,32 @@ r.Post("/api/v1/apps/{id}/refresh", api.PostRefresh(srv))
 ```go
 // internal/server/refresh.go
 
+// RunRefresh re-resolves dependencies for an unpinned deployment.
+// Returns true if a new worker was spawned (dependencies changed).
 func (srv *Server) RunRefresh(
     ctx context.Context,
     app *db.App,
     m *manifest.Manifest,
     taskID string,
-) {
+) bool {
     sender := srv.Tasks.Sender(taskID)
     defer srv.Tasks.Complete(taskID)
 
     sender.Write("refreshing dependencies...")
 
-    // 1. Ensure pak is cached.
+    // 1. Ensure pak and by-builder are cached.
     pakPath, err := pakcache.EnsureInstalled(
         ctx, srv.Backend, srv.Config.Docker.Image,
         srv.Config.Docker.PakVersion, srv.Config.Docker.PakCachePath())
     if err != nil {
         srv.Tasks.Fail(taskID, fmt.Errorf("ensure pak: %w", err))
-        return
+        return false
+    }
+    builderPath, err := buildercache.EnsureCached(
+        srv.Config.Docker.BuilderCachePath(), srv.Config.Docker.BuilderVersion)
+    if err != nil {
+        srv.Tasks.Fail(taskID, fmt.Errorf("ensure by-builder: %w", err))
+        return false
     }
 
     // 2. Get the bundle's unpacked path (contains DESCRIPTION / scripts).
@@ -946,7 +1012,7 @@ func (srv *Server) RunRefresh(
         Cmd:      buildCommand(),
         Mounts: buildMounts(
             pakPath, bundlePaths.Unpacked,
-            srv.PkgStore.Root(), dlCachePath),
+            srv.PkgStore.Root(), dlCachePath, builderPath),
         Env: []string{"BUILD_UUID=" + buildUUID},
         Labels: map[string]string{
             "dev.blockyard/managed": "true",
@@ -959,12 +1025,12 @@ func (srv *Server) RunRefresh(
     result, err := srv.Backend.Build(ctx, spec)
     if err != nil {
         srv.Tasks.Fail(taskID, fmt.Errorf("refresh build: %w", err))
-        return
+        return false
     }
     if !result.Success {
         srv.Tasks.Fail(taskID,
             fmt.Errorf("refresh failed (exit %d)", result.ExitCode))
-        return
+        return false
     }
 
     // 4. Extract new lockfile from the build directory.
@@ -983,7 +1049,7 @@ func (srv *Server) RunRefresh(
     if err := copyFile(newLockfileSrc, newLockfileDst); err != nil {
         srv.Tasks.Fail(taskID,
             fmt.Errorf("persist new lockfile: %w", err))
-        return
+        return false
     }
 
     // 6. Check if anything actually changed (semantic comparison via store keys).
@@ -995,12 +1061,13 @@ func (srv *Server) RunRefresh(
     }
     if !changed {
         sender.Write("dependencies unchanged — no action needed")
-        return
+        return false
     }
 
     // 7. Graceful drain: spawn new worker, drain old ones.
     sender.Write("dependencies updated — spawning new worker...")
     srv.drainAndReplace(ctx, app, newLockfileDst, sender)
+    return true
 }
 ```
 
@@ -1173,13 +1240,22 @@ the server triggers a refresh before spawning a worker on cold start:
 // internal/proxy/coldstart.go
 
 if app.RefreshOnStart && !manifest.IsPinned() {
-    srv.RunRefresh(ctx, app, m, taskID)
+    spawned := srv.RunRefresh(ctx, app, m, taskID)
+    if spawned {
+        // Refresh already spawned a worker with updated deps.
+        // Skip the normal cold-start spawn to avoid a duplicate.
+        return
+    }
+    // Dependencies unchanged — fall through to normal worker spawn
+    // using the existing lockfile.
 }
-// Then proceed with normal worker spawn.
+// Proceed with normal worker spawn.
 ```
 
 This keeps long-lived scan-mode apps current without manual
-intervention. Disabled by default.
+intervention. Disabled by default. When refresh detects no changes,
+the cold-start path spawns a worker as usual using the existing
+lockfile.
 
 ---
 

@@ -8,7 +8,10 @@ libraries via hard links. This phase retrofits the phase 2-5 build flow
 to the store-aware four-phase pattern described in dep-mgmt.md.
 
 Depends on phase 2-5 (manifest types, pak build pipeline, lockfile
-output).
+output). **Breaking change:** bundles built under phase 2-5 must be
+redeployed after phase 2-6 is deployed. The per-bundle `library/`
+directory from 2-5 is no longer used — workers assemble from the
+store, which has no entries for pre-2-6 bundles.
 
 See [dep-mgmt.md](../dep-mgmt.md) for store key design, ABI safety
 rationale, concurrency protocol, store layout, and design rationale.
@@ -119,6 +122,25 @@ and atomic `rename()`.
 Parsed from the pak lockfile (JSON). The curated hash and worker
 library assembly are computed from these fields.
 
+**NOTE:** The JSON field names below (`package`, `version`,
+`RemoteType`, `sha256`, `RemoteSha`, `RemoteSubdir`) must be verified
+against the actual output of `pak::lockfile_create()` before
+implementation. Preliminary inspection of the actual pak lockfile
+output shows:
+
+- `metadata.RemoteType` (nested under `metadata`, not top-level)
+- `metadata.RemoteSha` (nested; for standard type it's the version string)
+- `type` at top level (value: `"standard"`)
+- `needscompilation` (boolean, not string)
+- `sha256` at top level (matches)
+- `rversion` per-package (short form like `"4.5"`)
+- `platform` per-package
+
+The struct below preserves the current field mapping for clarity but
+needs to be aligned with the actual nested format during
+implementation. The `RemoteType`/`RemoteSha`/`RemoteSubdir` fields
+will likely come from `metadata.*` paths when unmarshaling.
+
 ```go
 // internal/pkgstore/lockfile.go
 
@@ -154,8 +176,8 @@ func ReadLockfile(path string) (*Lockfile, error) {
 ### Store key computation
 
 The curated hash dispatches on `RemoteType` and hashes only the fields
-that determine what source code was compiled. See dep-mgmt.md
-§ Package Store and Cache Key Design for the full rationale.
+that determine what source code was compiled. See dep-mgmt.md § Package
+Store and Cache Key Design for the full rationale.
 
 ```go
 // internal/pkgstore/key.go
@@ -239,8 +261,10 @@ func (s *Store) Touch(pkg, hash string) {
 
 ### Store metadata
 
-Each store entry has a sibling JSON file containing metadata for ABI
-safety checks and eviction. See dep-mgmt.md § Store Layout.
+Each store entry has a sibling JSON file containing metadata for
+eviction and ABI safety checks. The `source_compiled` and `linkingto`
+fields record compile-time context so the populate step can detect
+stale entries (see dep-mgmt.md § The ABI Problem).
 
 ```go
 // internal/pkgstore/meta.go
@@ -248,7 +272,7 @@ safety checks and eviction. See dep-mgmt.md § Store Layout.
 type StoreMeta struct {
     CreatedAt      time.Time         `json:"created_at"`
     SourceCompiled bool              `json:"source_compiled"`
-    LinkingTo      map[string]string `json:"linkingto,omitempty"` // pkg name → store key
+    LinkingTo      map[string]string `json:"linkingto,omitempty"`
 }
 
 func WriteStoreMeta(path string, meta StoreMeta) error {
@@ -272,13 +296,165 @@ func ReadStoreMeta(path string) (StoreMeta, error) {
 | Field | Description |
 |---|---|
 | `created_at` | Timestamp written once at ingestion. |
-| `source_compiled` | Whether this entry was compiled from source (vs pre-built binary). |
-| `linkingto` | Map of `LinkingTo` dependency names to their store keys at compile time. Empty for binary installs or packages without `LinkingTo`. |
+| `source_compiled` | `true` if the package was compiled from source (`NeedsCompilation: yes` in DESCRIPTION). Packages installed from binary archives have `false`. |
+| `linkingto` | Map of `{package: store_key}` for each `LinkingTo` dependency at the time this package was compiled. Empty/omitted for binary installs and packages without `LinkingTo`. Used by `LinkingToMatches` to detect ABI staleness. |
 
 **Last-accessed tracking** uses the metadata file's filesystem `mtime`
 rather than a JSON field — the server `touch`es the metadata file on
 every store hit. `touch` is a metadata-only syscall (`utimes()`),
 avoiding JSON rewrites on every access.
+
+### WriteIngestMeta
+
+Writes the store metadata file after ingesting a package. Reads the
+installed DESCRIPTION to determine `NeedsCompilation` and `LinkingTo`,
+then looks up store keys for linked packages in the lockfile. This
+metadata is used at populate time to detect ABI staleness (see
+`LinkingToMatches`).
+
+```go
+// internal/pkgstore/meta.go
+
+// WriteIngestMeta writes the store metadata file for a newly ingested
+// package. It reads the installed DESCRIPTION to extract compile-time
+// context (NeedsCompilation, LinkingTo) and records the store keys
+// of linked packages for ABI safety checks at populate time.
+func (s *Store) WriteIngestMeta(entry LockfileEntry, lf *Lockfile) error {
+    hash, err := StoreKey(entry)
+    if err != nil {
+        return err
+    }
+
+    meta := StoreMeta{CreatedAt: time.Now()}
+
+    // Read the installed DESCRIPTION to check NeedsCompilation and LinkingTo.
+    descPath := filepath.Join(s.Path(entry.Package, hash), "DESCRIPTION")
+    desc, err := ParseDCF(descPath)
+    if err == nil {
+        meta.SourceCompiled = strings.EqualFold(desc["NeedsCompilation"], "yes")
+
+        if lt := desc["LinkingTo"]; lt != "" {
+            pkgs := parsePkgList(lt)
+            if len(pkgs) > 0 {
+                meta.LinkingTo = make(map[string]string, len(pkgs))
+                for _, linkedPkg := range pkgs {
+                    linkedKey := lockfileStoreKey(lf, linkedPkg)
+                    if linkedKey != "" {
+                        meta.LinkingTo[linkedPkg] = linkedKey
+                    }
+                }
+            }
+        }
+    }
+
+    return WriteStoreMeta(s.MetaPath(entry.Package, hash), meta)
+}
+
+// ParseDCF reads a Debian Control File (DESCRIPTION) into a map.
+func ParseDCF(path string) (map[string]string, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil, err
+    }
+    result := make(map[string]string)
+    var currentKey, currentVal string
+    for _, line := range strings.Split(string(data), "\n") {
+        if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+            currentVal += " " + strings.TrimSpace(line)
+        } else if idx := strings.IndexByte(line, ':'); idx > 0 {
+            if currentKey != "" {
+                result[currentKey] = strings.TrimSpace(currentVal)
+            }
+            currentKey = strings.TrimSpace(line[:idx])
+            currentVal = strings.TrimSpace(line[idx+1:])
+        }
+    }
+    if currentKey != "" {
+        result[currentKey] = strings.TrimSpace(currentVal)
+    }
+    return result, nil
+}
+
+// parsePkgList splits a comma-separated DESCRIPTION field (e.g.,
+// "Rcpp (>= 1.0.0), s2") into bare package names.
+func parsePkgList(s string) []string {
+    var result []string
+    for _, part := range strings.Split(s, ",") {
+        name := strings.TrimSpace(part)
+        if idx := strings.IndexByte(name, '('); idx > 0 {
+            name = strings.TrimSpace(name[:idx])
+        }
+        if name != "" {
+            result = append(result, name)
+        }
+    }
+    return result
+}
+
+// lockfileStoreKey computes the store key for a named package from
+// the lockfile, returning "" if the package is not found (e.g., base
+// R packages like methods).
+func lockfileStoreKey(lf *Lockfile, pkg string) string {
+    for _, entry := range lf.Packages {
+        if entry.Package == pkg {
+            key, err := StoreKey(entry)
+            if err != nil {
+                return ""
+            }
+            return key
+        }
+    }
+    return ""
+}
+```
+
+### LinkingToMatches
+
+Checks whether a store entry's `LinkingTo` metadata still matches the
+current lockfile. This catches the narrow edge case where a package was
+compiled from source with `LinkingTo` dependencies that have since
+changed version.
+
+In practice this almost never fires: PPM binaries don't have
+`source_compiled = true` (they're pre-built), and even source-compiled
+packages only trigger a mismatch when a `LinkingTo` dependency changes
+between two builds using the same repository snapshot. The main
+scenario is GitHub dev-installs where the linked package (e.g., Rcpp)
+is updated independently.
+
+```go
+// internal/pkgstore/meta.go
+
+// LinkingToMatches checks whether the store entry's LinkingTo metadata
+// still matches the current lockfile. Returns true (match) if:
+// - the store entry has no metadata file (legacy or error — assume ok)
+// - the entry was not compiled from source (binary install — no ABI concern)
+// - the entry has no LinkingTo deps
+// - all LinkingTo deps' store keys match the current lockfile
+func (s *Store) LinkingToMatches(pkg, hash string, lf *Lockfile) bool {
+    meta, err := ReadStoreMeta(s.MetaPath(pkg, hash))
+    if err != nil {
+        return true // no metadata — assume ok (legacy entry)
+    }
+    if !meta.SourceCompiled {
+        return true // binary install — no ABI concern
+    }
+    if len(meta.LinkingTo) == 0 {
+        return true // no LinkingTo deps
+    }
+
+    for linkedPkg, recordedKey := range meta.LinkingTo {
+        currentKey := lockfileStoreKey(lf, linkedPkg)
+        if currentKey == "" {
+            continue // base R package or removed dep — skip
+        }
+        if currentKey != recordedKey {
+            return false // ABI mismatch
+        }
+    }
+    return true
+}
+```
 
 ---
 
@@ -429,36 +605,55 @@ func populateCmd() *cobra.Command {
             s := pkgstore.NewStore(storeRoot)
             s.SetPlatform(pkgstore.PlatformFromLockfile(lf))
 
+            // Load the reference library's package manifest to compare
+            // store keys, not just directory existence. A package in the
+            // reference lib with a DIFFERENT store key (version change)
+            // should still be looked up in the store.
+            var refManifest map[string]string
+            if refLib != "" {
+                refManifest, _ = pkgstore.ReadPackageManifest(refLib)
+            }
+
             var hits, misses int
             for _, entry := range lf.Packages {
-                // Skip packages already in the reference library.
-                if refLib != "" && dirExists(filepath.Join(refLib, entry.Package)) {
-                    continue
-                }
-                // Skip packages already in the build library.
-                if dirExists(filepath.Join(lib, entry.Package)) {
-                    continue
-                }
-
                 key, err := pkgstore.StoreKey(entry)
                 if err != nil {
                     return err
+                }
+
+                // Skip packages whose store key matches the reference
+                // library — same version already installed in the worker.
+                if refManifest != nil && refManifest[entry.Package] == key {
+                    continue
+                }
+                // Skip packages already in the build/staging library.
+                if dirExists(filepath.Join(lib, entry.Package)) {
+                    continue
                 }
                 if !s.Has(entry.Package, key) {
                     misses++
                     continue
                 }
 
-                // ABI safety check for source-compiled packages.
+                // ABI safety check: if the store entry's LinkingTo
+                // metadata doesn't match the current lockfile, skip it.
+                // The stale entry is left in place (append-only store —
+                // may be in use by running workers). pak will recompile
+                // in phase 3 and a fresh entry gets ingested in phase 4.
                 if !s.LinkingToMatches(entry.Package, key, lf) {
-                    misses++ // ABI mismatch — treat as store miss
+                    misses++
                     continue
                 }
 
                 // Hard-link store entry into build library.
+                // cp -al creates a recursive hard-link copy — every file
+                // in the source tree gets a hard link in the destination.
                 dest := filepath.Join(lib, entry.Package)
-                if err := hardlink(s.Path(entry.Package, key), dest); err != nil {
-                    return fmt.Errorf("link %s: %w", entry.Package, err)
+                out, cpErr := exec.Command(
+                    "cp", "-al", s.Path(entry.Package, key), dest,
+                ).CombinedOutput()
+                if cpErr != nil {
+                    return fmt.Errorf("link %s: %s: %w", entry.Package, out, cpErr)
                 }
                 s.Touch(entry.Package, key)
                 hits++
@@ -497,16 +692,27 @@ func ingestCmd() *cobra.Command {
             s := pkgstore.NewStore(storeRoot)
             s.SetPlatform(pkgstore.PlatformFromLockfile(lf))
 
-            for _, entry := range lf.Packages {
-                // Skip packages from the reference library (not built here).
-                if refLib != "" && dirExists(filepath.Join(refLib, entry.Package)) {
-                    continue
-                }
+            // Load the reference library's package manifest to compare
+            // store keys. Only skip ingestion when the reference lib has
+            // the SAME store key — a version change means the new version
+            // was installed in the staging dir and must be ingested.
+            var refManifest map[string]string
+            if refLib != "" {
+                refManifest, _ = pkgstore.ReadPackageManifest(refLib)
+            }
 
+            for _, entry := range lf.Packages {
                 key, err := pkgstore.StoreKey(entry)
                 if err != nil {
                     return err
                 }
+
+                // Skip packages whose store key matches the reference
+                // library — already in the store from a prior build.
+                if refManifest != nil && refManifest[entry.Package] == key {
+                    continue
+                }
+
                 if s.Has(entry.Package, key) {
                     continue // already in store
                 }
@@ -693,7 +899,7 @@ no runtime. It shares `internal/pkgstore` with the server.
 
 ---
 
-## Step 5: Build integration (Go side)
+## Step 6: Build integration (Go side)
 
 ### Updated buildCommand
 
@@ -910,7 +1116,7 @@ cleaned up after the lockfile is extracted).
 
 ---
 
-## Step 6: Worker library assembly
+## Step 7: Worker library assembly
 
 At worker startup, the server assembles a per-container library at
 `{store}/.workers/{worker_id}/` by hard-linking packages from the store
@@ -1049,7 +1255,7 @@ the same directory. See dep-mgmt.md § Design Decisions.
 
 ---
 
-## Step 7: Worker lifecycle integration
+## Step 8: Worker lifecycle integration
 
 ### WorkerSpec changes
 
@@ -1058,27 +1264,48 @@ the same directory. See dep-mgmt.md § Design Decisions.
 
 type WorkerSpec struct {
     // ... existing fields ...
-    LibDir string // server-side path to per-worker lib dir; empty if no store
+    LibDir      string // server-side path to per-worker lib dir; empty if no store
+    TransferDir string // server-side path to per-worker transfer dir (phase 2-7)
 }
 ```
 
 `LibDir` replaces the previous `LibraryPath` (per-bundle library) with
 a per-worker library (assembled from the store).
 
+`TransferDir` is a pre-created directory for container transfer
+signaling (phase 2-7). Mounted read-write into every worker at
+`/transfer` so the R session can write board state there if a version
+conflict requires a container swap. Empty for most workers' lifetime.
+
 ### WorkerMounts
 
-Extend `WorkerMounts` to include the assembled library:
+Extend `WorkerMounts` to include the assembled library and transfer
+directory:
 
 ```go
 func (mc MountConfig) WorkerMounts(
-    bundlePath, libDir, workerMount string,
+    bundlePath, libDir, transferDir, workerMount string,
 ) (binds []string, mounts []mount.Mount) {
     // Bundle mount (read-only).
     // ... existing logic ...
 
-    // Library mount (read-write — writable for runtime additions in phase 2-7).
+    // Library mount (read-only from inside the container). Runtime
+    // package additions (phase 2-7) are hardlinked from the host side
+    // by the server — host-side writes are visible through the bind
+    // mount regardless of the ro flag. Making it ro prevents
+    // install.packages() from inside R, which is correct since
+    // installations must go through the server's packages API.
     if libDir != "" {
         // same translation logic as other mounts (Volume/Bind/Native)
+        // mount at /lib, read-only
+    }
+
+    // Transfer mount (read-write). Pre-created at spawn time for
+    // container transfer signaling (phase 2-7). The R session writes
+    // board.json here when a version conflict requires a container
+    // swap. Empty until a transfer is triggered.
+    if transferDir != "" {
+        // mount at /transfer, read-write
     }
 
     return binds, mounts
@@ -1125,9 +1352,16 @@ if srv.PkgStore != nil {
     }
 }
 
+// Pre-create transfer directory for container transfer signaling
+// (phase 2-7). Mounted rw at /transfer inside the container.
+// TransferDir returns {bundle_server_path}/.transfers/{worker_id}.
+transferDir := srv.TransferDir(workerID)
+os.MkdirAll(transferDir, 0o755)
+
 spec := backend.WorkerSpec{
     // ... existing fields ...
-    LibDir: libDir,
+    LibDir:      libDir,
+    TransferDir: transferDir,
 }
 ```
 
@@ -1143,6 +1377,8 @@ if srv.PkgStore != nil {
             "worker_id", workerID, "error", err)
     }
 }
+// Clean up transfer directory.
+os.RemoveAll(srv.TransferDir(workerID))
 ```
 
 ### Startup cleanup
@@ -1166,7 +1402,7 @@ if srv.PkgStore != nil {
 
 ---
 
-## Step 8: Server struct changes
+## Step 9: Server struct changes
 
 ### Server struct
 
@@ -1198,7 +1434,7 @@ file written after the first successful build.
 
 ---
 
-## Step 9: Tests
+## Step 10: Tests
 
 ### Unit tests
 
