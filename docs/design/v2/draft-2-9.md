@@ -167,7 +167,7 @@ by bundles <app>                          List bundles for an app
 by delete <app>                           Soft-delete an app
 by restore <app>                          Restore a soft-deleted app
 by config <app> [flags]                   Update app config (--memory, --cpu, etc.)
-by refresh <app>                          Refresh unpinned dependencies
+by refresh <app> [--rollback]              Refresh unpinned dependencies
 by users list                             List users (admin only)
 by users update <sub> [flags]             Update user role/active status
 ```
@@ -197,7 +197,22 @@ Done.
 $ by refresh my-pinned-app
 Error: my-pinned-app was deployed with pinned dependencies.
 Redeploy to update.
+
+$ by refresh my-app --rollback
+Rolling back dependencies for my-app...
+  Restored previous lockfile
+  Worker swap: in progress...
+Done.
+
+$ by refresh my-app --rollback
+Error: no previous lockfile to roll back to.
 ```
+
+The `--rollback` flag wraps `POST /api/v1/apps/{id}/refresh/rollback`
+from phase 2-7. It restores the previous pak lockfile and reassembles
+worker libraries from it. Only one level of rollback is supported —
+the store retains old package versions (append-only), so rollback is
+instant.
 
 ## Error Handling
 

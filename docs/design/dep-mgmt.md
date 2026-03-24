@@ -658,18 +658,21 @@ minimizing version conflicts with already-loaded packages.
 
 ### Store-Aware Build Flow
 
-Every build mode uses the same three-phase pattern: create a pak
+Every build mode uses the same four-phase pattern: create a pak
 lockfile (resolve + solve), check the store using lockfile entries,
-then install only what's missing.
+install only what's missing, then ingest new packages into the store.
+R handles phases 1 and 3 (pak API calls); the `by-builder` Go binary
+handles phases 2 and 4 (store operations).
 
 **Container mounts:**
 
 ```
-/app        (ro)  ← bundle
-/pak        (ro)  ← cached pak package
-/pak-cache  (rw)  ← persistent pak download cache (shared across builds)
-/store      (rw)  ← package store (multi-version, shared across builds)
-                    build library created under /store/.builds/{uuid}/
+/app              (ro)  ← bundle
+/pak              (ro)  ← cached pak package
+/pak-cache        (rw)  ← persistent pak download cache (shared across builds)
+/store            (rw)  ← package store (multi-version, shared across builds)
+                          build library created under /store/.builds/{uuid}/
+/tools/by-builder (ro)  ← cached Go binary for store operations
 ```
 
 The persistent download cache (`/pak-cache`) is set via
@@ -695,51 +698,35 @@ options(repos = repos)  # from manifest repositories array
 
 # Install target lives on the store volume so that ingestion
 # (phase 4) is an atomic rename() — no cross-filesystem copy.
-build_lib <- file.path("/store", ".builds", uuid::UUIDgenerate())
+build_lib <- file.path("/store", ".builds", Sys.getenv("BUILD_UUID"))
 dir.create(build_lib, recursive = TRUE)
 
-# ── Phase 1: Resolve + solve (no download, no install) ──────────
+# ── Phase 1: Resolve + solve (R — needs pak) ────────────────────
 pak::lockfile_create(refs, lockfile = file.path(build_lib, "pak.lock"),
                      lib = build_lib)
 
-# ── Phase 2: Check store, pre-populate build library ────────────
-lock <- jsonlite::fromJSON(file.path(build_lib, "pak.lock"))
+# ── Phase 2: Check store, pre-populate build library (Go binary) ─
+# by-builder reads the lockfile, computes store keys, checks the
+# store, runs ABI safety checks, and hard-links hits into build_lib.
+system2("/tools/by-builder", c(
+  "store", "populate",
+  "--lockfile", file.path(build_lib, "pak.lock"),
+  "--lib", build_lib, "--store", "/store"))
 
-for (pkg in lock$packages) {
-  key <- store_key(pkg)  # curated hash of identity fields (see below)
-  store_path <- file.path("/store", build_platform, pkg$package, key)
-  meta_path <- paste0(store_path, ".json")
-  if (dir.exists(store_path)) {
-    # ABI check: for source-compiled packages with LinkingTo,
-    # verify that the linked deps match the current lockfile.
-    if (!linkingto_matches(meta_path, lock)) next  # store miss — recompile
-    touch(meta_path)  # update last-accessed mtime
-    link_package(store_path, file.path(build_lib, pkg$package))
-  }
-}
-
-# ── Phase 3: Install store misses ───────────────────────────────
+# ── Phase 3: Install store misses (R — needs pak) ───────────────
 # lockfile_install() scans build_lib (update=TRUE by default),
 # finds pre-populated packages, marks them as installed (type =
 # "installed"), and skips them — no download, no install. Only
 # store misses are downloaded and installed.
 pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 
-# ── Phase 4: Ingest newly installed packages into store ─────────
-for (pkg in lock$packages) {
-  key <- store_key(pkg)
-  store_dir <- file.path("/store", build_platform, pkg$package, key)
-  meta_path <- paste0(store_dir, ".json")
-  pkg_path <- file.path(build_lib, pkg$package)
-  if (!dir.exists(store_dir) && dir.exists(pkg_path)) {
-    # Under lock: copy package tree, then write metadata file.
-    ingest_to_store(pkg_path, store_dir)
-    write_store_meta(meta_path, pkg, lock)  # created_at, source_compiled, linkingto
-  }
-}
-
-# Clean up build directory.
-unlink(build_lib, recursive = TRUE)
+# ── Phase 4: Ingest new packages into store (Go binary) ─────────
+# by-builder ingests newly installed packages under lock with
+# metadata (created_at, source_compiled, linkingto).
+system2("/tools/by-builder", c(
+  "store", "ingest",
+  "--lockfile", file.path(build_lib, "pak.lock"),
+  "--lib", build_lib, "--store", "/store"))
 ```
 
 For full store hits, phase 3 is a no-op — the build completes in
@@ -821,21 +808,14 @@ store handles it correctly without migration.
 **Curated hash computation.** The hash dispatches on `RemoteType`
 so that each package source includes only the fields that
 determine *what source code was compiled* — no redundant or
-absent fields:
+absent fields. The hash is implemented once in Go
+(`internal/pkgstore/key.go`) and used by both the server (worker
+library assembly) and the `by-builder` binary (store operations
+inside build containers). No R implementation exists.
 
-```r
-store_key <- function(pkg) {
-  fields <- switch(pkg$RemoteType,
-    standard = c(pkg$package, pkg$version, pkg$sha256),
-    github =, gitlab =, git =
-      c(pkg$package, pkg$RemoteSha, pkg$RemoteSubdir %||% ""),
-    stop("Unsupported RemoteType for store: ", pkg$RemoteType)
-  )
-  digest::digest(
-    paste(pkg$RemoteType, paste(fields, collapse = "\x00"), sep = "\x00"),
-    algo = "sha256"
-  )
-}
+```
+hash input = {RemoteType}\0{field1}\0{field2}[...\0{fieldN}]
+hash algo  = SHA-256
 ```
 
 `RemoteType` is always the first element in the hash input to
@@ -865,8 +845,8 @@ supported. `url::` packages lack a content hash in the pak
 lockfile (pak records an HTTP ETag rather than a `sha256` for
 url-type downloads, which is too weak for store identity).
 `local::` packages would require content-hashing the source tree,
-which is outside our current scope. Both are niche; `store_key()`
-errors with a clear message if encountered. Support can be added
+which is outside our current scope. Both are niche; `StoreKey()`
+returns a clear error if encountered. Support can be added
 later if demand appears.
 
 Examples:
@@ -1049,18 +1029,22 @@ lock to release and then use the store entry.
 
 **Lock protocol:**
 
-1. Before installing a package, the build process creates a lockfile
-   at `/store/.locks/{platform}/{package}/{hash}.lock`. The
-   lockfile contains the build's PID and a timestamp.
-2. If the lockfile already exists, the build knows another process
-   is installing the same package. It waits (polling with backoff)
-   until the lockfile is released and the store entry appears.
-3. After successful installation and ingestion into the store, the
-   build removes the lockfile.
-4. **Stale lock detection:** if the PID in the lockfile is no longer
-   running (crashed build), or the lock is older than a threshold
-   (e.g., 30 minutes), the waiting process may claim the lock and
-   proceed with its own install.
+1. Before ingesting a package, the build process creates a lock
+   directory at `/store/.locks/{platform}/{package}/{hash}.lock`
+   via `mkdir`. Directory creation is atomic on all POSIX
+   filesystems — exactly one concurrent caller succeeds.
+2. If `mkdir` fails (directory already exists), the build knows
+   another process is installing the same package. It waits
+   (polling with backoff, jittered 0.5–2s) until the lock
+   directory is removed and the store entry appears.
+3. After successful ingestion (package tree + metadata file
+   written), the build removes the lock directory.
+4. **Stale lock detection:** if the lock directory's mtime is older
+   than a threshold (e.g., 30 minutes), the waiting process removes
+   it and re-attempts acquisition. This handles crashed builds that
+   never released their lock. PID-based detection is not used
+   because builds run in containers with isolated PID namespaces —
+   a PID from one container is meaningless to another.
 
 **Write safety:** the lock serializes all writes to a given store
 path. Under the lock, the build writes the package tree and the
@@ -1109,7 +1093,7 @@ reference library so the resolver sees what's already installed.
 staging <- file.path("/store", ".staging", uuid::UUIDgenerate())
 dir.create(staging, recursive = TRUE)
 
-# ── Phase 1: Resolve against existing library ───────────────────
+# ── Phase 1: Resolve against existing library (R — needs pak) ────
 pak::lockfile_create(
   "xyz",
   lockfile = file.path(staging, "pak.lock"),
@@ -1118,19 +1102,16 @@ pak::lockfile_create(
 # Resolver sees /lib packages, respects upgrade = FALSE.
 # Lockfile contains the full solution (existing + new).
 
-# ── Phase 2: Check store for NEW entries ────────────────────────
-lock <- jsonlite::fromJSON(file.path(staging, "pak.lock"))
-for (pkg in lock$packages) {
-  # Skip packages already in the worker's library
-  if (dir.exists(file.path("/containers/{id}/lib", pkg$package))) next
-  key <- store_key(pkg)
-  store_path <- file.path("/store", build_platform, pkg$package, key)
-  if (dir.exists(store_path)) {
-    link_package(store_path, file.path(staging, pkg$package))
-  }
-}
+# ── Phase 2: Check store for NEW entries (Go binary) ─────────────
+# by-builder skips packages in the worker library (--reference-lib),
+# checks the store, and hard-links hits into staging.
+system2("/tools/by-builder", c(
+  "store", "populate",
+  "--lockfile", file.path(staging, "pak.lock"),
+  "--lib", staging, "--store", "/store",
+  "--reference-lib", "/containers/{id}/lib"))
 
-# ── Phase 3: Install store misses ───────────────────────────────
+# ── Phase 3: Install store misses (R — needs pak) ───────────────
 pak::lockfile_install(
   file.path(staging, "pak.lock"),
   lib = c(staging, "/containers/{id}/lib")
@@ -1138,11 +1119,14 @@ pak::lockfile_install(
 # Installs into staging only. Packages in /lib are scanned as
 # reference — not re-installed.
 
-# ── Phase 4: Ingest into store + hardlink into worker ────────────
-# Staging is on the store volume, so ingestion is an atomic
-# rename() into the final store path — no copy needed.
-# Then hardlink from the store into the worker's /lib.
-# Finally, clean up the staging directory.
+# ── Phase 4: Ingest into store (Go binary) ───────────────────────
+# by-builder ingests new packages from staging into the store,
+# then the server hard-links from the store into the worker's /lib.
+system2("/tools/by-builder", c(
+  "store", "ingest",
+  "--lockfile", file.path(staging, "pak.lock"),
+  "--lib", staging, "--store", "/store",
+  "--reference-lib", "/containers/{id}/lib"))
 ```
 
 The staging directory lives on the store's filesystem. This is
@@ -1165,15 +1149,18 @@ success. The API call blocks for the duration of the install —
 the R session waits.
 
 **3. Transfer required (version conflict):** after resolving, the
-server compares the new lockfile entries against the loaded
-namespaces reported in the request. If any package in the new
-lockfile is already loaded at a different version, R cannot unload
-and reload it in the same session — that's a version conflict. The
-server returns a `"transfer"` response. The R code (blockr) then
-serializes the board state to a well-known path and the server
-handles the container transfer (see below). Packages that are
-installed but not loaded can safely be updated in place (the
-hardlink in `/lib` is replaced).
+server compares the new lockfile entries against the worker's
+per-container package manifest (`.packages.json` — a `{package →
+store_key}` map written at library assembly and updated on each
+live install). For each loaded namespace reported in the request,
+the server compares the current store key against the new lockfile's
+store key for that package. If any loaded package has a different
+store key, R cannot unload and reload it — that's a version
+conflict. The server returns a `"transfer"` response. The R code
+(blockr) then serializes the board state to a well-known path and
+the server handles the container transfer (see below). Packages
+that are installed but not loaded can safely be updated in place
+(the hardlink in `/lib` is replaced, `.packages.json` is updated).
 
 **Resolution context.** The server resolves runtime package requests
 using the same repository configuration as the original build —
@@ -1340,11 +1327,20 @@ re-uploading code:
 3. Run the standard lockfile-based build flow (lockfile → store
    check → pre-populate → install misses → ingest).
 4. Store the new pak lockfile alongside the bundle.
-5. Swap the worker to the new library (same container transfer
-   protocol as version-conflict updates).
+5. Spawn new worker(s) with the updated library. Mark old workers
+   as **draining** — no new sessions routed to them. Existing
+   sessions continue undisturbed until they naturally end, then the
+   old worker is evicted.
 
 The bundle's code is unchanged — only the dependency versions move
 forward. The previous pak lockfile is kept for rollback.
+
+**No session disruption.** Unlike live install conflicts (which
+require container transfer because a loaded package must change),
+refresh uses graceful drain. Running sessions keep their current
+libraries. Only new sessions get the updated dependencies. This
+means stale workers run for hours at most — not days — as sessions
+naturally end and the load balancer stops routing new traffic.
 
 ### What Gets Updated
 
@@ -1614,6 +1610,20 @@ versions (append-only), so rollback is instant.
    the server watches for the file to appear. The API response is
    the signal for the common case; the atomic rename is the signal
    for transfers — no websocket or helper package needed.
+
+15. **Store operations in Go via `by-builder`, not R.** All store
+   operations (key computation, store lookups, hard-linking,
+   ingestion, locking, ABI checks, metadata) are implemented in Go
+   (`internal/pkgstore`) and run inside build containers via a small
+   Go CLI binary (`by-builder`). R scripts only call pak APIs
+   (`lockfile_create`, `lockfile_install`) and shell out to
+   `by-builder` for store phases. This eliminates the cross-language
+   parity risk — `StoreKey()` exists only in Go, no R-side
+   `digest()` equivalent. The binary is cross-compiled at release
+   time for `linux/amd64` and `linux/arm64`, cached on the server
+   (same pattern as pak), mounted read-only at `/tools/by-builder`,
+   and selected at runtime via `runtime.GOARCH`. It shares
+   `internal/pkgstore` with the server — no code duplication.
 
 ---
 
