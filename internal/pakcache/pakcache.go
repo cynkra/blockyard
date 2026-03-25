@@ -7,11 +7,26 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/cynkra/blockyard/internal/backend"
 )
+
+// channelMaxAge is how long a channel-based cache entry (e.g. "stable")
+// is considered fresh before re-downloading.
+const channelMaxAge = 24 * time.Hour
+
+// validVersions lists the accepted pak_version values. "pinned" installs
+// from "stable" once and never refreshes — an escape hatch for operators
+// who want to lock to a specific pak version without expiry.
+var validVersions = map[string]bool{
+	"stable": true, "rc": true, "devel": true, "pinned": true,
+}
+
+// channels are the rolling release channels whose cache can go stale.
+var channels = map[string]bool{"stable": true, "rc": true, "devel": true}
 
 // mu serialises pak installations so concurrent builds don't race.
 var mu sync.Mutex
@@ -25,16 +40,34 @@ var mu sync.Mutex
 func EnsureInstalled(ctx context.Context, be backend.Backend,
 	image, version, cachePath string) (string, error) {
 
+	if !validVersions[version] {
+		return "", fmt.Errorf("invalid pak_version %q (must be stable, rc, devel, or pinned)", version)
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 
 	pakDir := filepath.Join(cachePath, "pak-"+version)
-	if dirExists(pakDir) {
-		return pakDir, nil
+	if info, err := os.Stat(pakDir); err == nil && info.IsDir() {
+		if !channels[version] || time.Since(info.ModTime()) < channelMaxAge {
+			return pakDir, nil
+		}
+		// Channel cache is stale — remove and re-install.
+		slog.Info("pak channel cache expired, refreshing",
+			"version", version, "age", time.Since(info.ModTime()).Round(time.Second))
+		if err := os.RemoveAll(pakDir); err != nil {
+			return "", fmt.Errorf("remove stale pak cache: %w", err)
+		}
 	}
 
 	if err := os.MkdirAll(cachePath, 0o755); err != nil {
 		return "", fmt.Errorf("create pak cache dir: %w", err)
+	}
+
+	// "pinned" installs from the stable channel but never expires.
+	downloadChannel := version
+	if version == "pinned" {
+		downloadChannel = "stable"
 	}
 
 	// Install pak into a temp directory using a short-lived container.
@@ -42,7 +75,7 @@ func EnsureInstalled(ctx context.Context, be backend.Backend,
 		`install.packages("pak", lib="/pak-output", repos=sprintf(`+
 			`"https://r-lib.github.io/p/pak/%s/%%s/%%s/%%s", `+
 			`.Platform$pkgType, R.Version()$os, R.Version()$arch))`,
-		version)
+		downloadChannel)
 
 	tmpDir, err := os.MkdirTemp(cachePath, ".pak-install-")
 	if err != nil {
@@ -80,11 +113,6 @@ func EnsureInstalled(ctx context.Context, be backend.Backend,
 
 	slog.Info("pak cached", "version", version, "path", pakDir)
 	return pakDir, nil
-}
-
-func dirExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
 }
 
 func lastLines(s string, n int) string {

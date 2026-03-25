@@ -7,7 +7,6 @@ import (
 	"github.com/docker/docker/api/types/mount"
 
 	"github.com/cynkra/blockyard/internal/backend"
-	"github.com/cynkra/blockyard/internal/bundle"
 )
 
 // MountMode describes how the server's data directory is mounted.
@@ -120,33 +119,3 @@ func (mc MountConfig) TranslateMount(m backend.MountEntry) (
 	return binds, mounts
 }
 
-// BuildMounts returns the container HostConfig fields for a build container.
-// All paths are server-side; MountConfig translates them as needed.
-// Deprecated: new code should use BuildSpec.Mounts + TranslateMount instead.
-func (mc MountConfig) BuildMounts(bundlePath, libraryPath, rvBinaryPath string) (binds []string, mounts []mount.Mount) {
-	if mc.Mode == MountModeVolume {
-		mounts = []mount.Mount{
-			mc.volumeMount("/app", true, bundlePath),
-			mc.volumeMount(bundle.BuildContainerLibPath, false, libraryPath),
-			mc.volumeMount("/usr/local/bin/rv", true, rvBinaryPath),
-		}
-		return nil, mounts
-	}
-
-	// Native or Bind mode — use bind mounts.
-	bp := bundlePath
-	lp := libraryPath
-	rp := rvBinaryPath
-	if mc.Mode == MountModeBind {
-		bp = mc.toHostPath(bundlePath)
-		lp = mc.toHostPath(libraryPath)
-		rp = mc.toHostPath(rvBinaryPath)
-	}
-
-	binds = []string{
-		bp + ":/app:ro",
-		lp + ":" + bundle.BuildContainerLibPath,
-		rp + ":/usr/local/bin/rv:ro",
-	}
-	return binds, nil
-}

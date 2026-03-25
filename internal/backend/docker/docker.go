@@ -721,29 +721,19 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	containerName := "blockyard-build-" + spec.BundleID
 
-	// Use Cmd when set, otherwise fall back to legacy default.
-	cmd := spec.Cmd
-	if cmd == nil {
-		cmd = []string{"/usr/local/bin/rv", "sync"}
-	}
-
 	// 3. Create container
 	var binds []string
 	var mounts []mount.Mount
-	if len(spec.Mounts) > 0 {
-		for _, m := range spec.Mounts {
-			b, dm := d.mountCfg.TranslateMount(m)
-			binds = append(binds, b...)
-			mounts = append(mounts, dm...)
-		}
-	} else {
-		binds, mounts = d.mountCfg.BuildMounts(spec.BundlePath, spec.LibraryPath, "")
+	for _, m := range spec.Mounts {
+		b, dm := d.mountCfg.TranslateMount(m)
+		binds = append(binds, b...)
+		mounts = append(mounts, dm...)
 	}
 
 	resp, err := d.client.ContainerCreate(ctx,
 		&container.Config{
 			Image:      spec.Image,
-			Cmd:        cmd,
+			Cmd:        spec.Cmd,
 			WorkingDir: "/app",
 			Labels:     buildLabels(spec),
 			Env:        spec.Env,

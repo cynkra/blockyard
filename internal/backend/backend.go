@@ -47,16 +47,14 @@ type WorkerSpec struct {
 }
 
 type BuildSpec struct {
-	AppID      string
-	BundleID   string
-	Image      string
-	BundlePath string            // used when Mounts is empty (legacy)
-	LibraryPath string           // used when Mounts is empty (legacy)
-	Labels     map[string]string
-	LogWriter  func(string)      // called with each log line during the build; may be nil
-	Cmd        []string          // overrides default command when set
-	Mounts     []MountEntry      // overrides default mounts when set
-	Env        []string          // environment variables (KEY=VALUE)
+	AppID    string
+	BundleID string
+	Image    string
+	Labels   map[string]string
+	LogWriter func(string)   // called with each log line during the build; may be nil
+	Cmd      []string        // container command (e.g. R script invocation)
+	Mounts   []MountEntry    // bind/volume mounts for the build container
+	Env      []string        // environment variables (KEY=VALUE)
 }
 
 // MountEntry describes a single bind/volume mount for a build container.

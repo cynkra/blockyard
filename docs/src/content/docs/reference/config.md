@@ -60,7 +60,7 @@ shutdown_timeout = "30s"
 socket     = "/var/run/docker.sock"
 image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838
-rv_version = "v0.19.0"
+pak_version = "stable"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -68,7 +68,7 @@ rv_version = "v0.19.0"
 | `socket` | `string` | `/var/run/docker.sock` | No | Path to Docker or Podman socket |
 | `image` | `string` | — | **Yes** | Base image for worker and build containers |
 | `shiny_port` | `integer` | `3838` | No | Port Shiny listens on inside containers |
-| `rv_version` | `string` | `v0.19.0` | No | [rv](https://github.com/a2-ai/rv) release tag (e.g. `v0.19.0`) |
+| `pak_version` | `string` | `stable` | No | [pak](https://pak.r-lib.org/) release channel (`stable`, `rc`, or `devel`) |
 
 ## `[storage]`
 

@@ -13,11 +13,6 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 )
 
-// BuildContainerLibPath is the legacy container-side mount point for the
-// library volume. Kept for backward compatibility with legacy BuildMounts().
-// New pak builds use /build-lib via explicit MountEntry instead.
-const BuildContainerLibPath = "/rv-library"
-
 // Paths holds the filesystem locations for a bundle.
 type Paths struct {
 	Base     string // {base}/{app_id}/bundles/{bundle_id}/ — parent for bundle artifacts

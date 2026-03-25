@@ -10,11 +10,10 @@ the right worker.
 
 ## How it works
 
-1. **You deploy a bundle** — a `.tar.gz` archive of your Shiny app source code
-   and an `rv.lock` file describing its R package dependencies.
-2. **Blockyard restores dependencies** — it spins up a build container, runs
-   [`rv sync`](https://github.com/a2-ai/rv) to install packages, and caches
-   the resulting library.
+1. **You deploy a bundle** — a `.tar.gz` archive of your Shiny app source code,
+   optionally with dependency metadata (`renv.lock`, `DESCRIPTION`, or `manifest.json`).
+2. **Blockyard restores dependencies** — it resolves a manifest, spins up a
+   build container, and uses [pak](https://pak.r-lib.org/) to install packages.
 3. **Users visit the app** — when a request hits `/app/<name>/`, Blockyard
    spawns a worker container on demand and reverse-proxies HTTP and WebSocket
    traffic to it.

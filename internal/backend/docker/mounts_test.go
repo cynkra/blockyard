@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types/mount"
-
-	"github.com/cynkra/blockyard/internal/bundle"
 )
 
 func TestMountConfig_WorkerMounts_NativeMode(t *testing.T) {
@@ -78,80 +76,6 @@ func TestMountConfig_WorkerMounts_VolumeMode(t *testing.T) {
 	assertVolumeMount(t, mounts[1], "blockyard-data", "/blockyard-lib", true, "bundles/app1/b1_lib")
 }
 
-func TestMountConfig_BuildMounts_NativeMode(t *testing.T) {
-	mc := MountConfig{Mode: MountModeNative}
-
-	binds, mounts := mc.BuildMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "/data/bundles/.rv-cache/rv")
-	if len(mounts) != 0 {
-		t.Fatalf("expected no mounts in native mode, got %d", len(mounts))
-	}
-	if len(binds) != 3 {
-		t.Fatalf("expected 3 binds, got %d: %v", len(binds), binds)
-	}
-	if binds[0] != "/data/bundles/app1/b1:/app:ro" {
-		t.Errorf("bind[0] = %q", binds[0])
-	}
-	if binds[1] != "/data/bundles/app1/b1_lib:"+bundle.BuildContainerLibPath {
-		t.Errorf("bind[1] = %q", binds[1])
-	}
-	if binds[2] != "/data/bundles/.rv-cache/rv:/usr/local/bin/rv:ro" {
-		t.Errorf("bind[2] = %q", binds[2])
-	}
-}
-
-func TestMountConfig_BuildMounts_BindMode(t *testing.T) {
-	mc := MountConfig{
-		Mode:       MountModeBind,
-		HostSource: "/host/data",
-		MountDest:  "/data",
-	}
-
-	binds, mounts := mc.BuildMounts(
-		"/data/bundles/app1/b1",
-		"/data/bundles/app1/b1_lib",
-		"/data/bundles/.rv-cache/rv-v0.19.0/rv",
-	)
-	if len(mounts) != 0 {
-		t.Fatalf("expected no mounts in bind mode, got %d", len(mounts))
-	}
-	if len(binds) != 3 {
-		t.Fatalf("expected 3 binds, got %d: %v", len(binds), binds)
-	}
-	if binds[0] != "/host/data/bundles/app1/b1:/app:ro" {
-		t.Errorf("bind[0] = %q", binds[0])
-	}
-	if binds[1] != "/host/data/bundles/app1/b1_lib:"+bundle.BuildContainerLibPath {
-		t.Errorf("bind[1] = %q", binds[1])
-	}
-	if binds[2] != "/host/data/bundles/.rv-cache/rv-v0.19.0/rv:/usr/local/bin/rv:ro" {
-		t.Errorf("bind[2] = %q", binds[2])
-	}
-}
-
-func TestMountConfig_BuildMounts_VolumeMode(t *testing.T) {
-	mc := MountConfig{
-		Mode:       MountModeVolume,
-		VolumeName: "blockyard-data",
-		MountDest:  "/data",
-	}
-
-	binds, mounts := mc.BuildMounts(
-		"/data/bundles/app1/b1",
-		"/data/bundles/app1/b1_lib",
-		"/data/bundles/.rv-cache/rv-v0.19.0/rv",
-	)
-	if len(binds) != 0 {
-		t.Fatalf("expected no binds, got %d", len(binds))
-	}
-	if len(mounts) != 3 {
-		t.Fatalf("expected 3 mounts, got %d", len(mounts))
-	}
-
-	assertVolumeMount(t, mounts[0], "blockyard-data", "/app", true, "bundles/app1/b1")
-	assertVolumeMount(t, mounts[1], "blockyard-data", bundle.BuildContainerLibPath, false, "bundles/app1/b1_lib")
-	assertVolumeMount(t, mounts[2], "blockyard-data", "/usr/local/bin/rv", true, "bundles/.rv-cache/rv-v0.19.0/rv")
-}
-
 func TestMountConfig_Subpath(t *testing.T) {
 	mc := MountConfig{
 		Mode:       MountModeVolume,
@@ -164,7 +88,7 @@ func TestMountConfig_Subpath(t *testing.T) {
 		want  string
 	}{
 		{"/data/bundles/app1/b1", "bundles/app1/b1"},
-		{"/data/bundles/.rv-cache/rv-v0.19.0/rv", "bundles/.rv-cache/rv-v0.19.0/rv"},
+		{"/data/bundles/.pak-cache/pak-stable", "bundles/.pak-cache/pak-stable"},
 		{"/data", ""},
 	}
 	for _, tt := range tests {
@@ -187,7 +111,7 @@ func TestMountConfig_ToHostPath(t *testing.T) {
 		want  string
 	}{
 		{"/data/bundles/app1/b1", "/host/path/data/bundles/app1/b1"},
-		{"/data/bundles/.rv-cache/rv", "/host/path/data/bundles/.rv-cache/rv"},
+		{"/data/bundles/.pak-cache/pak-stable", "/host/path/data/bundles/.pak-cache/pak-stable"},
 		{"/data", "/host/path/data"},
 	}
 	for _, tt := range tests {
