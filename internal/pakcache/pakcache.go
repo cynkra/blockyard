@@ -48,7 +48,7 @@ func EnsureInstalled(ctx context.Context, be backend.Backend,
 	if err != nil {
 		return "", fmt.Errorf("create pak temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer os.RemoveAll(tmpDir) //nolint:errcheck // best-effort cleanup
 
 	spec := backend.BuildSpec{
 		AppID:    "_system",

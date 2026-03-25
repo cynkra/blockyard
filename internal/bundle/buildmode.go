@@ -67,7 +67,7 @@ func detectEntrypoint(unpackedPath string) string {
 // checksums for all regular files.
 func computeFileChecksums(unpackedPath string) map[string]manifest.FileInfo {
 	files := make(map[string]manifest.FileInfo)
-	filepath.WalkDir(unpackedPath, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(unpackedPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}

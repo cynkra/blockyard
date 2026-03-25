@@ -166,7 +166,9 @@ func runRestore(p RestoreParams) error {
 
 	// 6. Ensure download cache dir exists.
 	dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
-	os.MkdirAll(dlCachePath, 0o755)
+	if err := os.MkdirAll(dlCachePath, 0o755); err != nil {
+		return fmt.Errorf("create download cache dir: %w", err)
+	}
 
 	// 7. Run build container.
 	spec := backend.BuildSpec{

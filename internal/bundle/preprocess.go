@@ -19,7 +19,7 @@ func preProcess(ctx context.Context, be backend.Backend,
 	if err != nil {
 		return fmt.Errorf("create preprocess output dir: %w", err)
 	}
-	defer os.RemoveAll(outputDir)
+	defer os.RemoveAll(outputDir) //nolint:errcheck // best-effort cleanup
 
 	rScript := `
 		library(pak, lib.loc = "/pak")
