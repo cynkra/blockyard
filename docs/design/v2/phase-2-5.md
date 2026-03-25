@@ -1064,15 +1064,17 @@ After a successful build, two artifacts are stored alongside the bundle
 └── manifest.json      # canonical manifest (pinned or unpinned)
 ```
 
-The **pak lockfile** drives worker library assembly (phase 2-6) and
-runtime requests (phase 2-7). Every lockfile entry maps to a store path
-via the curated hash — see dep-mgmt.md § Package Store.
+Phase 2-6 replaces this layout: `library/` is removed (workers
+assemble from the store), and `store-manifest.json` (output of
+`by-builder store ingest`) becomes the primary artifact driving worker
+assembly, refresh comparison, and rollback. The pak lockfile is
+retained as a debug/audit artifact only.
 
 The **manifest** is preserved separately. For unpinned deploys, the
 manifest retains the original `description` fields (package names with
 optional version constraints), while the pak lockfile has the resolved
-exact versions. Both are needed: the lockfile for assembly, the
-manifest for refresh (phase 2-7).
+exact versions. The manifest drives refresh (phase 2-7); the lockfile
+is informational.
 
 ---
 
@@ -1296,10 +1298,11 @@ will scan it and discover `library(shiny)`.
 
 7. **Post-build lockfile + manifest storage.** Both artifacts are
    persisted alongside the bundle but serve different purposes. The pak
-   lockfile has exact resolved versions and drives store-based library
-   assembly (phase 2-6) and runtime requests (phase 2-7). The manifest
-   retains the original dependency specification (unpinned: description
-   fields; pinned: package records) and drives refresh (phase 2-7). The
-   lockfile is a non-fatal artifact in phase 2-5 — the build succeeds
-   without it, and the lockfile becomes load-bearing only when the store
-   and refresh are implemented.
+   lockfile has exact resolved versions and is retained as a debug/audit
+   artifact. Worker library assembly (phase 2-6) and refresh comparison
+   (phase 2-7) are driven by `store-manifest.json` (output of
+   `by-builder store ingest`), not the lockfile. The manifest retains
+   the original dependency specification (unpinned: description fields;
+   pinned: package records) and drives refresh (phase 2-7). The lockfile
+   is a non-fatal artifact in phase 2-5 — the build succeeds without
+   it.

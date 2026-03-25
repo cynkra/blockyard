@@ -1006,12 +1006,20 @@ func ingestCmd() *cobra.Command {
                 }
 
                 // Ingest under lock (one lock per source hash).
-                s.Acquire(cmd.Context(), entry.Package, sourceHash, 30*time.Minute)
+                if err := s.Acquire(cmd.Context(), entry.Package, sourceHash, 30*time.Minute); err != nil {
+                    return fmt.Errorf("acquire lock for %s: %w", entry.Package, err)
+                }
                 if !s.Has(entry.Package, sourceHash, configHash) {
-                    s.Ingest(entry.Package, sourceHash, configHash, pkgPath)
-                    s.WriteIngestMeta(entry, lf,
+                    if err := s.Ingest(entry.Package, sourceHash, configHash, pkgPath); err != nil {
+                        s.Release(entry.Package, sourceHash)
+                        return fmt.Errorf("ingest %s: %w", entry.Package, err)
+                    }
+                    if err := s.WriteIngestMeta(entry, lf,
                         sourceHash, configHash, linkingToKeys,
-                        sourceCompiled, linkingToNames)
+                        sourceCompiled, linkingToNames); err != nil {
+                        s.Release(entry.Package, sourceHash)
+                        return fmt.Errorf("write ingest meta for %s: %w", entry.Package, err)
+                    }
                 }
                 s.Release(entry.Package, sourceHash)
 

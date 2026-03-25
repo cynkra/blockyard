@@ -579,8 +579,10 @@ manifest schemas, ref derivation rules, and design rationale.
    generate a synthetic DESCRIPTION, and build an unpinned manifest.
    Both artifacts persisted alongside the bundle.
 8. **Post-build lockfile storage** — persist the pak lockfile alongside
-   the bundle after successful builds. Drives worker library assembly
-   (phase 2-6) and runtime requests (phase 2-7).
+   the bundle after successful builds. Retained as a debug/audit artifact
+   (exact versions, sources, hashes). Worker library assembly (phase 2-6)
+   and refresh comparison (phase 2-7) are driven by `store-manifest.json`
+   (output of `by-builder store ingest`), not the pak lockfile.
 9. **BuildSpec extension** — add `Cmd` and `Mounts` fields to `BuildSpec`
    so the `Build` method supports flexible commands and mount
    configurations.
@@ -700,11 +702,13 @@ rationale, concurrency protocol, and store layout details.
 5. **Persistent pak download cache** — already set up in phase 2-5;
    this phase ensures the mount is present in the store-aware build flow.
 6. **Worker library assembly** — at worker startup, assemble a single
-   mutable `/lib` per container by hard-linking from the store based on
-   the bundle's `store-manifest.json`. Each entry maps directly to a
-   store path (`sourceHash/configHash`) — no hash computation or config
-   resolution needed. Assembly also writes a `.packages.json` manifest
-   (`{package: "sourceHash/configHash"}`) that tracks what's installed
+   per-container `/lib` by hard-linking from the store based on the
+   bundle's `store-manifest.json`. Mounted read-only into the container
+   (runtime package additions are hardlinked from the host side by the
+   server). Each entry maps directly to a store path
+   (`sourceHash/configHash`) — no hash computation or config resolution
+   needed. Assembly also writes a `.packages.json` manifest initialized
+   as a copy of the bundle's store-manifest that tracks what's installed
    in each worker — the source of truth for live installs (phase 2-7).
    R runs with `.libPaths("/lib")`.
 7. **Worker lifecycle integration** — create `/lib` directories on spawn,

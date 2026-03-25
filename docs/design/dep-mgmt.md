@@ -1227,14 +1227,15 @@ success. The API call blocks for the duration of the install —
 the R session waits.
 
 **3. Transfer required (version conflict):** after resolving, the
-server compares the new lockfile entries against the worker's
-per-container package manifest (`.packages.json` — a `{package →
+server compares the new store-manifest (output of `by-builder store
+ingest` in the staging directory) against the worker's per-container
+package manifest (`.packages.json` — a `{package →
 "sourceHash/configHash"}` map initialized from the bundle's
 store-manifest.json at library assembly and
 updated on each live install). For each loaded namespace reported
 in the request, the server compares the current compound ref
-against the new lockfile's compound ref for that package. If any
-loaded package has a different compound ref, R cannot unload and
+against the new store-manifest's compound ref for that package. If
+any loaded package has a different compound ref, R cannot unload and
 reload it — that's a version conflict. The compound ref encodes
 both source identity (version/sha256) and ABI configuration
 (LinkingTo store keys), so the comparison catches version bumps
