@@ -248,9 +248,12 @@ func runRestore(p RestoreParams) error {
 // base R + pak (no jsonlite dependency).
 func buildCommand() []string {
 	rScript := `
+		Sys.setenv(
+		  R_USER_CACHE_DIR = "/pak-cache",
+		  PKG_CACHE_DIR = "/pak-cache"
+		)
 		.libPaths(c("/pak", .libPaths()))
 		library(pak)
-		Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
 		# Configure repos from pre-computed text file (Name=URL per line).
 		repos_file <- "/app/.pak-repos"
