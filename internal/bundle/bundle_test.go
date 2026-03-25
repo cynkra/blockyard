@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	mockmock "github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
@@ -55,71 +57,6 @@ func TestDeleteFiles(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be deleted", p)
 		}
-	}
-}
-
-func TestSetLibraryPath(t *testing.T) {
-	tmp := t.TempDir()
-	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
-
-	data := testutil.MakeBundle(t)
-	WriteArchive(paths, bytes.NewReader(data))
-	UnpackArchive(paths)
-
-	// Write a realistic rproject.toml.
-	config := "[project]\nname = \"test\"\nr_version = \"4.4\"\ndependencies = [\"shiny\"]\n"
-	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte(config), 0o644)
-
-	if err := SetLibraryPath(paths, "/rv-library"); err != nil {
-		t.Fatalf("SetLibraryPath: %v", err)
-	}
-
-	// Read back and verify.
-	content, _ := os.ReadFile(paths.Unpacked + "/rproject.toml")
-	if !strings.Contains(string(content), `library = "/rv-library"`) {
-		t.Errorf("expected library directive, got:\n%s", content)
-	}
-	// Original fields should be preserved.
-	if !strings.Contains(string(content), `name = "test"`) {
-		t.Errorf("original config lost, got:\n%s", content)
-	}
-}
-
-func TestSetLibraryPath_OverridesExisting(t *testing.T) {
-	tmp := t.TempDir()
-	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
-
-	data := testutil.MakeBundle(t)
-	WriteArchive(paths, bytes.NewReader(data))
-	UnpackArchive(paths)
-
-	config := "library = \"/old/path\"\n[project]\nname = \"test\"\nr_version = \"4.4\"\n"
-	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte(config), 0o644)
-
-	if err := SetLibraryPath(paths, "/rv-library"); err != nil {
-		t.Fatalf("SetLibraryPath: %v", err)
-	}
-
-	content, _ := os.ReadFile(paths.Unpacked + "/rproject.toml")
-	if !strings.Contains(string(content), `library = "/rv-library"`) {
-		t.Errorf("expected new library directive, got:\n%s", content)
-	}
-	if strings.Contains(string(content), "/old/path") {
-		t.Errorf("old library path should be replaced, got:\n%s", content)
-	}
-}
-
-func TestSetLibraryPath_NoConfig(t *testing.T) {
-	tmp := t.TempDir()
-	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
-
-	data := testutil.MakeBundle(t)
-	WriteArchive(paths, bytes.NewReader(data))
-	UnpackArchive(paths)
-
-	// No rproject.toml — should be a no-op.
-	if err := SetLibraryPath(paths, "/rv-library"); err != nil {
-		t.Fatalf("SetLibraryPath: %v", err)
 	}
 }
 
@@ -204,45 +141,6 @@ func TestDeleteFilesNonexistent(t *testing.T) {
 	DeleteFiles(paths)
 }
 
-func TestSetLibraryPathCreatesUpdatedConfig(t *testing.T) {
-	tmp := t.TempDir()
-	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
-
-	data := testutil.MakeBundle(t)
-	WriteArchive(paths, bytes.NewReader(data))
-	UnpackArchive(paths)
-
-	// Write a config with existing library set to something else
-	config := "[project]\nname = \"myapp\"\n"
-	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte(config), 0o644)
-
-	if err := SetLibraryPath(paths, BuildContainerLibPath); err != nil {
-		t.Fatalf("SetLibraryPath: %v", err)
-	}
-
-	content, _ := os.ReadFile(paths.Unpacked + "/rproject.toml")
-	if !strings.Contains(string(content), `library = "/rv-library"`) {
-		t.Errorf("expected library path in config, got:\n%s", content)
-	}
-}
-
-func TestSetLibraryPathInvalidTOML(t *testing.T) {
-	tmp := t.TempDir()
-	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
-
-	data := testutil.MakeBundle(t)
-	WriteArchive(paths, bytes.NewReader(data))
-	UnpackArchive(paths)
-
-	// Write invalid TOML
-	os.WriteFile(paths.Unpacked+"/rproject.toml", []byte("{{invalid toml"), 0o644)
-
-	err := SetLibraryPath(paths, "/rv-library")
-	if err == nil {
-		t.Fatal("expected error for invalid TOML")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // ValidateEntrypoint
 // ---------------------------------------------------------------------------
@@ -261,6 +159,19 @@ func TestValidateEntrypoint_Valid(t *testing.T) {
 
 	if err := ValidateEntrypoint(paths); err != nil {
 		t.Fatalf("expected valid entrypoint, got: %v", err)
+	}
+}
+
+func TestValidateEntrypoint_ServerR(t *testing.T) {
+	tmp := t.TempDir()
+	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
+
+	// Create unpacked dir with server.R only.
+	os.MkdirAll(paths.Unpacked, 0o755)
+	os.WriteFile(filepath.Join(paths.Unpacked, "server.R"), []byte("# server"), 0o644)
+
+	if err := ValidateEntrypoint(paths); err != nil {
+		t.Fatalf("expected valid entrypoint with server.R, got: %v", err)
 	}
 }
 
@@ -416,6 +327,29 @@ func TestEnforceRetention_UnderLimit(t *testing.T) {
 // runRestore
 // ---------------------------------------------------------------------------
 
+// writeBundleWithManifest creates an unpacked bundle with app.R and a manifest.
+func writeBundleWithManifest(t *testing.T, paths Paths) {
+	t.Helper()
+	os.MkdirAll(paths.Unpacked, 0o755)
+	os.MkdirAll(paths.Library, 0o755)
+	os.WriteFile(filepath.Join(paths.Unpacked, "app.R"),
+		[]byte("library(shiny)\nshinyApp(ui, server)"), 0o644)
+
+	m := manifest.Manifest{
+		Version:  1,
+		Platform: "4.4.2",
+		Metadata: manifest.Metadata{AppMode: "shiny", Entrypoint: "app.R"},
+		Description: map[string]string{
+			"Imports": "shiny",
+		},
+		Files: map[string]manifest.FileInfo{
+			"app.R": {Checksum: "abc123"},
+		},
+	}
+	data, _ := json.MarshalIndent(m, "", "  ")
+	os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), data, 0o644)
+}
+
 func TestRunRestore_Success(t *testing.T) {
 	database := openTestDB(t)
 	tmp := t.TempDir()
@@ -431,22 +365,27 @@ func TestRunRestore_Success(t *testing.T) {
 	}
 
 	paths := NewBundlePaths(tmp, app.ID, "b-1")
+	writeBundleWithManifest(t, paths)
 	tasks := task.NewStore()
 	sender := tasks.Create("task-1", "")
 
+	// Pre-create a fake pak cache dir so EnsureInstalled finds it.
+	pakCacheDir := filepath.Join(tmp, ".pak-cache")
+	os.MkdirAll(filepath.Join(pakCacheDir, "pak-stable"), 0o755)
+
 	params := RestoreParams{
-		Backend:   be,
-		DB:        database,
-		Tasks:     tasks,
-		Sender:    sender,
-		AppID:     app.ID,
-		BundleID:  "b-1",
-		Paths:     paths,
-		Image:     "test-image",
-		RvVersion:    "4.4.0",
-		RvBinaryPath: testutil.FakeRvBinary(t),
-		Retention: 5,
-		BasePath:  tmp,
+		Backend:      be,
+		DB:           database,
+		Tasks:        tasks,
+		Sender:       sender,
+		AppID:        app.ID,
+		BundleID:     "b-1",
+		Paths:        paths,
+		Image:        "test-image",
+		PakVersion:   "stable",
+		PakCachePath: pakCacheDir,
+		Retention:    5,
+		BasePath:     tmp,
 	}
 
 	if err := runRestore(params); err != nil {
@@ -487,22 +426,26 @@ func TestRunRestore_BuildFailure(t *testing.T) {
 	}
 
 	paths := NewBundlePaths(tmp, app.ID, "b-1")
+	writeBundleWithManifest(t, paths)
 	tasks := task.NewStore()
 	sender := tasks.Create("task-1", "")
 
+	pakCacheDir := filepath.Join(tmp, ".pak-cache")
+	os.MkdirAll(filepath.Join(pakCacheDir, "pak-stable"), 0o755)
+
 	params := RestoreParams{
-		Backend:   be,
-		DB:        database,
-		Tasks:     tasks,
-		Sender:    sender,
-		AppID:     app.ID,
-		BundleID:  "b-1",
-		Paths:     paths,
-		Image:     "test-image",
-		RvVersion:    "4.4.0",
-		RvBinaryPath: testutil.FakeRvBinary(t),
-		Retention: 5,
-		BasePath:  tmp,
+		Backend:      be,
+		DB:           database,
+		Tasks:        tasks,
+		Sender:       sender,
+		AppID:        app.ID,
+		BundleID:     "b-1",
+		Paths:        paths,
+		Image:        "test-image",
+		PakVersion:   "stable",
+		PakCachePath: pakCacheDir,
+		Retention:    5,
+		BasePath:     tmp,
 	}
 
 	err = runRestore(params)

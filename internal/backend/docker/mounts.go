@@ -6,6 +6,7 @@ import (
 
 	"github.com/docker/docker/api/types/mount"
 
+	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 )
 
@@ -94,8 +95,34 @@ func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, workerMount string) 
 	return binds, nil
 }
 
+// TranslateMount converts a single backend.MountEntry into the appropriate
+// Docker bind or volume mount for the detected mount mode.
+func (mc MountConfig) TranslateMount(m backend.MountEntry) (
+	binds []string, mounts []mount.Mount,
+) {
+	switch mc.Mode {
+	case MountModeVolume:
+		mounts = append(mounts,
+			mc.volumeMount(m.Target, m.ReadOnly, m.Source))
+	case MountModeBind:
+		flag := ":ro"
+		if !m.ReadOnly {
+			flag = ""
+		}
+		binds = append(binds, mc.toHostPath(m.Source)+":"+m.Target+flag)
+	default: // Native
+		flag := ":ro"
+		if !m.ReadOnly {
+			flag = ""
+		}
+		binds = append(binds, m.Source+":"+m.Target+flag)
+	}
+	return binds, mounts
+}
+
 // BuildMounts returns the container HostConfig fields for a build container.
 // All paths are server-side; MountConfig translates them as needed.
+// Deprecated: new code should use BuildSpec.Mounts + TranslateMount instead.
 func (mc MountConfig) BuildMounts(bundlePath, libraryPath, rvBinaryPath string) (binds []string, mounts []mount.Mount) {
 	if mc.Mode == MountModeVolume {
 		mounts = []mount.Mount{

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -97,8 +98,8 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			BundleID:     bundleID,
 			Paths:        paths,
 			Image:        srv.Config.Docker.Image,
-			RvVersion:    srv.Config.Docker.RvVersion,
-			RvBinaryPath: srv.Config.Docker.RvBinaryPath,
+			PakVersion:   srv.Config.Docker.PakVersion,
+			PakCachePath: filepath.Join(srv.Config.Storage.BundleServerPath, ".pak-cache"),
 			Retention:    srv.Config.Storage.BundleRetention,
 			BasePath:     srv.Config.Storage.BundleServerPath,
 			AuditLog:     srv.AuditLog,

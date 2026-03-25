@@ -10,18 +10,17 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/cynkra/blockyard/internal/db"
 )
 
-// BuildContainerLibPath is the container-side mount point for the library
-// volume in build containers. This must match the bind mount in the Docker
-// backend. It is kept outside /app so that the bundle can be mounted
-// read-only.
+// BuildContainerLibPath is the legacy container-side mount point for the
+// library volume. Kept for backward compatibility with legacy BuildMounts().
+// New pak builds use /build-lib via explicit MountEntry instead.
 const BuildContainerLibPath = "/rv-library"
 
 // Paths holds the filesystem locations for a bundle.
 type Paths struct {
+	Base     string // {base}/{app_id}/bundles/{bundle_id}/ — parent for bundle artifacts
 	Archive  string // {base}/{app_id}/{bundle_id}.tar.gz
 	Unpacked string // {base}/{app_id}/{bundle_id}/
 	Library  string // {base}/{app_id}/{bundle_id}_lib/
@@ -32,6 +31,7 @@ type Paths struct {
 func NewBundlePaths(base, appID, bundleID string) Paths {
 	appDir := filepath.Join(base, appID)
 	return Paths{
+		Base:     appDir,
 		Archive:  filepath.Join(appDir, bundleID+".tar.gz"),
 		Unpacked: filepath.Join(appDir, bundleID),
 		Library:  filepath.Join(appDir, bundleID+"_lib"),
@@ -151,51 +151,20 @@ func UnpackArchive(paths Paths) error {
 	return nil
 }
 
-// ValidateEntrypoint checks that the unpacked bundle contains an app.R file
-// at the top level. In v0, all deployments must have this entrypoint.
+// ValidateEntrypoint checks that the unpacked bundle contains an app.R
+// or server.R file at the top level.
 func ValidateEntrypoint(paths Paths) error {
-	entrypoint := filepath.Join(paths.Unpacked, "app.R")
-	if _, err := os.Stat(entrypoint); os.IsNotExist(err) {
-		return fmt.Errorf("bundle must contain an app.R entrypoint")
-	} else if err != nil {
-		return fmt.Errorf("check entrypoint: %w", err)
+	for _, name := range []string{"app.R", "server.R"} {
+		if _, err := os.Stat(filepath.Join(paths.Unpacked, name)); err == nil {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("missing entrypoint: app.R or server.R")
 }
 
 // CreateLibraryDir creates the output directory for dependency restoration.
 func CreateLibraryDir(paths Paths) error {
 	return os.MkdirAll(paths.Library, 0o755)
-}
-
-// SetLibraryPath sets the library key in the bundle's rproject.toml to the
-// given container-side path. This is called after unpacking so the build
-// container writes restored packages to the mounted library volume rather
-// than to a path relative to the read-only /app mount.
-func SetLibraryPath(paths Paths, containerLibPath string) error {
-	configPath := filepath.Join(paths.Unpacked, "rproject.toml")
-
-	var cfg map[string]any
-	if _, err := toml.DecodeFile(configPath, &cfg); err != nil {
-		if os.IsNotExist(err) {
-			return nil // no config file, nothing to do
-		}
-		return fmt.Errorf("parse rproject.toml: %w", err)
-	}
-
-	cfg["library"] = containerLibPath
-
-	f, err := os.Create(configPath)
-	if err != nil {
-		return fmt.Errorf("write rproject.toml: %w", err)
-	}
-	defer f.Close()
-
-	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
-		return fmt.Errorf("encode rproject.toml: %w", err)
-	}
-
-	return nil
 }
 
 // DeleteFiles removes a bundle's archive, unpacked dir, and library dir.

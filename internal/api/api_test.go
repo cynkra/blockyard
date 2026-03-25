@@ -33,7 +33,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -230,7 +230,7 @@ func TestTaskLogsStreamsOutput(t *testing.T) {
 	}
 
 	logs, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(logs), "Starting dependency restoration") {
+	if !strings.Contains(string(logs), "restoring dependencies") {
 		t.Errorf("expected restore log output, got: %s", logs)
 	}
 }
@@ -554,7 +554,7 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -993,7 +993,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -1096,7 +1096,7 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 
 	cfg := &config.Config{
 		Server:  config.ServerConfig{},
-		Docker:  config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker:  config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -1487,7 +1487,7 @@ func testServerWithBackend(t *testing.T, be backend.Backend) (*server.Server, *h
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -2088,7 +2088,7 @@ func testServerWithSoftDelete(t *testing.T) (*server.Server, *httptest.Server) {
 	tmp := t.TempDir()
 
 	cfg := &config.Config{
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath:    tmp,
 			BundleWorkerPath:    "/app",
@@ -2340,7 +2340,7 @@ func TestUpdateAppCPULimitExceedsCeiling(t *testing.T) {
 	tmp := t.TempDir()
 	maxCPU := 4.0
 	cfg := &config.Config{
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -2385,7 +2385,7 @@ func TestUpdateAppCPULimitCeilingDisabled(t *testing.T) {
 	tmp := t.TempDir()
 	zeroCPU := 0.0
 	cfg := &config.Config{
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
 			BundleWorkerPath: "/app",
@@ -2560,7 +2560,7 @@ func testServerWithSoftDeleteAndAudit(t *testing.T) (*server.Server, *httptest.S
 	auditPath := tmp + "/audit.jsonl"
 
 	cfg := &config.Config{
-		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, RvBinaryPath: testutil.FakeRvBinary(t)},
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
 		Storage: config.StorageConfig{
 			BundleServerPath:    tmp,
 			BundleWorkerPath:    "/app",

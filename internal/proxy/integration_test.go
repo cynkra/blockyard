@@ -43,13 +43,12 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 	t.Helper()
 	tmp := t.TempDir()
 
-	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
-			Image:        "test-image",
-			ShinyPort:    3838,
-			RvBinaryPath: rvBin,
+			Image:      "test-image",
+			ShinyPort:  3838,
+			PakVersion: "stable",
 		},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,
@@ -1016,13 +1015,12 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 	t.Helper()
 	tmp := t.TempDir()
 
-	rvBin := testutil.FakeRvBinary(t)
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
-			Image:        "test-image",
-			ShinyPort:    3838,
-			RvBinaryPath: rvBin,
+			Image:      "test-image",
+			ShinyPort:  3838,
+			PakVersion: "stable",
 		},
 		Storage: config.StorageConfig{
 			BundleServerPath: tmp,

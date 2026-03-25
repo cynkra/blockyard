@@ -1,0 +1,5 @@
+Package: hello-shiny
+Title: Hello Shiny Example
+Version: 0.1.0
+Imports:
+    shiny

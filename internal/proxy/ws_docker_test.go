@@ -160,7 +160,7 @@ func dockerTestConfig() *config.DockerConfig {
 		Socket:    "/var/run/docker.sock",
 		Image:     "alpine:latest",
 		ShinyPort: 8080,
-		RvVersion: "v0.19.0",
+		PakVersion: "stable",
 	}
 }
 
