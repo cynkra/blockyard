@@ -250,7 +250,8 @@ func buildCommand() []string {
 	rScript := `
 		Sys.setenv(
 		  R_USER_CACHE_DIR = "/pak-cache",
-		  PKG_CACHE_DIR = "/pak-cache"
+		  PKG_CACHE_DIR = "/pak-cache",
+		  PKG_SYSREQS = "false"
 		)
 		.libPaths(c("/pak", .libPaths()))
 		library(pak)
