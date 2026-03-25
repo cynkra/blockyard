@@ -22,7 +22,8 @@ func preProcess(ctx context.Context, be backend.Backend,
 	defer os.RemoveAll(outputDir) //nolint:errcheck // best-effort cleanup
 
 	rScript := `
-		library(pak, lib.loc = "/pak")
+		.libPaths(c("/pak", .libPaths()))
+		library(pak)
 		deps <- pkgdepends::scan_deps("/app")
 		pkgs <- unique(deps$package[deps$type == "prod"])
 		dsc <- desc::desc("!new")

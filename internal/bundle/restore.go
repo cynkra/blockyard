@@ -234,7 +234,8 @@ func runRestore(p RestoreParams) error {
 // manifest to determine which.
 func buildCommand() []string {
 	rScript := `
-		library(pak, lib.loc = "/pak")
+		.libPaths(c("/pak", .libPaths()))
+		library(pak)
 		Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
 		# simplifyVector = FALSE: prevents jsonlite from collapsing
