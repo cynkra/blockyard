@@ -61,6 +61,13 @@ build pipeline and worker lifecycle.
    the container. Shares `internal/pkgstore` with the server — store
    key computation, locking, ABI checks, and metadata exist in one
    place. No R-side store code needed.
+9. **Store eviction** — background sweeper that periodically removes
+   config entries whose sidecar `mtime` (last-accessed) exceeds a
+   configurable retention window. Operates at the config level — each
+   config entry is evicted independently. Empty parent directories
+   (source hash, package) are cleaned up after their last config is
+   removed. No default — zero (unset) means eviction is disabled.
+   Operators opt in by setting a positive retention (e.g., `"720h"`).
 
 ---
 
@@ -404,7 +411,8 @@ func (s *Store) Ingest(pkg, sourceHash, configHash, srcDir string) error {
 }
 
 // Touch updates the mtime of a config's sidecar file.
-// Used for last-accessed tracking (LRU eviction, future concern).
+// Used for last-accessed tracking — the eviction sweeper removes
+// config entries whose sidecar mtime exceeds the retention window.
 func (s *Store) Touch(pkg, sourceHash, configHash string) {
     metaPath := s.ConfigMetaPath(pkg, sourceHash, configHash)
     now := time.Now()
@@ -1124,18 +1132,28 @@ The full build script. This replaces the phase 2-5 build script
 (step 8 of that document). R handles phases 1 and 3 (pak API calls);
 the `by-builder` binary handles phases 2 and 4 (store operations).
 
+**Change from phase 2-5:** bare-script pre-processing is folded into
+this build script, eliminating the separate pre-processing container.
+The R script now has three ref derivation branches: pinned (package
+records → refs), unpinned with DESCRIPTION (`deps::/app`), and bare
+scripts (`scan_deps()` → package names as refs). This saves one
+container startup + R boot cycle for bare-script deploys.
+
 ```r
 library(pak, lib.loc = "/pak")
 Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
-# ── Read manifest and configure ──────────────────────────────────
-# simplifyVector = FALSE: without it, jsonlite simplifies
-# manifest$packages into a data frame when all records share
-# the same fields, breaking vapply iteration. See phase-2-5.md.
-manifest <- jsonlite::fromJSON("/app/manifest.json",
-                               simplifyVector = FALSE)
+# ── Read manifest (if present) and configure ─────────────────────
+manifest <- NULL
+if (file.exists("/app/manifest.json")) {
+  # simplifyVector = FALSE: without it, jsonlite simplifies
+  # manifest$packages into a data frame when all records share
+  # the same fields, breaking vapply iteration. See phase-2-5.md.
+  manifest <- jsonlite::fromJSON("/app/manifest.json",
+                                 simplifyVector = FALSE)
+}
 
-if (length(manifest$repositories) > 0) {
+if (!is.null(manifest) && length(manifest$repositories) > 0) {
   repo_urls <- setNames(
     vapply(manifest$repositories, function(r) {
       url <- r$URL
@@ -1154,7 +1172,7 @@ if (length(manifest$repositories) > 0) {
   options(repos = repo_urls)
 }
 
-# Derive refs.
+# ── Derive refs ──────────────────────────────────────────────────
 record_to_ref <- function(rec) {
   switch(rec$Source,
     Repository =, Bioconductor = {
@@ -1172,10 +1190,23 @@ record_to_ref <- function(rec) {
   )
 }
 
-if (!is.null(manifest$packages)) {
+if (!is.null(manifest) && !is.null(manifest$packages)) {
+  # Pinned: convert each package record to a pkgdepends ref.
   refs <- vapply(manifest$packages, record_to_ref, "")
-} else {
+} else if (!is.null(manifest) && !is.null(manifest$description)) {
+  # Unpinned with DESCRIPTION: pak reads Imports/Depends/Remotes.
   refs <- "deps::/app"
+} else if (file.exists("/app/DESCRIPTION")) {
+  # DESCRIPTION without manifest (legacy or direct upload).
+  refs <- "deps::/app"
+} else {
+  # Bare scripts: scan for library()/require()/:: calls directly.
+  # No DESCRIPTION synthesis needed — scan_deps() returns package
+  # names which are valid pkgdepends refs (resolved against repos).
+  message("No manifest or DESCRIPTION found — scanning scripts")
+  deps <- pkgdepends::scan_deps(path = "/app", root = "/app")
+  refs <- unique(deps$package[deps$type == "prod"])
+  if (length(refs) == 0) stop("No package dependencies found in scripts")
 }
 
 # Build library lives on the store volume so ingestion (phase 4) is
@@ -1210,6 +1241,11 @@ if (rc != 0L) {
 # finds pre-populated packages, marks them as installed (type =
 # "installed"), and skips them — no download, no install. Only
 # store misses are downloaded and installed.
+#
+# Verified empirically (pak 0.9.2, R 4.5.2): lockfile_install()
+# decides to skip based on DESCRIPTION files in the target library
+# alone — no pak download cache, metadata cache, or library _cache
+# directory required. See tests/manual/test-pak-skip-*.R.
 pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 
 # ── Phase 4: Ingest newly installed packages into store ──────────
@@ -1263,8 +1299,9 @@ no runtime. It shares `internal/pkgstore` with the server.
 
 func buildCommand() []string {
     // The R script is embedded or written to the build container.
-    // It handles both pinned and unpinned modes, calls by-builder for
-    // store phases 2 and 4, and reads BUILD_UUID from the environment.
+    // It handles three modes (pinned, unpinned with DESCRIPTION,
+    // bare scripts via scan_deps), calls by-builder for store
+    // phases 2 and 4, and reads BUILD_UUID from the environment.
     rScript := `... (four-phase build script from step 5) ...`
     return []string{"R", "--vanilla", "-e", rScript}
 }
@@ -1316,36 +1353,29 @@ func runRestore(p RestoreParams) error {
     }
 
     // 2. Resolve manifest from bundle contents.
+    // Returns nil for bare scripts (no manifest.json, renv.lock, or
+    // DESCRIPTION). That's fine — the R build script handles bare
+    // scripts directly via scan_deps(). No separate pre-processing
+    // container needed (change from phase 2-5).
     m, err := resolveManifest(p.Paths.Unpacked)
     if err != nil {
         return fmt.Errorf("resolve manifest: %w", err)
     }
 
-    // 3. Bare scripts: pre-process to generate DESCRIPTION, then retry.
-    if m == nil {
-        p.Sender.Write("scanning scripts for dependencies...")
-        if err := preProcess(context.Background(), p.Backend, pakPath, p); err != nil {
-            return fmt.Errorf("preprocess: %w", err)
+    // 3. Write manifest.json to unpacked dir (if generated server-side).
+    // For bare scripts (m == nil), no manifest is written — the R
+    // build script detects the absence and runs scan_deps().
+    if m != nil {
+        manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
+        if !fileExists(manifestPath) {
+            if err := m.Write(manifestPath); err != nil {
+                return fmt.Errorf("write manifest: %w", err)
+            }
         }
-        m, err = resolveManifest(p.Paths.Unpacked)
-        if err != nil {
-            return fmt.Errorf("resolve manifest after preprocess: %w", err)
-        }
-        if m == nil {
-            return errors.New("failed to produce manifest after preprocessing")
-        }
+        p.Sender.Write(fmt.Sprintf("build mode: %s", m.BuildMode()))
+    } else {
+        p.Sender.Write("build mode: bare scripts (scan_deps)")
     }
-
-    // 4. Write manifest.json to unpacked dir (if generated server-side).
-    manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
-    if !fileExists(manifestPath) {
-        if err := m.Write(manifestPath); err != nil {
-            return fmt.Errorf("write manifest: %w", err)
-        }
-    }
-
-    mode := m.BuildMode()
-    p.Sender.Write(fmt.Sprintf("build mode: %s", mode))
 
     // 5. Ensure download cache and store dirs exist.
     dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
@@ -1834,7 +1864,229 @@ file written after the first successful build.
 
 ---
 
-## Step 10: Tests
+## Step 10: Store eviction
+
+A background sweeper removes config entries whose sidecar `mtime`
+(last-accessed time) exceeds a configurable retention window. The
+store is append-only during normal operation — eviction is the only
+deletion path.
+
+### Config
+
+Add `StoreRetention` to the Docker/storage config:
+
+```go
+type DockerConfig struct {
+    // ... existing fields ...
+    StoreRetention Duration `toml:"store_retention"` // 0 = disabled
+}
+```
+
+**No default.** Same pattern as `SoftDeleteRetention` in phase 2-2:
+`StoreRetention` has no entry in `applyDefaults()`. Zero (the
+absent/unset value) means "eviction disabled — store grows
+unboundedly." Operators opt in by setting a positive retention:
+
+```toml
+[docker]
+# How long unused packages remain in the store before eviction.
+# Unset or 0 = disabled (store grows indefinitely).
+store_retention = "720h"   # 30 days
+```
+
+Environment variable: `BLOCKYARD_DOCKER_STORE_RETENTION`.
+
+### Eviction logic
+
+```go
+// internal/pkgstore/evict.go
+
+// EvictStale removes config entries whose sidecar mtime is older than
+// the retention cutoff. Returns the number of configs removed.
+func (s *Store) EvictStale(retention time.Duration) (int, error) {
+    if retention <= 0 {
+        return 0, nil
+    }
+    cutoff := time.Now().Add(-retention)
+    removed := 0
+
+    platformDir := filepath.Join(s.root, s.platform)
+    packages, err := os.ReadDir(platformDir)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return 0, nil
+        }
+        return 0, err
+    }
+
+    for _, pkgEntry := range packages {
+        if !pkgEntry.IsDir() || strings.HasPrefix(pkgEntry.Name(), ".") {
+            continue
+        }
+        pkgDir := filepath.Join(platformDir, pkgEntry.Name())
+        sourceHashes, _ := os.ReadDir(pkgDir)
+
+        for _, shEntry := range sourceHashes {
+            if !shEntry.IsDir() {
+                continue
+            }
+            shDir := filepath.Join(pkgDir, shEntry.Name())
+            n, err := s.evictSourceHash(pkgEntry.Name(), shEntry.Name(), shDir, cutoff)
+            if err != nil {
+                slog.Warn("eviction error",
+                    "package", pkgEntry.Name(),
+                    "source_hash", shEntry.Name(),
+                    "error", err)
+                continue
+            }
+            removed += n
+        }
+
+        // Remove empty package directory.
+        removeIfEmpty(pkgDir)
+    }
+    return removed, nil
+}
+
+// evictSourceHash removes expired config entries under a single source
+// hash directory. If all configs are removed, removes the source hash
+// directory too.
+func (s *Store) evictSourceHash(pkg, sourceHash, shDir string, cutoff time.Time) (int, error) {
+    removed := 0
+    entries, err := os.ReadDir(shDir)
+    if err != nil {
+        return 0, err
+    }
+
+    for _, entry := range entries {
+        // Config sidecar files are {config_hash}.json.
+        if !strings.HasSuffix(entry.Name(), ".json") || entry.Name() == "configs.json" {
+            continue
+        }
+        configHash := strings.TrimSuffix(entry.Name(), ".json")
+
+        info, err := entry.Info()
+        if err != nil {
+            continue
+        }
+        if info.ModTime().After(cutoff) {
+            continue // still fresh
+        }
+
+        // Remove config directory and sidecar.
+        configDir := filepath.Join(shDir, configHash)
+        os.RemoveAll(configDir)
+        os.Remove(filepath.Join(shDir, entry.Name()))
+
+        // Update configs.json: remove the config entry.
+        configsPath := s.ConfigsPath(pkg, sourceHash)
+        if sc, err := ReadStoreConfigs(configsPath); err == nil {
+            delete(sc.Configs, configHash)
+            if len(sc.Configs) == 0 {
+                os.Remove(configsPath)
+            } else {
+                WriteStoreConfigs(configsPath, sc)
+            }
+        }
+
+        removed++
+        slog.Info("evicted stale config",
+            "package", pkg,
+            "source_hash", sourceHash,
+            "config_hash", configHash,
+            "last_accessed", info.ModTime())
+    }
+
+    // Remove empty source hash directory.
+    removeIfEmpty(shDir)
+    return removed, nil
+}
+
+func removeIfEmpty(dir string) {
+    entries, err := os.ReadDir(dir)
+    if err == nil && len(entries) == 0 {
+        os.Remove(dir)
+    }
+}
+```
+
+Eviction operates at the **config** level — each config entry
+(a distinct compilation of a package) is evicted independently based
+on its own sidecar mtime. When all configs for a source hash are
+evicted, the source hash directory is removed. When all source hashes
+for a package are evicted, the package directory is removed.
+
+### Sweeper goroutine
+
+```go
+// internal/pkgstore/evict.go
+
+// SpawnEvictionSweeper starts a background goroutine that periodically
+// evicts stale store entries. Same pattern as the soft-delete sweeper
+// in phase 2-2.
+func SpawnEvictionSweeper(ctx context.Context, store *Store, retention time.Duration) {
+    if retention <= 0 {
+        return // eviction disabled
+    }
+
+    // Sweep daily. Retention is measured in days/weeks, so hourly
+    // sweeps would waste cycles. Daily catches entries within ~1 day
+    // of expiry, which is fine for a 30-day default window.
+    interval := 24 * time.Hour
+    if retention < 24*time.Hour {
+        // For very short retention (testing), sweep more often.
+        interval = retention / 2
+    }
+
+    go func() {
+        ticker := time.NewTicker(interval)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                n, err := store.EvictStale(retention)
+                if err != nil {
+                    slog.Warn("store eviction sweep error", "error", err)
+                } else if n > 0 {
+                    slog.Info("store eviction sweep complete", "removed", n)
+                }
+            }
+        }
+    }()
+}
+```
+
+Wired up in `main.go` alongside the soft-delete sweeper:
+
+```go
+if cfg.Docker.StoreRetention > 0 {
+    pkgstore.SpawnEvictionSweeper(ctx, srv.PkgStore, cfg.Docker.StoreRetention)
+}
+```
+
+### Eviction safety
+
+- **No locking needed for reads.** The sweeper only reads sidecar
+  mtimes. Concurrent `Touch()` calls from builds/assembly update the
+  mtime — the sweeper sees the latest value on next scan.
+- **Concurrent ingestion.** If a build is ingesting a config while the
+  sweeper is removing stale entries for the same source hash, the
+  ingestion lock prevents races on `configs.json`. The sweeper does
+  not acquire locks — it operates on config entries that haven't been
+  accessed in 30+ days, which means no concurrent ingestion for the
+  same config. If a race does occur (ingestion starts between the
+  sweeper's mtime check and removal), the worst case is that a
+  freshly-ingested config is removed and will be re-ingested on the
+  next build. This is harmless.
+- **Active workers unaffected.** Worker libraries are assembled via
+  hard links. Once hard-linked, the files are independent of the
+  store entry. Evicting a store entry does not affect running workers.
+
+---
+
+## Step 11: Tests
 
 ### Unit tests
 
@@ -1928,6 +2180,25 @@ file written after the first successful build.
 - `TestIngestConcurrent` — two ingest processes for the same package,
   only one writes.
 
+**Store eviction:**
+- `TestEvictStale_RemovesExpired` — config with old mtime is removed;
+  config directory, sidecar, and configs.json entry all gone.
+- `TestEvictStale_PreservesFresh` — config with recent mtime is kept.
+- `TestEvictStale_MixedConfigs` — source hash with two configs, one
+  expired and one fresh: only expired config removed, configs.json
+  updated to retain the fresh entry.
+- `TestEvictStale_CleansEmptyDirs` — after all configs for a source
+  hash are evicted, source hash directory and package directory are
+  removed.
+- `TestEvictStale_DisabledWhenZero` — retention ≤ 0 returns
+  immediately with zero removals.
+- `TestEvictStale_EmptyStore` — no error on empty or nonexistent
+  platform directory.
+- `TestSpawnEvictionSweeper_Fires` — with short retention, verify
+  sweeper runs and removes stale entries.
+- `TestSpawnEvictionSweeper_DisabledWhenZero` — zero retention does
+  not start goroutine.
+
 ### Integration tests
 
 - **Store-aware build (full cache miss):** deploy app with no store
@@ -1950,6 +2221,10 @@ file written after the first successful build.
   LinkingTo deps → change linked dependency version → verify original
   config is not matched → pak recompiles → verify new config added
   to configs.json → verify both configs coexist in the store.
+- **Store eviction:** build two apps → advance time past retention for
+  first app's packages → run eviction → verify first app's store
+  entries removed, second app's entries retained → verify second app's
+  worker library still assembles correctly.
 
 ### E2E tests
 
@@ -2026,3 +2301,14 @@ file written after the first successful build.
    is reconstructed on demand from the store. This reduces disk usage
    (packages stored once in the store, not once per bundle plus once
    in the store) and simplifies bundle cleanup.
+
+9. **Bare-script pre-processing folded into the build script.**
+   Phase 2-5 runs a separate pre-processing container for
+   `pkgdepends::scan_deps()` to generate a synthetic DESCRIPTION,
+   then runs the build container. Phase 2-6 eliminates the separate
+   container — the build R script calls `scan_deps()` directly when
+   no manifest or DESCRIPTION is found, using the returned package
+   names as refs. This saves one container startup + R boot cycle
+   per bare-script deploy. `scan_deps(path, root)` accepts any
+   directory of R files — no package structure needed. The
+   `preProcess()` function from phase 2-5 is removed.

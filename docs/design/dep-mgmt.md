@@ -1094,11 +1094,13 @@ retries (e.g., network issue) or fixes the root cause (e.g.,
 missing system dependency). No rollback of successfully ingested
 packages.
 
-The store is append-only — packages are never modified or deleted
-after insertion. Eviction (LRU, size limits) is a future concern.
-The `mtime` of the metadata file (updated via `touch` on every
-store hit) provides last-accessed tracking for LRU eviction without
-additional bookkeeping.
+The store is append-only during normal operation — packages are
+never modified after insertion. A background sweeper evicts config
+entries whose sidecar `mtime` exceeds a configurable retention
+window (opt-in via `store_retention`, e.g., `"720h"`; disabled when
+unset). The `mtime` is updated via `touch` on
+every store hit, providing last-accessed tracking without additional
+bookkeeping. See phase 2-6 step 10 for implementation.
 
 ### Store Concurrency
 
@@ -1788,10 +1790,11 @@ no rebuilding needed.
    with different tools (uv/pip for Python, Pkg.jl for Julia).
    The manifest format should be extensible to accommodate this.
 
-4. **Store eviction policy.** The store is append-only — packages
-   are never modified after insertion. A periodic cleanup process
-   should evict entries that have not been referenced by any build
-   or running worker for some time (e.g., LRU with a configurable
-   retention window). This also naturally handles cache key
-   evolution: if the curated hash algorithm changes, old entries
-   become unreferenced and are eventually evicted.
+4. **Store eviction policy.** Addressed in phase 2-6 step 10. A
+   background sweeper evicts config entries whose sidecar mtime
+   (last-accessed) exceeds a configurable retention window (opt-in
+   via `store_retention`, e.g., `"720h"`; disabled when unset).
+   Empty parent directories are cleaned up. This also naturally
+   handles cache key evolution: if the curated hash algorithm
+   changes, old entries become unreferenced and are eventually
+   evicted.

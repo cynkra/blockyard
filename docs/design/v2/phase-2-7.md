@@ -56,49 +56,173 @@ This document covers how to build them.
 
 Workers need to call the packages endpoint from inside the container.
 The existing session token mechanism (HMAC-SHA256 via `auth.SigningKey`)
-is reused with a worker-scoped claim.
+is reused with a worker-scoped claim. Tokens are short-lived (15
+minutes) and the server refreshes them automatically via a mounted
+token file — R code never manages token lifecycle.
 
 ### Token generation
 
-At spawn time, generate a worker token and inject it as an environment
-variable:
-
 ```go
-// internal/proxy/coldstart.go
+// internal/proxy/workertoken.go
+
+const workerTokenTTL = 15 * time.Minute
 
 func workerToken(signingKey *auth.SigningKey, appID, workerID string) (string, error) {
+    now := time.Now()
     claims := &auth.SessionTokenClaims{
         Sub: "worker:" + workerID,
         App: appID,
         Wid: workerID,
-        Iat: time.Now().Unix(),
-        Exp: time.Now().Add(365 * 24 * time.Hour).Unix(), // long-lived — revoked on eviction
+        Iat: now.Unix(),
+        Exp: now.Add(workerTokenTTL).Unix(),
     }
     return auth.EncodeSessionToken(claims, signingKey)
 }
 ```
 
-The token is long-lived because the worker's lifetime is its validity
-window — when the worker is evicted, the token is meaningless. The
-`Sub` prefix `worker:` distinguishes worker tokens from user session
-tokens.
+The `Sub` prefix `worker:` distinguishes worker tokens from user
+session tokens.
+
+### Token file and server-side refresh
+
+Instead of injecting the token as an environment variable (which
+cannot be updated in a running container), the server writes the
+token to a file on the host side and mounts it into the container.
+A background goroutine rewrites the file at half the TTL interval,
+so the token visible to R is always fresh. When the worker is
+evicted, the goroutine stops and the last token expires naturally
+within one TTL period (15 minutes).
+
+Same pattern as Kubernetes projected service account tokens.
+
+```go
+// internal/proxy/workertoken.go
+
+// tokenDir returns the host-side directory for a worker's token file.
+// Lives under the store root for same-filesystem guarantees.
+func tokenDir(bundleServerPath, workerID string) string {
+    return filepath.Join(bundleServerPath, ".worker-tokens", workerID)
+}
+
+// writeTokenFile writes a fresh token to the worker's token file
+// using atomic write (temp + rename) to prevent partial reads.
+func writeTokenFile(dir string, signingKey *auth.SigningKey, appID, workerID string) error {
+    token, err := workerToken(signingKey, appID, workerID)
+    if err != nil {
+        return err
+    }
+    tokenPath := filepath.Join(dir, "token")
+    tmp := tokenPath + ".tmp"
+    if err := os.WriteFile(tmp, []byte(token), 0o600); err != nil {
+        return err
+    }
+    return os.Rename(tmp, tokenPath)
+}
+
+// SpawnTokenRefresher starts a goroutine that refreshes the worker's
+// token file every TTL/2. Returns a cancel function. The goroutine
+// writes an initial token immediately before returning, so the token
+// file is ready before the container starts.
+func SpawnTokenRefresher(
+    ctx context.Context,
+    bundleServerPath string,
+    signingKey *auth.SigningKey,
+    appID, workerID string,
+) (tokenDir string, cancel func(), err error) {
+    dir := tokenDir(bundleServerPath, workerID)
+    if err := os.MkdirAll(dir, 0o700); err != nil {
+        return "", nil, err
+    }
+
+    // Write initial token synchronously — container needs it at start.
+    if err := writeTokenFile(dir, signingKey, appID, workerID); err != nil {
+        return "", nil, err
+    }
+
+    ctx, cancel = context.WithCancel(ctx)
+    go func() {
+        ticker := time.NewTicker(workerTokenTTL / 2) // refresh at 7.5min
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                if err := writeTokenFile(dir, signingKey, appID, workerID); err != nil {
+                    slog.Warn("failed to refresh worker token",
+                        "worker_id", workerID, "error", err)
+                }
+            }
+        }
+    }()
+
+    return dir, cancel, nil
+}
+```
+
+### Worker spawn integration
+
+At spawn time, start the token refresher and mount the directory:
+
+```go
+// Start token refresher (before container creation).
+tokDir, cancelToken, err := SpawnTokenRefresher(
+    ctx, srv.Config.Docker.BundleServerPath,
+    srv.SigningKey, app.ID, workerID)
+if err != nil {
+    return fmt.Errorf("start token refresher: %w", err)
+}
+
+// Store cancel function for cleanup on eviction.
+worker.CancelToken = cancelToken
+```
+
+### Worker eviction cleanup
+
+On eviction, cancel the refresher and remove the token directory:
+
+```go
+worker.CancelToken()
+os.RemoveAll(tokenDir(srv.Config.Docker.BundleServerPath, workerID))
+```
+
+After cancellation, the last-written token is valid for at most 15
+minutes. Any leaked token has the same maximum exposure window.
+
+### Container mounts
+
+The token directory is mounted read-only into the container:
+
+```go
+// Added to worker mounts (alongside /lib, /transfer from phase 2-6).
+{Source: tokDir, Target: "/var/run/blockyard", ReadOnly: true},
+```
 
 ### WorkerSpec.Env update
 
-Add the token to the worker's environment:
+The API URL is still injected as an env var (it doesn't change):
 
 ```go
-env["BLOCKYARD_WORKER_TOKEN"] = token
 env["BLOCKYARD_API_URL"] = srv.InternalAPIURL() // e.g., http://host.docker.internal:3939
 ```
 
-`BLOCKYARD_API_URL` is the server's internal URL reachable from inside
-containers. This already exists for credential exchange — reused here.
+R reads the token from the file on each request:
+
+```r
+token <- readLines("/var/run/blockyard/token", n = 1)
+httr2::request(paste0(api_url, "/api/v1/packages")) |>
+  httr2::req_auth_bearer_token(token) |>
+  ...
+```
+
+No token management in R. The file always contains a valid token
+as long as the worker is alive.
 
 ### Middleware
 
 The packages endpoint validates the worker token and extracts the
-worker ID:
+worker ID. The only change from a long-lived token is that
+`DecodeSessionToken` now enforces expiry:
 
 ```go
 // internal/api/workerauth.go
@@ -115,7 +239,8 @@ func WorkerAuth(signingKey *auth.SigningKey) func(http.Handler) http.Handler {
 
             claims, err := auth.DecodeSessionToken(token, signingKey)
             if err != nil {
-                http.Error(w, "invalid worker token", http.StatusUnauthorized)
+                http.Error(w, "invalid or expired worker token",
+                    http.StatusUnauthorized)
                 return
             }
             if !strings.HasPrefix(claims.Sub, "worker:") {
@@ -608,6 +733,20 @@ Packages that are installed but not loaded can be updated in place —
 the hardlink in `/lib` is replaced with the correct version/config
 (see step 7).
 
+**Why checking `loadedNamespaces` is sufficient.** R loads namespaces
+transitively: when `library(A)` runs, R loads A and all its `Imports`
+and `Depends` recursively via `loadNamespace()`. So if A is loaded
+and depends on B, B is in `loadedNamespaces` too — the conflict
+check catches it. The only way a dependency of a loaded package can
+be absent from `loadedNamespaces` is via `Suggests` (conditional
+dependencies that haven't been triggered yet). Replacing a
+not-yet-triggered `Suggests` package on disk is safe: R never loaded
+the old version into memory, so `requireNamespace()` will load the
+new version fresh when the code path eventually runs. Compiled
+interfaces (`LinkingTo`) are handled separately by the config hash —
+ABI changes produce a different compound ref regardless of load
+state.
+
 ---
 
 ## Step 7: Linking new packages into the worker library
@@ -684,6 +823,29 @@ transfer. For blockr apps, the board state is serialized and restored
 in a new container. For non-blockr apps, the session is lost (hard
 restart).
 
+### Config
+
+Add `TransferTimeout` to `ProxyConfig`:
+
+```go
+type ProxyConfig struct {
+    // ... existing fields ...
+    TransferTimeout Duration `toml:"transfer_timeout"` // default 60s
+}
+```
+
+**No entry in `applyDefaults()`.** The code defaults to 60s when
+unset (zero). Operators can increase for apps with large board state.
+
+```toml
+[proxy]
+# How long to wait for R to serialize board state during a container
+# transfer. Default 60s if unset.
+transfer_timeout = "60s"
+```
+
+Env var: `BLOCKYARD_PROXY_TRANSFER_TIMEOUT`.
+
 ### Transfer directory
 
 ```go
@@ -747,7 +909,10 @@ func (srv *Server) watchTransfer(
     appID, workerID, storeManifestPath, transferDir string,
 ) {
     boardPath := filepath.Join(transferDir, "board.json")
-    timeout := 30 * time.Second
+    timeout := srv.Config.Proxy.TransferTimeout.Duration
+    if timeout <= 0 {
+        timeout = 60 * time.Second
+    }
     pollInterval := 100 * time.Millisecond
 
     deadline := time.Now().Add(timeout)
@@ -1409,10 +1574,18 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
 ### Unit tests
 
 **Worker auth:**
-- `TestWorkerTokenGenerate` — token encodes worker ID and app ID.
+- `TestWorkerTokenGenerate` — token encodes worker ID, app ID, and
+  15-minute expiry.
 - `TestWorkerTokenValidate` — valid token passes middleware.
-- `TestWorkerTokenInvalid` — invalid/expired/non-worker token rejected.
+- `TestWorkerTokenExpired` — token past TTL rejected with 401.
+- `TestWorkerTokenInvalid` — malformed/non-worker token rejected.
 - `TestWorkerTokenWrongPrefix` — user session token rejected.
+- `TestWriteTokenFile` — atomic write (file appears complete, no
+  partial reads).
+- `TestSpawnTokenRefresher` — initial token written synchronously
+  before return; token file content changes after TTL/2.
+- `TestTokenRefresherCancelledOnEviction` — cancel stops writes;
+  token expires naturally within TTL.
 
 **Version conflict detection:**
 - `TestDetectConflict_NoConflict` — new package, not loaded.
