@@ -595,11 +595,9 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 		t.Fatalf("write manifest.json: %v", err)
 	}
 
-	// Pre-create a fake pak cache directory so the pak cache check passes.
+	// Let EnsureInstalled actually install pak into a real cache dir.
+	// This runs a container to download pak — slow but exercises the real path.
 	pakCachePath := filepath.Join(basePath, ".pak-cache")
-	if err := os.MkdirAll(filepath.Join(pakCachePath, "pak-"+pakVersion), 0o755); err != nil {
-		t.Fatalf("create pak cache dir: %v", err)
-	}
 
 	// --- Step 2: SpawnRestore — goes through the full production restore path ---
 
