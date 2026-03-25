@@ -706,8 +706,10 @@ pak::lockfile_create(refs, lockfile = file.path(build_lib, "pak.lock"),
                      lib = build_lib)
 
 # ── Phase 2: Check store, pre-populate build library (Go binary) ─
-# by-builder reads the lockfile, computes store keys, checks the
-# store, runs ABI safety checks, and hard-links hits into build_lib.
+# by-builder reads the lockfile, computes source hashes, reads
+# configs.json for each package, resolves the matching config hash
+# (based on the current lockfile's LinkingTo store keys), and
+# hard-links config hits into build_lib.
 system2("/tools/by-builder", c(
   "store", "populate",
   "--lockfile", file.path(build_lib, "pak.lock"),
@@ -721,8 +723,9 @@ system2("/tools/by-builder", c(
 pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 
 # ── Phase 4: Ingest new packages into store (Go binary) ─────────
-# by-builder ingests newly installed packages under lock with
-# metadata (created_at, source_compiled, linkingto).
+# by-builder reads each installed DESCRIPTION for NeedsCompilation
+# and LinkingTo, computes config hashes, creates config directories,
+# updates configs.json, and writes config sidecar files.
 system2("/tools/by-builder", c(
   "store", "ingest",
   "--lockfile", file.path(build_lib, "pak.lock"),
@@ -862,35 +865,56 @@ Examples:
    is coherent. Builds that install from a single snapshot produce a
    coherent store population. This covers the vast majority of cases.
 
-2. **Metadata-based check for the LinkingTo edge case.** The store
-   key does NOT include `LinkingTo` dependencies — the pak lockfile
-   does not contain `LinkingTo` data at the point where the key is
-   needed (after `lockfile_create` but before `lockfile_install`).
-   Instead, ABI safety for the narrow `LinkingTo` case is enforced
-   via the store metadata file:
+2. **Multi-config store entries for the LinkingTo edge case.** The
+   store key (curated hash) identifies the *source state* of a
+   package but does NOT include `LinkingTo` dependencies — the pak
+   lockfile does not contain `LinkingTo` data at the point where the
+   key is needed (after `lockfile_create` but before
+   `lockfile_install`). Instead, each source hash directory in the
+   store can hold *multiple compiled artifacts* for different
+   LinkingTo dependency configurations.
 
-   - **At ingestion:** `WriteIngestMeta` reads the installed
-     DESCRIPTION to determine `NeedsCompilation` and `LinkingTo`,
-     then records the store keys of linked packages in the metadata.
-   - **At populate:** `LinkingToMatches` checks the metadata against
-     the current lockfile. If any linked package's store key has
-     changed, the store entry is skipped (treated as a miss).
-   - The stale entry is left in place (append-only store — it may
-     be in use by running workers). pak recompiles the package in
-     phase 3, and a fresh entry with updated metadata is ingested
-     in phase 4.
+   A `configs.json` file at the source-hash level records
+   source-level properties (`source_compiled`, `linkingto` package
+   names — invariant across configs) and maps each *config hash* to
+   the specific set of LinkingTo store keys the package was compiled
+   against. Each config hash has its own installed package tree
+   directory and a sibling metadata sidecar file.
 
-   This is a performance trade-off for a narrow edge case. In
-   practice it almost never fires: PPM binaries are pre-built
-   (not source-compiled), and even source-compiled packages only
-   trigger a mismatch when a `LinkingTo` dependency changes between
-   two builds. The main scenario is GitHub dev-installs where the
-   linked package (e.g., Rcpp) is updated independently.
+   The **config hash** is SHA-256 of the sorted
+   `{linked_package}\0{store_key}` pairs. For packages without
+   `LinkingTo` deps (the majority), the config hash is a canonical
+   empty hash (SHA-256 of `""`). The store layout is uniform — no
+   structural difference between packages with and without
+   `LinkingTo` deps.
+
+   - **At populate:** `by-builder` reads `configs.json`, gets the
+     `linkingto` package names, looks up their store keys in the
+     current lockfile, computes the expected config hash, and checks
+     whether that config exists. A matching config is a hit (hard-
+     link from `{source_hash}/{config_hash}/`); no match is a miss.
+   - **At ingest:** `by-builder` reads the installed DESCRIPTION to
+     get `NeedsCompilation` and `LinkingTo`, computes the config hash
+     from the lockfile's store keys for the linked packages, writes
+     the installed package tree into a new config directory, updates
+     `configs.json` (under lock), and writes the config sidecar.
+   - Old configs remain in place (append-only store) — they may be
+     in use by running workers and will serve future builds that
+     happen to need the same LinkingTo combination.
+
+   In practice the multi-config case rarely fires: PPM binaries are
+   pre-built (not source-compiled), and even source-compiled packages
+   only produce additional configs when a `LinkingTo` dependency
+   changes between two builds. The main scenario is GitHub
+   dev-installs where the linked package (e.g., Rcpp) is updated
+   independently. Most packages have zero or one config entry.
 
 ### Store Layout
 
 The store holds multiple versions of the same package, keyed by
-curated hash. Each entry is a fully installed R package tree.
+curated hash (source state). Each source hash directory can hold
+multiple *config* subdirectories — one per distinct set of
+`LinkingTo` dependency versions the package was compiled against.
 `/store` is a logical mount point throughout this document — the
 host path is a deployment concern.
 
@@ -898,72 +922,102 @@ host path is a deployment concern.
 /store/
 └── 4.4-linux-x86_64/
     ├── shiny/
-    │   ├── e3b0c442.../        ← installed package tree (v1.9.1 from CRAN)
-    │   ├── e3b0c442....json    ← store metadata (sibling file)
-    │   ├── 7d865e95.../        ← v1.8.0 from CRAN (different archive → different hash)
-    │   └── 7d865e95....json
+    │   └── e3b0c442.../                ← source hash (v1.9.1 from CRAN)
+    │       ├── configs.json            ← source-level metadata + config map
+    │       ├── a1b2c3d4.../            ← config: installed package tree
+    │       └── a1b2c3d4....json        ← config sidecar (created_at)
+    ├── sf/
+    │   └── 7d865e95.../                ← source hash (v1.0.0)
+    │       ├── configs.json
+    │       ├── b5bb9d80.../            ← config A: compiled against Rcpp@key1
+    │       ├── b5bb9d80....json
+    │       ├── c6cc0a91.../            ← config B: compiled against Rcpp@key2
+    │       └── c6cc0a91....json
     ├── ggplot2/
-    │   ├── b5bb9d80.../        ← v3.5.0
-    │   └── b5bb9d80....json
-    ├── blockr/
-    │   ├── 185f8db3.../        ← v0.2.0 from CRAN
-    │   ├── 185f8db3....json
-    │   ├── a591a6d4.../        ← v0.2.1-dev from GitHub
-    │   └── a591a6d4....json
+    │   └── b5bb9d80.../
+    │       ├── configs.json
+    │       ├── e3b0c442.../            ← canonical empty config (no LinkingTo)
+    │       └── e3b0c442....json
     └── ...
 ```
 
-Each `{hash}/` directory contains the installed package tree
-directly (`DESCRIPTION`, `R/`, `Meta/`, etc. — no nested package
-name directory). The sibling `{hash}.json` file holds store
-metadata (see below).
+Each `{config_hash}/` directory contains the installed package
+tree directly (`DESCRIPTION`, `R/`, `Meta/`, etc. — no nested
+package name directory).
 
-**Store metadata file.** Each store entry has a sibling JSON file
-containing metadata for eviction and ABI safety checks.
+**`configs.json`** — stored at the source-hash level. Records
+source-level properties (invariant across configs) and maps each
+config hash to the LinkingTo store keys it was compiled against.
 
 ```json
 {
-  "created_at": "2026-03-18T14:30:00Z",
   "source_compiled": true,
-  "linkingto": {
-    "Rcpp": "a7ffc6f8bf1e...",
-    "s2": "b8e9d7c3f2a1..."
+  "linkingto": ["Rcpp", "s2"],
+  "configs": {
+    "b5bb9d80...": {"Rcpp": "a7ffc6f8bf1e...", "s2": "b8e9d7c3f2a1..."},
+    "c6cc0a91...": {"Rcpp": "c3d4e5f6a7b8...", "s2": "b8e9d7c3f2a1..."}
+  }
+}
+```
+
+For packages without `LinkingTo` deps (the majority):
+
+```json
+{
+  "source_compiled": false,
+  "linkingto": [],
+  "configs": {
+    "e3b0c442...": {}
   }
 }
 ```
 
 | Field | Description |
 |---|---|
-| `created_at` | Timestamp written once at ingestion. |
-| `source_compiled` | `true` if the package was compiled from source (`NeedsCompilation: yes` in DESCRIPTION). |
-| `linkingto` | Map of `{package: store_key}` for each `LinkingTo` dependency at compile time. Omitted for binary installs and packages without `LinkingTo`. Used at populate time to detect ABI staleness. |
+| `source_compiled` | `true` if the package was compiled from source (`NeedsCompilation: yes` in DESCRIPTION). Invariant across configs for the same source. |
+| `linkingto` | Sorted list of `LinkingTo` package names from the source DESCRIPTION. Empty for packages without `LinkingTo` deps. Invariant across configs. |
+| `configs` | Map of `{config_hash: {linked_pkg: store_key, ...}}`. Each entry represents a distinct compilation against specific versions of the linked packages. |
 
-**Last-accessed tracking** uses the metadata file's filesystem
-`mtime` rather than a JSON field — the server `touch`es the
-metadata file on every store hit. This avoids rewriting JSON on
+**Config sidecar file (`{config_hash}.json`)** — stored alongside
+the config directory at the source-hash level. Contains only
+per-build metadata:
+
+```json
+{
+  "created_at": "2026-03-18T14:30:00Z"
+}
+```
+
+**Last-accessed tracking** uses the config sidecar file's
+filesystem `mtime` rather than a JSON field — the server `touch`es
+the sidecar on every store hit. This avoids rewriting JSON on
 every access; `touch` is a metadata-only syscall (`utimes()`).
 Eviction queries can scan `mtime` values efficiently without
-parsing file contents.
+parsing file contents. Eviction operates at the config level —
+individual configs can be evicted independently when they go stale.
 
 An R library is flat — `lib/shiny/` can hold exactly one version.
 The bridge between the multi-version store and R's single-version
 library is a **view**: a flat directory assembled per-build (or
-per-worker) by hard-linking the correct version of each package
+per-worker) by hard-linking the correct config of each package
 from the store.
 
 ```
 /lib/                            (assembled view)
-├── shiny/    → hardlink from /store/4.4-linux-x86_64/shiny/e3b0c442.../
-├── ggplot2/  → hardlink from /store/4.4-linux-x86_64/ggplot2/b5bb9d80.../
-└── blockr/   → hardlink from /store/4.4-linux-x86_64/blockr/185f8db3.../
+├── shiny/    → hardlink from /store/.../shiny/{src_hash}/{cfg_hash}/
+├── ggplot2/  → hardlink from /store/.../ggplot2/{src_hash}/{cfg_hash}/
+└── blockr/   → hardlink from /store/.../blockr/{src_hash}/{cfg_hash}/
 ```
 
 Version selection is always driven by the pak lockfile. Each
-lockfile entry maps to a store path via the curated hash. This is
-the same at build time (assembling the build library under
-`/store/.builds/{uuid}/`), at worker startup (assembling `/lib`
-from the stored lockfile), and at runtime (adding packages to
-`/lib` after a runtime request produces a new lockfile).
+lockfile entry maps to a source hash via the curated hash. The
+config hash is determined by looking up `configs.json` and matching
+the current lockfile's store keys for the package's `LinkingTo`
+dependencies. This is the same at build time (assembling the build
+library under `/store/.builds/{uuid}/`), at worker startup
+(assembling `/lib` from the stored lockfile), and at runtime
+(adding packages to `/lib` after a runtime request produces a new
+lockfile).
 
 Hard links (not symlinks) are used so the store does not need to
 be mounted into worker containers at runtime. The view is
@@ -977,21 +1031,27 @@ also share the store's filesystem (e.g., same Docker volume).
 
 Packages are ingested into the store after `lockfile_install()`
 completes (phase 4 of the build flow). The lockfile provides the
-store key — no post-installation hash computation is needed.
+source hash — no post-installation hash computation is needed.
+The config hash is determined at ingest time from the installed
+DESCRIPTION's `LinkingTo` field and the lockfile's store keys.
 
 For each lockfile entry that was not a store hit:
 
-1. Compute the store key from the lockfile entry (curated hash).
-2. Acquire the lock (`/store/.locks/{platform}/{package}/{hash}.lock`).
-3. If `{platform}/{package}/{hash}/` does not already exist in the
-   store:
-   a. Copy the installed package tree into the store (from the
-      temp build directory).
-   b. Write the sibling metadata file (`{hash}.json`) with
-      `created_at`, `source_compiled`, and `linkingto` (recording
-      the store keys of any `LinkingTo` dependencies for ABI safety
-      checks at populate time — see § The ABI Problem).
-4. Release the lock.
+1. Compute the source hash from the lockfile entry (curated hash).
+2. Read the installed DESCRIPTION to get `NeedsCompilation` and
+   `LinkingTo`. Compute the config hash from the lockfile's store
+   keys for the linked packages (empty map → canonical empty hash).
+3. Acquire the lock
+   (`/store/.locks/{platform}/{package}/{source_hash}.lock`).
+4. If the config does not already exist:
+   a. Move the installed package tree into
+      `{platform}/{package}/{source_hash}/{config_hash}/`.
+   b. Write or update `configs.json` — set `source_compiled` and
+      `linkingto` (package names), add the config entry with its
+      LinkingTo store key map.
+   c. Write the config sidecar (`{config_hash}.json`) with
+      `created_at`.
+5. Release the lock.
 
 **On build failure:** packages that were successfully installed
 before the failure remain in the store — they are independently
@@ -1543,18 +1603,31 @@ versions (append-only), so rollback is instant.
    orthogonal to the store (which caches *installed* packages) —
    the download cache helps even for store misses.
 
-9. **Type-specific hash of lockfile identity fields as cache key.**
-   The store key dispatches on `RemoteType` and hashes only the
-   fields relevant to that source: `package + version + sha256`
-   for standard (CRAN/Bioc), `package + RemoteSha + RemoteSubdir`
-   for github/gitlab/git. `RemoteType` is always included to prevent
-   cross-type collisions. The key is fully computable from the
-   lockfile before installation — no installed package tree or
-   metadata file is needed. `url::` and `local::` refs are
-   unsupported (clear error); both are niche and lack reliable
-   content identifiers in the lockfile. ABI safety for `LinkingTo`
-   dependencies is handled via store metadata, not the key itself
-   (see § The ABI Problem).
+9. **Two-level store key: source hash + config hash.** The store
+   uses a two-level keying scheme. The *source hash* (curated hash
+   of lockfile identity fields, dispatched on `RemoteType`) identifies
+   the source code: `package + version + sha256` for standard,
+   `package + RemoteSha + RemoteSubdir` for github/gitlab/git. The
+   *config hash* identifies the ABI context: SHA-256 of the sorted
+   `{linked_package}\0{store_key}` pairs from `LinkingTo`
+   dependencies. For packages without `LinkingTo` deps, the config
+   hash is a canonical empty hash.
+
+   The source hash is fully computable from the lockfile before
+   installation. The config hash requires reading `configs.json`
+   (written at a prior ingestion) to learn the `LinkingTo` package
+   names, then looking up their store keys in the current lockfile.
+   At ingest time, the installed DESCRIPTION provides `LinkingTo`.
+
+   This two-level scheme solves the ABI problem without baking
+   `LinkingTo` information into the source hash (which would require
+   data not available from the lockfile alone). The same source can
+   have multiple compiled artifacts for different LinkingTo
+   configurations, each independently usable and evictable. See
+   § The ABI Problem for the full rationale.
+
+   `url::` and `local::` refs are unsupported (clear error); both
+   are niche and lack reliable content identifiers in the lockfile.
 
 10. **Platform-aware store key.** The store key includes an
    `{r_version}-{os}-{arch}` prefix (e.g., `4.4-linux-x86_64`).

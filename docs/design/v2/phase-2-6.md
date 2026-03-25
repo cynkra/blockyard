@@ -21,17 +21,22 @@ build pipeline and worker lifecycle.
 ## Deliverables
 
 1. **Package store** (`internal/pkgstore/store.go`) — content-addressable
-   directory keyed by `{platform}/{package}/{curated_hash}`. The
-   `platform` prefix encodes R version (minor), OS, and architecture
-   (e.g., `4.4-linux-x86_64`). Curated hash is SHA-256 of selected
-   identity fields from the pak lockfile entry.
-2. **Store operations** — `Has(key)`, `Path(key)`, `Ingest(key, src)`.
+   directory with two-level keying:
+   `{platform}/{package}/{source_hash}/{config_hash}`. The `platform`
+   prefix encodes R version (minor), OS, and architecture (e.g.,
+   `4.4-linux-x86_64`). Source hash is SHA-256 of selected identity
+   fields from the pak lockfile entry. Config hash is SHA-256 of the
+   sorted `LinkingTo` dependency store keys (canonical empty hash for
+   packages without `LinkingTo`).
+2. **Store operations** — `Has(pkg, sourceHash, configHash)`,
+   `Path(pkg, sourceHash, configHash)`,
+   `Ingest(pkg, sourceHash, configHash, src)`.
    Ingestion uses atomic `rename()` from a build directory on the same
    filesystem. Append-only — packages are never modified after insertion.
 3. **Store concurrency** — file-based locking under
-   `{root}/.locks/{platform}/{package}/{hash}.lock`. Concurrent builds
-   wait with backoff for the lock holder to finish. Stale lock detection
-   via age threshold.
+   `{root}/.locks/{platform}/{package}/{source_hash}.lock`. Concurrent
+   builds wait with backoff for the lock holder to finish. Stale lock
+   detection via age threshold.
 4. **Store-aware build flow** — retrofit the phase 2-5 build to the
    four-phase pattern: (1) `lockfile_create()` → (2) check store,
    pre-populate build library with hard links → (3) `lockfile_install()`
@@ -88,13 +93,22 @@ func (s *Store) SetPlatform(p string) { s.platform = p }
 {root}/
 ├── 4.4-linux-x86_64/            ← platform prefix
 │   ├── shiny/
-│   │   ├── e3b0c442.../         ← installed package tree
-│   │   ├── e3b0c442....json     ← store metadata (sibling file)
-│   │   ├── 7d865e95.../         ← different version/hash
-│   │   └── 7d865e95....json
+│   │   └── e3b0c442.../         ← source hash (v1.9.1)
+│   │       ├── configs.json     ← source-level metadata + config map
+│   │       ├── a1b2c3d4.../     ← config: installed package tree
+│   │       └── a1b2c3d4....json ← config sidecar (created_at)
+│   ├── sf/
+│   │   └── 7d865e95.../         ← source hash (v1.0.0)
+│   │       ├── configs.json
+│   │       ├── b5bb9d80.../     ← config A (Rcpp@key1)
+│   │       ├── b5bb9d80....json
+│   │       ├── c6cc0a91.../     ← config B (Rcpp@key2)
+│   │       └── c6cc0a91....json
 │   ├── ggplot2/
-│   │   ├── b5bb9d80.../
-│   │   └── b5bb9d80....json
+│   │   └── b5bb9d80.../
+│   │       ├── configs.json
+│   │       ├── e3b0c442.../     ← canonical empty config (no LinkingTo)
+│   │       └── e3b0c442....json
 │   └── ...
 ├── .builds/                      ← temporary build libraries
 │   └── {uuid}/
@@ -106,12 +120,14 @@ func (s *Store) SetPlatform(p string) { s.platform = p }
 └── .locks/                       ← concurrency locks
     └── 4.4-linux-x86_64/
         └── shiny/
-            └── e3b0c442.lock
+            └── e3b0c442.lock    ← one lock per source hash
 ```
 
-Each `{hash}/` directory contains the installed package tree directly
-(`DESCRIPTION`, `R/`, `Meta/`, etc. — no nested package name
-directory). The sibling `{hash}.json` file holds store metadata.
+Each `{config_hash}/` directory contains the installed package tree
+directly (`DESCRIPTION`, `R/`, `Meta/`, etc. — no nested package name
+directory). The sibling `{config_hash}.json` file holds per-config
+metadata. The `configs.json` file at the source-hash level records
+source-level properties and the config map.
 
 All helper directories (`.builds/`, `.workers/`, `.locks/`) live under
 the store root to guarantee same-filesystem placement for hard links
@@ -220,27 +236,37 @@ an error. See dep-mgmt.md § Unsupported ref types.
 ### Store operations
 
 ```go
-// Path returns the store path for a package entry.
-func (s *Store) Path(pkg, hash string) string {
-    return filepath.Join(s.root, s.platform, pkg, hash)
+// SourceDir returns the source-hash directory for a package.
+func (s *Store) SourceDir(pkg, sourceHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash)
 }
 
-// MetaPath returns the metadata file path for a store entry.
-func (s *Store) MetaPath(pkg, hash string) string {
-    return filepath.Join(s.root, s.platform, pkg, hash+".json")
+// Path returns the config directory (installed package tree) path.
+func (s *Store) Path(pkg, sourceHash, configHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash, configHash)
 }
 
-// Has reports whether the store contains a package with the given key.
-func (s *Store) Has(pkg, hash string) bool {
-    _, err := os.Stat(s.Path(pkg, hash))
+// ConfigsPath returns the path to configs.json for a source hash.
+func (s *Store) ConfigsPath(pkg, sourceHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash, "configs.json")
+}
+
+// ConfigMetaPath returns the config sidecar file path.
+func (s *Store) ConfigMetaPath(pkg, sourceHash, configHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash, configHash+".json")
+}
+
+// Has reports whether the store contains a specific config for a package.
+func (s *Store) Has(pkg, sourceHash, configHash string) bool {
+    _, err := os.Stat(s.Path(pkg, sourceHash, configHash))
     return err == nil
 }
 
-// Ingest atomically moves an installed package tree into the store.
-// No-op if the entry already exists. srcDir must be on the same
-// filesystem as the store (for atomic rename).
-func (s *Store) Ingest(pkg, hash, srcDir string) error {
-    dst := s.Path(pkg, hash)
+// Ingest atomically moves an installed package tree into the store
+// as a config entry. No-op if the config already exists. srcDir must
+// be on the same filesystem as the store (for atomic rename).
+func (s *Store) Ingest(pkg, sourceHash, configHash, srcDir string) error {
+    dst := s.Path(pkg, sourceHash, configHash)
     if dirExists(dst) {
         return nil // already in store
     }
@@ -250,10 +276,10 @@ func (s *Store) Ingest(pkg, hash, srcDir string) error {
     return os.Rename(srcDir, dst)
 }
 
-// Touch updates the mtime of a store entry's metadata file.
+// Touch updates the mtime of a config's sidecar file.
 // Used for last-accessed tracking (LRU eviction, future concern).
-func (s *Store) Touch(pkg, hash string) {
-    metaPath := s.MetaPath(pkg, hash)
+func (s *Store) Touch(pkg, sourceHash, configHash string) {
+    metaPath := s.ConfigMetaPath(pkg, sourceHash, configHash)
     now := time.Now()
     os.Chtimes(metaPath, now, now)
 }
@@ -261,93 +287,221 @@ func (s *Store) Touch(pkg, hash string) {
 
 ### Store metadata
 
-Each store entry has a sibling JSON file containing metadata for
-eviction and ABI safety checks. The `source_compiled` and `linkingto`
-fields record compile-time context so the populate step can detect
-stale entries (see dep-mgmt.md § The ABI Problem).
+The store uses two metadata files at different levels:
+
+**`configs.json`** — one per source hash. Records source-level
+properties (invariant across configs) and maps config hashes to
+their LinkingTo store key sets. Updated (under lock) when new
+configs are ingested.
+
+**`{config_hash}.json`** — one per config. Contains only `created_at`.
+Its filesystem `mtime` serves as last-accessed tracking (`touch`ed on
+every store hit).
 
 ```go
 // internal/pkgstore/meta.go
 
-type StoreMeta struct {
-    CreatedAt      time.Time         `json:"created_at"`
-    SourceCompiled bool              `json:"source_compiled"`
-    LinkingTo      map[string]string `json:"linkingto,omitempty"`
+// StoreConfigs represents the configs.json file at the source-hash level.
+type StoreConfigs struct {
+    SourceCompiled bool                         `json:"source_compiled"`
+    LinkingTo      []string                     `json:"linkingto"`
+    Configs        map[string]map[string]string `json:"configs"`
+    // Configs key: config hash
+    // Configs value: map of {linked_package: store_key}
+    //   (empty map for packages without LinkingTo deps)
 }
 
-func WriteStoreMeta(path string, meta StoreMeta) error {
-    data, err := json.MarshalIndent(meta, "", "  ")
+// ConfigMeta represents the per-config sidecar file.
+type ConfigMeta struct {
+    CreatedAt time.Time `json:"created_at"`
+}
+
+func WriteStoreConfigs(path string, sc StoreConfigs) error {
+    data, err := json.MarshalIndent(sc, "", "  ")
     if err != nil {
         return err
     }
     return os.WriteFile(path, data, 0o644)
 }
 
-func ReadStoreMeta(path string) (StoreMeta, error) {
+func ReadStoreConfigs(path string) (StoreConfigs, error) {
     data, err := os.ReadFile(path)
     if err != nil {
-        return StoreMeta{}, err
+        return StoreConfigs{}, err
     }
-    var meta StoreMeta
-    return meta, json.Unmarshal(data, &meta)
+    var sc StoreConfigs
+    return sc, json.Unmarshal(data, &sc)
+}
+
+func WriteConfigMeta(path string, meta ConfigMeta) error {
+    data, err := json.MarshalIndent(meta, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(path, data, 0o644)
 }
 ```
 
-| Field | Description |
-|---|---|
-| `created_at` | Timestamp written once at ingestion. |
-| `source_compiled` | `true` if the package was compiled from source (`NeedsCompilation: yes` in DESCRIPTION). Packages installed from binary archives have `false`. |
-| `linkingto` | Map of `{package: store_key}` for each `LinkingTo` dependency at the time this package was compiled. Empty/omitted for binary installs and packages without `LinkingTo`. Used by `LinkingToMatches` to detect ABI staleness. |
+| File | Field | Description |
+|---|---|---|
+| `configs.json` | `source_compiled` | `true` if the package was compiled from source (`NeedsCompilation: yes` in DESCRIPTION). Invariant across configs for the same source. |
+| `configs.json` | `linkingto` | Sorted list of `LinkingTo` package names from the source DESCRIPTION. Empty for packages without `LinkingTo`. |
+| `configs.json` | `configs` | Map of `{config_hash: {linked_pkg: store_key, ...}}`. Each entry is a distinct compilation. |
+| `{config_hash}.json` | `created_at` | Timestamp written once at ingestion. |
 
-**Last-accessed tracking** uses the metadata file's filesystem `mtime`
-rather than a JSON field — the server `touch`es the metadata file on
-every store hit. `touch` is a metadata-only syscall (`utimes()`),
-avoiding JSON rewrites on every access.
+**Last-accessed tracking** uses the config sidecar file's filesystem
+`mtime` — the server `touch`es it on every store hit. `touch` is a
+metadata-only syscall (`utimes()`), avoiding JSON rewrites on every
+access. Eviction operates at the config level.
 
-### WriteIngestMeta
+### ConfigHash
 
-Writes the store metadata file after ingesting a package. Reads the
-installed DESCRIPTION to determine `NeedsCompilation` and `LinkingTo`,
-then looks up store keys for linked packages in the lockfile. This
-metadata is used at populate time to detect ABI staleness (see
-`LinkingToMatches`).
+Computes the config hash from a map of LinkingTo package names to
+their store keys. The hash is deterministic: entries are sorted by
+package name, joined with `\x00`, and hashed with SHA-256. For
+packages without `LinkingTo` deps, the input is empty and the result
+is the canonical empty config hash.
+
+```go
+// internal/pkgstore/key.go
+
+// ConfigHash computes the config hash from a LinkingTo dependency map.
+// Entries are sorted by package name to ensure deterministic output.
+// An empty map produces the canonical empty config hash.
+func ConfigHash(linkingToKeys map[string]string) string {
+    if len(linkingToKeys) == 0 {
+        h := sha256.Sum256([]byte(""))
+        return hex.EncodeToString(h[:])
+    }
+
+    // Sort by package name for determinism.
+    pkgs := make([]string, 0, len(linkingToKeys))
+    for pkg := range linkingToKeys {
+        pkgs = append(pkgs, pkg)
+    }
+    sort.Strings(pkgs)
+
+    var parts []string
+    for _, pkg := range pkgs {
+        parts = append(parts, pkg+"\x00"+linkingToKeys[pkg])
+    }
+    input := strings.Join(parts, "\x00")
+    h := sha256.Sum256([]byte(input))
+    return hex.EncodeToString(h[:])
+}
+```
+
+### ResolveConfig
+
+At populate time, looks up `configs.json` for a source hash, computes
+the expected config hash from the current lockfile's store keys for
+the package's `LinkingTo` dependencies, and returns the matching config
+hash if it exists. This replaces the old `LinkingToMatches` approach.
 
 ```go
 // internal/pkgstore/meta.go
 
-// WriteIngestMeta writes the store metadata file for a newly ingested
-// package. It reads the installed DESCRIPTION to extract compile-time
-// context (NeedsCompilation, LinkingTo) and records the store keys
-// of linked packages for ABI safety checks at populate time.
-func (s *Store) WriteIngestMeta(entry LockfileEntry, lf *Lockfile) error {
-    hash, err := StoreKey(entry)
+// ResolveConfig reads configs.json for a package's source hash and
+// returns the config hash that matches the current lockfile's
+// LinkingTo store keys. Returns ("", false) if no matching config
+// exists (miss) or if configs.json doesn't exist (never seen).
+func (s *Store) ResolveConfig(
+    pkg, sourceHash string, lf *Lockfile,
+) (configHash string, ok bool) {
+    sc, err := ReadStoreConfigs(s.ConfigsPath(pkg, sourceHash))
     if err != nil {
-        return err
+        return "", false // no configs.json — never ingested
     }
 
-    meta := StoreMeta{CreatedAt: time.Now()}
+    // Compute expected config hash from current lockfile.
+    linkingToKeys := make(map[string]string)
+    for _, linkedPkg := range sc.LinkingTo {
+        key := lockfileStoreKey(lf, linkedPkg)
+        if key != "" {
+            linkingToKeys[linkedPkg] = key
+        }
+    }
+    expected := ConfigHash(linkingToKeys)
 
-    // Read the installed DESCRIPTION to check NeedsCompilation and LinkingTo.
-    descPath := filepath.Join(s.Path(entry.Package, hash), "DESCRIPTION")
+    if _, exists := sc.Configs[expected]; exists {
+        return expected, true
+    }
+    return "", false
+}
+```
+
+### WriteIngestMeta
+
+Writes or updates `configs.json` and writes the config sidecar after
+ingesting a package. Reads the installed DESCRIPTION to determine
+`NeedsCompilation` and `LinkingTo`, computes the config hash from the
+lockfile's store keys for the linked packages, and adds the config
+entry.
+
+```go
+// internal/pkgstore/meta.go
+
+// WriteIngestMeta writes the config sidecar and updates configs.json
+// for a newly ingested package config.
+func (s *Store) WriteIngestMeta(
+    entry LockfileEntry, lf *Lockfile,
+    sourceHash, configHash string, linkingToKeys map[string]string,
+    sourceCompiled bool, linkingToNames []string,
+) error {
+    // Write or update configs.json.
+    configsPath := s.ConfigsPath(entry.Package, sourceHash)
+    sc, err := ReadStoreConfigs(configsPath)
+    if err != nil {
+        // First config for this source hash — create configs.json.
+        sc = StoreConfigs{
+            SourceCompiled: sourceCompiled,
+            LinkingTo:      linkingToNames,
+            Configs:        make(map[string]map[string]string),
+        }
+    }
+    sc.Configs[configHash] = linkingToKeys
+    if err := WriteStoreConfigs(configsPath, sc); err != nil {
+        return fmt.Errorf("write configs.json: %w", err)
+    }
+
+    // Write config sidecar.
+    meta := ConfigMeta{CreatedAt: time.Now()}
+    metaPath := s.ConfigMetaPath(entry.Package, sourceHash, configHash)
+    return WriteConfigMeta(metaPath, meta)
+}
+
+// IngestContext extracts compile-time context from an installed
+// package's DESCRIPTION and computes the config hash from the
+// lockfile. Returns the config hash, LinkingTo store key map,
+// source_compiled flag, and sorted LinkingTo package names.
+func IngestContext(
+    descPath string, lf *Lockfile,
+) (configHash string, linkingToKeys map[string]string,
+    sourceCompiled bool, linkingToNames []string, err error) {
+
     desc, err := ParseDCF(descPath)
-    if err == nil {
-        meta.SourceCompiled = strings.EqualFold(desc["NeedsCompilation"], "yes")
+    if err != nil {
+        // No DESCRIPTION — use empty config (shouldn't happen for
+        // a successfully installed package, but safe fallback).
+        return ConfigHash(nil), nil, false, nil, nil
+    }
 
-        if lt := desc["LinkingTo"]; lt != "" {
-            pkgs := parsePkgList(lt)
-            if len(pkgs) > 0 {
-                meta.LinkingTo = make(map[string]string, len(pkgs))
-                for _, linkedPkg := range pkgs {
-                    linkedKey := lockfileStoreKey(lf, linkedPkg)
-                    if linkedKey != "" {
-                        meta.LinkingTo[linkedPkg] = linkedKey
-                    }
-                }
+    sourceCompiled = strings.EqualFold(desc["NeedsCompilation"], "yes")
+    linkingToKeys = make(map[string]string)
+
+    if lt := desc["LinkingTo"]; lt != "" {
+        linkingToNames = parsePkgList(lt)
+        sort.Strings(linkingToNames)
+        for _, linkedPkg := range linkingToNames {
+            key := lockfileStoreKey(lf, linkedPkg)
+            if key != "" {
+                linkingToKeys[linkedPkg] = key
             }
         }
     }
 
-    return WriteStoreMeta(s.MetaPath(entry.Package, hash), meta)
+    configHash = ConfigHash(linkingToKeys)
+    return configHash, linkingToKeys, sourceCompiled, linkingToNames, nil
 }
 
 // ParseDCF reads a Debian Control File (DESCRIPTION) into a map.
@@ -408,54 +562,6 @@ func lockfileStoreKey(lf *Lockfile, pkg string) string {
 }
 ```
 
-### LinkingToMatches
-
-Checks whether a store entry's `LinkingTo` metadata still matches the
-current lockfile. This catches the narrow edge case where a package was
-compiled from source with `LinkingTo` dependencies that have since
-changed version.
-
-In practice this almost never fires: PPM binaries don't have
-`source_compiled = true` (they're pre-built), and even source-compiled
-packages only trigger a mismatch when a `LinkingTo` dependency changes
-between two builds using the same repository snapshot. The main
-scenario is GitHub dev-installs where the linked package (e.g., Rcpp)
-is updated independently.
-
-```go
-// internal/pkgstore/meta.go
-
-// LinkingToMatches checks whether the store entry's LinkingTo metadata
-// still matches the current lockfile. Returns true (match) if:
-// - the store entry has no metadata file (legacy or error — assume ok)
-// - the entry was not compiled from source (binary install — no ABI concern)
-// - the entry has no LinkingTo deps
-// - all LinkingTo deps' store keys match the current lockfile
-func (s *Store) LinkingToMatches(pkg, hash string, lf *Lockfile) bool {
-    meta, err := ReadStoreMeta(s.MetaPath(pkg, hash))
-    if err != nil {
-        return true // no metadata — assume ok (legacy entry)
-    }
-    if !meta.SourceCompiled {
-        return true // binary install — no ABI concern
-    }
-    if len(meta.LinkingTo) == 0 {
-        return true // no LinkingTo deps
-    }
-
-    for linkedPkg, recordedKey := range meta.LinkingTo {
-        currentKey := lockfileStoreKey(lf, linkedPkg)
-        if currentKey == "" {
-            continue // base R package or removed dep — skip
-        }
-        if currentKey != recordedKey {
-            return false // ABI mismatch
-        }
-    }
-    return true
-}
-```
-
 ---
 
 ## Step 2: Platform detection
@@ -510,8 +616,8 @@ release and then use the store entry.
 ### Lock protocol
 
 1. Before ingesting a package, the build acquires a lock at
-   `{root}/.locks/{platform}/{package}/{hash}.lock`. The lock is a
-   directory (created atomically via `mkdir`).
+   `{root}/.locks/{platform}/{package}/{source_hash}.lock`. The lock
+   is a directory (created atomically via `mkdir`).
 2. If the lock directory already exists, the build waits with
    exponential backoff (0.5–2s, jittered) until the directory is
    removed and the store entry appears.
@@ -533,12 +639,12 @@ same code runs on the server for any host-side store operations.
 ```go
 // internal/pkgstore/lock.go
 
-func (s *Store) LockPath(pkg, hash string) string {
-    return filepath.Join(s.root, ".locks", s.platform, pkg, hash+".lock")
+func (s *Store) LockPath(pkg, sourceHash string) string {
+    return filepath.Join(s.root, ".locks", s.platform, pkg, sourceHash+".lock")
 }
 
-func (s *Store) Acquire(pkg, hash string, staleThreshold time.Duration) error {
-    lockDir := s.LockPath(pkg, hash)
+func (s *Store) Acquire(pkg, sourceHash string, staleThreshold time.Duration) error {
+    lockDir := s.LockPath(pkg, sourceHash)
     os.MkdirAll(filepath.Dir(lockDir), 0o755)
 
     for {
@@ -556,8 +662,8 @@ func (s *Store) Acquire(pkg, hash string, staleThreshold time.Duration) error {
     }
 }
 
-func (s *Store) Release(pkg, hash string) {
-    os.RemoveAll(s.LockPath(pkg, hash))
+func (s *Store) Release(pkg, sourceHash string) {
+    os.RemoveAll(s.LockPath(pkg, sourceHash))
 }
 ```
 
@@ -586,9 +692,11 @@ func main() {
 
 ### `store populate` subcommand
 
-Reads the pak lockfile, checks the store for each entry, and
-hard-links hits into the build library. Packages already present in
-the build library (or in an optional reference library) are skipped.
+Reads the pak lockfile, checks the store for each entry by computing
+the source hash and resolving the matching config hash via
+`configs.json`, then hard-links hits into the build library. Packages
+already present in the build library (or in an optional reference
+library) are skipped.
 
 ```go
 // cmd/by-builder/populate.go
@@ -616,46 +724,44 @@ func populateCmd() *cobra.Command {
 
             var hits, misses int
             for _, entry := range lf.Packages {
-                key, err := pkgstore.StoreKey(entry)
+                sourceHash, err := pkgstore.StoreKey(entry)
                 if err != nil {
                     return err
                 }
 
-                // Skip packages whose store key matches the reference
+                // Skip packages whose source hash matches the reference
                 // library — same version already installed in the worker.
-                if refManifest != nil && refManifest[entry.Package] == key {
+                if refManifest != nil && refManifest[entry.Package] == sourceHash {
                     continue
                 }
                 // Skip packages already in the build/staging library.
                 if dirExists(filepath.Join(lib, entry.Package)) {
                     continue
                 }
-                if !s.Has(entry.Package, key) {
+
+                // Resolve matching config via configs.json.
+                // ResolveConfig reads the LinkingTo package names from
+                // configs.json, looks up their store keys in the current
+                // lockfile, computes the expected config hash, and checks
+                // if it exists.
+                configHash, ok := s.ResolveConfig(entry.Package, sourceHash, lf)
+                if !ok {
                     misses++
                     continue
                 }
 
-                // ABI safety check: if the store entry's LinkingTo
-                // metadata doesn't match the current lockfile, skip it.
-                // The stale entry is left in place (append-only store —
-                // may be in use by running workers). pak will recompile
-                // in phase 3 and a fresh entry gets ingested in phase 4.
-                if !s.LinkingToMatches(entry.Package, key, lf) {
-                    misses++
-                    continue
-                }
-
-                // Hard-link store entry into build library.
+                // Hard-link config's package tree into build library.
                 // cp -al creates a recursive hard-link copy — every file
                 // in the source tree gets a hard link in the destination.
                 dest := filepath.Join(lib, entry.Package)
                 out, cpErr := exec.Command(
-                    "cp", "-al", s.Path(entry.Package, key), dest,
+                    "cp", "-al",
+                    s.Path(entry.Package, sourceHash, configHash), dest,
                 ).CombinedOutput()
                 if cpErr != nil {
                     return fmt.Errorf("link %s: %s: %w", entry.Package, out, cpErr)
                 }
-                s.Touch(entry.Package, key)
+                s.Touch(entry.Package, sourceHash, configHash)
                 hits++
             }
 
@@ -674,8 +780,10 @@ func populateCmd() *cobra.Command {
 ### `store ingest` subcommand
 
 Ingests newly installed packages from the build library into the store.
-Packages already in the store are skipped. Locking ensures concurrent
-builds don't conflict.
+For each package, reads the installed DESCRIPTION to determine the
+config hash, then ingests under lock. Packages already in the store
+with a matching config are skipped. Locking ensures concurrent builds
+don't conflict.
 
 ```go
 // cmd/by-builder/ingest.go
@@ -693,28 +801,24 @@ func ingestCmd() *cobra.Command {
             s.SetPlatform(pkgstore.PlatformFromLockfile(lf))
 
             // Load the reference library's package manifest to compare
-            // store keys. Only skip ingestion when the reference lib has
-            // the SAME store key — a version change means the new version
-            // was installed in the staging dir and must be ingested.
+            // source hashes. Only skip ingestion when the reference lib
+            // has the SAME source hash — a version change means the new
+            // version was installed in the staging dir and must be ingested.
             var refManifest map[string]string
             if refLib != "" {
                 refManifest, _ = pkgstore.ReadPackageManifest(refLib)
             }
 
             for _, entry := range lf.Packages {
-                key, err := pkgstore.StoreKey(entry)
+                sourceHash, err := pkgstore.StoreKey(entry)
                 if err != nil {
                     return err
                 }
 
-                // Skip packages whose store key matches the reference
+                // Skip packages whose source hash matches the reference
                 // library — already in the store from a prior build.
-                if refManifest != nil && refManifest[entry.Package] == key {
+                if refManifest != nil && refManifest[entry.Package] == sourceHash {
                     continue
-                }
-
-                if s.Has(entry.Package, key) {
-                    continue // already in store
                 }
 
                 pkgPath := filepath.Join(lib, entry.Package)
@@ -722,15 +826,31 @@ func ingestCmd() *cobra.Command {
                     continue // not installed (shouldn't happen)
                 }
 
-                // Ingest under lock.
-                s.Acquire(entry.Package, key, 30*time.Minute)
-                if !s.Has(entry.Package, key) { // re-check after lock
-                    s.Ingest(entry.Package, key, pkgPath)
-                    s.WriteIngestMeta(entry, lf)
+                // Compute config hash from installed DESCRIPTION.
+                descPath := filepath.Join(pkgPath, "DESCRIPTION")
+                configHash, linkingToKeys, sourceCompiled, linkingToNames, err :=
+                    pkgstore.IngestContext(descPath, lf)
+                if err != nil {
+                    return fmt.Errorf("ingest context for %s: %w",
+                        entry.Package, err)
                 }
-                s.Release(entry.Package, key)
 
-                fmt.Fprintf(os.Stderr, "store: ingested %s\n", entry.Package)
+                if s.Has(entry.Package, sourceHash, configHash) {
+                    continue // this exact config already in store
+                }
+
+                // Ingest under lock (one lock per source hash).
+                s.Acquire(entry.Package, sourceHash, 30*time.Minute)
+                if !s.Has(entry.Package, sourceHash, configHash) {
+                    s.Ingest(entry.Package, sourceHash, configHash, pkgPath)
+                    s.WriteIngestMeta(entry, lf,
+                        sourceHash, configHash, linkingToKeys,
+                        sourceCompiled, linkingToNames)
+                }
+                s.Release(entry.Package, sourceHash)
+
+                fmt.Fprintf(os.Stderr, "store: ingested %s (config %s)\n",
+                    entry.Package, configHash[:12])
             }
             return nil
         },
@@ -848,8 +968,9 @@ pak::lockfile_create(refs,
   lockfile = file.path(build_lib, "pak.lock"), lib = build_lib)
 
 # ── Phase 2: Check store, pre-populate build library ─────────────
-# by-builder reads the lockfile, computes store keys, checks the
-# store, and hard-links hits into the build library.
+# by-builder reads the lockfile, computes source hashes, reads
+# configs.json for each package, resolves the matching config hash,
+# and hard-links config hits into the build library.
 system2("/tools/by-builder", c(
   "store", "populate",
   "--lockfile", file.path(build_lib, "pak.lock"),
@@ -865,8 +986,9 @@ system2("/tools/by-builder", c(
 pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 
 # ── Phase 4: Ingest newly installed packages into store ──────────
-# by-builder ingests new packages from the build library into the
-# store, with locking and metadata.
+# by-builder reads installed DESCRIPTIONs, computes config hashes,
+# creates config directories, updates configs.json, and writes
+# config sidecar files — all under lock.
 system2("/tools/by-builder", c(
   "store", "ingest",
   "--lockfile", file.path(build_lib, "pak.lock"),
@@ -1128,24 +1250,32 @@ container at `/lib`. R runs with `.libPaths("/lib")`.
 
 // AssembleLibrary creates a library directory by hard-linking packages
 // from the store based on pak lockfile entries. Each lockfile entry maps
-// to a store path via the curated hash. After linking, it writes a
-// .packages.json manifest mapping each installed package to its store key.
+// to a source hash, then configs.json is consulted to find the matching
+// config hash. After linking, it writes a .packages.json manifest
+// mapping each installed package to its source hash (store key).
 func (s *Store) AssembleLibrary(
-    libDir string, entries []LockfileEntry,
+    libDir string, lf *Lockfile,
 ) (missing []string, err error) {
     if err := os.MkdirAll(libDir, 0o755); err != nil {
         return nil, fmt.Errorf("create lib dir: %w", err)
     }
 
-    manifest := make(map[string]string) // package → store_key
+    manifest := make(map[string]string) // package → source_hash
 
-    for _, entry := range entries {
-        key, err := StoreKey(entry)
+    for _, entry := range lf.Packages {
+        sourceHash, err := StoreKey(entry)
         if err != nil {
             return nil, fmt.Errorf("store key for %s: %w", entry.Package, err)
         }
 
-        storePath := s.Path(entry.Package, key)
+        // Resolve matching config from configs.json.
+        configHash, ok := s.ResolveConfig(entry.Package, sourceHash, lf)
+        if !ok {
+            missing = append(missing, entry.Package)
+            continue
+        }
+
+        storePath := s.Path(entry.Package, sourceHash, configHash)
         if !dirExists(storePath) {
             missing = append(missing, entry.Package)
             continue
@@ -1161,9 +1291,9 @@ func (s *Store) AssembleLibrary(
                 "hard-link %s: %s: %w", entry.Package, out, cpErr)
         }
 
-        // Touch metadata to update last-accessed time.
-        s.Touch(entry.Package, key)
-        manifest[entry.Package] = key
+        // Touch config sidecar to update last-accessed time.
+        s.Touch(entry.Package, sourceHash, configHash)
+        manifest[entry.Package] = sourceHash
     }
 
     // Write per-worker package manifest.
@@ -1342,7 +1472,7 @@ if srv.PkgStore != nil {
     }
 
     // Assemble library from store.
-    missing, err := srv.PkgStore.AssembleLibrary(libDir, lf.Packages)
+    missing, err := srv.PkgStore.AssembleLibrary(libDir, lf)
     if err != nil {
         return "", "", fmt.Errorf("assemble library: %w", err)
     }
@@ -1450,13 +1580,42 @@ file written after the first successful build.
 - `TestStoreIngest` — creates entry at correct path; source directory
   no longer exists (rename).
 - `TestStoreIngestIdempotent` — second Ingest is a no-op.
-- `TestStorePath` — format: `{root}/{platform}/{package}/{hash}`.
-- `TestStoreMetaPath` — format: `{root}/{platform}/{package}/{hash}.json`.
-- `TestStoreTouch` — mtime of metadata file updated.
+- `TestStorePath` — format:
+  `{root}/{platform}/{package}/{source_hash}/{config_hash}`.
+- `TestStoreConfigsPath` — format:
+  `{root}/{platform}/{package}/{source_hash}/configs.json`.
+- `TestStoreConfigMetaPath` — format:
+  `{root}/{platform}/{package}/{source_hash}/{config_hash}.json`.
+- `TestStoreTouch` — mtime of config sidecar updated.
+
+**Config hash:**
+- `TestConfigHash_Empty` — empty map produces canonical empty hash.
+- `TestConfigHash_SingleDep` — deterministic for single LinkingTo dep.
+- `TestConfigHash_MultipleDeps` — sorted by package name, deterministic.
+- `TestConfigHash_OrderIndependent` — same deps in different order
+  produce same hash.
 
 **Store metadata:**
-- `TestWriteReadStoreMeta` — round-trip.
-- `TestStoreMetaWithLinkingTo` — linkingto map preserved.
+- `TestWriteReadStoreConfigs` — round-trip for configs.json.
+- `TestStoreConfigsWithMultipleConfigs` — multiple config entries
+  preserved.
+- `TestWriteReadConfigMeta` — round-trip for config sidecar.
+
+**Config resolution:**
+- `TestResolveConfig_NoConfigsFile` — returns false when no
+  configs.json exists.
+- `TestResolveConfig_MatchingConfig` — returns correct config hash
+  when LinkingTo store keys match.
+- `TestResolveConfig_NoMatchingConfig` — returns false when LinkingTo
+  store keys differ from all existing configs.
+- `TestResolveConfig_EmptyLinkingTo` — matches canonical empty config
+  hash.
+
+**Ingest context:**
+- `TestIngestContext_NoLinkingTo` — returns empty config hash,
+  source_compiled from DESCRIPTION.
+- `TestIngestContext_WithLinkingTo` — returns correct config hash,
+  sorted linkingto names, store key map.
 
 **Lockfile parsing:**
 - `TestReadLockfile` — valid pak lockfile JSON.
@@ -1478,9 +1637,15 @@ file written after the first successful build.
   build lib, skips misses.
 - `TestPopulateWithReferenceLib` — packages in reference lib skipped.
 - `TestPopulateABIMismatch` — source-compiled package with changed
-  LinkingTo treated as miss.
-- `TestIngestCommand` — ingests new packages under lock, writes metadata.
-- `TestIngestIdempotent` — second ingest is a no-op (lock + re-check).
+  LinkingTo config not found → treated as miss.
+- `TestPopulateMultiConfig` — package with multiple configs, correct
+  one selected based on current lockfile.
+- `TestIngestCommand` — ingests new packages under lock, writes
+  configs.json and config sidecar.
+- `TestIngestIdempotent` — second ingest of same config is a no-op
+  (lock + re-check).
+- `TestIngestNewConfig` — second ingest of same source hash with
+  different LinkingTo store keys adds new config entry.
 - `TestIngestConcurrent` — two ingest processes for the same package,
   only one writes.
 
@@ -1502,9 +1667,10 @@ file written after the first successful build.
   packages.
 - **Worker eviction cleanup:** spawn worker → evict → verify worker
   lib directory removed.
-- **ABI safety:** ingest source-compiled package with LinkingTo
-  metadata → change linked dependency version → verify store hit
-  is skipped (treated as miss).
+- **ABI safety (multi-config):** ingest source-compiled package with
+  LinkingTo deps → change linked dependency version → verify original
+  config is not matched → pak recompiles → verify new config added
+  to configs.json → verify both configs coexist in the store.
 
 ### E2E tests
 

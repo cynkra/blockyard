@@ -632,14 +632,23 @@ func (srv *Server) linkNewPackages(
             continue // already in /lib — skip
         }
 
-        // Try store first.
-        key, err := pkgstore.StoreKey(entry)
+        // Try store first (resolve source hash + config hash).
+        sourceHash, err := pkgstore.StoreKey(entry)
         if err != nil {
             return fmt.Errorf("store key for %s: %w", entry.Package, err)
         }
-        storePath := srv.PkgStore.Path(entry.Package, key)
-        srcPath := storePath
-        if !dirExists(storePath) {
+
+        var srcPath string
+        configHash, ok := srv.PkgStore.ResolveConfig(
+            entry.Package, sourceHash, lf)
+        if ok {
+            storePath := srv.PkgStore.Path(
+                entry.Package, sourceHash, configHash)
+            if dirExists(storePath) {
+                srcPath = storePath
+            }
+        }
+        if srcPath == "" {
             // Fallback to staging (package was just installed).
             srcPath = filepath.Join(stagingDir, entry.Package)
         }
@@ -654,8 +663,10 @@ func (srv *Server) linkNewPackages(
             return fmt.Errorf("link %s: %s: %w", entry.Package, out, err)
         }
 
-        srv.PkgStore.Touch(entry.Package, key)
-        newEntries[entry.Package] = key
+        if ok {
+            srv.PkgStore.Touch(entry.Package, sourceHash, configHash)
+        }
+        newEntries[entry.Package] = sourceHash
     }
 
     // Update the worker's .packages.json with newly linked packages.
@@ -778,7 +789,7 @@ func (srv *Server) completeTransfer(
 
     newWorkerID := uuid.New().String()
     newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
-    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, lf.Packages)
+    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, lf)
     if err != nil {
         slog.Error("transfer: assemble library", "error", err)
         return
@@ -1098,7 +1109,7 @@ func (srv *Server) drainAndReplace(
     // 1. Spawn a new worker with the updated library.
     newWorkerID := uuid.New().String()
     newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
-    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, lf.Packages)
+    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, lf)
     if err != nil {
         sender.Write("error assembling library: " + err.Error())
         return
