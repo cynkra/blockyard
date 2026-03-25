@@ -2,7 +2,6 @@ package bundle
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,30 +9,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/buildercache"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/pakcache"
+	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // RestoreParams holds everything the restore goroutine needs.
 type RestoreParams struct {
-	Backend      backend.Backend
-	DB           *db.DB
-	Tasks        *task.Store
-	Sender       task.Sender
-	AppID        string
-	BundleID     string
-	Paths        Paths
-	Image        string
-	PakVersion   string // "stable" (default), or pinned version
-	PakCachePath string // base directory for pak cache
-	Retention    int
-	BasePath     string // bundle_server_path for retention cleanup
-	AuditLog     *audit.Log
-	AuditActor   string // sub of the user who triggered the upload
+	Backend          backend.Backend
+	DB               *db.DB
+	Tasks            *task.Store
+	Sender           task.Sender
+	AppID            string
+	BundleID         string
+	Paths            Paths
+	Image            string
+	PakVersion       string // "stable" (default), or pinned version
+	PakCachePath     string // base directory for pak cache
+	BuilderVersion   string // by-builder binary version
+	BuilderCachePath string // by-builder cache directory
+	Retention        int
+	BasePath         string // bundle_server_path for retention cleanup
+	Store            *pkgstore.Store
+	AuditLog         *audit.Log
+	AuditActor       string // sub of the user who triggered the upload
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
@@ -121,7 +127,7 @@ func runRestore(p RestoreParams) error {
 		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "building")
 	p.Sender.Write("restoring dependencies...")
 
-	// 2. Ensure pak is cached.
+	// 2. Ensure pak and by-builder are cached.
 	pakCachePath := p.PakCachePath
 	if pakCachePath == "" {
 		pakCachePath = filepath.Join(p.BasePath, ".pak-cache")
@@ -132,6 +138,19 @@ func runRestore(p RestoreParams) error {
 	if err != nil {
 		return fmt.Errorf("ensure pak: %w", err)
 	}
+	// Only cache by-builder when the package store is available.
+	var builderPath string
+	if p.Store != nil {
+		builderCachePath := p.BuilderCachePath
+		if builderCachePath == "" {
+			builderCachePath = filepath.Join(p.BasePath, ".by-builder-cache")
+		}
+		builderPath, err = buildercache.EnsureCached(
+			builderCachePath, p.BuilderVersion)
+		if err != nil {
+			return fmt.Errorf("ensure by-builder: %w", err)
+		}
+	}
 
 	// 3. Resolve manifest from bundle contents.
 	m, err := resolveManifest(p.Paths.Unpacked)
@@ -139,64 +158,109 @@ func runRestore(p RestoreParams) error {
 		return fmt.Errorf("resolve manifest: %w", err)
 	}
 
-	// 4. Bare scripts: pre-process to generate DESCRIPTION, then retry.
-	if m == nil {
-		p.Sender.Write("scanning scripts for dependencies...")
-		if err := preProcess(context.Background(), p.Backend, pakPath, p); err != nil {
-			return fmt.Errorf("preprocess: %w", err)
+	// 4. Handle manifest / bare scripts.
+	if p.Store != nil {
+		// Store-aware: bare scripts handled directly by R build script
+		// (scan_deps). Manifest written if generated server-side.
+		if m != nil {
+			manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
+			if !fileExists(manifestPath) {
+				if err := m.Write(manifestPath); err != nil {
+					return fmt.Errorf("write manifest: %w", err)
+				}
+			}
+			p.Sender.Write(fmt.Sprintf("build mode: %s", m.BuildMode()))
+		} else {
+			p.Sender.Write("build mode: bare scripts (scan_deps)")
 		}
-		m, err = resolveManifest(p.Paths.Unpacked)
-		if err != nil {
-			return fmt.Errorf("resolve manifest after preprocess: %w", err)
-		}
+	} else {
+		// Legacy: bare scripts need preProcess container, manifest
+		// needs .pak-refs/.pak-repos text files.
 		if m == nil {
-			return errors.New("failed to produce manifest after preprocessing")
+			p.Sender.Write("scanning scripts for dependencies...")
+			if err := preProcess(context.Background(), p.Backend, pakPath, p); err != nil {
+				return fmt.Errorf("preprocess: %w", err)
+			}
+			m, err = resolveManifest(p.Paths.Unpacked)
+			if err != nil {
+				return fmt.Errorf("resolve manifest after preprocess: %w", err)
+			}
+			if m == nil {
+				return fmt.Errorf("failed to produce manifest after preprocessing")
+			}
+		}
+		manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
+		if !fileExists(manifestPath) {
+			if err := m.Write(manifestPath); err != nil {
+				return fmt.Errorf("write manifest: %w", err)
+			}
+		}
+		p.Sender.Write(fmt.Sprintf("build mode: %s", m.BuildMode()))
+
+		// Write pak refs and repos for the legacy R build script.
+		refsData := strings.Join(m.PakRefs(), "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-refs"), []byte(refsData), 0o644); err != nil {
+			return fmt.Errorf("write pak refs: %w", err)
+		}
+		if lines := m.RepoLines(); len(lines) > 0 {
+			repoData := strings.Join(lines, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-repos"), []byte(repoData), 0o644); err != nil {
+				return fmt.Errorf("write pak repos: %w", err)
+			}
 		}
 	}
 
-	// 5. Write manifest.json to unpacked dir (if generated server-side).
-	manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
-	if !fileExists(manifestPath) {
-		if err := m.Write(manifestPath); err != nil {
-			return fmt.Errorf("write manifest: %w", err)
-		}
-	}
-
-	mode := m.BuildMode()
-	p.Sender.Write(fmt.Sprintf("build mode: %s", mode))
-
-	// 6. Write pak refs and repos for the R build script (avoids jsonlite dep).
-	refsData := strings.Join(m.PakRefs(), "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-refs"), []byte(refsData), 0o644); err != nil {
-		return fmt.Errorf("write pak refs: %w", err)
-	}
-	if lines := m.RepoLines(); len(lines) > 0 {
-		repoData := strings.Join(lines, "\n") + "\n"
-		if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-repos"), []byte(repoData), 0o644); err != nil {
-			return fmt.Errorf("write pak repos: %w", err)
-		}
-	}
-
-	// 7. Ensure download cache dir exists.
+	// 5. Ensure download cache dir exists.
 	dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
 	if err := os.MkdirAll(dlCachePath, 0o755); err != nil {
 		return fmt.Errorf("create download cache dir: %w", err)
 	}
 
+	// 6. Ensure store dir exists and prepare build.
+	if p.Store != nil {
+		if err := os.MkdirAll(p.Store.Root(), 0o755); err != nil {
+			return fmt.Errorf("create store dir: %w", err)
+		}
+	}
+
+	// 7. Generate build UUID for the build library path.
+	buildUUID := uuid.New().String()
+
 	// 8. Run build container.
-	spec := backend.BuildSpec{
-		AppID:    p.AppID,
-		BundleID: p.BundleID,
-		Image:    p.Image,
-		Cmd:      buildCommand(),
-		Mounts:   buildMounts(pakPath, p.Paths.Unpacked, p.Paths.Library, dlCachePath),
-		Labels: map[string]string{
-			"dev.blockyard/managed":   "true",
-			"dev.blockyard/role":      "build",
-			"dev.blockyard/app-id":    p.AppID,
-			"dev.blockyard/bundle-id": p.BundleID,
-		},
-		LogWriter: func(line string) { p.Sender.Write(line) },
+	var spec backend.BuildSpec
+	if p.Store != nil {
+		// Store-aware build: four-phase pipeline with by-builder.
+		spec = backend.BuildSpec{
+			AppID:    p.AppID,
+			BundleID: p.BundleID,
+			Image:    p.Image,
+			Cmd:      buildCommand(),
+			Mounts:   buildMounts(pakPath, p.Paths.Unpacked, p.Store.Root(), dlCachePath, builderPath),
+			Env:      []string{"BUILD_UUID=" + buildUUID},
+			Labels: map[string]string{
+				"dev.blockyard/managed":   "true",
+				"dev.blockyard/role":      "build",
+				"dev.blockyard/app-id":    p.AppID,
+				"dev.blockyard/bundle-id": p.BundleID,
+			},
+			LogWriter: func(line string) { p.Sender.Write(line) },
+		}
+	} else {
+		// Legacy build (no store): phase 2-5 flow.
+		spec = backend.BuildSpec{
+			AppID:    p.AppID,
+			BundleID: p.BundleID,
+			Image:    p.Image,
+			Cmd:      legacyBuildCommand(),
+			Mounts:   legacyBuildMounts(pakPath, p.Paths.Unpacked, p.Paths.Library, dlCachePath),
+			Labels: map[string]string{
+				"dev.blockyard/managed":   "true",
+				"dev.blockyard/role":      "build",
+				"dev.blockyard/app-id":    p.AppID,
+				"dev.blockyard/bundle-id": p.BundleID,
+			},
+			LogWriter: func(line string) { p.Sender.Write(line) },
+		}
 	}
 
 	result, err := p.Backend.Build(context.Background(), spec)
@@ -210,21 +274,56 @@ func runRestore(p RestoreParams) error {
 		return fmt.Errorf("dependency restore failed (exit %d)", result.ExitCode)
 	}
 
-	// 9. Persist pak lockfile alongside bundle.
-	lockfileSrc := filepath.Join(p.Paths.Library, "pak.lock")
-	lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
-	if err := copyFile(lockfileSrc, lockfileDst); err != nil {
-		slog.Warn("failed to persist pak lockfile",
-			"error", err, "bundle_id", p.BundleID)
-		// Non-fatal — the build succeeded, lockfile is a downstream
-		// optimization for store assembly (phase 2-6) and refresh (2-7).
+	// 9. Post-build artifact extraction.
+	if p.Store != nil {
+		buildDir := filepath.Join(p.Store.Root(), ".builds", buildUUID)
+		defer os.RemoveAll(buildDir)
+
+		// store-manifest.json is required — it drives assembly and rollback.
+		manifestSrc := filepath.Join(buildDir, "store-manifest.json")
+		manifestDst := filepath.Join(p.Paths.Base, "store-manifest.json")
+		if err := copyFile(manifestSrc, manifestDst); err != nil {
+			return fmt.Errorf("persist store-manifest: %w", err)
+		}
+
+		// Persist immutable baseline from the original deploy.
+		buildManifest := filepath.Join(p.Paths.Base, "store-manifest.json.build")
+		if err := copyFile(manifestSrc, buildManifest); err != nil {
+			return fmt.Errorf("persist build store-manifest: %w", err)
+		}
+
+		// pak.lock — debug/audit artifact; extraction failure is non-fatal.
+		lockfileSrc := filepath.Join(buildDir, "pak.lock")
+		lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
+		if err := copyFile(lockfileSrc, lockfileDst); err != nil {
+			slog.Warn("failed to persist pak lockfile (debug artifact)",
+				"error", err, "bundle_id", p.BundleID)
+		}
+
+		// Set store platform from lockfile (first build bootstraps this).
+		if p.Store.Platform() == "" {
+			lf, err := pkgstore.ReadLockfile(lockfileDst)
+			if err == nil {
+				p.Store.SetPlatform(pkgstore.PlatformFromLockfile(lf))
+			}
+		}
+	} else {
+		// Legacy: persist pak lockfile alongside bundle.
+		lockfileSrc := filepath.Join(p.Paths.Library, "pak.lock")
+		lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
+		if err := copyFile(lockfileSrc, lockfileDst); err != nil {
+			slog.Warn("failed to persist pak lockfile",
+				"error", err, "bundle_id", p.BundleID)
+		}
 	}
 
 	// 10. Persist manifest alongside bundle.
-	manifestDst := filepath.Join(p.Paths.Base, "manifest.json")
-	if err := m.Write(manifestDst); err != nil {
-		slog.Warn("failed to persist manifest",
-			"error", err, "bundle_id", p.BundleID)
+	if m != nil {
+		canonicalManifest := filepath.Join(p.Paths.Base, "manifest.json")
+		if err := m.Write(canonicalManifest); err != nil {
+			slog.Warn("failed to persist manifest",
+				"error", err, "bundle_id", p.BundleID)
+		}
 	}
 
 	// 11. Activate bundle.
@@ -243,55 +342,186 @@ func runRestore(p RestoreParams) error {
 }
 
 // buildCommand returns the R command that runs inside the build container.
-// The refs and repos are pre-computed by Go and written to .pak-refs and
-// .pak-repos text files in the bundle dir, so the R script only needs
-// base R + pak (no jsonlite dependency).
+// The four-phase store-aware build script:
+//   - Phase 1: lockfile_create (pak resolves + solves)
+//   - Phase 2: by-builder store populate (pre-populate from store)
+//   - Phase 3: lockfile_install (install store misses)
+//   - Phase 4: by-builder store ingest (ingest into store)
 func buildCommand() []string {
 	rScript := `
-		Sys.setenv(
-		  R_USER_CACHE_DIR = "/pak-cache",
-		  PKG_CACHE_DIR = "/pak-cache",
-		  PKG_SYSREQS = "false"
-		)
-		.libPaths(c("/pak", .libPaths()))
-		library(pak)
+Sys.setenv(
+  R_USER_CACHE_DIR = "/pak-cache",
+  PKG_CACHE_DIR = "/pak-cache",
+  PKG_SYSREQS = "false"
+)
+.libPaths(c("/pak", .libPaths()))
+library(pak)
+# Make pak's bundled dependencies (jsonlite, pkgdepends) available.
+pak_lib <- system.file("library", package = "pak")
+if (nzchar(pak_lib) && dir.exists(pak_lib)) {
+  .libPaths(c(pak_lib, .libPaths()))
+}
 
-		# Configure repos from pre-computed text file (Name=URL per line).
-		repos_file <- "/app/.pak-repos"
-		if (file.exists(repos_file)) {
-		  lines <- readLines(repos_file, warn = FALSE)
-		  lines <- lines[nzchar(lines)]
-		  if (length(lines) > 0) {
-		    nms  <- sub("=.*", "", lines)
-		    urls <- sub("^[^=]+=", "", lines)
-		    # Rewrite P3M URLs for binary linux packages.
-		    for (i in seq_along(urls)) {
-		      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", urls[i]) &&
-		          !grepl("__linux__", urls[i])) {
-		        os_rel <- readLines("/etc/os-release")
-		        cn <- sub("^VERSION_CODENAME=", "",
-		                  grep("^VERSION_CODENAME=", os_rel, value = TRUE))
-		        urls[i] <- sub("(/cran/|/bioc/)",
-		                       paste0("\\1__linux__/", cn, "/"), urls[i])
-		      }
-		    }
-		    options(repos = setNames(urls, nms))
-		  }
-		}
+# -- Read manifest (if present) and configure -------------------------
+manifest <- NULL
+if (file.exists("/app/manifest.json")) {
+  manifest <- jsonlite::fromJSON("/app/manifest.json",
+                                 simplifyVector = FALSE)
+}
 
-		# Read refs from pre-computed text file (one ref per line).
-		refs <- readLines("/app/.pak-refs", warn = FALSE)
-		refs <- refs[nzchar(refs)]
+if (!is.null(manifest) && length(manifest$repositories) > 0) {
+  repo_urls <- setNames(
+    vapply(manifest$repositories, function(r) {
+      url <- r$URL
+      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", url) &&
+          !grepl("__linux__", url)) {
+        os_rel <- readLines("/etc/os-release")
+        cn <- sub("^VERSION_CODENAME=", "",
+                  grep("^VERSION_CODENAME=", os_rel, value = TRUE))
+        url <- sub("(/cran/|/bioc/)",
+                   paste0("\\1__linux__/", cn, "/"), url)
+      }
+      url
+    }, ""),
+    vapply(manifest$repositories, function(r) r$Name, "")
+  )
+  options(repos = repo_urls)
+}
 
-		pak::lockfile_create(refs,
-		  lockfile = "/build-lib/pak.lock", lib = "/build-lib")
-		pak::lockfile_install("/build-lib/pak.lock", lib = "/build-lib")
-	`
+# -- Derive refs -------------------------------------------------------
+record_to_ref <- function(rec) {
+  switch(rec$Source,
+    Repository =, Bioconductor = {
+      prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
+      paste0(prefix, rec$Package, "@", rec$Version)
+    },
+    GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
+                      "@", rec$RemoteSha),
+    GitLab =    paste0("gitlab::", rec$RemoteUsername, "/",
+                      rec$RemoteRepo, "@", rec$RemoteSha),
+    Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/",
+                      rec$RemoteRepo, "@", rec$RemoteSha),
+    git    =    paste0("git::", rec$RemoteUrl),
+    stop("Unsupported Source: ", rec$Source)
+  )
+}
+
+if (!is.null(manifest) && !is.null(manifest$packages)) {
+  # Pinned: convert each package record to a pkgdepends ref.
+  refs <- vapply(manifest$packages, record_to_ref, "")
+} else if (!is.null(manifest) && !is.null(manifest$description)) {
+  # Unpinned with DESCRIPTION: pak reads Imports/Depends/Remotes.
+  refs <- "deps::/app"
+} else if (file.exists("/app/DESCRIPTION")) {
+  # DESCRIPTION without manifest (legacy or direct upload).
+  refs <- "deps::/app"
+} else {
+  # Bare scripts: scan for library()/require()/:: calls directly.
+  message("No manifest or DESCRIPTION found -- scanning scripts")
+  deps <- pkgdepends::scan_deps(path = "/app", root = "/app")
+  refs <- unique(deps$package[deps$type == "prod"])
+  if (length(refs) == 0) stop("No package dependencies found in scripts")
+}
+
+# Build library lives on the store volume so ingestion is an atomic rename.
+build_uuid <- Sys.getenv("BUILD_UUID")
+build_lib <- file.path("/store", ".builds", build_uuid)
+dir.create(build_lib, recursive = TRUE)
+
+# -- Phase 1: Resolve + solve (no download, no install) ----------------
+pak::lockfile_create(refs,
+  lockfile = file.path(build_lib, "pak.lock"), lib = build_lib)
+
+# -- Phase 2: Check store, pre-populate build library ------------------
+rc <- system2("/tools/by-builder", c(
+  "store", "populate",
+  "--lockfile", file.path(build_lib, "pak.lock"),
+  "--lib", build_lib,
+  "--store", "/store"
+))
+if (rc != 0L) {
+  message("WARNING: store populate failed (exit ", rc,
+          "); falling back to full install")
+}
+
+# -- Phase 3: Install store misses ------------------------------------
+pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
+
+# -- Phase 4: Ingest newly installed packages into store ---------------
+rc <- system2("/tools/by-builder", c(
+  "store", "ingest",
+  "--lockfile", file.path(build_lib, "pak.lock"),
+  "--lib", build_lib,
+  "--store", "/store"
+))
+if (rc != 0L) {
+  stop("store ingest failed (exit ", rc,
+       "); store-manifest.json was not written")
+}
+`
 	return []string{"R", "--vanilla", "-e", rScript}
 }
 
-// buildMounts returns the mount entries for the pak build container.
+// buildMounts returns the mount entries for the store-aware build container.
 func buildMounts(
+	pakCachePath, bundlePath, storePath, dlCachePath, builderPath string,
+) []backend.MountEntry {
+	return []backend.MountEntry{
+		{Source: bundlePath, Target: "/app", ReadOnly: true},
+		{Source: pakCachePath, Target: "/pak", ReadOnly: true},
+		{Source: dlCachePath, Target: "/pak-cache", ReadOnly: false},
+		{Source: storePath, Target: "/store", ReadOnly: false},
+		{Source: builderPath, Target: "/tools/by-builder", ReadOnly: true},
+	}
+}
+
+// legacyBuildCommand returns the R command for the phase 2-5 build flow
+// (no package store). Used when Store is nil (tests, pre-store deployments).
+func legacyBuildCommand() []string {
+	rScript := `
+Sys.setenv(
+  R_USER_CACHE_DIR = "/pak-cache",
+  PKG_CACHE_DIR = "/pak-cache",
+  PKG_SYSREQS = "false"
+)
+.libPaths(c("/pak", .libPaths()))
+library(pak)
+
+# Configure repos from pre-computed text file (Name=URL per line).
+repos_file <- "/app/.pak-repos"
+if (file.exists(repos_file)) {
+  lines <- readLines(repos_file, warn = FALSE)
+  lines <- lines[nzchar(lines)]
+  if (length(lines) > 0) {
+    nms  <- sub("=.*", "", lines)
+    urls <- sub("^[^=]+=", "", lines)
+    for (i in seq_along(urls)) {
+      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", urls[i]) &&
+          !grepl("__linux__", urls[i])) {
+        os_rel <- readLines("/etc/os-release")
+        cn <- sub("^VERSION_CODENAME=", "",
+                  grep("^VERSION_CODENAME=", os_rel, value = TRUE))
+        urls[i] <- sub("(/cran/|/bioc/)",
+                       paste0("\\1__linux__/", cn, "/"), urls[i])
+      }
+    }
+    options(repos = setNames(urls, nms))
+  }
+}
+
+# Read refs from pre-computed text file (one ref per line).
+refs <- readLines("/app/.pak-refs", warn = FALSE)
+refs <- refs[nzchar(refs)]
+
+pak::lockfile_create(refs,
+  lockfile = "/build-lib/pak.lock", lib = "/build-lib")
+pak::lockfile_install("/build-lib/pak.lock", lib = "/build-lib")
+`
+	return []string{"R", "--vanilla", "-e", rScript}
+}
+
+// legacyBuildMounts returns mount entries for the phase 2-5 build flow.
+func legacyBuildMounts(
 	pakCachePath, bundlePath, libraryPath, dlCachePath string,
 ) []backend.MountEntry {
 	return []backend.MountEntry{

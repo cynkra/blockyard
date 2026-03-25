@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
+	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
@@ -179,15 +182,50 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 
 	extraEnv := WorkerEnv(srv)
 
+	// Assemble per-worker library from the package store.
+	var libDir string
+	if srv.PkgStore != nil {
+		libDir = srv.PkgStore.WorkerLibDir(wid)
+
+		manifestPath := filepath.Join(hostPaths.Base, "store-manifest.json")
+		storeManifest, err := pkgstore.ReadStoreManifest(manifestPath)
+		if err != nil {
+			// No store-manifest — pre-store bundle. Fall back to
+			// legacy library path (LibraryPath).
+			slog.Debug("no store-manifest, using legacy library",
+				"worker_id", wid, "error", err)
+			libDir = ""
+		} else {
+			missing, err := srv.PkgStore.AssembleLibrary(libDir, storeManifest)
+			if err != nil {
+				return "", "", fmt.Errorf("assemble library: %w", err)
+			}
+			if len(missing) > 0 {
+				slog.Warn("worker library: missing store entries",
+					"worker_id", wid, "missing", missing)
+			}
+		}
+	}
+
+	// Pre-create transfer directory for container transfer signaling
+	// (phase 2-7). Mounted rw at /transfer inside the container.
+	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", wid)
+	if err := os.MkdirAll(transferDir, 0o755); err != nil {
+		slog.Warn("failed to create transfer dir", "worker_id", wid, "error", err)
+		transferDir = ""
+	}
+
 	spec := backend.WorkerSpec{
-		AppID:    app.ID,
-		WorkerID: wid,
-		Image:    srv.Config.Docker.Image,
+		AppID:       app.ID,
+		WorkerID:    wid,
+		Image:       srv.Config.Docker.Image,
 		Cmd: []string{"R", "-e",
 			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
 				srv.Config.Storage.BundleWorkerPath)},
 		BundlePath:  hostPaths.Unpacked,
 		LibraryPath: hostPaths.Library,
+		LibDir:      libDir,
+		TransferDir: transferDir,
 		WorkerMount: srv.Config.Storage.BundleWorkerPath,
 		ShinyPort:   srv.Config.Docker.ShinyPort,
 		MemoryLimit: ptrOr(app.MemoryLimit, ""),

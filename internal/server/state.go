@@ -11,6 +11,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/logstore"
+	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/registry"
 	"github.com/cynkra/blockyard/internal/session"
 	"github.com/cynkra/blockyard/internal/task"
@@ -46,6 +47,12 @@ type Server struct {
 
 	// Audit log — nil when [audit] is not configured.
 	AuditLog *audit.Log
+
+	// Package store — nil when not available (no builds yet).
+	PkgStore *pkgstore.Store
+
+	// Version is the server version string, set at build time.
+	Version string
 }
 
 // NewServer creates a Server with all in-memory stores initialized.

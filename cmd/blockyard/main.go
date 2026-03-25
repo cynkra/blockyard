@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/ops"
+	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
@@ -78,6 +80,18 @@ func main() {
 
 	// Build shared state and router
 	srv := server.NewServer(cfg, be, database)
+	srv.Version = version
+
+	// Initialize package store.
+	storePath := filepath.Join(cfg.Storage.BundleServerPath, ".pkg-store")
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		slog.Error("failed to create package store", "error", err)
+		os.Exit(1)
+	}
+	srv.PkgStore = pkgstore.NewStore(storePath)
+	if platform := recoverPlatform(storePath); platform != "" {
+		srv.PkgStore.SetPlatform(platform)
+	}
 
 	// Background goroutine context — used for vault token renewal and others.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -208,6 +222,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Clean up orphaned worker library directories from previous runs.
+	if srv.PkgStore != nil {
+		workersDir := filepath.Join(srv.PkgStore.Root(), ".workers")
+		entries, _ := os.ReadDir(workersDir)
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			if _, found := srv.Workers.Get(e.Name()); !found {
+				os.RemoveAll(filepath.Join(workersDir, e.Name()))
+			}
+		}
+	}
+
 	handler := api.NewRouter(srv)
 
 	httpServer := &http.Server{
@@ -248,6 +276,11 @@ func main() {
 		defer bgWg.Done()
 		ops.SpawnSoftDeleteSweeper(bgCtx, srv)
 	}()
+
+	// Store eviction sweeper.
+	if cfg.Docker.StoreRetention.Duration > 0 {
+		pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Docker.StoreRetention.Duration)
+	}
 
 	// Start audit log background writer.
 	if srv.AuditLog != nil {
@@ -388,4 +421,25 @@ func resolveSessionSecret(client *integration.Client) (string, error) {
 
 	slog.Info("auto-generated session_secret (stored in vault)")
 	return secret, nil
+}
+
+// recoverPlatform scans the store root for existing platform
+// directories (e.g., "4.5-x86_64-pc-linux-gnu/") to restore the
+// platform after a server restart.
+func recoverPlatform(storePath string) string {
+	entries, err := os.ReadDir(storePath)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		// Platform dirs look like "4.5-x86_64-pc-linux-gnu".
+		if strings.Contains(e.Name(), "-") && !strings.HasPrefix(e.Name(), ".") {
+			slog.Info("recovered store platform", "platform", e.Name())
+			return e.Name()
+		}
+	}
+	return ""
 }
