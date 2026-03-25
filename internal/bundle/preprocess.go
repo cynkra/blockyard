@@ -22,8 +22,14 @@ func preProcess(ctx context.Context, be backend.Backend,
 	defer os.RemoveAll(outputDir) //nolint:errcheck // best-effort cleanup
 
 	rScript := `
+		Sys.setenv(R_USER_CACHE_DIR = "/output")
 		.libPaths(c("/pak", .libPaths()))
 		library(pak)
+		# Make pak's bundled dependencies (pkgdepends, desc) available.
+		pak_lib <- system.file("library", package = "pak")
+		if (nzchar(pak_lib) && dir.exists(pak_lib)) {
+		  .libPaths(c(pak_lib, .libPaths()))
+		}
 		deps <- pkgdepends::scan_deps("/app")
 		pkgs <- unique(deps$package[deps$type == "prod"])
 		dsc <- desc::desc("!new")
