@@ -1,60 +1,79 @@
-# Phase 2-6: Package Store and Runtime Assembly
+# Phase 2-6: Package Store & Worker Library Assembly
 
-A server-level content-addressable package store that is populated
-during builds and consumed at runtime. Every dependency restore adds
-packages to the store. Workers assemble their libraries from store
-entries via hard links — near-instant, zero additional disk usage.
-An API endpoint allows requesting packages from the store for running
-workers (e.g., during blockr board restore).
+A server-level content-addressable package store populated during builds
+and consumed at worker startup. The store caches installed R packages
+keyed by a curated hash of identity fields from the pak lockfile. Build
+libraries are pre-populated from the store; workers assemble their
+libraries via hard links. This phase retrofits the phase 2-5 build flow
+to the store-aware four-phase pattern described in dep-mgmt.md.
 
-Depends on phase 2-5 (pak-based build pipeline).
+Depends on phase 2-5 (manifest types, pak build pipeline, lockfile
+output). **Breaking change:** bundles built under phase 2-5 must be
+redeployed after phase 2-6 is deployed. The per-bundle `library/`
+directory from 2-5 is no longer used — workers assemble from the
+store, which has no entries for pre-2-6 bundles.
+
+See [dep-mgmt.md](../dep-mgmt.md) for store key design, ABI safety
+rationale, concurrency protocol, store layout, and design rationale.
+This document covers how to build the store and integrate it with the
+build pipeline and worker lifecycle.
 
 ## Deliverables
 
-1. **Package store** (`internal/pkgstore/store.go`) — content-
-   addressable directory keyed by `{package}/{version}-{source}`.
-   Populated during builds. Append-only.
-2. **Build integration** — after a successful dependency restore,
-   catalog all installed packages into the store.
-3. **Per-worker library views** (`internal/pkgstore/view.go`) — flat
-   directories populated with hard links from the store. Mounted
-   read-only at `/extra-lib/` in worker containers.
-4. **Worker lifecycle integration** — create view directories on spawn,
-   mount them, clean up on eviction.
-5. **Runtime assembly API** — `POST /api/v1/packages` endpoint that
-   hard-links packages from the store into a running worker's view.
-6. **Worker authentication** — HMAC-based worker tokens for
-   in-container API access.
+1. **Package store** (`internal/pkgstore/store.go`) — content-addressable
+   directory with two-level keying:
+   `{platform}/{package}/{source_hash}/{config_hash}`. The `platform`
+   prefix encodes R version (minor), OS, and architecture (e.g.,
+   `4.5-x86_64-pc-linux-gnu`). Source hash is SHA-256 of selected identity
+   fields from the pak lockfile entry. Config hash is SHA-256 of the
+   sorted `LinkingTo` dependency store keys (canonical empty hash for
+   packages without `LinkingTo`).
+2. **Store operations** — `Has(pkg, sourceHash, configHash)`,
+   `Path(pkg, sourceHash, configHash)`,
+   `Ingest(pkg, sourceHash, configHash, src)`.
+   Ingestion uses atomic `rename()` from a build directory on the same
+   filesystem. Append-only — packages are never modified after insertion.
+3. **Store concurrency** — file-based locking under
+   `{root}/.locks/{platform}/{package}/{source_hash}.lock`. Concurrent
+   builds wait with backoff for the lock holder to finish. Stale lock
+   detection via age threshold.
+4. **Store-aware build flow** — retrofit the phase 2-5 build to the
+   four-phase pattern: (1) `lockfile_create()` → (2) check store,
+   pre-populate build library with hard links → (3) `lockfile_install()`
+   skips pre-populated packages → (4) ingest newly installed packages
+   into store. Full store hits make phase 3 a no-op.
+5. **Persistent pak download cache** — already set up in phase 2-5;
+   this phase ensures the mount is present in the store-aware build flow.
+6. **Worker library assembly** — at worker startup, assemble a single
+   mutable `/lib` per container by hard-linking from the store based on
+   the bundle's `store-manifest.json`. Each entry maps directly to a
+   store path — no hash computation or config resolution needed.
+   Assembly also writes a `.packages.json` manifest initialized as a
+   copy of the bundle's store-manifest that tracks what's installed in
+   each worker — the source of truth for live installs (phase 2-7).
+7. **Worker lifecycle integration** — create `/lib` directories on spawn,
+   populate from store, mount into containers. Clean up on eviction.
+8. **`by-builder` binary** (`cmd/by-builder/`) — a small Go CLI
+   cross-compiled for `linux/amd64` and `linux/arm64`, cached on the
+   server (same pattern as pakcache), and mounted read-only into build
+   containers at `/tools/by-builder`. Provides `store populate` and
+   `store ingest` subcommands that handle all store operations inside
+   the container. Shares `internal/pkgstore` with the server — store
+   key computation, locking, ABI checks, and metadata exist in one
+   place. No R-side store code needed.
+9. **Store eviction** — background sweeper that periodically removes
+   config entries whose sidecar `mtime` (last-accessed) exceeds a
+   configurable retention window. Operates at the config level — each
+   config entry is evicted independently. Empty parent directories
+   (source hash, package) are cleaned up after their last config is
+   removed. No default — zero (unset) means eviction is disabled.
+   Operators opt in by setting a positive retention (e.g., `"720h"`).
 
 ---
 
-## Step 1: Package store
+## Step 1: Package store types
 
 New package: `internal/pkgstore/`.
-
-### Directory layout
-
-```
-{bundle_server_path}/.pkg-store/
-├── ggplot2/
-│   └── 3.5.0-cran/           ← installed R package tree
-├── shiny/
-│   └── 1.13.0-cran/
-├── blockr.ggplot/
-│   ├── 0.2.0-cran/
-│   └── 0.2.1-github/
-└── ...
-```
-
-Keyed by `{package}/{version}-{source}`. Multiple versions and sources
-coexist. Append-only — packages are never modified after installation.
-
-The R major.minor version is NOT part of the key. The store lives under
-a server that runs a single R version (configured via `[docker] image`).
-When the image changes, the operator clears the store
-(`rm -rf .pkg-store/`) — same as clearing any package cache after an
-R upgrade. This keeps store keys simple and avoids a startup-time R
-version detection container.
 
 ### Store struct
 
@@ -62,187 +81,1509 @@ version detection container.
 // internal/pkgstore/store.go
 
 type Store struct {
-    basePath string // {bundle_server_path}/.pkg-store
+    root     string // host-side store root, e.g., {bundle_server_path}/.pkg-store
+    platform string // e.g., 4.5-x86_64-pc-linux-gnu; set via PlatformFromLockfile
 }
 
-func NewStore(basePath string) *Store {
-    return &Store{basePath: basePath}
+func NewStore(root string) *Store {
+    return &Store{root: root}
 }
 
-func storeKey(pkg, version, source string) string {
-    return filepath.Join(pkg, version+"-"+source)
-}
+func (s *Store) Root() string     { return s.root }
+func (s *Store) Platform() string { return s.platform }
 
-func (s *Store) Path(pkg, version, source string) string {
-    return filepath.Join(s.basePath, storeKey(pkg, version, source))
-}
-
-func (s *Store) Has(pkg, version, source string) bool {
-    _, err := os.Stat(s.Path(pkg, version, source))
-    return err == nil
-}
+func (s *Store) SetPlatform(p string) { s.platform = p }
 ```
 
-### DESCRIPTION parser
+### Store layout
 
-```go
-// internal/pkgstore/description.go
-
-type PkgInfo struct {
-    Name       string
-    Version    string
-    Source     string // "cran", "github", etc.; derived from RemoteType or defaulted
-}
-
-func ReadPkgInfo(pkgDir string) (PkgInfo, error) {
-    data, err := os.ReadFile(filepath.Join(pkgDir, "DESCRIPTION"))
-    if err != nil {
-        return PkgInfo{}, err
-    }
-    var info PkgInfo
-    for _, line := range strings.Split(string(data), "\n") {
-        switch {
-        case strings.HasPrefix(line, "Package:"):
-            info.Name = strings.TrimSpace(line[len("Package:"):])
-        case strings.HasPrefix(line, "Version:"):
-            info.Version = strings.TrimSpace(line[len("Version:"):])
-        case strings.HasPrefix(line, "RemoteType:"):
-            info.Source = strings.TrimSpace(line[len("RemoteType:"):])
-        }
-    }
-    if info.Name == "" || info.Version == "" {
-        return PkgInfo{}, fmt.Errorf("invalid DESCRIPTION in %s", pkgDir)
-    }
-    if info.Source == "" {
-        info.Source = "cran"
-    }
-    return info, nil
-}
+```
+{root}/
+├── 4.5-x86_64-pc-linux-gnu/     ← platform prefix
+│   ├── shiny/
+│   │   └── e3b0c442.../         ← source hash (v1.9.1)
+│   │       ├── configs.json     ← source-level metadata + config map
+│   │       ├── a1b2c3d4.../     ← config: installed package tree
+│   │       └── a1b2c3d4....json ← config sidecar (created_at)
+│   ├── sf/
+│   │   └── 7d865e95.../         ← source hash (v1.0.0)
+│   │       ├── configs.json
+│   │       ├── b5bb9d80.../     ← config A (Rcpp@key1)
+│   │       ├── b5bb9d80....json
+│   │       ├── c6cc0a91.../     ← config B (Rcpp@key2)
+│   │       └── c6cc0a91....json
+│   ├── ggplot2/
+│   │   └── b5bb9d80.../
+│   │       ├── configs.json
+│   │       ├── e3b0c442.../     ← canonical empty config (no LinkingTo)
+│   │       └── e3b0c442....json
+│   └── ...
+├── .builds/                      ← temporary build libraries
+│   └── {uuid}/
+├── .workers/                     ← per-worker assembled libraries
+│   └── {worker_id}/
+│       ├── .packages.json       ← per-worker package manifest
+│       ├── shiny/               ← hard-linked package trees
+│       └── ...
+└── .locks/                       ← concurrency locks
+    └── 4.5-x86_64-pc-linux-gnu/
+        └── shiny/
+            └── e3b0c442.lock    ← one lock per source hash
 ```
 
-### Ingest — add packages to the store
+Each `{config_hash}/` directory contains the installed package tree
+directly (`DESCRIPTION`, `R/`, `Meta/`, etc. — no nested package name
+directory). The sibling `{config_hash}.json` file holds per-config
+metadata. The `configs.json` file at the source-hash level records
+source-level properties and the config map.
+
+All helper directories (`.builds/`, `.workers/`, `.locks/`) live under
+the store root to guarantee same-filesystem placement for hard links
+and atomic `rename()`.
+
+### LockfileEntry
+
+Parsed from the pak lockfile (JSON). The curated hash and worker
+library assembly are computed from these fields.
+
+Verified against `pak::lockfile_create()` output (pak 0.8.0, R 4.5.2).
+Key structural points:
+
+- `RemoteType`, `RemoteSha`, `RemoteSubdir` are nested under `metadata`
+  (a per-package object), not at the top level. A nested Go struct
+  handles this.
+- `type` at top level has the same value as `metadata.RemoteType` (e.g.,
+  `"standard"`). We use `metadata.RemoteType` for consistency with the
+  other `Remote*` fields but keep `type` as a convenient alias.
+- `sha256` is the archive hash, at top level.
+- For **standard** packages, `metadata.RemoteSha` is the version string
+  (e.g., `"1.9.1"`) — NOT a git SHA. The actual content hash is in
+  `sha256`. The store key for standard packages uses `sha256`, not
+  `metadata.RemoteSha`.
+- For **github**/**gitlab**/**git** packages, `metadata.RemoteSha` is
+  the git commit SHA.
+- `needscompilation` is a JSON boolean (not a `"yes"`/`"no"` string).
+- Each package carries its own `rversion` (short form, e.g., `"4.5"`)
+  and `platform` (R platform triple, e.g., `"x86_64-pc-linux-gnu"`).
+  These per-package fields are used for platform detection — see
+  `PlatformFromLockfile()`.
+- Top-level `r_version` is a long human-readable string
+  (e.g., `"R version 4.5.2 (2025-10-31)"`), not a bare version number.
+  Not used directly; the per-package `rversion` field is preferred.
 
 ```go
-// Ingest catalogs all R packages in a library directory and moves
-// new ones into the store. Returns the list of all packages found.
-// Existing store entries are skipped (not overwritten).
-func (s *Store) Ingest(libraryPath string) ([]PkgInfo, error) {
-    entries, err := os.ReadDir(libraryPath)
+// internal/pkgstore/lockfile.go
+
+// LockfileMetadata holds the nested metadata object from a pak lockfile
+// entry. Only the fields needed for store key computation are mapped.
+type LockfileMetadata struct {
+    RemoteType   string `json:"RemoteType"`
+    RemoteSha    string `json:"RemoteSha"`
+    RemoteSubdir string `json:"RemoteSubdir,omitempty"`
+}
+
+type LockfileEntry struct {
+    Package          string           `json:"package"`
+    Version          string           `json:"version"`
+    Type             string           `json:"type"`              // "standard", "github", etc.
+    NeedsCompilation bool             `json:"needscompilation"`
+    Metadata         LockfileMetadata `json:"metadata"`
+    SHA256           string           `json:"sha256"`            // archive hash (top-level)
+    Platform         string           `json:"platform"`          // per-pkg R triple, e.g. "x86_64-pc-linux-gnu"
+    RVersion         string           `json:"rversion"`          // per-pkg short R version, e.g. "4.5"
+}
+
+type Lockfile struct {
+    LockfileVersion int              `json:"lockfile_version"`
+    RVersion        string           `json:"r_version"`  // "R version 4.5.2 (2025-10-31)"
+    OS              string           `json:"os"`          // "Ubuntu 24.04.2 LTS" (human-readable)
+    Platform        string           `json:"platform"`    // "x86_64-pc-linux-gnu" (R triple)
+    Packages        []LockfileEntry  `json:"packages"`
+}
+
+func ReadLockfile(path string) (*Lockfile, error) {
+    data, err := os.ReadFile(path)
     if err != nil {
-        return nil, fmt.Errorf("read library: %w", err)
+        return nil, err
     }
+    var lf Lockfile
+    if err := json.Unmarshal(data, &lf); err != nil {
+        return nil, fmt.Errorf("parse pak lockfile: %w", err)
+    }
+    if err := lf.Validate(); err != nil {
+        return nil, fmt.Errorf("invalid pak lockfile %s: %w", path, err)
+    }
+    return &lf, nil
+}
 
-    var pkgs []PkgInfo
-    for _, entry := range entries {
-        if !entry.IsDir() {
-            continue
+// Validate checks that the pak lockfile has the structure and fields
+// we depend on. Catches upstream format changes at parse time rather
+// than as wrong store keys or nil-pointer panics downstream.
+func (lf *Lockfile) Validate() error {
+    if lf.LockfileVersion != 1 {
+        return fmt.Errorf(
+            "unsupported lockfile_version %d (expected 1)",
+            lf.LockfileVersion)
+    }
+    if len(lf.Packages) == 0 {
+        return errors.New("lockfile has no packages")
+    }
+    for i, entry := range lf.Packages {
+        if err := entry.Validate(); err != nil {
+            return fmt.Errorf("packages[%d]: %w", i, err)
         }
-        info, err := ReadPkgInfo(filepath.Join(libraryPath, entry.Name()))
-        if err != nil {
-            slog.Debug("pkgstore: skipping non-package dir",
-                "name", entry.Name(), "error", err)
-            continue
-        }
-
-        storePath := s.Path(info.Name, info.Version, info.Source)
-        if !dirExists(storePath) {
-            if err := os.MkdirAll(filepath.Dir(storePath), 0o755); err != nil {
-                return nil, fmt.Errorf("create store dir: %w", err)
-            }
-            // cp -al: hard-link the package tree into the store.
-            // The source (library) is kept intact for the current bundle.
-            out, cpErr := exec.Command(
-                "cp", "-al",
-                filepath.Join(libraryPath, entry.Name()),
-                storePath,
-            ).CombinedOutput()
-            if cpErr != nil {
-                slog.Warn("pkgstore: ingest failed",
-                    "package", info.Name, "error", string(out))
-                continue
-            }
-        }
-
-        pkgs = append(pkgs, info)
-    }
-    return pkgs, nil
-}
-```
-
-`cp -al` hard-links the package directory tree into the store. Both
-the original library (used by the current bundle) and the store entry
-point to the same inodes. Zero additional disk usage.
-
----
-
-## Step 2: Build integration
-
-After a successful dependency restore, ingest the restored library
-into the store.
-
-In `internal/bundle/restore.go`, after `ActivateBundle`:
-
-```go
-// Populate package store.
-if p.PkgStore != nil {
-    pkgs, err := p.PkgStore.Ingest(p.Paths.Library)
-    if err != nil {
-        slog.Warn("pkgstore: ingest failed", "error", err)
-        // Non-fatal — the bundle is still usable.
-    } else {
-        slog.Info("pkgstore: ingested packages",
-            "count", len(pkgs), "bundle_id", p.BundleID)
-    }
-}
-```
-
-**RestoreParams** gains a `PkgStore *pkgstore.Store` field.
-
-Every deploy populates the store. Over time, the store accumulates
-packages from all apps. When a worker needs a package that any prior
-build installed, it's a store hit — hard-link, instant.
-
----
-
-## Step 3: Per-worker library views
-
-```go
-// internal/pkgstore/view.go
-
-type View struct {
-    basePath string // {bundle_server_path}/.worker-libs
-}
-
-func NewView(basePath string) *View {
-    return &View{basePath: basePath}
-}
-
-func (v *View) BasePath() string { return v.basePath }
-
-func (v *View) Dir(workerID string) string {
-    return filepath.Join(v.basePath, workerID)
-}
-
-func (v *View) Create(workerID string) error {
-    return os.MkdirAll(v.Dir(workerID), 0o755)
-}
-
-// Link hard-links a package from the store into a worker's view.
-func (v *View) Link(workerID, pkgName, storePath string) error {
-    viewPkgPath := filepath.Join(v.Dir(workerID), pkgName)
-    if dirExists(viewPkgPath) {
-        return nil // already linked
-    }
-    out, err := exec.Command("cp", "-al", storePath, viewPkgPath).
-        CombinedOutput()
-    if err != nil {
-        return fmt.Errorf("hard-link %s: %s: %w", pkgName, out, err)
     }
     return nil
 }
 
-func (v *View) Cleanup(workerID string) error {
-    dir := v.Dir(workerID)
+// Validate checks that a lockfile entry has the fields needed for
+// store key computation and platform detection.
+func (e LockfileEntry) Validate() error {
+    if e.Package == "" {
+        return errors.New("missing \"package\" field")
+    }
+    if e.Version == "" {
+        return fmt.Errorf("package %s: missing \"version\"", e.Package)
+    }
+    if e.RVersion == "" {
+        return fmt.Errorf("package %s: missing \"rversion\"", e.Package)
+    }
+    if e.Platform == "" {
+        return fmt.Errorf("package %s: missing \"platform\"", e.Package)
+    }
+
+    // RemoteType: prefer metadata.RemoteType, fall back to top-level type.
+    remoteType := e.Metadata.RemoteType
+    if remoteType == "" {
+        remoteType = e.Type
+    }
+    if remoteType == "" {
+        return fmt.Errorf("package %s: missing type/metadata.RemoteType",
+            e.Package)
+    }
+
+    switch remoteType {
+    case "standard":
+        if e.SHA256 == "" {
+            return fmt.Errorf(
+                "package %s: type \"standard\" requires \"sha256\"",
+                e.Package)
+        }
+    case "github", "gitlab", "bitbucket", "git":
+        if e.Metadata.RemoteSha == "" {
+            return fmt.Errorf(
+                "package %s: type %q requires metadata.RemoteSha",
+                e.Package, remoteType)
+        }
+    default:
+        return fmt.Errorf("package %s: unsupported type %q"+
+            " (url, local, and svn are not supported)",
+            e.Package, remoteType)
+    }
+    return nil
+}
+```
+
+### Store key computation
+
+The curated hash dispatches on `RemoteType` and hashes only the fields
+that determine what source code was compiled. See dep-mgmt.md § Package
+Store and Cache Key Design for the full rationale.
+
+```go
+// internal/pkgstore/key.go
+
+// StoreKey computes the curated hash for a pak lockfile entry.
+// The hash is SHA-256 of a NUL-delimited string of identity fields.
+//
+// This is the single implementation — the by-builder binary and the
+// server both use this function. No R-side equivalent exists.
+//
+// Hash input format:
+//     {RemoteType}\0{field1}\0{field2}[...\0{fieldN}]
+func StoreKey(entry LockfileEntry) (string, error) {
+    // Use metadata.RemoteType (canonical). Falls back to top-level
+    // type field — they carry the same value but metadata.RemoteType
+    // is consistent with the other Remote* fields.
+    remoteType := entry.Metadata.RemoteType
+    if remoteType == "" {
+        remoteType = entry.Type
+    }
+
+    var fields []string
+    switch remoteType {
+    case "standard":
+        // sha256 is the archive hash (top-level). For standard
+        // packages, metadata.RemoteSha is just the version string
+        // (redundant with entry.Version) — NOT a content hash.
+        fields = []string{entry.Package, entry.Version, entry.SHA256}
+    case "github", "gitlab", "bitbucket", "git":
+        // metadata.RemoteSha is the git commit SHA for remote packages.
+        // metadata.RemoteSubdir selects which package within a monorepo.
+        fields = []string{
+            entry.Package,
+            entry.Metadata.RemoteSha,
+            entry.Metadata.RemoteSubdir,
+        }
+    default:
+        return "", fmt.Errorf(
+            "unsupported RemoteType for store key: %q"+
+                " (url, local, and svn are not supported)", remoteType)
+    }
+
+    input := remoteType + "\x00" + strings.Join(fields, "\x00")
+    h := sha256.Sum256([]byte(input))
+    return hex.EncodeToString(h[:]), nil
+}
+```
+
+| RemoteType | Identity fields | Rationale |
+|---|---|---|
+| `standard` | `package`, `version`, `sha256` | `sha256` (archive hash) catches PPM rebuilds where the version is unchanged but the binary differs. |
+| `github`, `gitlab`, `bitbucket`, `git` | `package`, `RemoteSha`, `RemoteSubdir` | The commit hash fully identifies the source code. `RemoteSubdir` selects which package within a monorepo. |
+
+Unsupported: `url::` (lacks reliable content hash), `local::` (would
+need source tree hashing), and `svn::` (extremely rare). All produce
+a clear error from `StoreKey()`. See dep-mgmt.md § Unsupported ref
+types.
+
+### StoreRef
+
+Compound key for `.packages.json` entries — encodes both the source
+identity and the ABI configuration of an installed package. Used by
+conflict detection (phase 2-7) to catch both version changes and
+LinkingTo ABI changes.
+
+```go
+// internal/pkgstore/key.go
+
+// StoreRef returns a compound "sourceHash/configHash" string for use
+// in the per-worker package manifest (.packages.json). Comparing
+// compound refs detects both source changes (version bump, different
+// sha256) and ABI changes (same source compiled against different
+// LinkingTo dependency versions).
+func StoreRef(sourceHash, configHash string) string {
+    return sourceHash + "/" + configHash
+}
+```
+
+### Store operations
+
+```go
+// SourceDir returns the source-hash directory for a package.
+func (s *Store) SourceDir(pkg, sourceHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash)
+}
+
+// Path returns the config directory (installed package tree) path.
+func (s *Store) Path(pkg, sourceHash, configHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash, configHash)
+}
+
+// ConfigsPath returns the path to configs.json for a source hash.
+func (s *Store) ConfigsPath(pkg, sourceHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash, "configs.json")
+}
+
+// ConfigMetaPath returns the config sidecar file path.
+func (s *Store) ConfigMetaPath(pkg, sourceHash, configHash string) string {
+    return filepath.Join(s.root, s.platform, pkg, sourceHash, configHash+".json")
+}
+
+// Has reports whether the store contains a specific config for a package.
+func (s *Store) Has(pkg, sourceHash, configHash string) bool {
+    _, err := os.Stat(s.Path(pkg, sourceHash, configHash))
+    return err == nil
+}
+
+// Ingest atomically moves an installed package tree into the store
+// as a config entry. No-op if the config already exists. srcDir must
+// be on the same filesystem as the store (for atomic rename).
+func (s *Store) Ingest(pkg, sourceHash, configHash, srcDir string) error {
+    dst := s.Path(pkg, sourceHash, configHash)
+    if dirExists(dst) {
+        return nil // already in store
+    }
+    if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+        return fmt.Errorf("create store dir: %w", err)
+    }
+    return os.Rename(srcDir, dst)
+}
+
+// Touch updates the mtime of a config's sidecar file.
+// Used for last-accessed tracking — the eviction sweeper removes
+// config entries whose sidecar mtime exceeds the retention window.
+func (s *Store) Touch(pkg, sourceHash, configHash string) {
+    metaPath := s.ConfigMetaPath(pkg, sourceHash, configHash)
+    now := time.Now()
+    os.Chtimes(metaPath, now, now)
+}
+```
+
+### Store metadata
+
+The store uses two metadata files at different levels:
+
+**`configs.json`** — one per source hash. Records source-level
+properties (invariant across configs) and maps config hashes to
+their LinkingTo store key sets. Updated (under lock) when new
+configs are ingested.
+
+**`{config_hash}.json`** — one per config. Contains only `created_at`.
+Its filesystem `mtime` serves as last-accessed tracking (`touch`ed on
+every store hit).
+
+```go
+// internal/pkgstore/meta.go
+
+// StoreConfigs represents the configs.json file at the source-hash level.
+type StoreConfigs struct {
+    SourceCompiled bool                         `json:"source_compiled"`
+    LinkingTo      []string                     `json:"linkingto"`
+    Configs        map[string]map[string]string `json:"configs"`
+    // Configs key: config hash
+    // Configs value: map of {linked_package: store_key}
+    //   (empty map for packages without LinkingTo deps)
+}
+
+// ConfigMeta represents the per-config sidecar file.
+type ConfigMeta struct {
+    CreatedAt time.Time `json:"created_at"`
+}
+
+// WriteStoreConfigs atomically writes configs.json via write-to-temp +
+// rename. This is called under lock but atomic writes guard against
+// partial writes from crashes or disk-full conditions.
+func WriteStoreConfigs(path string, sc StoreConfigs) error {
+    data, err := json.MarshalIndent(sc, "", "  ")
+    if err != nil {
+        return err
+    }
+    tmp := path + ".tmp"
+    if err := os.WriteFile(tmp, data, 0o644); err != nil {
+        return err
+    }
+    return os.Rename(tmp, path)
+}
+
+func ReadStoreConfigs(path string) (StoreConfigs, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return StoreConfigs{}, err
+    }
+    var sc StoreConfigs
+    return sc, json.Unmarshal(data, &sc)
+}
+
+func WriteConfigMeta(path string, meta ConfigMeta) error {
+    data, err := json.MarshalIndent(meta, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(path, data, 0o644)
+}
+```
+
+| File | Field | Description |
+|---|---|---|
+| `configs.json` | `source_compiled` | `true` if the package was compiled from source (`NeedsCompilation: yes` in DESCRIPTION). Invariant across configs for the same source. |
+| `configs.json` | `linkingto` | Sorted list of `LinkingTo` package names from the source DESCRIPTION. Empty for packages without `LinkingTo`. |
+| `configs.json` | `configs` | Map of `{config_hash: {linked_pkg: store_key, ...}}`. Each entry is a distinct compilation. |
+| `{config_hash}.json` | `created_at` | Timestamp written once at ingestion. |
+
+**Last-accessed tracking** uses the config sidecar file's filesystem
+`mtime` — the server `touch`es it on every store hit. `touch` is a
+metadata-only syscall (`utimes()`), avoiding JSON rewrites on every
+access. Eviction operates at the config level.
+
+### ConfigHash
+
+Computes the config hash from a map of LinkingTo package names to
+their store keys. The hash is deterministic: entries are sorted by
+package name, joined with `\x00`, and hashed with SHA-256. For
+packages without `LinkingTo` deps, the input is empty and the result
+is the canonical empty config hash.
+
+```go
+// internal/pkgstore/key.go
+
+// ConfigHash computes the config hash from a LinkingTo dependency map.
+// Entries are sorted by package name to ensure deterministic output.
+// An empty map produces the canonical empty config hash.
+func ConfigHash(linkingToKeys map[string]string) string {
+    if len(linkingToKeys) == 0 {
+        h := sha256.Sum256([]byte(""))
+        return hex.EncodeToString(h[:])
+    }
+
+    // Sort by package name for determinism.
+    pkgs := make([]string, 0, len(linkingToKeys))
+    for pkg := range linkingToKeys {
+        pkgs = append(pkgs, pkg)
+    }
+    sort.Strings(pkgs)
+
+    var parts []string
+    for _, pkg := range pkgs {
+        parts = append(parts, pkg+"\x00"+linkingToKeys[pkg])
+    }
+    input := strings.Join(parts, "\x00")
+    h := sha256.Sum256([]byte(input))
+    return hex.EncodeToString(h[:])
+}
+```
+
+### ResolveConfig
+
+At populate time, looks up `configs.json` for a source hash, computes
+the expected config hash from the current lockfile's store keys for
+the package's `LinkingTo` dependencies, and returns the matching config
+hash if it exists. This replaces the old `LinkingToMatches` approach.
+
+```go
+// internal/pkgstore/meta.go
+
+// ResolveConfig reads configs.json for a package's source hash and
+// returns the config hash that matches the current lockfile's
+// LinkingTo store keys. Returns ("", false) if no matching config
+// exists (miss) or if configs.json doesn't exist (never seen).
+func (s *Store) ResolveConfig(
+    pkg, sourceHash string, lf *Lockfile,
+) (configHash string, ok bool) {
+    sc, err := ReadStoreConfigs(s.ConfigsPath(pkg, sourceHash))
+    if err != nil {
+        return "", false // no configs.json — never ingested
+    }
+
+    // Compute expected config hash from current lockfile.
+    linkingToKeys := make(map[string]string)
+    for _, linkedPkg := range sc.LinkingTo {
+        key := lockfileStoreKey(lf, linkedPkg)
+        if key != "" {
+            linkingToKeys[linkedPkg] = key
+        }
+    }
+    expected := ConfigHash(linkingToKeys)
+
+    if _, exists := sc.Configs[expected]; exists {
+        return expected, true
+    }
+    return "", false
+}
+```
+
+### WriteIngestMeta
+
+Writes or updates `configs.json` and writes the config sidecar after
+ingesting a package. Reads the installed DESCRIPTION to determine
+`NeedsCompilation` and `LinkingTo`, computes the config hash from the
+lockfile's store keys for the linked packages, and adds the config
+entry.
+
+```go
+// internal/pkgstore/meta.go
+
+// WriteIngestMeta writes the config sidecar and updates configs.json
+// for a newly ingested package config.
+func (s *Store) WriteIngestMeta(
+    entry LockfileEntry, lf *Lockfile,
+    sourceHash, configHash string, linkingToKeys map[string]string,
+    sourceCompiled bool, linkingToNames []string,
+) error {
+    // Write or update configs.json.
+    configsPath := s.ConfigsPath(entry.Package, sourceHash)
+    sc, err := ReadStoreConfigs(configsPath)
+    if err != nil {
+        // First config for this source hash — create configs.json.
+        sc = StoreConfigs{
+            SourceCompiled: sourceCompiled,
+            LinkingTo:      linkingToNames,
+            Configs:        make(map[string]map[string]string),
+        }
+    }
+    sc.Configs[configHash] = linkingToKeys
+    if err := WriteStoreConfigs(configsPath, sc); err != nil {
+        return fmt.Errorf("write configs.json: %w", err)
+    }
+
+    // Write config sidecar.
+    meta := ConfigMeta{CreatedAt: time.Now()}
+    metaPath := s.ConfigMetaPath(entry.Package, sourceHash, configHash)
+    return WriteConfigMeta(metaPath, meta)
+}
+
+// IngestContext extracts compile-time context from an installed
+// package's DESCRIPTION and computes the config hash from the
+// lockfile. Returns the config hash, LinkingTo store key map,
+// source_compiled flag, and sorted LinkingTo package names.
+func IngestContext(
+    descPath string, lf *Lockfile,
+) (configHash string, linkingToKeys map[string]string,
+    sourceCompiled bool, linkingToNames []string, err error) {
+
+    desc, err := ParseDCF(descPath)
+    if err != nil {
+        // No DESCRIPTION — use empty config (shouldn't happen for
+        // a successfully installed package, but safe fallback).
+        return ConfigHash(nil), nil, false, nil, nil
+    }
+
+    sourceCompiled = strings.EqualFold(desc["NeedsCompilation"], "yes")
+    linkingToKeys = make(map[string]string)
+
+    if lt := desc["LinkingTo"]; lt != "" {
+        linkingToNames = parsePkgList(lt)
+        sort.Strings(linkingToNames)
+        for _, linkedPkg := range linkingToNames {
+            key := lockfileStoreKey(lf, linkedPkg)
+            if key != "" {
+                linkingToKeys[linkedPkg] = key
+            }
+        }
+    }
+
+    configHash = ConfigHash(linkingToKeys)
+    return configHash, linkingToKeys, sourceCompiled, linkingToNames, nil
+}
+
+// ParseDCF reads a Debian Control File (DESCRIPTION) into a map.
+func ParseDCF(path string) (map[string]string, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil, err
+    }
+    result := make(map[string]string)
+    var currentKey, currentVal string
+    for _, line := range strings.Split(string(data), "\n") {
+        if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+            currentVal += " " + strings.TrimSpace(line)
+        } else if idx := strings.IndexByte(line, ':'); idx > 0 {
+            if currentKey != "" {
+                result[currentKey] = strings.TrimSpace(currentVal)
+            }
+            currentKey = strings.TrimSpace(line[:idx])
+            currentVal = strings.TrimSpace(line[idx+1:])
+        }
+    }
+    if currentKey != "" {
+        result[currentKey] = strings.TrimSpace(currentVal)
+    }
+    return result, nil
+}
+
+// parsePkgList splits a comma-separated DESCRIPTION field (e.g.,
+// "Rcpp (>= 1.0.0), s2") into bare package names.
+func parsePkgList(s string) []string {
+    var result []string
+    for _, part := range strings.Split(s, ",") {
+        name := strings.TrimSpace(part)
+        if idx := strings.IndexByte(name, '('); idx > 0 {
+            name = strings.TrimSpace(name[:idx])
+        }
+        if name != "" {
+            result = append(result, name)
+        }
+    }
+    return result
+}
+
+// lockfileStoreKey computes the store key for a named package from
+// the lockfile, returning "" if the package is not found (e.g., base
+// R packages like methods).
+func lockfileStoreKey(lf *Lockfile, pkg string) string {
+    for _, entry := range lf.Packages {
+        if entry.Package == pkg {
+            key, err := StoreKey(entry)
+            if err != nil {
+                return ""
+            }
+            return key
+        }
+    }
+    return ""
+}
+```
+
+---
+
+## Step 2: Platform detection
+
+The store key includes a platform prefix to prevent mixing packages
+compiled under different R versions or architectures. The platform is
+derived from the pak lockfile — both the server (worker assembly) and
+the `by-builder` binary (store operations inside build containers) use
+`PlatformFromLockfile()`.
+
+The platform is derived from per-package fields in the lockfile (not
+the top-level fields, which use long human-readable strings). Each
+package carries `rversion` (short form, e.g., `"4.5"`) and `platform`
+(R platform triple, e.g., `"x86_64-pc-linux-gnu"`). These are
+consistent across all packages in a lockfile — pak resolves for a
+single platform.
+
+Derived from the pak lockfile after the first successful build, then
+cached in the `Store` struct.
+
+```go
+// internal/pkgstore/platform.go
+
+// PlatformFromLockfile derives the platform prefix from a pak lockfile.
+// Uses per-package fields (short form) rather than top-level fields
+// (which contain long human-readable strings like
+// "R version 4.5.2 (2025-10-31)").
+func PlatformFromLockfile(lf *Lockfile) string {
+    if len(lf.Packages) == 0 {
+        return ""
+    }
+    // All packages share the same rversion and platform within a lockfile.
+    pkg := lf.Packages[0]
+    return pkg.RVersion + "-" + pkg.Platform
+}
+```
+
+The platform is set after the first build:
+
+```go
+if s.platform == "" {
+    lf, err := ReadLockfile(lockfilePath)
+    if err == nil {
+        s.SetPlatform(PlatformFromLockfile(lf))
+    }
+}
+```
+
+On subsequent server restarts, the platform is recovered by scanning
+for existing lockfiles or existing platform directories in the store
+root.
+
+**Format:** `{rversion}-{R_platform_triple}`, e.g.,
+`4.5-x86_64-pc-linux-gnu`.
+
+---
+
+## Step 3: Store concurrency
+
+The store is shared across all builds running on the same server. When
+concurrent builds need the same package, the first build to start
+installing it takes a lock; subsequent builds wait for the lock to
+release and then use the store entry.
+
+### Lock protocol
+
+1. Before ingesting a package, the build acquires a lock at
+   `{root}/.locks/{platform}/{package}/{source_hash}.lock`. The lock
+   is a directory (created atomically via `mkdir`).
+2. If the lock directory already exists, the build waits with
+   exponential backoff (0.5–2s, jittered) until the directory is
+   removed and the store entry appears.
+3. After successful ingestion (package tree + metadata file written),
+   the build removes the lock directory.
+4. **Stale lock detection:** if the lock directory's mtime is older than
+   30 minutes, the waiting build removes it and re-attempts acquisition.
+   This handles crashed builds that never released their lock.
+
+Using `mkdir` (not file creation) because directory creation is atomic
+on all POSIX filesystems — exactly one concurrent caller succeeds.
+
+### Go implementation
+
+Locking is implemented in `internal/pkgstore/lock.go` and runs inside
+build containers via the `by-builder store ingest` subcommand. The
+same code runs on the server for any host-side store operations.
+
+```go
+// internal/pkgstore/lock.go
+
+func (s *Store) LockPath(pkg, sourceHash string) string {
+    return filepath.Join(s.root, ".locks", s.platform, pkg, sourceHash+".lock")
+}
+
+func (s *Store) Acquire(ctx context.Context, pkg, sourceHash string, staleThreshold time.Duration) error {
+    lockDir := s.LockPath(pkg, sourceHash)
+    os.MkdirAll(filepath.Dir(lockDir), 0o755)
+
+    for {
+        if err := ctx.Err(); err != nil {
+            return fmt.Errorf("lock acquisition cancelled for %s: %w", pkg, err)
+        }
+        if err := os.Mkdir(lockDir, 0o755); err == nil {
+            return nil // acquired
+        }
+        // Check for stale lock.
+        info, err := os.Stat(lockDir)
+        if err == nil && time.Since(info.ModTime()) > staleThreshold {
+            os.RemoveAll(lockDir)
+            continue
+        }
+        // Wait with jittered backoff.
+        time.Sleep(time.Duration(500+rand.Intn(1500)) * time.Millisecond)
+    }
+}
+
+func (s *Store) Release(pkg, sourceHash string) {
+    os.RemoveAll(s.LockPath(pkg, sourceHash))
+}
+```
+
+---
+
+## Step 4: by-builder binary
+
+A small Go CLI that runs inside build containers, providing store
+operations as subcommands. The binary shares `internal/pkgstore` with
+the server — store key computation, locking, ABI checks, and metadata
+live in one place.
+
+### Binary structure
+
+```go
+// cmd/by-builder/main.go
+
+func main() {
+    root := &cobra.Command{Use: "by-builder"}
+    store := &cobra.Command{Use: "store"}
+    store.AddCommand(populateCmd(), ingestCmd())
+    root.AddCommand(store)
+    root.Execute()
+}
+```
+
+### `store populate` subcommand
+
+Reads the pak lockfile, checks the store for each entry by computing
+the source hash and resolving the matching config hash via
+`configs.json`, then hard-links hits into the build library. Packages
+already present in the build library (or in an optional reference
+library) are skipped.
+
+```go
+// cmd/by-builder/populate.go
+
+func populateCmd() *cobra.Command {
+    var lockfile, lib, storeRoot, refLib string
+    cmd := &cobra.Command{
+        Use: "populate",
+        RunE: func(cmd *cobra.Command, args []string) error {
+            lf, err := pkgstore.ReadLockfile(lockfile)
+            if err != nil {
+                return err
+            }
+            s := pkgstore.NewStore(storeRoot)
+            s.SetPlatform(pkgstore.PlatformFromLockfile(lf))
+
+            // Load the reference library's package manifest to compare
+            // compound store refs (sourceHash/configHash). A package in
+            // the reference lib with a DIFFERENT source OR config hash
+            // should still be looked up in the store — this catches both
+            // version changes and LinkingTo ABI changes.
+            var refManifest map[string]string
+            if refLib != "" {
+                refManifest, _ = pkgstore.ReadPackageManifest(refLib)
+            }
+
+            var hits, misses int
+            for _, entry := range lf.Packages {
+                sourceHash, err := pkgstore.StoreKey(entry)
+                if err != nil {
+                    return err
+                }
+
+                // Skip packages already in the build/staging library.
+                // At build time the library is freshly created (always
+                // empty), so this never fires — it exists for runtime
+                // installs where the staging dir may already contain
+                // packages from a prior populate attempt.
+                if dirExists(filepath.Join(lib, entry.Package)) {
+                    continue
+                }
+
+                // Resolve matching config via configs.json.
+                // ResolveConfig reads the LinkingTo package names from
+                // configs.json, looks up their store keys in the current
+                // lockfile, computes the expected config hash, and checks
+                // if it exists.
+                configHash, ok := s.ResolveConfig(entry.Package, sourceHash, lf)
+                if !ok {
+                    misses++
+                    continue
+                }
+
+                // Skip packages whose compound ref matches the reference
+                // library — same source AND same ABI config already
+                // installed in the worker.
+                expectedRef := pkgstore.StoreRef(sourceHash, configHash)
+                if refManifest != nil && refManifest[entry.Package] == expectedRef {
+                    continue
+                }
+
+                // Hard-link config's package tree into build library.
+                // cp -al creates a recursive hard-link copy — every file
+                // in the source tree gets a hard link in the destination.
+                dest := filepath.Join(lib, entry.Package)
+                out, cpErr := exec.Command(
+                    "cp", "-al",
+                    s.Path(entry.Package, sourceHash, configHash), dest,
+                ).CombinedOutput()
+                if cpErr != nil {
+                    return fmt.Errorf("link %s: %s: %w", entry.Package, out, cpErr)
+                }
+                s.Touch(entry.Package, sourceHash, configHash)
+                hits++
+            }
+
+            fmt.Fprintf(os.Stderr, "store: %d hits, %d misses\n", hits, misses)
+            return nil
+        },
+    }
+    cmd.Flags().StringVar(&lockfile, "lockfile", "", "path to pak.lock")
+    cmd.Flags().StringVar(&lib, "lib", "", "build library path")
+    cmd.Flags().StringVar(&storeRoot, "store", "", "store root path")
+    cmd.Flags().StringVar(&refLib, "reference-lib", "", "skip packages present here (optional)")
+    return cmd
+}
+```
+
+### `store ingest` subcommand
+
+Ingests newly installed packages from the build library into the store.
+For each package, reads the installed DESCRIPTION to determine the
+config hash, then ingests under lock. Packages already in the store
+with a matching config are skipped. Locking ensures concurrent builds
+don't conflict.
+
+```go
+// cmd/by-builder/ingest.go
+
+func ingestCmd() *cobra.Command {
+    var lockfile, lib, storeRoot, refLib string
+    cmd := &cobra.Command{
+        Use: "ingest",
+        RunE: func(cmd *cobra.Command, args []string) error {
+            lf, err := pkgstore.ReadLockfile(lockfile)
+            if err != nil {
+                return err
+            }
+            s := pkgstore.NewStore(storeRoot)
+            s.SetPlatform(pkgstore.PlatformFromLockfile(lf))
+
+            // Load the reference library's package manifest to compare
+            // compound store refs. Only skip ingestion when the reference
+            // lib has the SAME source AND config hash — a version change
+            // or ABI change means the new build was installed in the
+            // staging dir and must be ingested.
+            var refManifest map[string]string
+            if refLib != "" {
+                refManifest, _ = pkgstore.ReadPackageManifest(refLib)
+            }
+
+            // Build the store-manifest as we go — every lockfile
+            // package gets an entry regardless of whether it was
+            // ingested, already in the store, or unchanged in the
+            // reference library. This guarantees the store-manifest
+            // is always complete — no consumer needs to merge it
+            // with another manifest to get the full picture.
+            storeManifest := make(map[string]string)
+
+            for _, entry := range lf.Packages {
+                sourceHash, err := pkgstore.StoreKey(entry)
+                if err != nil {
+                    return err
+                }
+
+                pkgPath := filepath.Join(lib, entry.Package)
+                if !dirExists(pkgPath) {
+                    // Package not in --lib (normal for runtime installs:
+                    // unchanged packages live only in the reference lib).
+                    // Carry the existing compound ref from the reference
+                    // library's .packages.json into the store-manifest
+                    // so it remains complete.
+                    if refManifest != nil {
+                        if ref, ok := refManifest[entry.Package]; ok {
+                            storeManifest[entry.Package] = ref
+                        }
+                    }
+                    continue
+                }
+
+                // Compute config hash from installed DESCRIPTION.
+                descPath := filepath.Join(pkgPath, "DESCRIPTION")
+                configHash, linkingToKeys, sourceCompiled, linkingToNames, err :=
+                    pkgstore.IngestContext(descPath, lf)
+                if err != nil {
+                    return fmt.Errorf("ingest context for %s: %w",
+                        entry.Package, err)
+                }
+
+                // Record in store-manifest regardless of whether the
+                // package needs ingestion.
+                storeManifest[entry.Package] = pkgstore.StoreRef(sourceHash, configHash)
+
+                // Skip packages whose compound ref matches the reference
+                // library — same source AND config already present.
+                expectedRef := pkgstore.StoreRef(sourceHash, configHash)
+                if refManifest != nil && refManifest[entry.Package] == expectedRef {
+                    continue
+                }
+
+                // Check whether this config is fully present in the store.
+                // A config is "fully present" when both the package tree
+                // directory AND the configs.json entry exist. If the
+                // directory exists but configs.json is incomplete (e.g.,
+                // a previous ingest crashed between Rename and
+                // WriteIngestMeta), we fall through to the lock+repair
+                // path below instead of skipping silently — otherwise
+                // the package becomes a perpetual cache miss at populate
+                // time (ResolveConfig can't find it) but is also
+                // perpetually skipped at ingest time (Has returns true).
+                if s.Has(entry.Package, sourceHash, configHash) {
+                    if _, ok := s.ResolveConfig(entry.Package, sourceHash, lf); ok {
+                        continue // fully consistent — skip
+                    }
+                    // Directory exists but metadata incomplete — fall
+                    // through to repair under lock.
+                }
+
+                // Ingest (or repair) under lock (one lock per source hash).
+                // Wrapped in a closure so defer runs at end of each
+                // iteration, not accumulated until function return.
+                if err := func() error {
+                    if err := s.Acquire(cmd.Context(), entry.Package, sourceHash, 30*time.Minute); err != nil {
+                        return fmt.Errorf("acquire lock for %s: %w", entry.Package, err)
+                    }
+                    defer s.Release(entry.Package, sourceHash)
+
+                    if !s.Has(entry.Package, sourceHash, configHash) {
+                        if err := s.Ingest(entry.Package, sourceHash, configHash, pkgPath); err != nil {
+                            return fmt.Errorf("ingest %s: %w", entry.Package, err)
+                        }
+                    }
+                    // Write/repair metadata — idempotent (overwrites
+                    // configs.json entry and config sidecar if they
+                    // already exist).
+                    if err := s.WriteIngestMeta(entry, lf,
+                        sourceHash, configHash, linkingToKeys,
+                        sourceCompiled, linkingToNames); err != nil {
+                        return fmt.Errorf("write ingest meta for %s: %w", entry.Package, err)
+                    }
+                    return nil
+                }(); err != nil {
+                    return err
+                }
+
+                fmt.Fprintf(os.Stderr, "store: ingested %s (config %s)\n",
+                    entry.Package, configHash[:12])
+            }
+
+            // Write store-manifest: the pre-computed {package: "sourceHash/configHash"}
+            // map persisted per-bundle for assembly, refresh comparison, and rollback.
+            return pkgstore.WriteStoreManifest(lib, storeManifest)
+        },
+    }
+    cmd.Flags().StringVar(&lockfile, "lockfile", "", "path to pak.lock")
+    cmd.Flags().StringVar(&lib, "lib", "", "build library path")
+    cmd.Flags().StringVar(&storeRoot, "store", "", "store root path")
+    cmd.Flags().StringVar(&refLib, "reference-lib", "", "skip packages present here (optional)")
+    return cmd
+}
+```
+
+### Caching
+
+The binary is cross-compiled at release time for `linux/amd64` and
+`linux/arm64`. At runtime the server selects the correct binary based
+on `runtime.GOARCH` (the container runs on the same host as the server).
+
+```go
+// internal/buildercache/buildercache.go
+
+// EnsureCached returns the path to the by-builder binary for the
+// current platform. The binary is shipped alongside the server and
+// cached at {cachePath}/by-builder-{version}-linux-{arch}.
+func EnsureCached(cachePath, version string) (string, error) {
+    name := fmt.Sprintf("by-builder-%s-linux-%s", version, runtime.GOARCH)
+    binPath := filepath.Join(cachePath, name)
+    if fileExists(binPath) {
+        return binPath, nil
+    }
+    // Extract from embedded binary or download from release artifacts.
+    // Details depend on the release/distribution strategy.
+    return binPath, extract(binPath, name)
+}
+```
+
+**Cache path:** `{bundle_server_path}/.by-builder-cache/`
+
+The binary is mounted read-only into every build container at
+`/tools/by-builder`.
+
+---
+
+## Step 5: Store-aware build flow
+
+This step retrofits the phase 2-5 R build script to the four-phase
+store-aware pattern described in dep-mgmt.md § Store-Aware Build Flow.
+The only change from phase 2-5 is the insertion of store phases 2–4
+between `lockfile_create()` and `lockfile_install()`. Phases 2 and 4
+are handled by the `by-builder` binary — R only calls pak.
+
+### Four-phase build script
+
+The full build script. This replaces the phase 2-5 build script
+(step 8 of that document). R handles phases 1 and 3 (pak API calls);
+the `by-builder` binary handles phases 2 and 4 (store operations).
+
+**Change from phase 2-5:** bare-script pre-processing is folded into
+this build script, eliminating the separate pre-processing container.
+The R script now has three ref derivation branches: pinned (package
+records → refs), unpinned with DESCRIPTION (`deps::/app`), and bare
+scripts (`scan_deps()` → package names as refs). This saves one
+container startup + R boot cycle for bare-script deploys.
+
+```r
+library(pak, lib.loc = "/pak")
+Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
+
+# ── Read manifest (if present) and configure ─────────────────────
+manifest <- NULL
+if (file.exists("/app/manifest.json")) {
+  # simplifyVector = FALSE: without it, jsonlite simplifies
+  # manifest$packages into a data frame when all records share
+  # the same fields, breaking vapply iteration. See phase-2-5.md.
+  manifest <- jsonlite::fromJSON("/app/manifest.json",
+                                 simplifyVector = FALSE)
+}
+
+if (!is.null(manifest) && length(manifest$repositories) > 0) {
+  repo_urls <- setNames(
+    vapply(manifest$repositories, function(r) {
+      url <- r$URL
+      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", url) &&
+          !grepl("__linux__", url)) {
+        os_rel <- readLines("/etc/os-release")
+        cn <- sub("^VERSION_CODENAME=", "",
+                  grep("^VERSION_CODENAME=", os_rel, value = TRUE))
+        url <- sub("(/cran/|/bioc/)",
+                   paste0("\\1__linux__/", cn, "/"), url)
+      }
+      url
+    }, ""),
+    vapply(manifest$repositories, function(r) r$Name, "")
+  )
+  options(repos = repo_urls)
+}
+
+# ── Derive refs ──────────────────────────────────────────────────
+record_to_ref <- function(rec) {
+  switch(rec$Source,
+    Repository =, Bioconductor = {
+      prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
+      paste0(prefix, rec$Package, "@", rec$Version)
+    },
+    GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
+                      "@", rec$RemoteSha),
+    GitLab =    paste0("gitlab::", rec$RemoteUsername, "/",
+                      rec$RemoteRepo, "@", rec$RemoteSha),
+    Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/",
+                      rec$RemoteRepo, "@", rec$RemoteSha),
+    git    =    paste0("git::", rec$RemoteUrl),
+    stop("Unsupported Source: ", rec$Source)
+  )
+}
+
+if (!is.null(manifest) && !is.null(manifest$packages)) {
+  # Pinned: convert each package record to a pkgdepends ref.
+  refs <- vapply(manifest$packages, record_to_ref, "")
+} else if (!is.null(manifest) && !is.null(manifest$description)) {
+  # Unpinned with DESCRIPTION: pak reads Imports/Depends/Remotes.
+  refs <- "deps::/app"
+} else if (file.exists("/app/DESCRIPTION")) {
+  # DESCRIPTION without manifest (legacy or direct upload).
+  refs <- "deps::/app"
+} else {
+  # Bare scripts: scan for library()/require()/:: calls directly.
+  # No DESCRIPTION synthesis needed — scan_deps() returns package
+  # names which are valid pkgdepends refs (resolved against repos).
+  message("No manifest or DESCRIPTION found — scanning scripts")
+  deps <- pkgdepends::scan_deps(path = "/app", root = "/app")
+  refs <- unique(deps$package[deps$type == "prod"])
+  if (length(refs) == 0) stop("No package dependencies found in scripts")
+}
+
+# Build library lives on the store volume so ingestion (phase 4) is
+# an atomic rename() — no cross-filesystem copy.
+build_uuid <- Sys.getenv("BUILD_UUID")
+build_lib <- file.path("/store", ".builds", build_uuid)
+dir.create(build_lib, recursive = TRUE)
+
+# ── Phase 1: Resolve + solve (no download, no install) ───────────
+pak::lockfile_create(refs,
+  lockfile = file.path(build_lib, "pak.lock"), lib = build_lib)
+
+# ── Phase 2: Check store, pre-populate build library ─────────────
+# by-builder reads the lockfile, computes source hashes, reads
+# configs.json for each package, resolves the matching config hash,
+# and hard-links config hits into the build library.
+rc <- system2("/tools/by-builder", c(
+  "store", "populate",
+  "--lockfile", file.path(build_lib, "pak.lock"),
+  "--lib", build_lib,
+  "--store", "/store"
+))
+if (rc != 0L) {
+  # Populate failure is non-fatal — pak will install everything from
+  # scratch in phase 3. Log the error for diagnostics.
+  message("WARNING: store populate failed (exit ", rc,
+          "); falling back to full install")
+}
+
+# ── Phase 3: Install store misses ────────────────────────────────
+# lockfile_install() scans build_lib (update=TRUE by default),
+# finds pre-populated packages, marks them as installed (type =
+# "installed"), and skips them — no download, no install. Only
+# store misses are downloaded and installed.
+#
+# Verified empirically (pak 0.9.2, R 4.5.2): lockfile_install()
+# decides to skip based on DESCRIPTION files in the target library
+# alone — no pak download cache, metadata cache, or library _cache
+# directory required. Confirmed via two-process test with all pak
+# caches purged between install and re-check.
+pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
+
+# ── Phase 4: Ingest newly installed packages into store ──────────
+# by-builder reads installed DESCRIPTIONs, computes config hashes,
+# creates config directories, updates configs.json, and writes
+# config sidecar files — all under lock.
+rc <- system2("/tools/by-builder", c(
+  "store", "ingest",
+  "--lockfile", file.path(build_lib, "pak.lock"),
+  "--lib", build_lib,
+  "--store", "/store"
+))
+if (rc != 0L) {
+  stop("store ingest failed (exit ", rc,
+       "); store-manifest.json was not written")
+}
+```
+
+For full store hits, phase 3 is a no-op — the build completes in
+seconds. The lockfile drives both the store lookup (phase 2) and the
+installation (phase 3). The store-manifest (output of phase 4) drives
+all downstream operations: worker assembly, refresh comparison, and
+rollback.
+
+### Container mounts (updated from phase 2-5)
+
+```
+/app              (ro)  ← bundle (unpacked, includes manifest.json)
+/pak              (ro)  ← cached pak package
+/pak-cache        (rw)  ← persistent pak download cache (shared across builds)
+/store            (rw)  ← package store root (shared across all builds)
+/tools/by-builder (ro)  ← cached by-builder binary
+```
+
+The per-bundle `/build-lib` mount from phase 2-5 is replaced by
+`/store`. The build library is created inside the store volume at
+`/store/.builds/{uuid}/`, ensuring that store ingestion (phase 4) is
+an atomic `rename()` within the same filesystem.
+
+`/tools/by-builder` is a single static Go binary — no dependencies,
+no runtime. It shares `internal/pkgstore` with the server.
+
+---
+
+## Step 6: Build integration (Go side)
+
+### Updated buildCommand
+
+```go
+// internal/bundle/restore.go
+
+func buildCommand() []string {
+    // The R script is embedded or written to the build container.
+    // It handles three modes (pinned, unpinned with DESCRIPTION,
+    // bare scripts via scan_deps), calls by-builder for store
+    // phases 2 and 4, and reads BUILD_UUID from the environment.
+    rScript := `... (four-phase build script from step 5) ...`
+    return []string{"R", "--vanilla", "-e", rScript}
+}
+```
+
+The `BUILD_UUID` env var is injected into the build container so the R
+script creates the build library at `/store/.builds/{uuid}/` and the Go
+code knows where to find the lockfile afterward.
+
+### Updated buildMounts
+
+```go
+func buildMounts(
+    pakCachePath, bundlePath, storePath, dlCachePath, builderPath string,
+) []backend.MountEntry {
+    return []backend.MountEntry{
+        {Source: bundlePath, Target: "/app", ReadOnly: true},
+        {Source: pakCachePath, Target: "/pak", ReadOnly: true},
+        {Source: dlCachePath, Target: "/pak-cache", ReadOnly: false},
+        {Source: storePath, Target: "/store", ReadOnly: false},
+        {Source: builderPath, Target: "/tools/by-builder", ReadOnly: true},
+    }
+}
+```
+
+Key change from phase 2-5: the per-bundle `/build-lib` mount is
+replaced by the shared store mount at `/store`. The build library
+directory is created by the R script inside the store volume.
+`/tools/by-builder` is the cached Go binary for store operations.
+
+### Updated restore flow
+
+```go
+func runRestore(p RestoreParams) error {
+    p.DB.UpdateBundleStatus(p.BundleID, "building")
+    p.Sender.Write("restoring dependencies...")
+
+    // 1. Ensure pak and by-builder are cached.
+    pakPath, err := pakcache.EnsureInstalled(
+        context.Background(), p.Backend,
+        p.Image, p.PakVersion, p.PakCachePath)
+    if err != nil {
+        return fmt.Errorf("ensure pak: %w", err)
+    }
+    builderPath, err := buildercache.EnsureCached(
+        p.BuilderCachePath, p.BuilderVersion)
+    if err != nil {
+        return fmt.Errorf("ensure by-builder: %w", err)
+    }
+
+    // 2. Resolve manifest from bundle contents.
+    // Returns nil for bare scripts (no manifest.json, renv.lock, or
+    // DESCRIPTION). That's fine — the R build script handles bare
+    // scripts directly via scan_deps(). No separate pre-processing
+    // container needed (change from phase 2-5).
+    m, err := resolveManifest(p.Paths.Unpacked)
+    if err != nil {
+        return fmt.Errorf("resolve manifest: %w", err)
+    }
+
+    // 3. Write manifest.json to unpacked dir (if generated server-side).
+    // For bare scripts (m == nil), no manifest is written — the R
+    // build script detects the absence and runs scan_deps().
+    if m != nil {
+        manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
+        if !fileExists(manifestPath) {
+            if err := m.Write(manifestPath); err != nil {
+                return fmt.Errorf("write manifest: %w", err)
+            }
+        }
+        p.Sender.Write(fmt.Sprintf("build mode: %s", m.BuildMode()))
+    } else {
+        p.Sender.Write("build mode: bare scripts (scan_deps)")
+    }
+
+    // 5. Ensure download cache and store dirs exist.
+    dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
+    os.MkdirAll(dlCachePath, 0o755)
+    os.MkdirAll(p.Store.Root(), 0o755)
+
+    // 6. Generate build UUID for the build library path.
+    buildUUID := uuid.New().String()
+
+    // 7. Run build container.
+    spec := backend.BuildSpec{
+        AppID:    p.AppID,
+        BundleID: p.BundleID,
+        Image:    p.Image,
+        Cmd:      buildCommand(),
+        Mounts:   buildMounts(pakPath, p.Paths.Unpacked, p.Store.Root(), dlCachePath, builderPath),
+        Env:      []string{"BUILD_UUID=" + buildUUID},
+        Labels: map[string]string{
+            "dev.blockyard/managed":   "true",
+            "dev.blockyard/role":      "build",
+            "dev.blockyard/app-id":    p.AppID,
+            "dev.blockyard/bundle-id": p.BundleID,
+        },
+        LogWriter: func(line string) { p.Sender.Write(line) },
+    }
+
+    result, err := p.Backend.Build(context.Background(), spec)
+    if err != nil {
+        return fmt.Errorf("build: %w", err)
+    }
+    if !result.Success {
+        return fmt.Errorf("dependency restore failed (exit %d)", result.ExitCode)
+    }
+
+    // 8. Extract store-manifest and lockfile from the build directory.
+    buildDir := filepath.Join(p.Store.Root(), ".builds", buildUUID)
+    defer os.RemoveAll(buildDir) // clean up temp build dir
+
+    // store-manifest.json is required — it drives assembly and rollback.
+    manifestSrc := filepath.Join(buildDir, "store-manifest.json")
+    manifestDst := filepath.Join(p.Paths.Base, "store-manifest.json")
+    if err := copyFile(manifestSrc, manifestDst); err != nil {
+        return fmt.Errorf("persist store-manifest: %w", err)
+    }
+
+    // Persist a copy as store-manifest.json.build — the immutable
+    // baseline from the original deploy. Never overwritten by refresh.
+    // This is the ultimate rollback target when refresh goes wrong.
+    buildManifest := filepath.Join(p.Paths.Base, "store-manifest.json.build")
+    if err := copyFile(manifestSrc, buildManifest); err != nil {
+        return fmt.Errorf("persist build store-manifest: %w", err)
+    }
+
+    // pak.lock is retained as a debug/audit artifact; extraction failure
+    // is non-fatal.
+    lockfileSrc := filepath.Join(buildDir, "pak.lock")
+    lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
+    if err := copyFile(lockfileSrc, lockfileDst); err != nil {
+        slog.Warn("failed to persist pak lockfile (debug artifact)",
+            "error", err, "bundle_id", p.BundleID)
+    }
+
+    // 9. Set store platform from lockfile (first build bootstraps this).
+    if p.Store.Platform() == "" {
+        lf, err := pkgstore.ReadLockfile(lockfileDst)
+        if err == nil {
+            p.Store.SetPlatform(pkgstore.PlatformFromLockfile(lf))
+        }
+    }
+
+    // 10. Persist manifest alongside bundle.
+    canonicalManifest := filepath.Join(p.Paths.Base, "manifest.json")
+    if err := m.Write(canonicalManifest); err != nil {
+        slog.Warn("failed to persist manifest",
+            "error", err, "bundle_id", p.BundleID)
+    }
+
+    // 11. Activate bundle.
+    if err := p.DB.ActivateBundle(p.AppID, p.BundleID); err != nil {
+        return fmt.Errorf("activate bundle: %w", err)
+    }
+
+    // 12. Enforce retention.
+    bundle.EnforceRetention(p.DB, p.BasePath, p.AppID, p.BundleID, p.Retention)
+
+    return nil
+}
+```
+
+### RestoreParams changes
+
+```go
+type RestoreParams struct {
+    Backend          backend.Backend
+    DB               *db.DB
+    Tasks            *task.Store
+    Sender           task.Sender
+    AppID            string
+    BundleID         string
+    Paths            Paths
+    Image            string
+    PakVersion       string
+    PakCachePath     string
+    BuilderVersion   string  // NEW: by-builder binary version
+    BuilderCachePath string  // NEW: by-builder cache directory
+    Retention        int
+    BasePath         string
+    Store            *pkgstore.Store  // NEW: package store
+    AuditLog         *audit.Log
+    AuditActor       string
+}
+```
+
+### Post-build artifacts
+
+```
+{bundle_server_path}/{app_id}/bundles/{bundle_id}/
+├── unpacked/                  # bundle contents (app.R, manifest.json, ...)
+├── store-manifest.json        # current — drives assembly & rollback
+├── store-manifest.json.build  # immutable baseline from original deploy (never overwritten by refresh)
+├── pak.lock                   # pak lockfile — debug/audit artifact (not parsed at runtime)
+└── manifest.json              # canonical manifest (pinned or unpinned)
+```
+
+The per-bundle `library/` directory from phase 2-5 is no longer
+needed. Workers assemble their libraries from the store at startup.
+The build library is temporary (created under `{store}/.builds/` and
+cleaned up after the store-manifest is extracted).
+
+---
+
+## Step 7: Worker library assembly
+
+At worker startup, the server assembles a per-container library at
+`{store}/.workers/{worker_id}/` by hard-linking packages from the store
+based on the bundle's `store-manifest.json`. The directory is mounted
+into the container at `/lib`. R runs with `.libPaths("/lib")`.
+
+```go
+// internal/pkgstore/assembly.go
+
+// SplitStoreRef splits a compound store ref "sourceHash/configHash"
+// into its two components. Returns an error if the ref is malformed.
+func SplitStoreRef(ref string) (sourceHash, configHash string, err error) {
+    parts := strings.SplitN(ref, "/", 2)
+    if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+        return "", "", fmt.Errorf("malformed store ref: %q", ref)
+    }
+    return parts[0], parts[1], nil
+}
+
+// AssembleLibrary creates a library directory by hard-linking packages
+// from the store based on a pre-computed store-manifest (the
+// {package: "sourceHash/configHash"} map written by `store ingest`).
+// No hash computation or config resolution needed — the manifest
+// entries map directly to store paths. After linking, it writes a
+// .packages.json manifest initialized as a copy of the store-manifest.
+func (s *Store) AssembleLibrary(
+    libDir string, storeManifest map[string]string,
+) (missing []string, err error) {
+    if err := os.MkdirAll(libDir, 0o755); err != nil {
+        return nil, fmt.Errorf("create lib dir: %w", err)
+    }
+
+    for pkg, ref := range storeManifest {
+        sourceHash, configHash, err := SplitStoreRef(ref)
+        if err != nil {
+            return nil, fmt.Errorf("store ref for %s: %w", pkg, err)
+        }
+
+        storePath := s.Path(pkg, sourceHash, configHash)
+        if !dirExists(storePath) {
+            missing = append(missing, pkg)
+            continue
+        }
+
+        destPath := filepath.Join(libDir, pkg)
+        // cp -al: hard-link the package tree.
+        out, cpErr := exec.Command(
+            "cp", "-al", storePath, destPath,
+        ).CombinedOutput()
+        if cpErr != nil {
+            return nil, fmt.Errorf(
+                "hard-link %s: %s: %w", pkg, out, cpErr)
+        }
+
+        // Touch config sidecar to update last-accessed time.
+        s.Touch(pkg, sourceHash, configHash)
+    }
+
+    // Write per-worker package manifest (initialized as a copy of
+    // the bundle's store-manifest).
+    if err := WritePackageManifest(libDir, storeManifest); err != nil {
+        return nil, fmt.Errorf("write package manifest: %w", err)
+    }
+
+    return missing, nil
+}
+
+// WorkerLibDir returns the host-side library directory for a worker.
+func (s *Store) WorkerLibDir(workerID string) string {
+    return filepath.Join(s.root, ".workers", workerID)
+}
+
+// CleanupWorkerLib removes a worker's library directory.
+func (s *Store) CleanupWorkerLib(workerID string) error {
+    dir := s.WorkerLibDir(workerID)
     if _, err := os.Stat(dir); os.IsNotExist(err) {
         return nil
     }
@@ -250,18 +1591,102 @@ func (v *View) Cleanup(workerID string) error {
 }
 ```
 
-**Same-filesystem constraint:** hard links require source and target
-on the same filesystem. Both store and views live under
-`bundle_server_path`, naturally satisfied in all mount modes.
+### Per-worker package manifest
 
-**Mount propagation:** when packages are linked into a running
-worker's view on the host side, they appear inside the container
-immediately — bind mounts share the underlying filesystem. The `ro`
-flag only prevents writes from inside the container.
+Each worker's `/lib` contains a `.packages.json` file that maps every
+installed package to its compound store ref (`sourceHash/configHash`).
+At assembly time, `.packages.json` is initialized as a copy of the
+bundle's store-manifest. It can diverge via runtime package installs.
+This is the source of truth for what's actually installed in that
+specific worker — needed because live installs (phase 2-7) can add
+packages beyond the app-level lockfile. Storing the compound ref
+(not just the source hash) lets conflict detection (phase 2-7) catch
+both version changes and LinkingTo ABI changes.
+
+```json
+{
+  "shiny": "e3b0c44298fc.../a1b2c3d4e5f6...",
+  "ggplot2": "b5bb9d8088f8.../e3b0c44298fc..."
+}
+```
+
+`AssembleLibrary` writes the initial manifest; `UpdatePackageManifest`
+appends entries when packages are installed at runtime.
+
+```go
+// internal/pkgstore/manifest.go
+
+// packageManifestFile is the filename for the per-worker package manifest.
+const packageManifestFile = ".packages.json"
+
+// WritePackageManifest writes a per-worker package manifest to libDir.
+func WritePackageManifest(libDir string, manifest map[string]string) error {
+    data, err := json.MarshalIndent(manifest, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(filepath.Join(libDir, packageManifestFile), data, 0o644)
+}
+
+// ReadPackageManifest reads the per-worker package manifest.
+func ReadPackageManifest(libDir string) (map[string]string, error) {
+    data, err := os.ReadFile(filepath.Join(libDir, packageManifestFile))
+    if err != nil {
+        return nil, err
+    }
+    var manifest map[string]string
+    return manifest, json.Unmarshal(data, &manifest)
+}
+
+// UpdatePackageManifest adds entries to the per-worker package manifest.
+// Existing entries are preserved; additions overwrite on key collision.
+func UpdatePackageManifest(libDir string, additions map[string]string) error {
+    manifest, err := ReadPackageManifest(libDir)
+    if err != nil && !os.IsNotExist(err) {
+        return err
+    }
+    if manifest == nil {
+        manifest = make(map[string]string)
+    }
+    for pkg, key := range additions {
+        manifest[pkg] = key
+    }
+    return WritePackageManifest(libDir, manifest)
+}
+
+// storeManifestFile is the filename for the per-bundle store-manifest.
+const storeManifestFile = "store-manifest.json"
+
+// WriteStoreManifest writes the store-manifest ({package: "sourceHash/configHash"})
+// to the given directory. Called by `store ingest` at the end of a build.
+func WriteStoreManifest(dir string, manifest map[string]string) error {
+    data, err := json.MarshalIndent(manifest, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(filepath.Join(dir, storeManifestFile), data, 0o644)
+}
+
+// ReadStoreManifest reads a store-manifest from the given path.
+// The path should be the full file path (e.g., "{bundle}/store-manifest.json").
+func ReadStoreManifest(path string) (map[string]string, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil, err
+    }
+    var manifest map[string]string
+    return manifest, json.Unmarshal(data, &manifest)
+}
+```
+
+A single mutable library is simpler than a dual read-only/read-write
+split: no `.libPaths()` shadowing semantics, no question about which
+library a package lives in, and runtime additions (phase 2-7) go into
+the same directory. See dep-mgmt.md § Design Decisions.
 
 ---
 
-## Step 4: Worker lifecycle integration
+## Step 8: Worker lifecycle integration
 
 ### WorkerSpec changes
 
@@ -270,70 +1695,145 @@ flag only prevents writes from inside the container.
 
 type WorkerSpec struct {
     // ... existing fields ...
-    ExtraLibPath string // server-side path to extra-lib view dir; empty if unused
+    LibDir      string // server-side path to per-worker lib dir; empty if no store
+    TransferDir string // server-side path to per-worker transfer dir (phase 2-7)
 }
 ```
 
+`LibDir` replaces the previous `LibraryPath` (per-bundle library) with
+a per-worker library (assembled from the store).
+
+`TransferDir` is a pre-created directory for container transfer
+signaling (phase 2-7). Mounted read-write into every worker at
+`/transfer` so the R session can write board state there if a version
+conflict requires a container swap. Empty for most workers' lifetime.
+
 ### WorkerMounts
 
-Extend `WorkerMounts` to include the extra-lib mount when set:
+Extend `WorkerMounts` to include the assembled library and transfer
+directory:
 
 ```go
 func (mc MountConfig) WorkerMounts(
-    bundlePath, libraryPath, workerMount, extraLibPath string,
+    bundlePath, libDir, transferDir, workerMount string,
 ) (binds []string, mounts []mount.Mount) {
-    // ... existing bundle + library mount logic ...
+    // Bundle mount (read-only).
+    // ... existing logic ...
 
-    if extraLibPath != "" {
+    // Library mount (read-only from inside the container). Runtime
+    // package additions (phase 2-7) are hardlinked from the host side
+    // by the server — host-side writes are visible through the bind
+    // mount regardless of the ro flag. Making it ro prevents
+    // install.packages() from inside R, which is correct since
+    // installations must go through the server's packages API.
+    if libDir != "" {
         // same translation logic as other mounts (Volume/Bind/Native)
+        // mount at /lib, read-only
     }
+
+    // Transfer mount (read-write). Pre-created at spawn time for
+    // container transfer signaling (phase 2-7). The R session writes
+    // board.json here when a version conflict requires a container
+    // swap. Empty until a transfer is triggered.
+    if transferDir != "" {
+        // mount at /transfer, read-write
+    }
+
     return binds, mounts
 }
 ```
 
 ### R_LIBS
 
-Update `R_LIBS` in `createWorkerContainer` to search `/extra-lib`
-first:
+Update `R_LIBS` in `createWorkerContainer` to use the single library:
 
 ```go
-"R_LIBS=/extra-lib:/blockyard-lib"
+"R_LIBS=/lib"
 ```
 
-When `/extra-lib` is empty, R silently ignores it. Live-installed
-packages shadow the base library because `/extra-lib` comes first.
+One library, one search path. When `/lib` is empty (no store), R sees
+no packages — the same as a fresh install.
 
 ### Spawn integration
 
-In `spawnWorker()`, create the view directory and pass the path:
+In `spawnWorker()`, assemble the library from the store before starting
+the container:
 
 ```go
-var extraLibPath string
-if srv.PkgView != nil {
-    if err := srv.PkgView.Create(wid); err != nil {
-        return "", "", fmt.Errorf("create pkg view: %w", err)
+var libDir string
+if srv.PkgStore != nil {
+    wid := workerID
+    libDir = srv.PkgStore.WorkerLibDir(wid)
+
+    // Read the bundle's store-manifest.
+    manifestPath := filepath.Join(bundlePaths.Base, "store-manifest.json")
+    storeManifest, err := pkgstore.ReadStoreManifest(manifestPath)
+    if err != nil {
+        return "", "", fmt.Errorf("read store-manifest: %w", err)
     }
-    extraLibPath = srv.PkgView.Dir(wid)
+
+    // Assemble library from store.
+    missing, err := srv.PkgStore.AssembleLibrary(libDir, storeManifest)
+    if err != nil {
+        return "", "", fmt.Errorf("assemble library: %w", err)
+    }
+    if len(missing) > 0 {
+        slog.Warn("worker library: missing store entries",
+            "worker_id", wid, "missing", missing)
+    }
 }
+
+// Pre-create transfer directory for container transfer signaling
+// (phase 2-7). Mounted rw at /transfer inside the container.
+// TransferDir returns {bundle_server_path}/.transfers/{worker_id}.
+transferDir := srv.TransferDir(workerID)
+os.MkdirAll(transferDir, 0o755)
 
 spec := backend.WorkerSpec{
     // ... existing fields ...
-    ExtraLibPath: extraLibPath,
+    LibDir:      libDir,
+    TransferDir: transferDir,
 }
 ```
 
 ### Eviction cleanup
 
-In `EvictWorker()`, clean up the view after the container stops:
+In `EvictWorker()`, clean up the worker's library after the container
+stops:
 
 ```go
-if srv.PkgView != nil {
-    if err := srv.PkgView.Cleanup(workerID); err != nil {
-        slog.Warn("evict: failed to clean pkg view",
+if srv.PkgStore != nil {
+    if err := srv.PkgStore.CleanupWorkerLib(workerID); err != nil {
+        slog.Warn("evict: failed to clean worker lib",
             "worker_id", workerID, "error", err)
     }
 }
+// Clean up transfer directory.
+os.RemoveAll(srv.TransferDir(workerID))
 ```
+
+### Startup cleanup
+
+Remove orphaned worker library directories from previous runs:
+
+```go
+if srv.PkgStore != nil {
+    workersDir := filepath.Join(srv.PkgStore.Root(), ".workers")
+    entries, _ := os.ReadDir(workersDir)
+    for _, e := range entries {
+        if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+            continue
+        }
+        if _, found := srv.Workers.Get(e.Name()); !found {
+            os.RemoveAll(filepath.Join(workersDir, e.Name()))
+        }
+    }
+}
+```
+
+---
+
+## Step 9: Server struct changes
 
 ### Server struct
 
@@ -341,282 +1841,475 @@ if srv.PkgView != nil {
 type Server struct {
     // ... existing fields ...
     PkgStore *pkgstore.Store // nil when not available
-    PkgView  *pkgstore.View // nil when not available
 }
 ```
 
-### Startup cleanup
+### Initialization
 
-Remove orphaned view directories from previous runs:
+At server startup, create the store with a default root path:
 
 ```go
-if srv.PkgView != nil {
-    entries, _ := os.ReadDir(srv.PkgView.BasePath())
-    for _, e := range entries {
-        if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-            continue
-        }
-        if _, found := srv.Workers.Get(e.Name()); !found {
-            os.RemoveAll(filepath.Join(srv.PkgView.BasePath(), e.Name()))
-        }
-    }
+storePath := filepath.Join(cfg.Docker.BundleServerPath, ".pkg-store")
+os.MkdirAll(storePath, 0o755)
+srv.PkgStore = pkgstore.NewStore(storePath)
+
+// Recover platform from existing lockfiles or store directories.
+if platform := recoverPlatform(storePath, cfg); platform != "" {
+    srv.PkgStore.SetPlatform(platform)
 }
 ```
+
+`recoverPlatform()` scans the store root for existing platform
+directories (e.g., `4.5-x86_64-pc-linux-gnu/`) or reads a cached platform
+file written after the first successful build.
 
 ---
 
-## Step 5: Runtime assembly API
+## Step 10: Store eviction
 
-### Endpoint
+A background sweeper removes config entries whose sidecar `mtime`
+(last-accessed time) exceeds a configurable retention window. The
+store is append-only during normal operation — eviction is the only
+deletion path.
 
-```
-POST /api/v1/packages
-{
-    "worker_id": "...",
-    "packages": [
-        { "name": "ggplot2", "version": "3.5.0", "source": "cran" },
-        { "name": "blockr.ggplot" }
-    ]
-}
-→ 200 { "installed": [...], "missing": [...] }
-→ 400 invalid request
-→ 404 worker not found
-→ 501 package store not enabled
-```
+### Config
 
-The endpoint looks up each requested package in the store. Packages
-found in the store are hard-linked into the worker's view (instant).
-Packages not found are returned in a `missing` list — the caller
-decides what to do (deploy an app that includes them, or accept the
-gap).
+Add `StoreRetention` to the Docker/storage config:
 
 ```go
-// internal/api/packages.go
+type DockerConfig struct {
+    // ... existing fields ...
+    StoreRetention Duration `toml:"store_retention"` // 0 = disabled
+}
+```
 
-func InstallPackages(srv *server.Server) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        if srv.PkgStore == nil {
-            http.Error(w, "package store not enabled",
-                http.StatusNotImplemented)
-            return
-        }
+**No default.** Same pattern as `SoftDeleteRetention` in phase 2-2:
+`StoreRetention` has no entry in `applyDefaults()`. Zero (the
+absent/unset value) means "eviction disabled — store grows
+unboundedly." Operators opt in by setting a positive retention:
 
-        var body installPackagesRequest
-        if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-            badRequest(w, "invalid JSON body")
-            return
-        }
-        // ... validate worker_id, packages, auth ...
+```toml
+[docker]
+# How long unused packages remain in the store before eviction.
+# Unset or 0 = disabled (store grows indefinitely).
+store_retention = "720h"   # 30 days
+```
 
-        worker, found := srv.Workers.Get(body.WorkerID)
-        if !found {
-            notFound(w, "worker not found")
-            return
-        }
+Environment variable: `BLOCKYARD_DOCKER_STORE_RETENTION`.
 
-        var installed, missing []pkgResult
-        for _, pkg := range body.Packages {
-            source := pkg.Source
-            if source == "" {
-                source = "cran"
-            }
+### Eviction logic
 
-            if pkg.Version != "" && srv.PkgStore.Has(pkg.Name, pkg.Version, source) {
-                storePath := srv.PkgStore.Path(pkg.Name, pkg.Version, source)
-                if err := srv.PkgView.Link(
-                    body.WorkerID, pkg.Name, storePath,
-                ); err != nil {
-                    serverError(w, fmt.Sprintf("link %s: %s", pkg.Name, err))
-                    return
-                }
-                installed = append(installed, pkgResult{
-                    Name: pkg.Name, Version: pkg.Version, Source: source,
-                })
-            } else {
-                // Version not specified or not in store — try to find
-                // any version of this package.
-                if found := srv.PkgStore.FindLatest(pkg.Name, source); found != nil {
-                    if err := srv.PkgView.Link(
-                        body.WorkerID, pkg.Name, found.Path,
-                    ); err != nil {
-                        serverError(w, fmt.Sprintf("link %s: %s", pkg.Name, err))
-                        return
-                    }
-                    installed = append(installed, pkgResult{
-                        Name: found.Name, Version: found.Version, Source: found.Source,
-                    })
-                } else {
-                    missing = append(missing, pkgResult{
-                        Name: pkg.Name, Version: pkg.Version, Source: source,
-                    })
-                }
-            }
-        }
+```go
+// internal/pkgstore/evict.go
 
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(installPackagesResponse{
-            Installed: installed,
-            Missing:   missing,
-        })
+// EvictStale removes config entries whose sidecar mtime is older than
+// the retention cutoff. Returns the number of configs removed.
+func (s *Store) EvictStale(retention time.Duration) (int, error) {
+    if retention <= 0 {
+        return 0, nil
     }
-}
-```
+    cutoff := time.Now().Add(-retention)
+    removed := 0
 
-### FindLatest
-
-```go
-// FindLatest returns the newest version of a package in the store,
-// or nil if not found. Uses directory modification time as a proxy
-// for recency.
-func (s *Store) FindLatest(pkg, source string) *PkgInfo {
-    pkgDir := filepath.Join(s.basePath, pkg)
-    entries, err := os.ReadDir(pkgDir)
+    platformDir := filepath.Join(s.root, s.platform)
+    packages, err := os.ReadDir(platformDir)
     if err != nil {
-        return nil
+        if os.IsNotExist(err) {
+            return 0, nil
+        }
+        return 0, err
     }
-    suffix := "-" + source
-    var best *PkgInfo
-    var bestTime time.Time
-    for _, e := range entries {
-        if !e.IsDir() || !strings.HasSuffix(e.Name(), suffix) {
+
+    for _, pkgEntry := range packages {
+        if !pkgEntry.IsDir() || strings.HasPrefix(pkgEntry.Name(), ".") {
             continue
         }
-        info, err := e.Info()
+        pkgDir := filepath.Join(platformDir, pkgEntry.Name())
+        sourceHashes, _ := os.ReadDir(pkgDir)
+
+        for _, shEntry := range sourceHashes {
+            if !shEntry.IsDir() {
+                continue
+            }
+            shDir := filepath.Join(pkgDir, shEntry.Name())
+            n, err := s.evictSourceHash(pkgEntry.Name(), shEntry.Name(), shDir, cutoff)
+            if err != nil {
+                slog.Warn("eviction error",
+                    "package", pkgEntry.Name(),
+                    "source_hash", shEntry.Name(),
+                    "error", err)
+                continue
+            }
+            removed += n
+        }
+
+        // Remove empty package directory.
+        removeIfEmpty(pkgDir)
+    }
+    return removed, nil
+}
+
+// evictSourceHash removes expired config entries under a single source
+// hash directory. If all configs are removed, removes the source hash
+// directory too.
+func (s *Store) evictSourceHash(pkg, sourceHash, shDir string, cutoff time.Time) (int, error) {
+    removed := 0
+    entries, err := os.ReadDir(shDir)
+    if err != nil {
+        return 0, err
+    }
+
+    for _, entry := range entries {
+        // Config sidecar files are {config_hash}.json.
+        if !strings.HasSuffix(entry.Name(), ".json") || entry.Name() == "configs.json" {
+            continue
+        }
+        configHash := strings.TrimSuffix(entry.Name(), ".json")
+
+        info, err := entry.Info()
         if err != nil {
             continue
         }
-        if best == nil || info.ModTime().After(bestTime) {
-            version := strings.TrimSuffix(e.Name(), suffix)
-            best = &PkgInfo{Name: pkg, Version: version, Source: source}
-            best.Path = filepath.Join(pkgDir, e.Name())
-            bestTime = info.ModTime()
+        if info.ModTime().After(cutoff) {
+            continue // still fresh
         }
+
+        // Remove config directory and sidecar.
+        configDir := filepath.Join(shDir, configHash)
+        os.RemoveAll(configDir)
+        os.Remove(filepath.Join(shDir, entry.Name()))
+
+        // Update configs.json: remove the config entry.
+        configsPath := s.ConfigsPath(pkg, sourceHash)
+        if sc, err := ReadStoreConfigs(configsPath); err == nil {
+            delete(sc.Configs, configHash)
+            if len(sc.Configs) == 0 {
+                os.Remove(configsPath)
+            } else {
+                WriteStoreConfigs(configsPath, sc)
+            }
+        }
+
+        removed++
+        slog.Info("evicted stale config",
+            "package", pkg,
+            "source_hash", sourceHash,
+            "config_hash", configHash,
+            "last_accessed", info.ModTime())
     }
-    return best
+
+    // Remove empty source hash directory.
+    removeIfEmpty(shDir)
+    return removed, nil
+}
+
+func removeIfEmpty(dir string) {
+    entries, err := os.ReadDir(dir)
+    if err == nil && len(entries) == 0 {
+        os.Remove(dir)
+    }
 }
 ```
 
-### Route registration
+Eviction operates at the **config** level — each config entry
+(a distinct compilation of a package) is evicted independently based
+on its own sidecar mtime. When all configs for a source hash are
+evicted, the source hash directory is removed. When all source hashes
+for a package are evicted, the package directory is removed.
+
+### Sweeper goroutine
 
 ```go
-r.Post("/packages", InstallPackages(srv))
+// internal/pkgstore/evict.go
+
+// SpawnEvictionSweeper starts a background goroutine that periodically
+// evicts stale store entries. Same pattern as the soft-delete sweeper
+// in phase 2-2.
+func SpawnEvictionSweeper(ctx context.Context, store *Store, retention time.Duration) {
+    if retention <= 0 {
+        return // eviction disabled
+    }
+
+    // Sweep daily. Retention is measured in days/weeks, so hourly
+    // sweeps would waste cycles. Daily catches entries within ~1 day
+    // of expiry, which is fine for a 30-day default window.
+    interval := 24 * time.Hour
+    if retention < 24*time.Hour {
+        // For very short retention (testing), sweep more often.
+        interval = retention / 2
+    }
+
+    go func() {
+        ticker := time.NewTicker(interval)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                n, err := store.EvictStale(retention)
+                if err != nil {
+                    slog.Warn("store eviction sweep error", "error", err)
+                } else if n > 0 {
+                    slog.Info("store eviction sweep complete", "removed", n)
+                }
+            }
+        }
+    }()
+}
 ```
+
+Wired up in `main.go` alongside the soft-delete sweeper:
+
+```go
+if cfg.Docker.StoreRetention > 0 {
+    pkgstore.SpawnEvictionSweeper(ctx, srv.PkgStore, cfg.Docker.StoreRetention)
+}
+```
+
+### Eviction safety
+
+- **No locking needed for reads.** The sweeper only reads sidecar
+  mtimes. Concurrent `Touch()` calls from builds/assembly update the
+  mtime — the sweeper sees the latest value on next scan.
+- **Concurrent ingestion.** If a build is ingesting a config while the
+  sweeper is removing stale entries for the same source hash, the
+  ingestion lock prevents races on `configs.json`. The sweeper does
+  not acquire locks — it operates on config entries that haven't been
+  accessed in 30+ days, which means no concurrent ingestion for the
+  same config. If a race does occur (ingestion starts between the
+  sweeper's mtime check and removal), the worst case is that a
+  freshly-ingested config is removed and will be re-ingested on the
+  next build. This is harmless.
+- **Active workers unaffected.** Worker libraries are assembled via
+  hard links. Once hard-linked, the files are independent of the
+  store entry. Evicting a store entry does not affect running workers.
 
 ---
 
-## Step 6: Worker authentication
-
-The R app inside a worker needs to call the package assembly API.
-HMAC-based worker tokens provide lightweight, stateless auth for
-in-container callers.
-
-```go
-// internal/auth/workertoken.go
-
-func WorkerToken(sessionSecret []byte, workerID string) string {
-    mac := hmac.New(sha256.New, sessionSecret)
-    mac.Write([]byte("blockyard-worker:" + workerID))
-    return hex.EncodeToString(mac.Sum(nil))
-}
-
-func ValidateWorkerToken(sessionSecret []byte, workerID, token string) bool {
-    expected := WorkerToken(sessionSecret, workerID)
-    return hmac.Equal([]byte(expected), []byte(token))
-}
-```
-
-Injected at spawn time as `BLOCKYARD_WORKER_TOKEN` and
-`BLOCKYARD_WORKER_ID` environment variables. The API accepts either
-standard auth (session cookie / PAT) or
-`Authorization: Worker <id>:<token>`.
-
-R side:
-
-```r
-worker_id <- Sys.getenv("BLOCKYARD_WORKER_ID")
-token     <- Sys.getenv("BLOCKYARD_WORKER_TOKEN")
-api_url   <- Sys.getenv("BLOCKYARD_API_URL")
-
-resp <- httr::POST(
-    paste0(api_url, "/api/v1/packages"),
-    body = list(worker_id = worker_id,
-                packages = list(list(name = "ggplot2"))),
-    encode = "json",
-    httr::add_headers(
-        Authorization = paste0("Worker ", worker_id, ":", token)))
-
-# resp$missing tells the app which packages aren't available.
-```
-
----
-
-## Step 7: Tests
+## Step 11: Tests
 
 ### Unit tests
 
-**Package store:**
-- `TestStoreKey` — format: `{name}/{version}-{source}`.
-- `TestStoreHas` — empty store → false; create entry → true.
-- `TestIngest` — create temp library with mock packages, ingest,
-  verify store entries created with correct hard links.
-- `TestIngestIdempotent` — ingest same library twice, second is no-op.
-- `TestFindLatest` — multiple versions, returns most recent.
-- `TestReadPkgInfo` — valid and invalid DESCRIPTION files.
+**Store key:**
+- `TestStoreKey_Standard` — `standard` type: includes package, version,
+  sha256.
+- `TestStoreKey_GitHub` — `github` type: includes package, RemoteSha,
+  RemoteSubdir.
+- `TestStoreKey_GitHubSubdir` — subdir included in hash input.
+- `TestStoreKey_UnsupportedType` — `url` type returns error.
+**Store operations:**
+- `TestStoreHas` — empty store returns false; after Ingest returns true.
+- `TestStoreIngest` — creates entry at correct path; source directory
+  no longer exists (rename).
+- `TestStoreIngestIdempotent` — second Ingest is a no-op.
+- `TestStorePath` — format:
+  `{root}/{platform}/{package}/{source_hash}/{config_hash}`.
+- `TestStoreConfigsPath` — format:
+  `{root}/{platform}/{package}/{source_hash}/configs.json`.
+- `TestStoreConfigMetaPath` — format:
+  `{root}/{platform}/{package}/{source_hash}/{config_hash}.json`.
+- `TestStoreTouch` — mtime of config sidecar updated.
 
-**Views:**
-- `TestViewCreate`, `TestViewLink`, `TestViewCleanup`,
-  `TestViewLinkIdempotent` — same as before.
+**Config hash:**
+- `TestConfigHash_Empty` — empty map produces canonical empty hash.
+- `TestConfigHash_SingleDep` — deterministic for single LinkingTo dep.
+- `TestConfigHash_MultipleDeps` — sorted by package name, deterministic.
+- `TestConfigHash_OrderIndependent` — same deps in different order
+  produce same hash.
 
-**Worker token:**
-- `TestWorkerToken`, `TestWorkerTokenWrongSecret`,
-  `TestWorkerTokenWrongWorkerID`.
+**Store metadata:**
+- `TestWriteReadStoreConfigs` — round-trip for configs.json.
+- `TestStoreConfigsWithMultipleConfigs` — multiple config entries
+  preserved.
+- `TestWriteReadConfigMeta` — round-trip for config sidecar.
+
+**Config resolution:**
+- `TestResolveConfig_NoConfigsFile` — returns false when no
+  configs.json exists.
+- `TestResolveConfig_MatchingConfig` — returns correct config hash
+  when LinkingTo store keys match.
+- `TestResolveConfig_NoMatchingConfig` — returns false when LinkingTo
+  store keys differ from all existing configs.
+- `TestResolveConfig_EmptyLinkingTo` — matches canonical empty config
+  hash.
+
+**Ingest context:**
+- `TestIngestContext_NoLinkingTo` — returns empty config hash,
+  source_compiled from DESCRIPTION.
+- `TestIngestContext_WithLinkingTo` — returns correct config hash,
+  sorted linkingto names, store key map.
+
+**Lockfile parsing and validation:**
+- `TestReadLockfile` — valid pak lockfile JSON parses and validates.
+- `TestReadLockfile_UnsupportedVersion` — `lockfile_version: 2` rejected.
+- `TestReadLockfile_EmptyPackages` — rejected (no packages).
+- `TestLockfileEntryValidate_Standard` — requires `sha256`.
+- `TestLockfileEntryValidate_StandardMissingSha` — rejected with clear error.
+- `TestLockfileEntryValidate_GitHub` — requires `metadata.RemoteSha`.
+- `TestLockfileEntryValidate_MissingType` — rejected when both `type` and
+  `metadata.RemoteType` are empty.
+- `TestLockfileEntryValidate_MissingRversion` — rejected.
+- `TestLockfileEntryValidate_UnsupportedType` — `"url"` rejected with type in error.
+- `TestPlatformFromLockfile` — per-package `rversion: "4.5"`, `platform: "x86_64-pc-linux-gnu"` → `"4.5-x86_64-pc-linux-gnu"`.
+
+**Library assembly:**
+- `TestAssembleLibrary` — creates lib dir with hard-linked packages.
+- `TestAssembleLibraryMissing` — missing store entries returned, others
+  still linked.
+- `TestAssembleLibraryEmpty` — empty lockfile produces empty lib dir.
+
+**Worker lib management:**
+- `TestWorkerLibDir` — format: `{root}/.workers/{worker_id}`.
+- `TestCleanupWorkerLib` — removes directory.
+- `TestCleanupWorkerLibNonexistent` — no error.
+
+**by-builder CLI:**
+- `TestPopulateCommand` — reads lockfile, hard-links store hits into
+  build lib, skips misses.
+- `TestPopulateWithReferenceLib` — packages in reference lib skipped.
+- `TestPopulateABIMismatch` — source-compiled package with changed
+  LinkingTo config not found → treated as miss.
+- `TestPopulateMultiConfig` — package with multiple configs, correct
+  one selected based on current lockfile.
+- `TestIngestCommand` — ingests new packages under lock, writes
+  configs.json and config sidecar.
+- `TestIngestIdempotent` — second ingest of same config is a no-op
+  (lock + re-check).
+- `TestIngestNewConfig` — second ingest of same source hash with
+  different LinkingTo store keys adds new config entry.
+- `TestIngestConcurrent` — two ingest processes for the same package,
+  only one writes.
+
+**Store eviction:**
+- `TestEvictStale_RemovesExpired` — config with old mtime is removed;
+  config directory, sidecar, and configs.json entry all gone.
+- `TestEvictStale_PreservesFresh` — config with recent mtime is kept.
+- `TestEvictStale_MixedConfigs` — source hash with two configs, one
+  expired and one fresh: only expired config removed, configs.json
+  updated to retain the fresh entry.
+- `TestEvictStale_CleansEmptyDirs` — after all configs for a source
+  hash are evicted, source hash directory and package directory are
+  removed.
+- `TestEvictStale_DisabledWhenZero` — retention ≤ 0 returns
+  immediately with zero removals.
+- `TestEvictStale_EmptyStore` — no error on empty or nonexistent
+  platform directory.
+- `TestSpawnEvictionSweeper_Fires` — with short retention, verify
+  sweeper runs and removes stale entries.
+- `TestSpawnEvictionSweeper_DisabledWhenZero` — zero retention does
+  not start goroutine.
 
 ### Integration tests
 
-- Deploy app → verify packages ingested into store.
-- Deploy second app with overlapping deps → verify no duplicate store
-  entries (hard links to same inodes).
-- POST /api/v1/packages for a package in the store → 200, installed.
-- POST for a package not in the store → 200, missing list populated.
-- POST for non-existent worker → 404.
-- Worker token auth works; wrong token → rejected.
+- **Store-aware build (full cache miss):** deploy app with no store
+  entries → build runs all 4 phases → verify packages ingested into
+  store → verify lockfile persisted.
+- **Store-aware build (full cache hit):** deploy same app again (same
+  manifest) → verify phase 3 is no-op (no packages downloaded or
+  installed) → build completes in seconds.
+- **Store-aware build (partial hit):** deploy app that shares some
+  packages with a prior build → verify shared packages are store hits,
+  new packages installed and ingested.
+- **Concurrent builds:** two builds needing the same package → verify
+  only one installs it, the other waits and uses the store entry.
+- **Worker library assembly:** deploy app → spawn worker → verify
+  `/lib` populated from store via hard links → verify R can load
+  packages.
+- **Worker eviction cleanup:** spawn worker → evict → verify worker
+  lib directory removed.
+- **ABI safety (multi-config):** ingest source-compiled package with
+  LinkingTo deps → change linked dependency version → verify original
+  config is not matched → pak recompiles → verify new config added
+  to configs.json → verify both configs coexist in the store.
+- **Store eviction:** build two apps → advance time past retention for
+  first app's packages → run eviction → verify first app's store
+  entries removed, second app's entries retained → verify second app's
+  worker library still assembles correctly.
+
+### E2E tests
+
+- Deploy app → build populates store → spawn worker → worker library
+  assembled from store → app runs correctly.
+- Second deploy of same app → build uses full store hits → verify
+  faster build time.
+- Delete store → re-deploy → verify clean build works.
+- **Host-side write to ro bind mount:** spawn container with a
+  read-only bind mount → write a file on the host side into the
+  underlying directory → verify the file is visible inside the
+  container. Validates the assumption that runtime package hardlinks
+  (written by the server on the host) are visible through the
+  worker's ro `/lib` mount.
 
 ---
 
 ## Design Decisions
 
-1. **Builds populate the store; runtime consumes it.** The store is
-   filled during dependency restore — a process that already takes
-   seconds to minutes. Adding store ingestion is near-free (hard links
-   take milliseconds). Runtime assembly is always instant (hard-link
-   from store to view). No build containers at runtime.
+1. **Build library inside the store volume.** The build library is
+   created at `/store/.builds/{uuid}/` rather than a separate per-bundle
+   directory. This ensures all file operations (hard-link pre-population,
+   atomic rename for ingestion) happen within a single filesystem. No
+   cross-filesystem copies needed.
 
-2. **Store misses return `missing`, not errors.** The API reports which
-   packages weren't found rather than failing. The caller (R app)
-   decides how to handle gaps — degrade gracefully, show a message, or
-   request a redeploy. This keeps the runtime path non-blocking.
+2. **Store-manifest extraction, not library persistence.** Phase 2-5
+   persists the installed library alongside the bundle and mounts it
+   directly into workers. Phase 2-6 discards the build library after
+   extracting the store-manifest. Workers reconstruct their library
+   from the store on demand. This decouples worker libraries from build
+   artifacts — any worker's library can be reconstructed from its
+   store-manifest at any time, and the store serves as the single
+   source of truth.
 
-3. **No R version in store key.** The server runs a single R version.
-   On R upgrades, clear the store. This avoids startup-time R version
-   detection and keeps keys simple.
+3. **`mkdir` for locking, not `flock`.** `flock()` is not reliable
+   across all NFS implementations and Docker volume drivers. `mkdir` is
+   atomic on all POSIX filesystems. Stale lock detection uses a simple
+   age threshold (30 minutes) rather than PID checks, which don't work
+   across container PID namespaces.
 
-4. **`cp -al` for both ingest and view linking.** Hard links give zero
-   disk overhead and instant creation. The same-filesystem constraint
-   is naturally satisfied (everything under `bundle_server_path`).
+4. **All store operations in Go via `by-builder`.** Store checks,
+   ingestion, locking, ABI checks, and metadata are all implemented
+   in Go (`internal/pkgstore`) and run inside build containers via the
+   `by-builder` binary. R scripts only call pak APIs (`lockfile_create`,
+   `lockfile_install`) and shell out to `by-builder` for store phases.
+   This eliminates the cross-language parity risk for `store_key()` —
+   the hash function exists only in Go. Worker library assembly also
+   uses the same Go package on the host side.
 
-5. **No package cleanup/GC in v2.** Append-only. At ~10–50 MB per
-   package, hundreds of packages use only a few GB. Store cleanup
-   (LRU eviction, size limits) is a v3 concern.
+5. **`by-builder` binary, not a second container.** Store operations
+   run as a mounted Go binary inside the build container rather than
+   in a separate container invocation. This keeps the build as a
+   single container lifecycle (no extra startup overhead) while keeping
+   R scripts minimal. The binary is cross-compiled at release time for
+   `linux/amd64` and `linux/arm64`, cached on the server (same pattern
+   as pak), and selected at runtime via `runtime.GOARCH`.
 
-6. **`R_LIBS` always includes `/extra-lib`.** Even without the package
-   store enabled, R silently ignores non-existent paths. No
-   conditional logic needed.
+6. **Platform prefix from the start.** The store key includes
+   `{R_major}.{R_minor}-linux-{arch}` even though the server currently
+   runs a single R version. This avoids migration when user-supplied
+   build images or multi-arch support are added. See dep-mgmt.md
+   § Platform-aware store key.
 
-## Open Questions
+7. **Worker libraries under the store root.** Per-worker library
+   directories live at `{store}/.workers/{worker_id}/` to guarantee
+   same-filesystem placement for hard links. The alternative — a
+   separate directory under `bundle_server_path` — would require
+   ensuring both paths are on the same filesystem, adding a
+   configuration constraint.
 
-1. **Store miss at runtime — future options.** v2 returns missing
-   packages to the caller. Future phases could add: (a) worker-side
-   `install.packages()` into a rw extra-lib mount for immediate
-   fallback, (b) async background build that populates the store, or
-   (c) a "pre-populate store" admin API. The right answer depends on
-   real-world usage patterns.
+8. **No per-bundle library directory.** The `library/` subdirectory
+   from phase 2-5 is removed. The store-manifest is the portable
+   record; the lockfile is retained only for debug/audit. The library
+   is reconstructed on demand from the store. This reduces disk usage
+   (packages stored once in the store, not once per bundle plus once
+   in the store) and simplifies bundle cleanup.
+
+9. **Bare-script pre-processing folded into the build script.**
+   Phase 2-5 runs a separate pre-processing container for
+   `pkgdepends::scan_deps()` to generate a synthetic DESCRIPTION,
+   then runs the build container. Phase 2-6 eliminates the separate
+   container — the build R script calls `scan_deps()` directly when
+   no manifest or DESCRIPTION is found, using the returned package
+   names as refs. This saves one container startup + R boot cycle
+   per bare-script deploy. `scan_deps(path, root)` accepts any
+   directory of R files — no package structure needed. The
+   `preProcess()` function from phase 2-5 is removed.

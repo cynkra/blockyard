@@ -11,8 +11,9 @@ and adds usability improvements, safety nets, and blockr-specific features:
 dual-database support (SQLite + PostgreSQL), bundle rollback, soft-delete,
 resource limit enforcement, scale-to-zero with pre-warming, a cold-start
 loading page, board storage (PostgreSQL + PostgREST + vault Identity OIDC),
-build pipeline modernization (rv → pak), a content-addressable package
-store, web UI expansion, and a CLI tool.
+manifest-driven dependency management (pak build pipeline, content-addressable
+package store, runtime assembly, dependency refresh), web UI expansion, and
+a CLI tool.
 
 ## New Packages
 
@@ -30,9 +31,15 @@ internal/
 │   ├── db.go                   # refactored: sqlx + dialect abstraction
 │   ├── dialect.go              # SQLite/PostgreSQL dialect helpers
 │   └── ...
+├── manifest/
+│   ├── manifest.go             # manifest types, validation, dispatch
+│   ├── renvlock.go             # renv.lock → pinned manifest (pure Go)
+│   └── description.go          # DESCRIPTION → unpinned manifest (pure Go)
+├── pakcache/
+│   └── pakcache.go             # pak binary cache (replaces rvcache)
 ├── pkgstore/
-│   ├── store.go                # package store: content-addressable directory
-│   └── view.go                 # per-worker library views (hard-linked trees)
+│   ├── store.go                # content-addressable package store
+│   └── assembly.go             # library assembly from store (hard links)
 ├── proxy/
 │   ├── ... (existing)
 │   └── loading.go              # cold-start loading page handler
@@ -113,6 +120,10 @@ postgrest_url = ""
 [proxy]
 # existing fields unchanged; new additions:
 pre_warmed_seats = 0     # per-app default; 0 = scale-to-zero (no warm pool)
+
+[build]
+# NEW: pak version, replaces rv_version from v1.
+pak_version = "0.8.0"
 ```
 
 Per-app overrides for `pre_warmed_seats` are stored in the `apps` table
@@ -253,6 +264,18 @@ Blockyard provisions the schema and policies; PostgREST validates JWTs
 against vault's JWKS endpoint (`/identity/oidc/.well-known/keys`);
 PostgreSQL evaluates RLS policies on every query. Blockyard is not in
 the data path at runtime.
+
+### SQLite + PostgreSQL (shared)
+
+**Migration 005: dependency refresh**
+
+```sql
+ALTER TABLE apps ADD COLUMN refresh_schedule TEXT NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN last_refresh_at TEXT;
+```
+
+`last_refresh_at` uses `TEXT` (RFC3339) for consistency with other
+timestamp columns in shared tables.
 
 ## Build Phases
 
@@ -526,60 +549,302 @@ Tags:    PATCH  /boards?owner_sub=eq.{sub}&board_id=eq.{id}
                                  { tags: ["analysis", "demo"] }
 ```
 
-### Phase 2-5: Build Pipeline — rv → pak
+### Phase 2-5: Manifest Format & pak Build Pipeline
 
-Replace rv with pak as the build-time dependency manager. Make lockfiles
-optional. Support three build modes depending on what the bundle ships:
-lockfile (`pkg.lock` → `pak::lockfile_install()`), DESCRIPTION
-(`pak::local_install_deps()`), or bare scripts (`pak::scan_deps()` +
-`pak::pkg_install()`). This simplifies the deployment workflow and
-aligns blockyard with the standard R ecosystem.
+Replace rv with pak as the build-time dependency manager. Introduce a
+two-shape manifest format (pinned and unpinned) as the canonical interface
+between CLI and server. The build pipeline consumes manifests, resolves
+dependencies via pak, and persists the resulting pak lockfile for downstream
+phases (store integration, worker assembly, refresh). This phase implements
+the pipeline without store integration — builds run `lockfile_create()` →
+`lockfile_install()` end-to-end through pak.
 
-**Deliverables:**
-
-1. **pak cache** — download and cache pak's pre-built bundle on the
-   server, replacing the rv binary cache (`internal/pakcache/`). pak
-   vendors all 16 of its dependencies into a single self-contained
-   package — one download, instant install.
-2. **Build mode detection** — inspect bundle contents to select the
-   resolution strategy: lockfile > DESCRIPTION > script scan.
-3. **Build container command** — R script that loads pak (mounted
-   read-only) and runs the appropriate strategy.
-4. **BuildSpec extension** — add `Cmd` and `Mounts` fields to
-   `BuildSpec` so the `Build` method supports flexible commands.
-5. **Config changes** — replace `rv_version` with `pak_version`.
-6. **Bundle validation** — relax lockfile requirement; only `app.R`
-   is mandatory.
-7. **Remove rv** — delete `internal/rvcache/`, `SetLibraryPath()`,
-   `RvBinaryPath`, update examples.
-
-### Phase 2-6: Package Store and Runtime Assembly
-
-A server-level content-addressable package store populated during
-builds and consumed at runtime. Every dependency restore catalogs its
-installed packages into the store. Workers assemble additional packages
-from store entries via hard links — near-instant, zero disk overhead.
+See [dep-mgmt.md](../dep-mgmt.md) for the full architectural overview,
+manifest schemas, ref derivation rules, and design rationale.
 
 **Deliverables:**
 
-1. **Package store** (`internal/pkgstore/store.go`) — content-
-   addressable directory keyed by `{package}/{version}-{source}`.
-   Populated during builds via `Store.Ingest()`. Append-only.
-2. **Build integration** — after a successful restore, hard-link all
-   installed packages into the store.
-3. **Per-worker library views** (`internal/pkgstore/view.go`) — flat
-   directories populated with hard links from the store. Mounted
-   read-only at `/extra-lib/` in worker containers.
-4. **Worker lifecycle integration** — create view directories on spawn,
-   mount them, clean up on eviction.
-5. **Runtime assembly API** — `POST /api/v1/packages` endpoint that
-   hard-links packages from the store into a running worker's view.
-   Store hits are instant. Store misses are reported to the caller
-   (no build containers at runtime).
-6. **Worker authentication** — HMAC-based worker tokens for
-   in-container API access.
+1. **Manifest types** (`internal/manifest/`) — Go types for both manifest
+   shapes: pinned (with `packages`) and unpinned (with `description`).
+   Shared envelope: `version`, `platform`, `metadata`, `repositories`,
+   `files`. Validation rejects manifests carrying both `packages` and
+   `description`. Schema version check (reject unknown versions).
+2. **renv.lock → manifest conversion** — pure Go in `internal/manifest/`.
+   Package records copy verbatim. Top-level mapping: `R.Version` →
+   `platform`, `R.Repositories` → `repositories`.
+3. **DESCRIPTION → unpinned manifest** — pure Go in `internal/manifest/`.
+   Parses DCF fields and JSON-ifies them as string values into the
+   `description` object.
+4. **pak cache** (`internal/pakcache/`) — download and cache pak's
+   pre-built package bundle, replacing `internal/rvcache/`. Same pattern:
+   download once, cache locally, mount read-only into build containers.
+5. **Build mode detection** — server dispatches on manifest contents:
+   `packages` present → pinned; `description` present → unpinned; no
+   manifest → bare-script pre-processing then unpinned.
+6. **Build container R scripts** — ref derivation (`record_to_ref()`:
+   renv-style package record → pkgdepends ref string), platform URL
+   transformation (PPM neutral → platform-specific), and the build flow:
+   `lockfile_create(refs)` → `lockfile_install()`. Pinned builds derive
+   refs from package records; unpinned builds use `deps::/app`.
+7. **Bare script pre-processing** — R script using
+   `pkgdepends::scan_deps()` to discover dependencies from scripts,
+   generate a synthetic DESCRIPTION, and build an unpinned manifest.
+   Both artifacts persisted alongside the bundle.
+8. **Post-build lockfile storage** — persist the pak lockfile alongside
+   the bundle after successful builds. Retained as a debug/audit artifact
+   (exact versions, sources, hashes). Worker library assembly (phase 2-6)
+   and refresh comparison (phase 2-7) are driven by `store-manifest.json`
+   (output of `by-builder store ingest`), not the pak lockfile.
+9. **BuildSpec extension** — add `Cmd` and `Mounts` fields to `BuildSpec`
+   so the `Build` method supports flexible commands and mount
+   configurations.
+10. **Bundle validation** — relax lockfile requirement. Only `app.R` (or
+    `server.R`/`ui.R`) is mandatory.
+11. **Config changes** — replace `rv_version` with `pak_version`.
+12. **Remove rv** — delete `internal/rvcache/`, `SetLibraryPath()`,
+    `RvBinaryPath`. Update examples.
 
-### Phase 2-7: Web UI Expansion
+**Key type definitions:**
+
+```go
+// internal/manifest/manifest.go
+
+type Manifest struct {
+    Version      int                 `json:"version"`
+    Platform     string              `json:"platform"`
+    Metadata     Metadata            `json:"metadata"`
+    Repositories []Repository        `json:"repositories"`
+    Packages     map[string]Package  `json:"packages,omitempty"`
+    Description  map[string]string   `json:"description,omitempty"`
+    Files        map[string]FileInfo `json:"files"`
+}
+
+type Metadata struct {
+    AppMode    string `json:"appmode"`
+    Entrypoint string `json:"entrypoint"`
+}
+
+type Repository struct {
+    Name string `json:"Name"`
+    URL  string `json:"URL"`
+}
+
+// Package holds the renv.lock fields consumed by the build pipeline.
+// Only identity and source fields are mapped — record_to_ref() uses
+// Source/Remote* to derive pkgdepends refs. Fields like Hash,
+// Requirements, and DESCRIPTION metadata are not carried.
+type Package struct {
+    Package        string `json:"Package"`
+    Version        string `json:"Version"`
+    Source         string `json:"Source"`
+    Repository     string `json:"Repository,omitempty"`
+    RemoteType     string `json:"RemoteType,omitempty"`
+    RemoteHost     string `json:"RemoteHost,omitempty"`
+    RemoteUsername string `json:"RemoteUsername,omitempty"`
+    RemoteRepo     string `json:"RemoteRepo,omitempty"`
+    RemoteRef      string `json:"RemoteRef,omitempty"`
+    RemoteSha      string `json:"RemoteSha,omitempty"`
+    RemoteSubdir   string `json:"RemoteSubdir,omitempty"`
+    RemoteUrl      string `json:"RemoteUrl,omitempty"` // git:: sources
+}
+
+// IsPinned reports whether the manifest carries package records.
+func (m *Manifest) IsPinned() bool { return len(m.Packages) > 0 }
+
+// Validate checks manifest invariants: version known, pinned/unpinned
+// mutually exclusive, etc.
+func (m *Manifest) Validate() error { ... }
+```
+
+```go
+// internal/manifest/renvlock.go
+
+// FromRenvLock converts an renv.lock file to a pinned manifest.
+// Package records are copied verbatim — no field transformation.
+func FromRenvLock(lockPath string, meta Metadata, files map[string]FileInfo) (*Manifest, error)
+```
+
+```go
+// internal/manifest/description.go
+
+// FromDescription builds an unpinned manifest from a DESCRIPTION file.
+// DCF fields are JSON-ified as string values into the description object.
+func FromDescription(descPath string, meta Metadata, files map[string]FileInfo, repos []Repository) (*Manifest, error)
+```
+
+### Phase 2-6: Package Store & Worker Library Assembly
+
+A server-level content-addressable package store populated during builds
+and consumed at worker startup. The store caches installed R packages
+keyed by a curated hash of identity fields from the pak lockfile. Build
+libraries are pre-populated from the store; workers assemble their
+libraries via hard links. This phase retrofits the phase 2-5 build flow
+to the store-aware four-phase pattern described in dep-mgmt.md.
+
+See [dep-mgmt.md](../dep-mgmt.md) for store key design, ABI safety
+rationale, concurrency protocol, and store layout details.
+
+**Deliverables:**
+
+1. **Package store** (`internal/pkgstore/store.go`) — content-addressable
+   directory with two-level keying:
+   `{platform}/{package}/{source_hash}/{config_hash}`. The `platform`
+   prefix encodes R version (minor), OS, and architecture (e.g.,
+   `4.5-x86_64-pc-linux-gnu`). Source hash is SHA-256 of selected identity
+   fields from the pak lockfile entry, dispatched on `RemoteType`:
+   `package + version + sha256` for standard, `package + RemoteSha +
+   RemoteSubdir` for github/gitlab/git. Config hash is SHA-256 of the
+   sorted `LinkingTo` dependency store keys (canonical empty hash for
+   packages without `LinkingTo`).
+2. **Store operations** — `Has(pkg, sourceHash, configHash)`,
+   `Path(pkg, sourceHash, configHash)`,
+   `Ingest(pkg, sourceHash, configHash, src)`.
+   Ingestion uses atomic `rename()` from a build directory on the same
+   filesystem. Append-only — packages are never modified after insertion.
+3. **Store concurrency** — file-based locking under
+   `{root}/.locks/{platform}/{package}/{source_hash}.lock`. Concurrent
+   builds wait with backoff for the lock holder to finish. Stale lock
+   detection via age threshold (PID-based detection not used because
+   builds run in containers with isolated PID namespaces).
+4. **Store-aware build flow** — retrofit the phase 2-5 build to the
+   four-phase pattern: (1) `lockfile_create()` → (2) check store,
+   pre-populate build library with hard links → (3) `lockfile_install()`
+   skips pre-populated packages → (4) ingest newly installed packages
+   into store. Full store hits make phase 3 a no-op.
+5. **Persistent pak download cache** — already set up in phase 2-5;
+   this phase ensures the mount is present in the store-aware build flow.
+6. **Worker library assembly** — at worker startup, assemble a single
+   per-container `/lib` by hard-linking from the store based on the
+   bundle's `store-manifest.json`. Mounted read-only into the container
+   (runtime package additions are hardlinked from the host side by the
+   server). Each entry maps directly to a store path
+   (`sourceHash/configHash`) — no hash computation or config resolution
+   needed. Assembly also writes a `.packages.json` manifest initialized
+   as a copy of the bundle's store-manifest that tracks what's installed
+   in each worker — the source of truth for live installs (phase 2-7).
+   R runs with `.libPaths("/lib")`.
+7. **Worker lifecycle integration** — create `/lib` directories on spawn,
+   populate from store, mount into containers. Clean up on eviction.
+8. **`by-builder` binary** (`cmd/by-builder/`) — a small Go CLI
+   cross-compiled for `linux/amd64` and `linux/arm64`, cached on the
+   server (same pattern as pakcache), and mounted read-only into build
+   containers at `/tools/by-builder`. Provides `store populate` and
+   `store ingest` subcommands that handle all store operations inside
+   the container. Shares `internal/pkgstore` with the server — store
+   key computation, locking, ABI checks, and metadata exist in one
+   place. No R-side store code needed.
+
+**Key type definitions:**
+
+```go
+// internal/pkgstore/store.go
+
+type Store struct {
+    root     string // host-side store root, e.g., {bundle_server_path}/.pkg-store
+    platform string // e.g., 4.5-x86_64-pc-linux-gnu; set via PlatformFromLockfile
+}
+
+// Has reports whether the store contains a specific config for a package.
+func (s *Store) Has(pkg, sourceHash, configHash string) bool
+
+// Path returns the config directory (installed package tree) path.
+func (s *Store) Path(pkg, sourceHash, configHash string) string
+
+// Ingest atomically moves an installed package tree into the store
+// as a config entry. No-op if the config already exists.
+func (s *Store) Ingest(pkg, sourceHash, configHash, srcDir string) error
+
+// AssembleLibrary creates a library directory by hard-linking packages
+// from the store based on the bundle's store-manifest (a pre-computed
+// {package: "sourceHash/configHash"} map). No hash computation or
+// config resolution needed. Writes a .packages.json manifest to the lib dir.
+func (s *Store) AssembleLibrary(libDir string, storeManifest map[string]string) (missing []string, err error)
+```
+
+**Container mounts (updated from phase 2-5):**
+
+```
+/app              (ro)  ← bundle
+/pak              (ro)  ← cached pak package
+/pak-cache        (rw)  ← persistent pak download cache (shared across builds)
+/store            (rw)  ← package store (build library under /store/.builds/{uuid}/)
+/tools/by-builder (ro)  ← cached by-builder binary
+```
+
+### Phase 2-7: Runtime Package Assembly & Dependency Refresh
+
+Extends the package store with runtime capabilities: live package
+installation for running workers and dependency refresh for unpinned
+deployments. Both use the same store-aware build flow from phase 2-6,
+differing only in resolution context and trigger.
+
+See [dep-mgmt.md](../dep-mgmt.md) for the full runtime assembly flow,
+container transfer protocol, and refresh mechanics.
+
+**Deliverables:**
+
+1. **Runtime package API** — `POST /api/v1/packages` blocking endpoint.
+   Accepts a package name (or ref), resolves against the worker's existing
+   library (lazy upgrade policy), and returns when the package is
+   available. Three outcomes: success (store hit → instant hardlink),
+   success (store miss → install + ingest + hardlink), or transfer
+   (version conflict requiring new container).
+2. **Staging directory flow** — staging directories live on the store's
+   filesystem (`/store/.staging/{uuid}/`) so store hits can be hardlinked
+   in for pak to see, and newly installed packages can be atomically
+   `rename()`'d into the store.
+3. **Multi-library resolution** — runtime `lockfile_create()` receives
+   the worker's `/lib` as a reference library, so the solver sees what's
+   installed and applies the lazy upgrade policy. `lockfile_install()`
+   installs into the staging directory only.
+4. **Version conflict detection** — after resolution, compare the new
+   store-manifest's compound refs (`sourceHash/configHash`) against the
+   worker's `.packages.json`. If a loaded namespace has a different
+   compound ref, return `"transfer"` status. Compound refs catch both
+   version changes and LinkingTo ABI changes.
+5. **Container transfer** — when a version conflict requires a new
+   container: the R code (blockr) serializes board state to
+   `{bundle_server_path}/.transfers/{worker_id}/board.json` (atomic
+   rename). Server watches for the file, spawns a new worker with the
+   updated library view, reroutes traffic, drains the old worker. Non-
+   blockr apps get a hard restart (session lost).
+6. **Worker HMAC authentication** — worker tokens for in-container API
+   access. Tokens are generated at spawn time and injected as an
+   environment variable. The packages endpoint validates the token.
+7. **Dependency refresh** — for unpinned deployments only. Re-resolves
+   dependencies using the original unpinned manifest (preserved
+   separately from the pak lockfile). For `Remotes`: resolves against
+   current upstream. For CRAN packages: resolves using the manifest's
+   `repositories` URLs (dated PPM → same snapshot; undated → latest).
+   Produces a new store-manifest. If dependencies changed, spawns new
+   workers with the updated library and gracefully drains old ones (no
+   container transfer — existing sessions run undisturbed until they
+   end naturally).
+8. **Refresh triggers** — manual (`by refresh` CLI command, dashboard
+   button) and scheduled (per-app cron).
+9. **Refresh rollback** — two targets: previous refresh (one-step
+   undo, discards the bad manifest) and original build (immutable
+   baseline from deploy time). Both are instant library reassembly
+   from the store.
+
+**Key type definitions:**
+
+```go
+// internal/api/packages.go
+
+type PackageRequest struct {
+    Name             string   `json:"name"`              // package name or pkgdepends ref
+    LoadedNamespaces []string `json:"loaded_namespaces"` // from loadedNamespaces() in R
+}
+
+type PackageResponse struct {
+    Status       string `json:"status"`                  // "ok", "transfer", "error"
+    Message      string `json:"message,omitempty"`
+    TransferPath string `json:"transfer_path,omitempty"` // set when status == "transfer"
+}
+```
+
+### Phase 2-8: Web UI Expansion
 
 Extends the v1 dashboard with per-app management and operational
 visibility. Server-rendered HTML, no JavaScript framework.
@@ -596,10 +861,12 @@ visibility. Server-rendered HTML, no JavaScript framework.
    - Pre-warmed seats
    - Tags
    - Bundle list with rollback action
+   - Dependency refresh (unpinned apps only)
    - Soft-delete (with confirmation)
 
    Uses existing API endpoints — the UI is a form that POSTs to
-   `PATCH /api/v1/apps/{id}`, `POST /api/v1/apps/{id}/rollback`, etc.
+   `PATCH /api/v1/apps/{id}`, `POST /api/v1/apps/{id}/rollback`,
+   `POST /api/v1/apps/{id}/refresh`, etc.
 
 2. **Content filtering** — add search/filter controls to the dashboard
    app list. Filter by tag, search by name/title/description. Uses the
@@ -613,43 +880,34 @@ visibility. Server-rendered HTML, no JavaScript framework.
 
 No new navigation chrome (navbar, app switcher) — deferred to v3.
 
-### Phase 2-8: CLI Tool
+### Phase 2-9: CLI Tool
 
 A dedicated Go binary (`cmd/by/`) for interacting with the server via
 the REST API. Built last to target the stable, final v2 API surface.
 
+The deploy command is the primary complexity — it generates manifests
+from multiple input types (renv.lock, DESCRIPTION, bare scripts, `--pin`)
+using `internal/manifest/` types from phase 2-5. All other subcommands
+are thin REST API wrappers.
+
+See [draft-2-9.md](draft-2-9.md) for the full CLI design including deploy
+flow, manifest generation, refresh command, and subcommand reference.
+
+**Deliverables:**
+
+1. **CLI binary** (`cmd/by/main.go`) — cobra-based subcommand structure.
+2. **Deploy command** — manifest generation (consuming
+   `internal/manifest/` types), bundle preparation (tar.gz), upload.
+3. **Refresh command** — wraps `POST /api/v1/apps/{id}/refresh` from
+   phase 2-7. Only available for unpinned deployments.
+4. **CRUD commands** — thin API wrappers for list, get, start, stop,
+   rollback, logs, bundles, delete, restore, config, users.
+5. **Error formatting** — human-friendly error messages from API
+   responses. Non-zero exit codes on failure.
+
 **Authentication:** `BLOCKYARD_TOKEN` environment variable (a PAT).
 No login command — users create PATs via the web UI and export the
-env var. A `blockyard login` convenience command is a future addition.
-
-**Server URL:** `BLOCKYARD_URL` environment variable (e.g.,
-`https://blockyard.example.com`).
-
-**Subcommands:**
-
-```
-by deploy <app-name> <path>    Upload a bundle (tar.gz the directory, POST to upload endpoint)
-by list                        List apps (with status, active bundle, owner)
-by get <app>                   Get app details
-by start <app>                 Start an app
-by stop <app>                  Stop an app
-by rollback <app> <bundle-id>  Roll back to a previous bundle
-by logs <app>                  Tail app logs (--follow for streaming)
-by bundles <app>               List bundles for an app
-by delete <app>                Soft-delete an app
-by restore <app>               Restore a soft-deleted app
-by config <app> [flags]        Update app config (--memory, --cpu, --access-type, etc.)
-by users list                  List users (admin only)
-by users update <sub> [flags]  Update user role/active status (admin only)
-by tokens create <name>        Create a PAT (requires browser session — deferred)
-```
-
-All commands are thin wrappers around the REST API. The CLI bundles a
-directory into a tar.gz archive for `deploy` — this is the primary
-value over raw `curl`.
-
-**Error handling:** the CLI prints the `message` field from error
-responses, not the raw JSON. Non-zero exit codes on failure.
+env var. A `by login` convenience command is a future addition.
 
 ## Build Order and Dependency Graph
 
@@ -659,49 +917,60 @@ Phase 2-1: Database Dual-Backend Foundation
 
 Phase 2-2: Quick Wins (Rollback, Soft-Delete, Resource Limits)
   └── depends on: phase 2-1 (migrations)
-  └── independent of: phases 2-3 through 2-6
+  └── independent of: phases 2-3 through 2-7
 
 Phase 2-3: Worker Lifecycle (Scale-to-Zero, Pre-Warming, Loading Page)
   └── depends on: phase 2-1 (pre_warmed_seats column)
-  └── independent of: phases 2-4 through 2-6
+  └── independent of: phases 2-4 through 2-7
 
 Phase 2-4: Board Storage
   └── depends on: phase 2-1 (PostgreSQL support)
-  └── independent of: phases 2-3, 2-5, 2-6
+  └── independent of: phases 2-3, 2-5 through 2-7
 
-Phase 2-5: Build Pipeline (rv → pak)
+Phase 2-5: Manifest Format & pak Build Pipeline
   └── independent of: phases 2-2 through 2-4
   └── can be developed in parallel with everything after 2-1
 
-Phase 2-6: Package Store and Runtime Assembly
-  └── depends on: phase 2-5 (pak-based builds populate the store)
-  └── independent of: phases 2-3, 2-4
+Phase 2-6: Package Store & Worker Library Assembly
+  └── depends on: phase 2-5 (manifest types, pak builds, lockfile output)
 
-Phase 2-7: Web UI Expansion
+Phase 2-7: Runtime Package Assembly & Dependency Refresh
+  └── depends on: phase 2-6 (package store, library assembly)
+
+Phase 2-8: Web UI Expansion
   └── depends on: phases 2-2 (rollback, soft-delete UI),
-      2-3 (pre-warming config), 2-4 (board storage optional)
+      2-3 (pre-warming config), 2-7 (refresh UI)
 
-Phase 2-8: CLI Tool
-  └── depends on: all API-changing phases (2-2 through 2-6)
+Phase 2-9: CLI Tool
+  └── depends on: all API-changing phases (2-2 through 2-7)
+  └── uses internal/manifest/ types from phase 2-5
   └── built last to target final API surface
 ```
 
 Phases 2-3, 2-4, and 2-5 are independent of each other and can be
-developed in parallel after the foundation. Phase 2-6 requires 2-5.
+developed in parallel after the foundation. Phases 2-5 → 2-6 → 2-7
+form a dependency chain. Phase 2-9 (CLI) is last.
 
 ## Test Strategy
 
 ### Unit tests
 
+- **Manifest tests:** renv.lock → manifest, DESCRIPTION → manifest
+  conversions. Both valid and invalid inputs. Schema version rejection.
+  Validation: pinned/unpinned mutual exclusion, required fields. File
+  checksum computation.
 - **Database dialect tests:** verify all ~40 methods produce correct
   results on both SQLite and PostgreSQL. Run against `:memory:` SQLite
   and a test PostgreSQL instance (skipped when unavailable).
 - **Migration tests:** verify up/down migrations on both dialects.
-- **Package store tests:** store has/install/path operations using temp
-  directories. Hard-link view creation and cleanup.
+- **Package store tests:** curated hash computation, Has/Path/Ingest
+  operations, atomic ingestion via rename, concurrent access with locking,
+  stale lock detection. Library assembly from lockfile entries.
 - **Loading page tests:** verify HTML template renders, readiness
   endpoint returns correct status.
 - **CLI tests:** subcommand parsing, flag validation, output formatting.
+  Deploy command: manifest generation from renv.lock, DESCRIPTION, bare
+  scripts.
 
 ### Integration tests
 
@@ -719,8 +988,20 @@ Start the full server (with mock backend) and exercise HTTP endpoints:
 - **Loading page:** request app with no workers → verify HTML loading
   page served (not held request) → verify `/__blockyard/ready` returns
   status → verify redirect on ready.
-- **Package install:** POST to install endpoint → verify store entry
-  created → verify hard-linked into worker view.
+- **Build pipeline (pinned):** deploy bundle with pinned manifest →
+  verify pak builds correctly → verify lockfile persisted.
+- **Build pipeline (unpinned):** deploy with DESCRIPTION → verify
+  pak resolves and builds → verify lockfile persisted.
+- **Build pipeline (bare scripts):** deploy scripts only → verify
+  scan_deps runs → verify DESCRIPTION generated → verify build succeeds.
+- **Store population:** build with store misses → verify packages
+  ingested → rebuild same bundle → verify store hits (no-op install).
+- **Worker library assembly:** deploy + build → verify worker /lib
+  populated from store via hardlinks.
+- **Runtime package install:** POST to packages endpoint → verify
+  store lookup → verify hardlink into worker's /lib.
+- **Dependency refresh:** deploy unpinned → refresh → verify new lockfile
+  → verify worker library updated.
 - **Board storage:** requires PostgreSQL test instance. Verify RLS
   policies: owner sees own boards, shared user sees restricted boards,
   public boards visible to all, private boards invisible to others.
@@ -729,8 +1010,10 @@ Start the full server (with mock backend) and exercise HTTP endpoints:
 
 - Resource limit enforcement: spawn container with `memory_limit` and
   `cpu_limit`, verify Docker inspect shows correct values.
-- Package install build container: run a real `pak::pkg_install()` in
-  a build container, verify package appears in store.
+- Build pipeline: run a real pak build in a build container, verify
+  packages installed and ingested into store.
+- Store-aware build: pre-populate store, run build, verify store hits
+  are skipped (no download, no install).
 
 ## Design Decisions
 
@@ -775,10 +1058,10 @@ Start the full server (with mock backend) and exercise HTTP endpoints:
    includes `text/html`. This avoids breaking programmatic clients
    that expect either a response or a timeout.
 
-8. **CLI last.** The CLI targets the final v2 API surface, avoiding
-   rework if endpoints change during development. Auth is a simple
-   env var (`BLOCKYARD_TOKEN`); no device flow or browser-based login
-   in v2.
+8. **CLI last (phase 2-9).** The CLI targets the final v2 API surface,
+   avoiding rework if endpoints change during development. Auth is a
+   simple env var (`BLOCKYARD_TOKEN`); no device flow or browser-based
+   login in v2.
 
 9. **Pre-warming shares autoscaler machinery.** The pre-warming check
    runs inside the existing autoscaler loop (which already runs on
@@ -790,3 +1073,22 @@ Start the full server (with mock backend) and exercise HTTP endpoints:
     proxy endpoints live under this prefix, which is never forwarded to
     worker containers. This avoids collisions with app routes and
     provides a clean namespace for future proxy-level features.
+
+11. **Three-phase dependency management split.** Phase 2-5 gets pak
+    working end-to-end (apps build and deploy). Phase 2-6 adds caching
+    (fast builds, instant worker startup). Phase 2-7 adds runtime
+    dynamism (live package installation, dependency refresh). Each phase
+    is independently valuable — 2-5 without the store is a complete,
+    functional build pipeline; 2-6 without runtime requests still caches
+    and speeds up startup.
+
+12. **Manifest types as the CLI↔server interface.** `internal/manifest/`
+    defines Go types consumed by both the server (build mode detection,
+    validation) and the CLI (manifest generation in `by deploy`). The
+    server never needs the CLI; the CLI never needs build internals.
+
+13. **dep-mgmt.md as architectural authority.** Dependency management
+    design decisions (manifest format, store key design, ABI safety,
+    pak integration, runtime assembly, refresh mechanics) live in
+    [dep-mgmt.md](../dep-mgmt.md). This plan covers the build order
+    and deliverables for implementing that design.

@@ -50,8 +50,19 @@ around what a general-purpose host happens to offer:
 
 - **Board storage** — first-class save/share/restore workflows with per-user
   ACLs, not bolted on after the fact
+- **Unpinned deployments with refresh** — deploy without locking dependency
+  versions and let the server resolve them. A refresh action re-resolves
+  dependencies in place — no redeploy, no code change — so long-running apps
+  stay current automatically. No existing platform supports this; they all
+  require a full redeployment to update dependencies.
+  ([details](dep-mgmt.md#dependency-refresh))
 - **Live package installs** — users install packages at runtime instead of
-  waiting for an image rebuild (ShinyProxy) or a full redeployment (Connect)
+  waiting for an image rebuild (ShinyProxy) or a full redeployment (Connect).
+  If the new package is compatible with the running session it's hot-loaded
+  in place; if it conflicts with a loaded package, blockyard transparently
+  transfers the session to a fresh container with the updated library — the
+  user keeps working either way.
+  ([details](dep-mgmt.md#live-package-requests))
 
 ## What about the alternatives?
 
