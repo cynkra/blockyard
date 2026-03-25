@@ -590,7 +590,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 
 	// Add manifest.json to the unpacked bundle (production bundles ship this;
 	// MakeBundle only has app.R).
-	manifest := `{"type":"unpinned","description":{"Imports":"mime"},"packages":[]}`
+	manifest := `{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
 	if err := os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write manifest.json: %v", err)
 	}
