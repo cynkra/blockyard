@@ -330,7 +330,7 @@ func (srv *Server) InstallPackage(
         return api.PackageResponse{}, fmt.Errorf("read package manifest: %w", err)
     }
     conflict, conflictPkg, err := detectConflict(
-        lockfilePath, workerManifest, req.LoadedNamespaces)
+        lockfilePath, srv.PkgStore, workerManifest, req.LoadedNamespaces)
     if err != nil {
         return api.PackageResponse{}, fmt.Errorf("conflict check: %w", err)
     }
@@ -543,28 +543,33 @@ func (srv *Server) runRuntimeInstall(
 
 ## Step 6: Version conflict detection
 
-After resolution, compare the new lockfile's store keys against the
-worker's current package manifest (`.packages.json`). The manifest is a
-`{package → store_key}` map written at library assembly time (phase 2-6)
-and updated on live installs (step 7). If any loaded namespace has a
-different store key in the new lockfile, R cannot unload and reload it
-in the same session — that's a version conflict.
+After resolution, compare the new lockfile's compound store refs
+against the worker's current package manifest (`.packages.json`). The
+manifest is a `{package → "sourceHash/configHash"}` map written at
+library assembly time (phase 2-6) and updated on live installs (step 7).
+If any loaded namespace has a different compound ref in the new lockfile,
+R cannot unload and reload it in the same session — that's a version
+conflict.
 
-Using store keys instead of version strings is more robust: two builds
-of the same version from different sources or platforms produce
-different store keys, so the comparison catches every meaningful change,
-not just version bumps.
+Using compound store refs instead of version strings catches every
+meaningful change: version bumps (different source hash), PPM rebuilds
+(different sha256 in source hash), AND LinkingTo ABI changes (same
+source hash but different config hash — e.g., sf compiled against a
+new Rcpp version).
 
 ```go
 // internal/server/conflict.go
 
 // detectConflict checks whether the resolved lockfile conflicts with
-// the R session's loaded namespaces by comparing store keys from the
-// worker's .packages.json manifest against those derived from the new
-// lockfile.
+// the R session's loaded namespaces by comparing compound store refs
+// from the worker's .packages.json manifest against those derived from
+// the new lockfile. The compound ref encodes both the source identity
+// (version/sha256) and the ABI configuration (LinkingTo store keys),
+// catching both version changes and LinkingTo recompilation needs.
 func detectConflict(
     lockfilePath string,
-    workerManifest map[string]string, // from .packages.json
+    store *pkgstore.Store,
+    workerManifest map[string]string, // from .packages.json: {pkg → "sourceHash/configHash"}
     loadedNamespaces []string,
 ) (conflict bool, pkg string, err error) {
     lf, err := pkgstore.ReadLockfile(lockfilePath)
@@ -572,27 +577,36 @@ func detectConflict(
         return false, "", err
     }
 
-    // Build map of new lockfile's package → store key.
-    newKeys := make(map[string]string)
+    // Build map of new lockfile's package → compound store ref.
+    newRefs := make(map[string]string)
     for _, entry := range lf.Packages {
-        key, err := pkgstore.StoreKey(entry)
+        sourceHash, err := pkgstore.StoreKey(entry)
         if err != nil {
             return false, "", err
         }
-        newKeys[entry.Package] = key
+        // Resolve config hash from configs.json using the new
+        // lockfile's LinkingTo store keys.
+        configHash, ok := store.ResolveConfig(entry.Package, sourceHash, lf)
+        if !ok {
+            // Store miss — no configs.json yet. Use empty config hash
+            // as placeholder; this will mismatch any existing ref,
+            // which is correct (the package needs to be installed).
+            configHash = pkgstore.ConfigHash(nil)
+        }
+        newRefs[entry.Package] = pkgstore.StoreRef(sourceHash, configHash)
     }
 
-    // Check each loaded namespace against current vs new store key.
+    // Check each loaded namespace against current vs new compound ref.
     for _, ns := range loadedNamespaces {
-        currentKey, installed := workerManifest[ns]
+        currentRef, installed := workerManifest[ns]
         if !installed {
             continue // base package or not tracked — skip
         }
-        newKey, inNewLockfile := newKeys[ns]
+        newRef, inNewLockfile := newRefs[ns]
         if !inNewLockfile {
             continue // package not in new lockfile — no conflict
         }
-        if currentKey != newKey {
+        if currentRef != newRef {
             return true, ns, nil
         }
     }
@@ -601,7 +615,8 @@ func detectConflict(
 ```
 
 Packages that are installed but not loaded can be updated in place —
-the hardlink in `/lib` is replaced with the new version.
+the hardlink in `/lib` is replaced with the correct version/config
+(see step 7).
 
 ---
 
@@ -609,7 +624,10 @@ the hardlink in `/lib` is replaced with the new version.
 
 When there's no version conflict, newly resolved packages are
 hardlinked from the store (or staging directory) into the worker's
-`/lib`.
+`/lib`. Packages that are already in `/lib` but have a different
+compound ref (source or config hash changed) are replaced — this
+handles the case where a LinkingTo dependency changed and the
+existing build has stale ABI.
 
 ```go
 // internal/server/packages.go
@@ -623,16 +641,17 @@ func (srv *Server) linkNewPackages(
         return err
     }
 
-    // Track new entries to append to the worker's .packages.json.
+    // Load current worker manifest to compare compound refs.
+    workerManifest, _ := pkgstore.ReadPackageManifest(workerLibDir)
+    if workerManifest == nil {
+        workerManifest = make(map[string]string)
+    }
+
+    // Track new/updated entries to append to the worker's .packages.json.
     newEntries := make(map[string]string)
 
     for _, entry := range lf.Packages {
-        destPath := filepath.Join(workerLibDir, entry.Package)
-        if dirExists(destPath) {
-            continue // already in /lib — skip
-        }
-
-        // Try store first (resolve source hash + config hash).
+        // Resolve source hash + config hash for the expected compound ref.
         sourceHash, err := pkgstore.StoreKey(entry)
         if err != nil {
             return fmt.Errorf("store key for %s: %w", entry.Package, err)
@@ -652,6 +671,22 @@ func (srv *Server) linkNewPackages(
             // Fallback to staging (package was just installed).
             srcPath = filepath.Join(stagingDir, entry.Package)
         }
+
+        expectedRef := pkgstore.StoreRef(sourceHash, configHash)
+        destPath := filepath.Join(workerLibDir, entry.Package)
+
+        if dirExists(destPath) {
+            // Package already in /lib — check if the compound ref matches.
+            currentRef := workerManifest[entry.Package]
+            if currentRef == expectedRef {
+                continue // correct source + config — skip
+            }
+            // Different source or config hash — replace the stale build.
+            // This handles LinkingTo ABI changes (same source, different
+            // config) and version bumps for non-loaded packages.
+            os.RemoveAll(destPath)
+        }
+
         if !dirExists(srcPath) {
             return fmt.Errorf("package %s not found in store or staging",
                 entry.Package)
@@ -666,7 +701,7 @@ func (srv *Server) linkNewPackages(
         if ok {
             srv.PkgStore.Touch(entry.Package, sourceHash, configHash)
         }
-        newEntries[entry.Package] = sourceHash
+        newEntries[entry.Package] = expectedRef
     }
 
     // Update the worker's .packages.json with newly linked packages.
@@ -1392,10 +1427,13 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
 
 **Version conflict detection:**
 - `TestDetectConflict_NoConflict` — new package, not loaded.
-- `TestDetectConflict_SameStoreKey` — loaded package's manifest key
-  matches lockfile-derived key → no conflict.
-- `TestDetectConflict_DifferentStoreKey` — manifest key differs from
-  lockfile-derived key → conflict.
+- `TestDetectConflict_SameCompoundRef` — loaded package's compound ref
+  (sourceHash/configHash) matches lockfile-derived ref → no conflict.
+- `TestDetectConflict_DifferentSourceHash` — source hash differs
+  (version bump) → conflict.
+- `TestDetectConflict_SameSourceDifferentConfig` — same source hash but
+  different config hash (LinkingTo ABI change, e.g., sf compiled against
+  new Rcpp) → conflict.
 - `TestDetectConflict_BasePackage` — base R packages (not in
   `.packages.json`) skipped.
 - `TestDetectConflict_NotInNewLockfile` — loaded package absent from

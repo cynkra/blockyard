@@ -233,6 +233,26 @@ Unsupported: `url::` (lacks reliable content hash) and `local::`
 (would need source tree hashing). Both are niche; `StoreKey()` returns
 an error. See dep-mgmt.md § Unsupported ref types.
 
+### StoreRef
+
+Compound key for `.packages.json` entries — encodes both the source
+identity and the ABI configuration of an installed package. Used by
+conflict detection (phase 2-7) to catch both version changes and
+LinkingTo ABI changes.
+
+```go
+// internal/pkgstore/key.go
+
+// StoreRef returns a compound "sourceHash/configHash" string for use
+// in the per-worker package manifest (.packages.json). Comparing
+// compound refs detects both source changes (version bump, different
+// sha256) and ABI changes (same source compiled against different
+// LinkingTo dependency versions).
+func StoreRef(sourceHash, configHash string) string {
+    return sourceHash + "/" + configHash
+}
+```
+
 ### Store operations
 
 ```go
@@ -714,9 +734,10 @@ func populateCmd() *cobra.Command {
             s.SetPlatform(pkgstore.PlatformFromLockfile(lf))
 
             // Load the reference library's package manifest to compare
-            // store keys, not just directory existence. A package in the
-            // reference lib with a DIFFERENT store key (version change)
-            // should still be looked up in the store.
+            // compound store refs (sourceHash/configHash). A package in
+            // the reference lib with a DIFFERENT source OR config hash
+            // should still be looked up in the store — this catches both
+            // version changes and LinkingTo ABI changes.
             var refManifest map[string]string
             if refLib != "" {
                 refManifest, _ = pkgstore.ReadPackageManifest(refLib)
@@ -729,11 +750,6 @@ func populateCmd() *cobra.Command {
                     return err
                 }
 
-                // Skip packages whose source hash matches the reference
-                // library — same version already installed in the worker.
-                if refManifest != nil && refManifest[entry.Package] == sourceHash {
-                    continue
-                }
                 // Skip packages already in the build/staging library.
                 if dirExists(filepath.Join(lib, entry.Package)) {
                     continue
@@ -747,6 +763,14 @@ func populateCmd() *cobra.Command {
                 configHash, ok := s.ResolveConfig(entry.Package, sourceHash, lf)
                 if !ok {
                     misses++
+                    continue
+                }
+
+                // Skip packages whose compound ref matches the reference
+                // library — same source AND same ABI config already
+                // installed in the worker.
+                expectedRef := pkgstore.StoreRef(sourceHash, configHash)
+                if refManifest != nil && refManifest[entry.Package] == expectedRef {
                     continue
                 }
 
@@ -801,9 +825,10 @@ func ingestCmd() *cobra.Command {
             s.SetPlatform(pkgstore.PlatformFromLockfile(lf))
 
             // Load the reference library's package manifest to compare
-            // source hashes. Only skip ingestion when the reference lib
-            // has the SAME source hash — a version change means the new
-            // version was installed in the staging dir and must be ingested.
+            // compound store refs. Only skip ingestion when the reference
+            // lib has the SAME source AND config hash — a version change
+            // or ABI change means the new build was installed in the
+            // staging dir and must be ingested.
             var refManifest map[string]string
             if refLib != "" {
                 refManifest, _ = pkgstore.ReadPackageManifest(refLib)
@@ -813,12 +838,6 @@ func ingestCmd() *cobra.Command {
                 sourceHash, err := pkgstore.StoreKey(entry)
                 if err != nil {
                     return err
-                }
-
-                // Skip packages whose source hash matches the reference
-                // library — already in the store from a prior build.
-                if refManifest != nil && refManifest[entry.Package] == sourceHash {
-                    continue
                 }
 
                 pkgPath := filepath.Join(lib, entry.Package)
@@ -833,6 +852,13 @@ func ingestCmd() *cobra.Command {
                 if err != nil {
                     return fmt.Errorf("ingest context for %s: %w",
                         entry.Package, err)
+                }
+
+                // Skip packages whose compound ref matches the reference
+                // library — same source AND config already present.
+                expectedRef := pkgstore.StoreRef(sourceHash, configHash)
+                if refManifest != nil && refManifest[entry.Package] == expectedRef {
+                    continue
                 }
 
                 if s.Has(entry.Package, sourceHash, configHash) {
@@ -913,7 +939,11 @@ library(pak, lib.loc = "/pak")
 Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
 # ── Read manifest and configure ──────────────────────────────────
-manifest <- jsonlite::fromJSON("/app/manifest.json")
+# simplifyVector = FALSE: without it, jsonlite simplifies
+# manifest$packages into a data frame when all records share
+# the same fields, breaking vapply iteration. See phase-2-5.md.
+manifest <- jsonlite::fromJSON("/app/manifest.json",
+                               simplifyVector = FALSE)
 
 if (length(manifest$repositories) > 0) {
   repo_urls <- setNames(
@@ -929,7 +959,7 @@ if (length(manifest$repositories) > 0) {
       }
       url
     }, ""),
-    vapply(manifest$repositories, `[[`, "", "Name")
+    vapply(manifest$repositories, function(r) r$Name, "")
   )
   options(repos = repo_urls)
 }
@@ -1252,7 +1282,8 @@ container at `/lib`. R runs with `.libPaths("/lib")`.
 // from the store based on pak lockfile entries. Each lockfile entry maps
 // to a source hash, then configs.json is consulted to find the matching
 // config hash. After linking, it writes a .packages.json manifest
-// mapping each installed package to its source hash (store key).
+// mapping each installed package to its compound store ref
+// ("sourceHash/configHash").
 func (s *Store) AssembleLibrary(
     libDir string, lf *Lockfile,
 ) (missing []string, err error) {
@@ -1260,7 +1291,7 @@ func (s *Store) AssembleLibrary(
         return nil, fmt.Errorf("create lib dir: %w", err)
     }
 
-    manifest := make(map[string]string) // package → source_hash
+    manifest := make(map[string]string) // package → "sourceHash/configHash"
 
     for _, entry := range lf.Packages {
         sourceHash, err := StoreKey(entry)
@@ -1293,7 +1324,7 @@ func (s *Store) AssembleLibrary(
 
         // Touch config sidecar to update last-accessed time.
         s.Touch(entry.Package, sourceHash, configHash)
-        manifest[entry.Package] = sourceHash
+        manifest[entry.Package] = StoreRef(sourceHash, configHash)
     }
 
     // Write per-worker package manifest.
@@ -1322,14 +1353,17 @@ func (s *Store) CleanupWorkerLib(workerID string) error {
 ### Per-worker package manifest
 
 Each worker's `/lib` contains a `.packages.json` file that maps every
-installed package to its store key. This is the source of truth for
-what's actually installed in that specific worker — needed because live
-installs (phase 2-7) can add packages beyond the app-level lockfile.
+installed package to its compound store ref (`sourceHash/configHash`).
+This is the source of truth for what's actually installed in that
+specific worker — needed because live installs (phase 2-7) can add
+packages beyond the app-level lockfile. Storing the compound ref
+(not just the source hash) lets conflict detection (phase 2-7) catch
+both version changes and LinkingTo ABI changes.
 
 ```json
 {
-  "shiny": "e3b0c44298fc...",
-  "ggplot2": "b5bb9d8088f8..."
+  "shiny": "e3b0c44298fc.../a1b2c3d4e5f6...",
+  "ggplot2": "b5bb9d8088f8.../e3b0c44298fc..."
 }
 ```
 

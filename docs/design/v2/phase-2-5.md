@@ -721,14 +721,23 @@ library(pak, lib.loc = "/pak")
 Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
 # ── Read manifest ────────────────────────────────────────────────
-manifest <- jsonlite::fromJSON("/app/manifest.json")
+# simplifyVector = FALSE is critical: without it, jsonlite will
+# simplify manifest$packages into a data frame when all records have
+# identical field sets (e.g., all Source = "Repository"). vapply()
+# over a data frame iterates columns, not rows — silently producing
+# wrong refs. simplifyVector = FALSE keeps it as a named list of
+# lists, which vapply() iterates correctly.
+manifest <- jsonlite::fromJSON("/app/manifest.json",
+                               simplifyVector = FALSE)
 
 # ── Configure repositories ───────────────────────────────────────
 if (length(manifest$repositories) > 0) {
   repo_urls <- setNames(
-    vapply(manifest$repositories, function(r) transform_repo_url(r$URL), ""),
-    vapply(manifest$repositories, `[[`, "", "Name")
+    vapply(manifest$repositories, function(r) r$URL, ""),
+    vapply(manifest$repositories, function(r) r$Name, "")
   )
+  # Transform platform-neutral PPM URLs to platform-specific.
+  repo_urls <- vapply(repo_urls, transform_repo_url, "")
   options(repos = repo_urls)
 }
 
@@ -787,7 +796,9 @@ func buildCommand() []string {
         library(pak, lib.loc = "/pak")
         Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
-        manifest <- jsonlite::fromJSON("/app/manifest.json")
+        # simplifyVector = FALSE: see build flow section above.
+        manifest <- jsonlite::fromJSON("/app/manifest.json",
+                                       simplifyVector = FALSE)
 
         # Configure repos.
         if (length(manifest$repositories) > 0) {
@@ -804,7 +815,7 @@ func buildCommand() []string {
               }
               url
             }, ""),
-            vapply(manifest$repositories, `[[`, "", "Name")
+            vapply(manifest$repositories, function(r) r$Name, "")
           )
           options(repos = repo_urls)
         }

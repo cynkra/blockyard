@@ -1205,16 +1205,21 @@ the R session waits.
 **3. Transfer required (version conflict):** after resolving, the
 server compares the new lockfile entries against the worker's
 per-container package manifest (`.packages.json` — a `{package →
-store_key}` map written at library assembly and updated on each
-live install). For each loaded namespace reported in the request,
-the server compares the current store key against the new lockfile's
-store key for that package. If any loaded package has a different
-store key, R cannot unload and reload it — that's a version
-conflict. The server returns a `"transfer"` response. The R code
-(blockr) then serializes the board state to a well-known path and
-the server handles the container transfer (see below). Packages
-that are installed but not loaded can safely be updated in place
-(the hardlink in `/lib` is replaced, `.packages.json` is updated).
+"sourceHash/configHash"}` map written at library assembly and
+updated on each live install). For each loaded namespace reported
+in the request, the server compares the current compound ref
+against the new lockfile's compound ref for that package. If any
+loaded package has a different compound ref, R cannot unload and
+reload it — that's a version conflict. The compound ref encodes
+both source identity (version/sha256) and ABI configuration
+(LinkingTo store keys), so the comparison catches version bumps
+AND LinkingTo ABI changes (e.g., sf compiled against a new Rcpp).
+The server returns a `"transfer"` response. The R code (blockr)
+then serializes the board state to a well-known path and the
+server handles the container transfer (see below). Packages that
+are installed but not loaded can safely be updated in place (the
+hardlink in `/lib` is replaced with the correct version/config,
+`.packages.json` is updated).
 
 **Resolution context.** The server resolves runtime package requests
 using the same repository configuration as the original build —

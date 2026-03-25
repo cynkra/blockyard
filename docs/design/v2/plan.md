@@ -672,32 +672,49 @@ rationale, concurrency protocol, and store layout details.
 **Deliverables:**
 
 1. **Package store** (`internal/pkgstore/store.go`) — content-addressable
-   directory keyed by `{platform}/{package}/{curated_hash}`. The
-   `platform` prefix encodes R version (minor), OS, and architecture
-   (e.g., `4.4-linux-x86_64`). Curated hash is SHA-256 of selected
-   identity fields from the pak lockfile entry (`package`, `version`,
-   `RemoteType`, `sha256`, `RemoteSha`, `RemoteSubdir`).
-2. **Store operations** — `Has(key)`, `Path(key)`, `Ingest(key, src)`.
-   Ingestion uses atomic `rename()` from a temp directory on the same
+   directory with two-level keying:
+   `{platform}/{package}/{source_hash}/{config_hash}`. The `platform`
+   prefix encodes R version (minor), OS, and architecture (e.g.,
+   `4.4-linux-x86_64`). Source hash is SHA-256 of selected identity
+   fields from the pak lockfile entry, dispatched on `RemoteType`:
+   `package + version + sha256` for standard, `package + RemoteSha +
+   RemoteSubdir` for github/gitlab/git. Config hash is SHA-256 of the
+   sorted `LinkingTo` dependency store keys (canonical empty hash for
+   packages without `LinkingTo`).
+2. **Store operations** — `Has(pkg, sourceHash, configHash)`,
+   `Path(pkg, sourceHash, configHash)`,
+   `Ingest(pkg, sourceHash, configHash, src)`.
+   Ingestion uses atomic `rename()` from a build directory on the same
    filesystem. Append-only — packages are never modified after insertion.
 3. **Store concurrency** — file-based locking under
-   `/store/.locks/{platform}/{package}/{hash}.lock`. Lock contains PID +
-   timestamp. Stale lock detection (dead PID or age threshold). Concurrent
-   builds wait with backoff for the lock holder to finish.
+   `{root}/.locks/{platform}/{package}/{source_hash}.lock`. Concurrent
+   builds wait with backoff for the lock holder to finish. Stale lock
+   detection via age threshold (PID-based detection not used because
+   builds run in containers with isolated PID namespaces).
 4. **Store-aware build flow** — retrofit the phase 2-5 build to the
    four-phase pattern: (1) `lockfile_create()` → (2) check store,
    pre-populate build library with hard links → (3) `lockfile_install()`
    skips pre-populated packages → (4) ingest newly installed packages
    into store. Full store hits make phase 3 a no-op.
-5. **Persistent pak download cache** — mount a persistent directory at
-   `PKG_CACHE_DIR` across builds. Orthogonal to the store (caches
-   *downloaded archives* vs *installed packages*).
+5. **Persistent pak download cache** — already set up in phase 2-5;
+   this phase ensures the mount is present in the store-aware build flow.
 6. **Worker library assembly** — at worker startup, assemble a single
    mutable `/lib` per container by hard-linking from the store based on
    the bundle's pak lockfile. Each lockfile entry maps to a store path
-   via the curated hash. R runs with `.libPaths("/lib")`.
+   via the curated hash. Assembly also writes a `.packages.json`
+   manifest (`{package: store_key}`) that tracks what's installed in
+   each worker — the source of truth for live installs (phase 2-7).
+   R runs with `.libPaths("/lib")`.
 7. **Worker lifecycle integration** — create `/lib` directories on spawn,
    populate from store, mount into containers. Clean up on eviction.
+8. **`by-builder` binary** (`cmd/by-builder/`) — a small Go CLI
+   cross-compiled for `linux/amd64` and `linux/arm64`, cached on the
+   server (same pattern as pakcache), and mounted read-only into build
+   containers at `/tools/by-builder`. Provides `store populate` and
+   `store ingest` subcommands that handle all store operations inside
+   the container. Shares `internal/pkgstore` with the server — store
+   key computation, locking, ABI checks, and metadata exist in one
+   place. No R-side store code needed.
 
 **Key type definitions:**
 
@@ -705,32 +722,35 @@ rationale, concurrency protocol, and store layout details.
 // internal/pkgstore/store.go
 
 type Store struct {
-    root     string   // e.g., /data/store
-    platform string   // e.g., 4.4-linux-x86_64
+    root     string // host-side store root, e.g., {bundle_server_path}/.pkg-store
+    platform string // e.g., 4.4-linux-x86_64; set via DetectPlatform or SetPlatform
 }
 
-// Has reports whether the store contains a package with the given key.
-func (s *Store) Has(pkg, hash string) bool
+// Has reports whether the store contains a specific config for a package.
+func (s *Store) Has(pkg, sourceHash, configHash string) bool
 
-// Path returns the store path for a package entry.
-func (s *Store) Path(pkg, hash string) string
+// Path returns the config directory (installed package tree) path.
+func (s *Store) Path(pkg, sourceHash, configHash string) string
 
-// Ingest atomically moves an installed package tree into the store.
-// No-op if the entry already exists.
-func (s *Store) Ingest(pkg, hash, src string) error
+// Ingest atomically moves an installed package tree into the store
+// as a config entry. No-op if the config already exists.
+func (s *Store) Ingest(pkg, sourceHash, configHash, srcDir string) error
 
 // AssembleLibrary creates a library directory by hard-linking packages
-// from the store based on pak lockfile entries.
-func (s *Store) AssembleLibrary(libDir string, entries []LockfileEntry) error
+// from the store based on pak lockfile entries. Each entry maps to a
+// source hash, then configs.json is consulted to find the matching
+// config hash. Writes a .packages.json manifest to the lib dir.
+func (s *Store) AssembleLibrary(libDir string, lf *Lockfile) (missing []string, err error)
 ```
 
 **Container mounts (updated from phase 2-5):**
 
 ```
-/app        (ro)  ← bundle
-/pak        (ro)  ← cached pak package
-/pak-cache  (rw)  ← persistent pak download cache (shared across builds)
-/store      (rw)  ← package store (build library under /store/.builds/{uuid}/)
+/app              (ro)  ← bundle
+/pak              (ro)  ← cached pak package
+/pak-cache        (rw)  ← persistent pak download cache (shared across builds)
+/store            (rw)  ← package store (build library under /store/.builds/{uuid}/)
+/tools/by-builder (ro)  ← cached by-builder binary
 ```
 
 ### Phase 2-7: Runtime Package Assembly & Dependency Refresh
@@ -765,7 +785,7 @@ container transfer protocol, and refresh mechanics.
    `"transfer"` status.
 5. **Container transfer** — when a version conflict requires a new
    container: the R code (blockr) serializes board state to
-   `{bundle_server_path}/.transfer/{worker_id}/board.json` (atomic
+   `{bundle_server_path}/.transfers/{worker_id}/board.json` (atomic
    rename). Server watches for the file, spawns a new worker with the
    updated library view, reroutes traffic, drains the old worker. Non-
    blockr apps get a hard restart (session lost).
@@ -791,12 +811,14 @@ container transfer protocol, and refresh mechanics.
 // internal/api/packages.go
 
 type PackageRequest struct {
-    Name string `json:"name"`           // package name or pkgdepends ref
+    Name             string   `json:"name"`              // package name or pkgdepends ref
+    LoadedNamespaces []string `json:"loaded_namespaces"` // from loadedNamespaces() in R
 }
 
 type PackageResponse struct {
-    Status  string `json:"status"`       // "ok", "transfer", "error"
-    Message string `json:"message,omitempty"`
+    Status       string `json:"status"`                  // "ok", "transfer", "error"
+    Message      string `json:"message,omitempty"`
+    TransferPath string `json:"transfer_path,omitempty"` // set when status == "transfer"
 }
 ```
 
