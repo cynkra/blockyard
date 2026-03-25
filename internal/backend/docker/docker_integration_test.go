@@ -421,13 +421,15 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 
 	bundleDir, libDir := testBundleDir(t)
 	spec := backend.BuildSpec{
-		AppID:        "test-app",
-		BundleID:     uuid.New().String()[:8],
-		Image:        "alpine:latest",
-		Cmd: []string{"false"},
-		BundlePath:   bundleDir,
-		LibraryPath:  libDir,
-		Labels:       map[string]string{},
+		AppID:    "test-app",
+		BundleID: uuid.New().String()[:8],
+		Image:    "alpine:latest",
+		Cmd:      []string{"false"},
+		Mounts: []backend.MountEntry{
+			{Source: bundleDir, Target: "/app", ReadOnly: true},
+			{Source: libDir, Target: "/build-lib", ReadOnly: false},
+		},
+		Labels: map[string]string{},
 	}
 
 	// "false" command exits non-zero — build should fail
