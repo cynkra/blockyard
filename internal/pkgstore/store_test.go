@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+func TestStoreRootAndPlatform(t *testing.T) {
+	s := NewStore("/data/.pkg-store")
+	if s.Root() != "/data/.pkg-store" {
+		t.Errorf("Root() = %q", s.Root())
+	}
+	if s.Platform() != "" {
+		t.Errorf("Platform() = %q before SetPlatform", s.Platform())
+	}
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+	if s.Platform() != "4.5-x86_64-pc-linux-gnu" {
+		t.Errorf("Platform() = %q", s.Platform())
+	}
+}
+
+func TestStoreSourceDir(t *testing.T) {
+	s := NewStore("/data/.pkg-store")
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	got := s.SourceDir("shiny", "abc123")
+	want := "/data/.pkg-store/4.5-x86_64-pc-linux-gnu/shiny/abc123"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestStoreHas(t *testing.T) {
 	root := t.TempDir()
 	s := NewStore(root)

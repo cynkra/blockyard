@@ -179,6 +179,66 @@ func TestEvictStale_EmptyStore(t *testing.T) {
 	}
 }
 
+func TestRemoveIfEmpty(t *testing.T) {
+	dir := t.TempDir()
+	emptyDir := filepath.Join(dir, "empty")
+	os.MkdirAll(emptyDir, 0o755)
+
+	removeIfEmpty(emptyDir)
+	if _, err := os.Stat(emptyDir); !os.IsNotExist(err) {
+		t.Error("empty dir should be removed")
+	}
+
+	// Non-empty dir should remain.
+	nonEmpty := filepath.Join(dir, "nonempty")
+	os.MkdirAll(nonEmpty, 0o755)
+	os.WriteFile(filepath.Join(nonEmpty, "file"), []byte("x"), 0o644)
+
+	removeIfEmpty(nonEmpty)
+	if _, err := os.Stat(nonEmpty); err != nil {
+		t.Error("non-empty dir should remain")
+	}
+}
+
+func TestSpawnEvictionSweeper_RunsSweep(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	// Create an expired entry so the sweep has something to evict.
+	pkg, sh, ch := "shiny", "src1", "cfg1"
+	os.MkdirAll(s.Path(pkg, sh, ch), 0o755)
+	sidecar := s.ConfigMetaPath(pkg, sh, ch)
+	os.WriteFile(sidecar, []byte(`{}`), 0o644)
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(sidecar, old, old)
+
+	sc := StoreConfigs{Configs: map[string]map[string]string{ch: {}}}
+	WriteStoreConfigs(s.ConfigsPath(pkg, sh), sc)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Use a very short retention so the sweep fires quickly.
+	// retention/2 = interval; retention must be short enough for the
+	// ticker to fire before our deadline.
+	SpawnEvictionSweeper(ctx, s, 200*time.Millisecond)
+
+	// Wait for the sweep to fire.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for sweeper to evict")
+		default:
+		}
+		if !dirExists(s.Path(pkg, sh, ch)) {
+			return // success - entry was evicted
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestSpawnEvictionSweeper_DisabledWhenZero(t *testing.T) {
 	root := t.TempDir()
 	s := NewStore(root)

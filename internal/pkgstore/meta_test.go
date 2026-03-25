@@ -263,6 +263,101 @@ func TestIngestContext_WithLinkingTo(t *testing.T) {
 	}
 }
 
+func TestWriteIngestMeta(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	entry := LockfileEntry{
+		Package:  "sf",
+		Version:  "1.0",
+		Type:     "standard",
+		SHA256:   "sf-sha",
+		Platform: "x86_64-pc-linux-gnu",
+		RVersion: "4.5",
+		Metadata: LockfileMetadata{RemoteType: "standard"},
+	}
+	rcppEntry := LockfileEntry{
+		Package:  "Rcpp",
+		Version:  "1.0",
+		Type:     "standard",
+		SHA256:   "rcpp-sha",
+		Platform: "x86_64-pc-linux-gnu",
+		RVersion: "4.5",
+		Metadata: LockfileMetadata{RemoteType: "standard"},
+	}
+	lf := &Lockfile{Packages: []LockfileEntry{entry, rcppEntry}}
+
+	rcppKey, _ := StoreKey(rcppEntry)
+	linkingToKeys := map[string]string{"Rcpp": rcppKey}
+	configHash := ConfigHash(linkingToKeys)
+	sourceHash := "sfhash"
+
+	// Create the source hash directory.
+	os.MkdirAll(s.SourceDir(entry.Package, sourceHash), 0o755)
+
+	err := s.WriteIngestMeta(entry, lf, sourceHash, configHash, linkingToKeys, true, []string{"Rcpp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// configs.json should exist with the config.
+	sc, err := ReadStoreConfigs(s.ConfigsPath(entry.Package, sourceHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sc.SourceCompiled {
+		t.Error("source_compiled should be true")
+	}
+	if _, ok := sc.Configs[configHash]; !ok {
+		t.Error("config hash missing from configs.json")
+	}
+
+	// Config sidecar should exist.
+	metaPath := s.ConfigMetaPath(entry.Package, sourceHash, configHash)
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Error("config sidecar not written")
+	}
+}
+
+func TestWriteIngestMeta_AppendsConfig(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	entry := LockfileEntry{
+		Package:  "sf",
+		Version:  "1.0",
+		Type:     "standard",
+		SHA256:   "sf-sha",
+		Platform: "x86_64-pc-linux-gnu",
+		RVersion: "4.5",
+		Metadata: LockfileMetadata{RemoteType: "standard"},
+	}
+	lf := &Lockfile{Packages: []LockfileEntry{entry}}
+	sourceHash := "sfhash"
+
+	// Create directory and write initial config.
+	os.MkdirAll(s.SourceDir(entry.Package, sourceHash), 0o755)
+	sc := StoreConfigs{
+		SourceCompiled: true,
+		LinkingTo:      []string{"Rcpp"},
+		Configs:        map[string]map[string]string{"existing-cfg": {}},
+	}
+	WriteStoreConfigs(s.ConfigsPath(entry.Package, sourceHash), sc)
+
+	// Add a second config.
+	err := s.WriteIngestMeta(entry, lf, sourceHash, "new-cfg", map[string]string{}, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := ReadStoreConfigs(s.ConfigsPath(entry.Package, sourceHash))
+	if len(got.Configs) != 2 {
+		t.Errorf("expected 2 configs, got %d", len(got.Configs))
+	}
+}
+
 func TestParseDCF(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "DESCRIPTION")
