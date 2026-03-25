@@ -974,7 +974,11 @@ func ingestCmd() *cobra.Command {
 
                 pkgPath := filepath.Join(lib, entry.Package)
                 if !dirExists(pkgPath) {
-                    continue // not installed (shouldn't happen)
+                    // Normal for runtime installs: unchanged packages
+                    // live only in the reference lib, not in staging.
+                    // At build time this shouldn't happen — all packages
+                    // are either store-linked or freshly installed.
+                    continue
                 }
 
                 // Compute config hash from installed DESCRIPTION.
@@ -1347,8 +1351,8 @@ func runRestore(p RestoreParams) error {
     }
 
     // 10. Persist manifest alongside bundle.
-    manifestDst := filepath.Join(p.Paths.Base, "manifest.json")
-    if err := m.Write(manifestDst); err != nil {
+    canonicalManifest := filepath.Join(p.Paths.Base, "manifest.json")
+    if err := m.Write(canonicalManifest); err != nil {
         slog.Warn("failed to persist manifest",
             "error", err, "bundle_id", p.BundleID)
     }

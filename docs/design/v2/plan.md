@@ -615,15 +615,15 @@ type Repository struct {
     URL  string `json:"URL"`
 }
 
-// Package mirrors renv.lock package record fields exactly.
-// Fields are copied verbatim — no renaming, no semantic translation.
+// Package holds the renv.lock fields consumed by the build pipeline.
+// Only identity and source fields are mapped — record_to_ref() uses
+// Source/Remote* to derive pkgdepends refs. Fields like Hash,
+// Requirements, and DESCRIPTION metadata are not carried.
 type Package struct {
-    Package      string   `json:"Package"`
-    Version      string   `json:"Version"`
-    Source       string   `json:"Source"`
-    Repository   string   `json:"Repository,omitempty"`
-    Hash         string   `json:"Hash,omitempty"`
-    Requirements []string `json:"Requirements,omitempty"`
+    Package        string `json:"Package"`
+    Version        string `json:"Version"`
+    Source         string `json:"Source"`
+    Repository     string `json:"Repository,omitempty"`
     RemoteType     string `json:"RemoteType,omitempty"`
     RemoteHost     string `json:"RemoteHost,omitempty"`
     RemoteUsername string `json:"RemoteUsername,omitempty"`
@@ -631,6 +631,7 @@ type Package struct {
     RemoteRef      string `json:"RemoteRef,omitempty"`
     RemoteSha      string `json:"RemoteSha,omitempty"`
     RemoteSubdir   string `json:"RemoteSubdir,omitempty"`
+    RemoteUrl      string `json:"RemoteUrl,omitempty"` // git:: sources
 }
 
 // IsPinned reports whether the manifest carries package records.
@@ -675,7 +676,7 @@ rationale, concurrency protocol, and store layout details.
    directory with two-level keying:
    `{platform}/{package}/{source_hash}/{config_hash}`. The `platform`
    prefix encodes R version (minor), OS, and architecture (e.g.,
-   `4.4-linux-x86_64`). Source hash is SHA-256 of selected identity
+   `4.5-x86_64-pc-linux-gnu`). Source hash is SHA-256 of selected identity
    fields from the pak lockfile entry, dispatched on `RemoteType`:
    `package + version + sha256` for standard, `package + RemoteSha +
    RemoteSubdir` for github/gitlab/git. Config hash is SHA-256 of the
@@ -700,10 +701,11 @@ rationale, concurrency protocol, and store layout details.
    this phase ensures the mount is present in the store-aware build flow.
 6. **Worker library assembly** — at worker startup, assemble a single
    mutable `/lib` per container by hard-linking from the store based on
-   the bundle's pak lockfile. Each lockfile entry maps to a store path
-   via the curated hash. Assembly also writes a `.packages.json`
-   manifest (`{package: store_key}`) that tracks what's installed in
-   each worker — the source of truth for live installs (phase 2-7).
+   the bundle's `store-manifest.json`. Each entry maps directly to a
+   store path (`sourceHash/configHash`) — no hash computation or config
+   resolution needed. Assembly also writes a `.packages.json` manifest
+   (`{package: "sourceHash/configHash"}`) that tracks what's installed
+   in each worker — the source of truth for live installs (phase 2-7).
    R runs with `.libPaths("/lib")`.
 7. **Worker lifecycle integration** — create `/lib` directories on spawn,
    populate from store, mount into containers. Clean up on eviction.
@@ -723,7 +725,7 @@ rationale, concurrency protocol, and store layout details.
 
 type Store struct {
     root     string // host-side store root, e.g., {bundle_server_path}/.pkg-store
-    platform string // e.g., 4.4-linux-x86_64; set via DetectPlatform or SetPlatform
+    platform string // e.g., 4.5-x86_64-pc-linux-gnu; set via PlatformFromLockfile
 }
 
 // Has reports whether the store contains a specific config for a package.
@@ -737,10 +739,10 @@ func (s *Store) Path(pkg, sourceHash, configHash string) string
 func (s *Store) Ingest(pkg, sourceHash, configHash, srcDir string) error
 
 // AssembleLibrary creates a library directory by hard-linking packages
-// from the store based on pak lockfile entries. Each entry maps to a
-// source hash, then configs.json is consulted to find the matching
-// config hash. Writes a .packages.json manifest to the lib dir.
-func (s *Store) AssembleLibrary(libDir string, lf *Lockfile) (missing []string, err error)
+// from the store based on the bundle's store-manifest (a pre-computed
+// {package: "sourceHash/configHash"} map). No hash computation or
+// config resolution needed. Writes a .packages.json manifest to the lib dir.
+func (s *Store) AssembleLibrary(libDir string, storeManifest map[string]string) (missing []string, err error)
 ```
 
 **Container mounts (updated from phase 2-5):**
@@ -779,10 +781,11 @@ container transfer protocol, and refresh mechanics.
    the worker's `/lib` as a reference library, so the solver sees what's
    installed and applies the lazy upgrade policy. `lockfile_install()`
    installs into the staging directory only.
-4. **Version conflict detection** — after resolution, compare the
-   lockfile's versions against what's loaded in the R session. If a
-   dependency must change version and is already loaded, return
-   `"transfer"` status.
+4. **Version conflict detection** — after resolution, compare the new
+   store-manifest's compound refs (`sourceHash/configHash`) against the
+   worker's `.packages.json`. If a loaded namespace has a different
+   compound ref, return `"transfer"` status. Compound refs catch both
+   version changes and LinkingTo ABI changes.
 5. **Container transfer** — when a version conflict requires a new
    container: the R code (blockr) serializes board state to
    `{bundle_server_path}/.transfers/{worker_id}/board.json` (atomic
@@ -797,13 +800,15 @@ container transfer protocol, and refresh mechanics.
    separately from the pak lockfile). For `Remotes`: resolves against
    current upstream. For CRAN packages: resolves using the manifest's
    `repositories` URLs (dated PPM → same snapshot; undated → latest).
-   Produces a new pak lockfile, reassembles the worker library via
-   container transfer.
+   Produces a new store-manifest. If dependencies changed, spawns new
+   workers with the updated library and gracefully drains old ones (no
+   container transfer — existing sessions run undisturbed until they
+   end naturally).
 8. **Refresh triggers** — manual (`by refresh` CLI command, dashboard
    button), scheduled (per-app cron), and optionally on cold start.
-9. **Refresh rollback** — previous pak lockfiles are retained. Rollback
-   reassembles the library from the prior lockfile (instant — store is
-   append-only).
+9. **Refresh rollback** — previous store-manifests are retained.
+   Rollback reassembles the library from the prior store-manifest
+   (instant — store is append-only, no rebuilding needed).
 
 **Key type definitions:**
 

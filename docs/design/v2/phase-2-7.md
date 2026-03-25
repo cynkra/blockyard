@@ -629,7 +629,10 @@ func (srv *Server) linkNewPackages(
     newEntries := make(map[string]string)
 
     for pkg, ref := range newManifest {
-        sourceHash, configHash := pkgstore.SplitStoreRef(ref)
+        sourceHash, configHash, err := pkgstore.SplitStoreRef(ref)
+        if err != nil {
+            return fmt.Errorf("bad store ref for %s: %w", pkg, err)
+        }
 
         storePath := srv.PkgStore.Path(pkg, sourceHash, configHash)
         if !dirExists(storePath) {
@@ -763,16 +766,38 @@ func (srv *Server) completeTransfer(
     ctx context.Context,
     appID, oldWorkerID, storeManifestPath, transferDir string,
 ) {
-    // 1. Read the new store-manifest and assemble a library for the new worker.
-    storeManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
+    // 1. Read the old worker's package manifest and merge with the new
+    //    runtime store-manifest. The runtime store-manifest is PARTIAL —
+    //    it only contains packages that were in the staging directory
+    //    (new installs + store-linked updates). Unchanged packages from
+    //    the original build are only in the old worker's .packages.json.
+    //    Without merging, the new worker would be missing most packages.
+    oldWorkerLib := srv.PkgStore.WorkerLibDir(oldWorkerID)
+    oldManifest, err := pkgstore.ReadPackageManifest(oldWorkerLib)
+    if err != nil {
+        slog.Error("transfer: read old worker manifest", "error", err)
+        return
+    }
+
+    newRefs, err := pkgstore.ReadStoreManifest(storeManifestPath)
     if err != nil {
         slog.Error("transfer: read store-manifest", "error", err)
         return
     }
 
+    // Start with the old worker's full package set, then overlay
+    // new/changed entries from the runtime install.
+    mergedManifest := make(map[string]string, len(oldManifest))
+    for pkg, ref := range oldManifest {
+        mergedManifest[pkg] = ref
+    }
+    for pkg, ref := range newRefs {
+        mergedManifest[pkg] = ref
+    }
+
     newWorkerID := uuid.New().String()
     newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
-    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
+    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, mergedManifest)
     if err != nil {
         slog.Error("transfer: assemble library", "error", err)
         return
