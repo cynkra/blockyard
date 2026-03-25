@@ -574,20 +574,20 @@ pak = TRUE)` (in `R/records.R`) — a pure function (~20 lines) that
 dispatches on `Source`/`RemoteType` and concatenates strings:
 
 ```
-record$RemotePkgRef exists  →  return it verbatim
-                                (pak-installed packages carry a valid ref)
-
-Source = "Repository"       →  "{package}@{version}"        e.g. shiny@1.9.1
-Source = "Bioconductor"     →  "bioc::{package}@{version}"  e.g. bioc::GenomicRanges@1.56.0
-Source = "GitHub"           →  "{user}/{repo}@{sha}"        e.g. owner/myghpkg@abc123
+Source = "Repository"       →  "{package}@{version}"              e.g. shiny@1.9.1
+Source = "Bioconductor"     →  "bioc::{package}@{version}"        e.g. bioc::GenomicRanges@1.56.0
+Source = "GitHub"           →  "{user}/{repo}@{sha}"              e.g. owner/myghpkg@abc123
 Source = "GitLab"           →  "gitlab::{user}/{repo}@{sha}"
+Source = "Bitbucket"        →  "bitbucket::{user}/{repo}@{sha}"
 Source = "git"              →  "git::{RemoteUrl}"
 ```
 
-The full conversion covers ~10 source types (CRAN, Bioconductor,
-GitHub, GitLab, Bitbucket, git, local, URL, etc.) — all cases
-renv records in its lockfile. The coupling is to the pkgdepends ref
-format, which has been stable for years.
+The conversion covers the source types that renv records in its
+lockfile. `url::` and `local::` refs are unsupported (see
+§ Unsupported ref types below). `SVN` is unsupported — Subversion-
+hosted R packages are extremely rare; `StoreKey()` returns a clear
+error if encountered. The coupling is to the pkgdepends ref format,
+which has been stable for years.
 
 **Platform URL transformation.** The server transforms
 platform-neutral PPM URLs to platform-specific ones using the
@@ -717,10 +717,16 @@ pak::lockfile_create(refs, lockfile = file.path(build_lib, "pak.lock"),
 # configs.json for each package, resolves the matching config hash
 # (based on the current lockfile's LinkingTo store keys), and
 # hard-links config hits into build_lib.
-system2("/tools/by-builder", c(
+rc <- system2("/tools/by-builder", c(
   "store", "populate",
   "--lockfile", file.path(build_lib, "pak.lock"),
   "--lib", build_lib, "--store", "/store"))
+if (rc != 0L) {
+  # Populate failure is non-fatal — pak will install everything from
+  # scratch in phase 3. Log the error for diagnostics.
+  message("WARNING: store populate failed (exit ", rc,
+          "); falling back to full install")
+}
 
 # ── Phase 3: Install store misses (R — needs pak) ───────────────
 # lockfile_install() scans build_lib (update=TRUE by default),
@@ -735,10 +741,14 @@ pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 # updates configs.json, and writes config sidecar files. It also
 # writes store-manifest.json to the build library directory — a JSON
 # map of {package: "sourceHash/configHash"}.
-system2("/tools/by-builder", c(
+rc <- system2("/tools/by-builder", c(
   "store", "ingest",
   "--lockfile", file.path(build_lib, "pak.lock"),
   "--lib", build_lib, "--store", "/store"))
+if (rc != 0L) {
+  stop("store ingest failed (exit ", rc,
+       "); store-manifest.json was not written")
+}
 ```
 
 For full store hits, phase 3 is a no-op — the build completes in
@@ -849,7 +859,7 @@ delimiter to prevent concatenation collisions.
 | RemoteType | Identity fields (pak lockfile path) | Rationale |
 |---|---|---|
 | `standard` | `package`, `version`, `sha256` (all top-level) | `sha256` (archive hash) is the strongest identifier — catches PPM rebuilds where the version is unchanged but the binary differs. |
-| `github`, `gitlab`, `git` | `package` (top-level), `metadata.RemoteSha`, `metadata.RemoteSubdir` | The commit hash fully identifies the source code. `version` is redundant (it's whatever DESCRIPTION contains at that commit). `RemoteSubdir` selects which package within a monorepo. |
+| `github`, `gitlab`, `bitbucket`, `git` | `package` (top-level), `metadata.RemoteSha`, `metadata.RemoteSubdir` | The commit hash fully identifies the source code. `version` is redundant (it's whatever DESCRIPTION contains at that commit). `RemoteSubdir` selects which package within a monorepo. |
 
 What this produces per package type:
 
@@ -860,16 +870,18 @@ What this produces per package type:
 | GitHub | `github\|blockr\|a1b2c3d4e5...\|` |
 | GitHub subdir | `github\|mypkg\|f9e8d7...\|src/mypkg` |
 | GitLab | `gitlab\|other\|c3d4e5...\|` |
+| Bitbucket | `bitbucket\|pkg\|d5e6f7...\|` |
 | git | `git\|mypkg\|e4f5a6...\|` |
 
-**Unsupported ref types.** `url::` and `local::` refs are not
+**Unsupported ref types.** `url::`, `local::`, and `svn::` refs are not
 supported. `url::` packages lack a content hash in the pak
 lockfile (pak records an HTTP ETag rather than a `sha256` for
 url-type downloads, which is too weak for store identity).
 `local::` packages would require content-hashing the source tree,
-which is outside our current scope. Both are niche; `StoreKey()`
-returns a clear error if encountered. Support can be added
-later if demand appears.
+which is outside our current scope. `svn::` (Subversion-hosted
+packages) is extremely rare in the R ecosystem. All three produce
+a clear error from `StoreKey()` if encountered. Support can be
+added later if demand appears.
 
 Examples:
 ```
@@ -1183,11 +1195,15 @@ pak::lockfile_create(
 # ── Phase 2: Check store for NEW entries (Go binary) ─────────────
 # by-builder skips packages in the worker library (--reference-lib),
 # checks the store, and hard-links hits into staging.
-system2("/tools/by-builder", c(
+rc <- system2("/tools/by-builder", c(
   "store", "populate",
   "--lockfile", file.path(staging, "pak.lock"),
   "--lib", staging, "--store", "/store",
   "--reference-lib", "/containers/{id}/lib"))
+if (rc != 0L) {
+  message("WARNING: store populate failed (exit ", rc,
+          "); falling back to full install")
+}
 
 # ── Phase 3: Install store misses (R — needs pak) ───────────────
 pak::lockfile_install(
@@ -1198,13 +1214,18 @@ pak::lockfile_install(
 # reference — not re-installed.
 
 # ── Phase 4: Ingest into store (Go binary) ───────────────────────
-# by-builder ingests new packages from staging into the store,
-# then the server hard-links from the store into the worker's /lib.
-system2("/tools/by-builder", c(
+# by-builder ingests new packages from staging into the store and
+# writes a complete store-manifest.json (including unchanged packages
+# carried from the reference library's .packages.json).
+rc <- system2("/tools/by-builder", c(
   "store", "ingest",
   "--lockfile", file.path(staging, "pak.lock"),
   "--lib", staging, "--store", "/store",
   "--reference-lib", "/containers/{id}/lib"))
+if (rc != 0L) {
+  stop("store ingest failed (exit ", rc,
+       "); store-manifest.json was not written")
+}
 ```
 
 The staging directory lives on the store's filesystem. This is
@@ -1474,9 +1495,6 @@ configured repository state.
 - **Scheduled:** configurable per-app cron (e.g., weekly). The
   server runs refresh, and if any dependency versions changed,
   performs the worker swap. If nothing changed, it's a no-op.
-- **On deploy restart:** optionally, refresh on every cold start
-  (container eviction, scaling event). This keeps long-lived
-  scan-mode apps current without manual intervention.
 
 ### Scope and Constraints
 
@@ -1504,11 +1522,20 @@ a new deploy.
 
 ### Rollback
 
-Each refresh produces a new store-manifest. The server retains the
-previous store-manifest, so rolling back is a library reassembly
-from the prior store-manifest — same mechanism as the initial
-refresh, just pointing at the old manifest. The store still holds
-the old package versions (append-only), so rollback is instant.
+Each refresh produces a new store-manifest. Two rollback targets
+are available:
+
+- **Previous refresh** (`store-manifest.json.prev`): undo the last
+  refresh. The current (bad) manifest is discarded — rolling back
+  is a destructive undo, not a swap. There is no "redo."
+- **Original build** (`store-manifest.json.build`): return to the
+  deploy-time baseline. Written once at initial deploy, never
+  overwritten by refresh. Always available regardless of how many
+  refreshes have occurred.
+
+The store still holds all package versions (append-only), so both
+rollback operations are instant library reassembly via hardlinks —
+no rebuilding needed.
 
 ---
 
@@ -1663,8 +1690,9 @@ the old package versions (append-only), so rollback is instant.
    configurations, each independently usable and evictable. See
    § The ABI Problem for the full rationale.
 
-   `url::` and `local::` refs are unsupported (clear error); both
-   are niche and lack reliable content identifiers in the lockfile.
+   `url::`, `local::`, and `svn::` refs are unsupported (clear
+   error); all are niche and lack reliable content identifiers in
+   the lockfile.
 
 10. **Platform-aware store key.** The store key includes a
    `{rversion}-{R_platform_triple}` prefix (e.g.,

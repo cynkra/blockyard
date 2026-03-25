@@ -122,7 +122,7 @@ func (p Package) Validate() error {
             return fmt.Errorf("package %s: Source %q requires Version",
                 p.Package, p.Source)
         }
-    case "GitHub", "GitLab":
+    case "GitHub", "GitLab", "Bitbucket":
         for _, f := range []struct{ name, val string }{
             {"RemoteUsername", p.RemoteUsername},
             {"RemoteRepo", p.RemoteRepo},
@@ -720,19 +720,22 @@ consumes). See dep-mgmt.md § Ref Derivation for the full mapping.
 If ref format issues arise, check renv's current implementation.
 
 ```r
+# record_to_ref converts an renv-style package record (from the
+# manifest) to a pkgdepends ref string. The manifest Go struct does
+# not carry RemotePkgRef, so we always derive the ref from
+# Source/Remote* fields — the derivation is equivalent.
 record_to_ref <- function(rec) {
-  # pak-installed packages carry a valid ref already.
-  if (!is.null(rec$RemotePkgRef)) return(rec$RemotePkgRef)
-
   switch(rec$Source,
     Repository =, Bioconductor = {
       prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
       paste0(prefix, rec$Package, "@", rec$Version)
     },
-    GitHub =  paste0(rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
-    GitLab =  paste0("gitlab::", rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
-    git    =  paste0("git::", rec$RemoteUrl),
-    stop("Unsupported Source for ref derivation: ", rec$Source)
+    GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
+    GitLab =    paste0("gitlab::", rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
+    Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
+    git    =    paste0("git::", rec$RemoteUrl),
+    stop("Unsupported Source for ref derivation: ", rec$Source,
+         " (url, local, and svn are not supported)")
   )
 }
 ```
@@ -879,17 +882,18 @@ func buildCommand() []string {
 
         # Derive refs.
         record_to_ref <- function(rec) {
-          if (!is.null(rec$RemotePkgRef)) return(rec$RemotePkgRef)
           switch(rec$Source,
             Repository =, Bioconductor = {
               prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
               paste0(prefix, rec$Package, "@", rec$Version)
             },
-            GitHub = paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
-                            "@", rec$RemoteSha),
-            GitLab = paste0("gitlab::", rec$RemoteUsername, "/",
-                            rec$RemoteRepo, "@", rec$RemoteSha),
-            git    = paste0("git::", rec$RemoteUrl),
+            GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
+                              "@", rec$RemoteSha),
+            GitLab =    paste0("gitlab::", rec$RemoteUsername, "/",
+                              rec$RemoteRepo, "@", rec$RemoteSha),
+            Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/",
+                              rec$RemoteRepo, "@", rec$RemoteSha),
+            git    =    paste0("git::", rec$RemoteUrl),
             stop("Unsupported Source: ", rec$Source)
           )
         }

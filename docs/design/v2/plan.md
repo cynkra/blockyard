@@ -265,6 +265,18 @@ against vault's JWKS endpoint (`/identity/oidc/.well-known/keys`);
 PostgreSQL evaluates RLS policies on every query. Blockyard is not in
 the data path at runtime.
 
+### SQLite + PostgreSQL (shared)
+
+**Migration 005: dependency refresh**
+
+```sql
+ALTER TABLE apps ADD COLUMN refresh_schedule TEXT NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN last_refresh_at TEXT;
+```
+
+`last_refresh_at` uses `TEXT` (RFC3339) for consistency with other
+timestamp columns in shared tables.
+
 ## Build Phases
 
 ### Phase 2-1: Database Dual-Backend Foundation
@@ -809,10 +821,11 @@ container transfer protocol, and refresh mechanics.
    container transfer — existing sessions run undisturbed until they
    end naturally).
 8. **Refresh triggers** — manual (`by refresh` CLI command, dashboard
-   button), scheduled (per-app cron), and optionally on cold start.
-9. **Refresh rollback** — previous store-manifests are retained.
-   Rollback reassembles the library from the prior store-manifest
-   (instant — store is append-only, no rebuilding needed).
+   button) and scheduled (per-app cron).
+9. **Refresh rollback** — two targets: previous refresh (one-step
+   undo, discards the bad manifest) and original build (immutable
+   baseline from deploy time). Both are instant library reassembly
+   from the store.
 
 **Key type definitions:**
 

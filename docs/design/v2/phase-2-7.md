@@ -44,11 +44,11 @@ This document covers how to build them.
    unpinned deployments only. Re-resolves dependencies using the original
    unpinned manifest. Produces a new store-manifest, reassembles the
    worker library. Also persists the new pak.lock as audit artifact.
-8. **Refresh triggers** — manual (CLI command, dashboard button),
-   scheduled (per-app cron), and optionally on cold start.
-9. **Refresh rollback** — previous store-manifests are retained. Rollback
-   reassembles the library from the prior store-manifest (instant — store
-   is append-only).
+8. **Refresh triggers** — manual (CLI command, dashboard button) and
+   scheduled (per-app cron).
+9. **Refresh rollback** — two targets: previous refresh (one-step undo,
+   discards the bad manifest) and original build (immutable baseline from
+   deploy time). Both are instant library reassembly from the store.
 
 ---
 
@@ -450,13 +450,17 @@ pak::lockfile_create(
 # by-builder skips packages already in the worker library
 # (--reference-lib), checks the store, and hard-links hits into
 # the staging directory.
-system2("/tools/by-builder", c(
+rc <- system2("/tools/by-builder", c(
   "store", "populate",
   "--lockfile", file.path(staging, "pak.lock"),
   "--lib", staging,
   "--store", "/store",
   "--reference-lib", "/worker-lib"
 ))
+if (rc != 0L) {
+  message("WARNING: store populate failed (exit ", rc,
+          "); falling back to full install")
+}
 
 # ── Phase 3: Install store misses ────────────────────────────────
 pak::lockfile_install(
@@ -466,15 +470,20 @@ pak::lockfile_install(
 # Installs into staging only. /worker-lib is reference — not modified.
 
 # ── Phase 4: Ingest newly installed packages into store ──────────
-# by-builder ingests new packages from staging into the store,
-# skipping packages from the worker library.
-system2("/tools/by-builder", c(
+# by-builder ingests new packages from staging into the store and
+# writes a complete store-manifest.json (including unchanged packages
+# carried from the worker library's .packages.json).
+rc <- system2("/tools/by-builder", c(
   "store", "ingest",
   "--lockfile", file.path(staging, "pak.lock"),
   "--lib", staging,
   "--store", "/store",
   "--reference-lib", "/worker-lib"
 ))
+if (rc != 0L) {
+  stop("store ingest failed (exit ", rc,
+       "); store-manifest.json was not written")
+}
 ```
 
 ### Container mounts
@@ -766,38 +775,20 @@ func (srv *Server) completeTransfer(
     ctx context.Context,
     appID, oldWorkerID, storeManifestPath, transferDir string,
 ) {
-    // 1. Read the old worker's package manifest and merge with the new
-    //    runtime store-manifest. The runtime store-manifest is PARTIAL —
-    //    it only contains packages that were in the staging directory
-    //    (new installs + store-linked updates). Unchanged packages from
-    //    the original build are only in the old worker's .packages.json.
-    //    Without merging, the new worker would be missing most packages.
-    oldWorkerLib := srv.PkgStore.WorkerLibDir(oldWorkerID)
-    oldManifest, err := pkgstore.ReadPackageManifest(oldWorkerLib)
-    if err != nil {
-        slog.Error("transfer: read old worker manifest", "error", err)
-        return
-    }
-
-    newRefs, err := pkgstore.ReadStoreManifest(storeManifestPath)
+    // 1. Read the store-manifest produced by the runtime install.
+    //    The store-manifest is always complete — `store ingest` includes
+    //    entries for all lockfile packages, including unchanged ones
+    //    carried from the reference library's .packages.json. No merge
+    //    needed.
+    storeManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
     if err != nil {
         slog.Error("transfer: read store-manifest", "error", err)
         return
     }
 
-    // Start with the old worker's full package set, then overlay
-    // new/changed entries from the runtime install.
-    mergedManifest := make(map[string]string, len(oldManifest))
-    for pkg, ref := range oldManifest {
-        mergedManifest[pkg] = ref
-    }
-    for pkg, ref := range newRefs {
-        mergedManifest[pkg] = ref
-    }
-
     newWorkerID := uuid.New().String()
     newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
-    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, mergedManifest)
+    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
     if err != nil {
         slog.Error("transfer: assemble library", "error", err)
         return
@@ -1066,7 +1057,11 @@ func (srv *Server) RunRefresh(
         copyFile(newLockfileSrc, newLockfileDst)
     }
 
-    // 5. Archive previous store-manifest for rollback.
+    // 5. Archive current store-manifest as .prev for one-step rollback.
+    //    On rollback, .prev is promoted to current and the bad manifest
+    //    is discarded (not swapped). The original deploy baseline is
+    //    always available at .build (written once at deploy time, never
+    //    overwritten by refresh).
     prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
     if fileExists(newManifestDst) {
         copyFile(newManifestDst, prevManifest)
@@ -1244,44 +1239,26 @@ The scheduler runs in the server's main goroutine. `shouldRun()`
 parses the cron expression and checks whether it fires between
 `LastRefresh` and `now`.
 
-### On cold start (optional)
-
-Add a `refresh_on_start` boolean column to the apps table. When set,
-the server triggers a refresh before spawning a worker on cold start:
-
-```go
-// internal/proxy/coldstart.go
-
-if app.RefreshOnStart && !manifest.IsPinned() {
-    spawned := srv.RunRefresh(ctx, app, m, taskID)
-    if spawned {
-        // Refresh already spawned a worker with updated deps.
-        // Skip the normal cold-start spawn to avoid a duplicate.
-        return
-    }
-    // Dependencies unchanged — fall through to normal worker spawn
-    // using the existing store-manifest.
-}
-// Proceed with normal worker spawn.
-```
-
-This keeps long-lived scan-mode apps current without manual
-intervention. Disabled by default. When refresh detects no changes,
-the cold-start path spawns a worker as usual using the existing
-store-manifest.
-
 ---
 
 ## Step 11: Refresh rollback
 
-Each refresh archives the previous store-manifest as
-`store-manifest.json.prev`. Rolling back is a library reassembly from
-the prior store-manifest — same mechanism as the refresh itself, just
-pointing at the old store-manifest.
+Two rollback targets are available:
+
+- **Previous refresh** (`store-manifest.json.prev`): undo the last
+  refresh. The bad manifest is discarded, not preserved — rolling
+  back means "this was wrong, throw it away."
+- **Original build** (`store-manifest.json.build`): return to the
+  deploy-time baseline. Always available regardless of how many
+  refreshes have occurred.
 
 ```go
 // internal/server/refresh.go
 
+// RollbackRefresh rolls back to the previous refresh's store-manifest.
+// The current (bad) manifest is discarded and .prev is promoted to
+// current. After rollback, .prev is removed — there is no "redo."
+// To go further back, use RollbackToBuild.
 func (srv *Server) RollbackRefresh(
     ctx context.Context, app *db.App,
 ) error {
@@ -1289,27 +1266,56 @@ func (srv *Server) RollbackRefresh(
 
     prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
     if !fileExists(prevManifest) {
-        return fmt.Errorf("no previous store-manifest to roll back to")
+        return fmt.Errorf("no previous refresh to roll back to " +
+            "(use ?target=build to roll back to the original deploy)")
     }
 
     currentManifest := filepath.Join(bundlePaths.Base, "store-manifest.json")
 
-    // Swap current ↔ previous.
-    tmpPath := currentManifest + ".tmp"
-    if err := copyFile(currentManifest, tmpPath); err != nil {
-        return err
+    // Promote prev to current, discard the bad manifest.
+    if err := os.Rename(prevManifest, currentManifest); err != nil {
+        return fmt.Errorf("promote prev manifest: %w", err)
     }
-    if err := copyFile(prevManifest, currentManifest); err != nil {
-        return err
-    }
-    if err := os.Rename(tmpPath, prevManifest); err != nil {
-        return err
-    }
+    // .prev is now gone — no "redo" possible. The discarded manifest
+    // is not preserved. To go further back, use RollbackToBuild.
 
     // Reassemble workers with the rolled-back store-manifest (graceful drain).
     taskID := srv.Tasks.Create(app.ID, "rollback-refresh")
     sender := srv.Tasks.Sender(taskID)
-    sender.Write("rolling back dependencies...")
+    sender.Write("rolling back dependencies to previous refresh...")
+    srv.drainAndReplace(ctx, app, currentManifest, sender)
+    srv.Tasks.Complete(taskID)
+
+    return nil
+}
+
+// RollbackToBuild rolls back to the original deploy's store-manifest.
+// This is the ultimate fallback — returns to exactly the dependency
+// set from the initial build. The current manifest and .prev (if any)
+// are discarded.
+func (srv *Server) RollbackToBuild(
+    ctx context.Context, app *db.App,
+) error {
+    bundlePaths := srv.BundlePaths(app.ID, app.ActiveBundleID)
+
+    buildManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.build")
+    if !fileExists(buildManifest) {
+        return fmt.Errorf("no build store-manifest available")
+    }
+
+    currentManifest := filepath.Join(bundlePaths.Base, "store-manifest.json")
+    prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
+
+    // Copy .build to current. Remove .prev — it's no longer relevant.
+    if err := copyFile(buildManifest, currentManifest); err != nil {
+        return fmt.Errorf("restore build manifest: %w", err)
+    }
+    os.Remove(prevManifest)
+
+    // Reassemble workers with the original build store-manifest.
+    taskID := srv.Tasks.Create(app.ID, "rollback-to-build")
+    sender := srv.Tasks.Sender(taskID)
+    sender.Write("rolling back dependencies to original build...")
     srv.drainAndReplace(ctx, app, currentManifest, sender)
     srv.Tasks.Complete(taskID)
 
@@ -1317,9 +1323,9 @@ func (srv *Server) RollbackRefresh(
 }
 ```
 
-The store still holds the old package versions (append-only), so
-rollback is instant — no rebuilding, just library reassembly from
-the prior store-manifest via hardlinks.
+The store still holds all package versions (append-only), so both
+rollback operations are instant — no rebuilding, just library
+reassembly via hardlinks.
 
 ### Rollback API
 
@@ -1336,9 +1342,20 @@ func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
             return
         }
 
-        if err := srv.RollbackRefresh(r.Context(), app); err != nil {
+        // ?target=build rolls back to original deploy; default is
+        // previous refresh.
+        target := r.URL.Query().Get("target")
+        var rollbackErr error
+        switch target {
+        case "build":
+            rollbackErr = srv.RollbackToBuild(r.Context(), app)
+        default:
+            rollbackErr = srv.RollbackRefresh(r.Context(), app)
+        }
+
+        if rollbackErr != nil {
             writeJSON(w, http.StatusConflict,
-                map[string]string{"message": err.Error()})
+                map[string]string{"message": rollbackErr.Error()})
             return
         }
 
@@ -1349,6 +1366,7 @@ func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
 
 // Route:
 // r.Post("/api/v1/apps/{id}/refresh/rollback", api.PostRefreshRollback(srv))
+// r.Post("/api/v1/apps/{id}/refresh/rollback?target=build", ...)
 ```
 
 ---
@@ -1358,12 +1376,15 @@ func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
 ### Schema changes
 
 ```sql
--- Migration: add refresh columns to apps table.
+-- Migration 005: add refresh columns to apps table.
+-- Shared across SQLite and PostgreSQL (same SQL on both dialects).
 
 ALTER TABLE apps ADD COLUMN refresh_schedule TEXT NOT NULL DEFAULT '';
-ALTER TABLE apps ADD COLUMN refresh_on_start BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE apps ADD COLUMN last_refresh_at TIMESTAMP;
+ALTER TABLE apps ADD COLUMN last_refresh_at TEXT;
 ```
+
+`last_refresh_at` uses `TEXT` (RFC3339) for consistency with other
+timestamp columns in shared tables.
 
 ### DB methods
 
@@ -1511,12 +1532,17 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
    with the updated library and old workers are drained gracefully
    rather than swapped immediately.
 
-6. **Single-depth rollback (prev store-manifest).** Refresh retains
-   exactly one previous store-manifest. Multiple levels of rollback
-   would require a manifest history table — complexity that can be added later if
-   needed. The store is append-only, so even old package versions
-   remain available indefinitely (until eviction). For deeper
-   rollback, redeploy from the original source.
+6. **Two rollback targets: previous refresh and original build.**
+   Refresh retains exactly one previous store-manifest (`.prev`) plus
+   the immutable original build manifest (`.build`, written once at
+   deploy time). Rolling back promotes `.prev` to current and
+   **discards** the bad manifest — there is no "swap" or "redo."
+   Rolling back to `.build` returns to the deploy-time baseline and
+   removes `.prev`. This gives operators two meaningful rollback
+   targets ("undo last refresh" and "go back to what I deployed")
+   without the complexity of a numbered history. The store is
+   append-only, so all package versions remain available — rollback
+   is instant library reassembly, no rebuilding.
 
 7. **Refresh as a server-side operation, not a rebuild.** Refresh does
    not re-upload code or create a new bundle. It re-resolves

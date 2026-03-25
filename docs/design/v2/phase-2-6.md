@@ -262,14 +262,15 @@ func (e LockfileEntry) Validate() error {
                 "package %s: type \"standard\" requires \"sha256\"",
                 e.Package)
         }
-    case "github", "gitlab", "git":
+    case "github", "gitlab", "bitbucket", "git":
         if e.Metadata.RemoteSha == "" {
             return fmt.Errorf(
                 "package %s: type %q requires metadata.RemoteSha",
                 e.Package, remoteType)
         }
     default:
-        return fmt.Errorf("package %s: unsupported type %q",
+        return fmt.Errorf("package %s: unsupported type %q"+
+            " (url, local, and svn are not supported)",
             e.Package, remoteType)
     }
     return nil
@@ -309,7 +310,7 @@ func StoreKey(entry LockfileEntry) (string, error) {
         // packages, metadata.RemoteSha is just the version string
         // (redundant with entry.Version) — NOT a content hash.
         fields = []string{entry.Package, entry.Version, entry.SHA256}
-    case "github", "gitlab", "git":
+    case "github", "gitlab", "bitbucket", "git":
         // metadata.RemoteSha is the git commit SHA for remote packages.
         // metadata.RemoteSubdir selects which package within a monorepo.
         fields = []string{
@@ -319,7 +320,8 @@ func StoreKey(entry LockfileEntry) (string, error) {
         }
     default:
         return "", fmt.Errorf(
-            "unsupported RemoteType for store key: %q", remoteType)
+            "unsupported RemoteType for store key: %q"+
+                " (url, local, and svn are not supported)", remoteType)
     }
 
     input := remoteType + "\x00" + strings.Join(fields, "\x00")
@@ -331,11 +333,12 @@ func StoreKey(entry LockfileEntry) (string, error) {
 | RemoteType | Identity fields | Rationale |
 |---|---|---|
 | `standard` | `package`, `version`, `sha256` | `sha256` (archive hash) catches PPM rebuilds where the version is unchanged but the binary differs. |
-| `github`, `gitlab`, `git` | `package`, `RemoteSha`, `RemoteSubdir` | The commit hash fully identifies the source code. `RemoteSubdir` selects which package within a monorepo. |
+| `github`, `gitlab`, `bitbucket`, `git` | `package`, `RemoteSha`, `RemoteSubdir` | The commit hash fully identifies the source code. `RemoteSubdir` selects which package within a monorepo. |
 
-Unsupported: `url::` (lacks reliable content hash) and `local::`
-(would need source tree hashing). Both are niche; `StoreKey()` returns
-an error. See dep-mgmt.md § Unsupported ref types.
+Unsupported: `url::` (lacks reliable content hash), `local::` (would
+need source tree hashing), and `svn::` (extremely rare). All produce
+a clear error from `StoreKey()`. See dep-mgmt.md § Unsupported ref
+types.
 
 ### StoreRef
 
@@ -878,6 +881,10 @@ func populateCmd() *cobra.Command {
                 }
 
                 // Skip packages already in the build/staging library.
+                // At build time the library is freshly created (always
+                // empty), so this never fires — it exists for runtime
+                // installs where the staging dir may already contain
+                // packages from a prior populate attempt.
                 if dirExists(filepath.Join(lib, entry.Package)) {
                     continue
                 }
@@ -961,9 +968,12 @@ func ingestCmd() *cobra.Command {
                 refManifest, _ = pkgstore.ReadPackageManifest(refLib)
             }
 
-            // Build the store-manifest as we go — every package gets
-            // an entry, whether it was already in the store or newly
-            // ingested.
+            // Build the store-manifest as we go — every lockfile
+            // package gets an entry regardless of whether it was
+            // ingested, already in the store, or unchanged in the
+            // reference library. This guarantees the store-manifest
+            // is always complete — no consumer needs to merge it
+            // with another manifest to get the full picture.
             storeManifest := make(map[string]string)
 
             for _, entry := range lf.Packages {
@@ -974,10 +984,16 @@ func ingestCmd() *cobra.Command {
 
                 pkgPath := filepath.Join(lib, entry.Package)
                 if !dirExists(pkgPath) {
-                    // Normal for runtime installs: unchanged packages
-                    // live only in the reference lib, not in staging.
-                    // At build time this shouldn't happen — all packages
-                    // are either store-linked or freshly installed.
+                    // Package not in --lib (normal for runtime installs:
+                    // unchanged packages live only in the reference lib).
+                    // Carry the existing compound ref from the reference
+                    // library's .packages.json into the store-manifest
+                    // so it remains complete.
+                    if refManifest != nil {
+                        if ref, ok := refManifest[entry.Package]; ok {
+                            storeManifest[entry.Package] = ref
+                        }
+                    }
                     continue
                 }
 
@@ -1001,27 +1017,50 @@ func ingestCmd() *cobra.Command {
                     continue
                 }
 
+                // Check whether this config is fully present in the store.
+                // A config is "fully present" when both the package tree
+                // directory AND the configs.json entry exist. If the
+                // directory exists but configs.json is incomplete (e.g.,
+                // a previous ingest crashed between Rename and
+                // WriteIngestMeta), we fall through to the lock+repair
+                // path below instead of skipping silently — otherwise
+                // the package becomes a perpetual cache miss at populate
+                // time (ResolveConfig can't find it) but is also
+                // perpetually skipped at ingest time (Has returns true).
                 if s.Has(entry.Package, sourceHash, configHash) {
-                    continue // this exact config already in store
+                    if _, ok := s.ResolveConfig(entry.Package, sourceHash, lf); ok {
+                        continue // fully consistent — skip
+                    }
+                    // Directory exists but metadata incomplete — fall
+                    // through to repair under lock.
                 }
 
-                // Ingest under lock (one lock per source hash).
-                if err := s.Acquire(cmd.Context(), entry.Package, sourceHash, 30*time.Minute); err != nil {
-                    return fmt.Errorf("acquire lock for %s: %w", entry.Package, err)
-                }
-                if !s.Has(entry.Package, sourceHash, configHash) {
-                    if err := s.Ingest(entry.Package, sourceHash, configHash, pkgPath); err != nil {
-                        s.Release(entry.Package, sourceHash)
-                        return fmt.Errorf("ingest %s: %w", entry.Package, err)
+                // Ingest (or repair) under lock (one lock per source hash).
+                // Wrapped in a closure so defer runs at end of each
+                // iteration, not accumulated until function return.
+                if err := func() error {
+                    if err := s.Acquire(cmd.Context(), entry.Package, sourceHash, 30*time.Minute); err != nil {
+                        return fmt.Errorf("acquire lock for %s: %w", entry.Package, err)
                     }
+                    defer s.Release(entry.Package, sourceHash)
+
+                    if !s.Has(entry.Package, sourceHash, configHash) {
+                        if err := s.Ingest(entry.Package, sourceHash, configHash, pkgPath); err != nil {
+                            return fmt.Errorf("ingest %s: %w", entry.Package, err)
+                        }
+                    }
+                    // Write/repair metadata — idempotent (overwrites
+                    // configs.json entry and config sidecar if they
+                    // already exist).
                     if err := s.WriteIngestMeta(entry, lf,
                         sourceHash, configHash, linkingToKeys,
                         sourceCompiled, linkingToNames); err != nil {
-                        s.Release(entry.Package, sourceHash)
                         return fmt.Errorf("write ingest meta for %s: %w", entry.Package, err)
                     }
+                    return nil
+                }(); err != nil {
+                    return err
                 }
-                s.Release(entry.Package, sourceHash)
 
                 fmt.Fprintf(os.Stderr, "store: ingested %s (config %s)\n",
                     entry.Package, configHash[:12])
@@ -1117,17 +1156,18 @@ if (length(manifest$repositories) > 0) {
 
 # Derive refs.
 record_to_ref <- function(rec) {
-  if (!is.null(rec$RemotePkgRef)) return(rec$RemotePkgRef)
   switch(rec$Source,
     Repository =, Bioconductor = {
       prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
       paste0(prefix, rec$Package, "@", rec$Version)
     },
-    GitHub = paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
-                    "@", rec$RemoteSha),
-    GitLab = paste0("gitlab::", rec$RemoteUsername, "/",
-                    rec$RemoteRepo, "@", rec$RemoteSha),
-    git    = paste0("git::", rec$RemoteUrl),
+    GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
+                      "@", rec$RemoteSha),
+    GitLab =    paste0("gitlab::", rec$RemoteUsername, "/",
+                      rec$RemoteRepo, "@", rec$RemoteSha),
+    Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/",
+                      rec$RemoteRepo, "@", rec$RemoteSha),
+    git    =    paste0("git::", rec$RemoteUrl),
     stop("Unsupported Source: ", rec$Source)
   )
 }
@@ -1152,12 +1192,18 @@ pak::lockfile_create(refs,
 # by-builder reads the lockfile, computes source hashes, reads
 # configs.json for each package, resolves the matching config hash,
 # and hard-links config hits into the build library.
-system2("/tools/by-builder", c(
+rc <- system2("/tools/by-builder", c(
   "store", "populate",
   "--lockfile", file.path(build_lib, "pak.lock"),
   "--lib", build_lib,
   "--store", "/store"
 ))
+if (rc != 0L) {
+  # Populate failure is non-fatal — pak will install everything from
+  # scratch in phase 3. Log the error for diagnostics.
+  message("WARNING: store populate failed (exit ", rc,
+          "); falling back to full install")
+}
 
 # ── Phase 3: Install store misses ────────────────────────────────
 # lockfile_install() scans build_lib (update=TRUE by default),
@@ -1170,12 +1216,16 @@ pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 # by-builder reads installed DESCRIPTIONs, computes config hashes,
 # creates config directories, updates configs.json, and writes
 # config sidecar files — all under lock.
-system2("/tools/by-builder", c(
+rc <- system2("/tools/by-builder", c(
   "store", "ingest",
   "--lockfile", file.path(build_lib, "pak.lock"),
   "--lib", build_lib,
   "--store", "/store"
 ))
+if (rc != 0L) {
+  stop("store ingest failed (exit ", rc,
+       "); store-manifest.json was not written")
+}
 ```
 
 For full store hits, phase 3 is a no-op — the build completes in
@@ -1341,6 +1391,14 @@ func runRestore(p RestoreParams) error {
         return fmt.Errorf("persist store-manifest: %w", err)
     }
 
+    // Persist a copy as store-manifest.json.build — the immutable
+    // baseline from the original deploy. Never overwritten by refresh.
+    // This is the ultimate rollback target when refresh goes wrong.
+    buildManifest := filepath.Join(p.Paths.Base, "store-manifest.json.build")
+    if err := copyFile(manifestSrc, buildManifest); err != nil {
+        return fmt.Errorf("persist build store-manifest: %w", err)
+    }
+
     // pak.lock is retained as a debug/audit artifact; extraction failure
     // is non-fatal.
     lockfileSrc := filepath.Join(buildDir, "pak.lock")
@@ -1405,10 +1463,11 @@ type RestoreParams struct {
 
 ```
 {bundle_server_path}/{app_id}/bundles/{bundle_id}/
-├── unpacked/              # bundle contents (app.R, manifest.json, ...)
-├── store-manifest.json    # {package: "sourceHash/configHash"} — drives assembly & rollback
-├── pak.lock               # pak lockfile — debug/audit artifact (not parsed at runtime)
-└── manifest.json          # canonical manifest (pinned or unpinned)
+├── unpacked/                  # bundle contents (app.R, manifest.json, ...)
+├── store-manifest.json        # current — drives assembly & rollback
+├── store-manifest.json.build  # immutable baseline from original deploy (never overwritten by refresh)
+├── pak.lock                   # pak lockfile — debug/audit artifact (not parsed at runtime)
+└── manifest.json              # canonical manifest (pinned or unpinned)
 ```
 
 The per-bundle `library/` directory from phase 2-5 is no longer
@@ -1899,6 +1958,12 @@ file written after the first successful build.
 - Second deploy of same app → build uses full store hits → verify
   faster build time.
 - Delete store → re-deploy → verify clean build works.
+- **Host-side write to ro bind mount:** spawn container with a
+  read-only bind mount → write a file on the host side into the
+  underlying directory → verify the file is visible inside the
+  container. Validates the assumption that runtime package hardlinks
+  (written by the server on the host) are visible through the
+  worker's ro `/lib` mount.
 
 ---
 
