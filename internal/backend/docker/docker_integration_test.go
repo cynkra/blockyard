@@ -588,11 +588,15 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 		t.Fatalf("CreateLibraryDir: %v", err)
 	}
 
-	// Add manifest.json to the unpacked bundle (production bundles ship this;
-	// MakeBundle only has app.R).
-	manifest := `{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
+	// Write a minimal manifest with P3M repos for binary packages, and
+	// overwrite the DESCRIPTION to only import 'mime' (pure R, no compilation).
+	manifest := `{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
 	if err := os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write manifest.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Unpacked, "DESCRIPTION"),
+		[]byte("Package: testapp\nVersion: 0.1.0\nImports:\n    mime\n"), 0o644); err != nil {
+		t.Fatalf("write DESCRIPTION: %v", err)
 	}
 
 	// Let EnsureInstalled actually install pak into a real cache dir.
