@@ -277,7 +277,7 @@ func runRestore(p RestoreParams) error {
 	// 9. Post-build artifact extraction.
 	if p.Store != nil {
 		buildDir := filepath.Join(p.Store.Root(), ".builds", buildUUID)
-		defer os.RemoveAll(buildDir)
+		defer func() { _ = os.RemoveAll(buildDir) }()
 
 		// store-manifest.json is required — it drives assembly and rollback.
 		manifestSrc := filepath.Join(buildDir, "store-manifest.json")

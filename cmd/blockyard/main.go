@@ -231,7 +231,7 @@ func main() {
 				continue
 			}
 			if _, found := srv.Workers.Get(e.Name()); !found {
-				os.RemoveAll(filepath.Join(workersDir, e.Name()))
+				_ = os.RemoveAll(filepath.Join(workersDir, e.Name()))
 			}
 		}
 	}
