@@ -300,12 +300,11 @@ func runRestore(p RestoreParams) error {
 				"error", err, "bundle_id", p.BundleID)
 		}
 
-		// Set store platform from lockfile (first build bootstraps this).
-		if p.Store.Platform() == "" {
-			lf, err := pkgstore.ReadLockfile(lockfileDst)
-			if err == nil {
-				p.Store.SetPlatform(pkgstore.PlatformFromLockfile(lf))
-			}
+		// Set store platform from lockfile. Updated on every build
+		// (not just the first) so that an R version upgrade is
+		// picked up without a server restart.
+		if lf, err := pkgstore.ReadLockfile(lockfileDst); err == nil {
+			p.Store.SetPlatform(pkgstore.PlatformFromLockfile(lf))
 		}
 	} else {
 		// Legacy: persist pak lockfile alongside bundle.

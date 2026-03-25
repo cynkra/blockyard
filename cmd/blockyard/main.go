@@ -436,7 +436,7 @@ func recoverPlatform(storePath string) string {
 			continue
 		}
 		// Platform dirs look like "4.5-x86_64-pc-linux-gnu".
-		if strings.Contains(e.Name(), "-") && !strings.HasPrefix(e.Name(), ".") {
+		if strings.Contains(e.Name(), "-") {
 			slog.Info("recovered store platform", "platform", e.Name())
 			return e.Name()
 		}

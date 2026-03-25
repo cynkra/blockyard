@@ -28,7 +28,7 @@ func TestEvictStale_RemovesExpired(t *testing.T) {
 	}
 	WriteStoreConfigs(s.ConfigsPath(pkg, sh), sc)
 
-	n, err := s.EvictStale(1 * time.Hour)
+	n, err := s.EvictStale(context.Background(), 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestEvictStale_PreservesFresh(t *testing.T) {
 	sc := StoreConfigs{Configs: map[string]map[string]string{ch: {}}}
 	WriteStoreConfigs(s.ConfigsPath(pkg, sh), sc)
 
-	n, _ := s.EvictStale(1 * time.Hour)
+	n, _ := s.EvictStale(context.Background(), 1*time.Hour)
 	if n != 0 {
 		t.Errorf("expected 0 evictions, got %d", n)
 	}
@@ -98,7 +98,7 @@ func TestEvictStale_MixedConfigs(t *testing.T) {
 	}
 	WriteStoreConfigs(s.ConfigsPath(pkg, sh), sc)
 
-	n, err := s.EvictStale(1 * time.Hour)
+	n, err := s.EvictStale(context.Background(), 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestEvictStale_CleansEmptyDirs(t *testing.T) {
 	sc := StoreConfigs{Configs: map[string]map[string]string{ch: {}}}
 	WriteStoreConfigs(s.ConfigsPath(pkg, sh), sc)
 
-	s.EvictStale(1 * time.Hour)
+	s.EvictStale(context.Background(), 1*time.Hour)
 
 	// Source hash dir should be removed (empty after eviction).
 	if dirExists(filepath.Join(root, "4.5-x86_64-pc-linux-gnu", pkg, sh)) {
@@ -156,7 +156,7 @@ func TestEvictStale_DisabledWhenZero(t *testing.T) {
 	s := NewStore(root)
 	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
 
-	n, err := s.EvictStale(0)
+	n, err := s.EvictStale(context.Background(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestEvictStale_EmptyStore(t *testing.T) {
 	s := NewStore(root)
 	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
 
-	n, err := s.EvictStale(1 * time.Hour)
+	n, err := s.EvictStale(context.Background(), 1*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

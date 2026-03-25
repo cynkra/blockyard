@@ -78,6 +78,9 @@ func populateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&lib, "lib", "", "build library path")
 	cmd.Flags().StringVar(&storeRoot, "store", "", "store root path")
 	cmd.Flags().StringVar(&refLib, "reference-lib", "", "skip packages present here (optional)")
+	_ = cmd.MarkFlagRequired("lockfile")
+	_ = cmd.MarkFlagRequired("lib")
+	_ = cmd.MarkFlagRequired("store")
 	return cmd
 }
 

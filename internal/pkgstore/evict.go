@@ -11,7 +11,7 @@ import (
 
 // EvictStale removes config entries whose sidecar mtime is older than
 // the retention cutoff. Returns the number of configs removed.
-func (s *Store) EvictStale(retention time.Duration) (int, error) {
+func (s *Store) EvictStale(ctx context.Context, retention time.Duration) (int, error) {
 	if retention <= 0 {
 		return 0, nil
 	}
@@ -39,7 +39,7 @@ func (s *Store) EvictStale(retention time.Duration) (int, error) {
 				continue
 			}
 			shDir := filepath.Join(pkgDir, shEntry.Name())
-			n, err := s.evictSourceHash(pkgEntry.Name(), shEntry.Name(), shDir, cutoff)
+			n, err := s.evictSourceHash(ctx, pkgEntry.Name(), shEntry.Name(), shDir, cutoff)
 			if err != nil {
 				slog.Warn("eviction error",
 					"package", pkgEntry.Name(),
@@ -56,20 +56,24 @@ func (s *Store) EvictStale(retention time.Duration) (int, error) {
 }
 
 // evictSourceHash removes expired config entries under a single source
-// hash directory.
-func (s *Store) evictSourceHash(pkg, sourceHash, shDir string, cutoff time.Time) (int, error) {
-	removed := 0
+// hash directory. Acquires the per-source-hash lock to prevent races
+// with concurrent ingestion writing to configs.json.
+func (s *Store) evictSourceHash(ctx context.Context, pkg, sourceHash, shDir string, cutoff time.Time) (int, error) {
+	// Phase 1: scan for stale candidates without the lock (read-only).
 	entries, err := os.ReadDir(shDir)
 	if err != nil {
 		return 0, err
 	}
 
+	type candidate struct {
+		configHash string
+	}
+	var candidates []candidate
+
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") || entry.Name() == "configs.json" {
 			continue
 		}
-		configHash := strings.TrimSuffix(entry.Name(), ".json")
-
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -77,29 +81,62 @@ func (s *Store) evictSourceHash(pkg, sourceHash, shDir string, cutoff time.Time)
 		if info.ModTime().After(cutoff) {
 			continue // still fresh
 		}
+		candidates = append(candidates, candidate{
+			configHash: strings.TrimSuffix(entry.Name(), ".json"),
+		})
+	}
+
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	// Phase 2: acquire lock, re-check mtimes, and evict.
+	if err := s.Acquire(ctx, pkg, sourceHash, 30*time.Minute); err != nil {
+		return 0, err
+	}
+	defer s.Release(pkg, sourceHash)
+
+	removed := 0
+	var evictedHashes []string
+
+	for _, c := range candidates {
+		// Re-check mtime under lock — a concurrent Touch may have
+		// refreshed the sidecar since the unlocked scan.
+		sidecarPath := s.ConfigMetaPath(pkg, sourceHash, c.configHash)
+		info, err := os.Stat(sidecarPath)
+		if err != nil {
+			continue // sidecar gone (concurrent removal)
+		}
+		if info.ModTime().After(cutoff) {
+			continue // refreshed since scan
+		}
 
 		// Remove config directory and sidecar.
-		configDir := filepath.Join(shDir, configHash)
-		_ = os.RemoveAll(configDir)
-		_ = os.Remove(filepath.Join(shDir, entry.Name()))
+		_ = os.RemoveAll(s.Path(pkg, sourceHash, c.configHash))
+		_ = os.Remove(sidecarPath)
+		evictedHashes = append(evictedHashes, c.configHash)
+		removed++
 
-		// Update configs.json: remove the config entry.
+		slog.Info("evicted stale config",
+			"package", pkg,
+			"source_hash", sourceHash,
+			"config_hash", c.configHash,
+			"last_accessed", info.ModTime())
+	}
+
+	// Batch-update configs.json under the lock.
+	if len(evictedHashes) > 0 {
 		configsPath := s.ConfigsPath(pkg, sourceHash)
 		if sc, err := ReadStoreConfigs(configsPath); err == nil {
-			delete(sc.Configs, configHash)
+			for _, ch := range evictedHashes {
+				delete(sc.Configs, ch)
+			}
 			if len(sc.Configs) == 0 {
 				_ = os.Remove(configsPath)
 			} else {
 				_ = WriteStoreConfigs(configsPath, sc)
 			}
 		}
-
-		removed++
-		slog.Info("evicted stale config",
-			"package", pkg,
-			"source_hash", sourceHash,
-			"config_hash", configHash,
-			"last_accessed", info.ModTime())
 	}
 
 	removeIfEmpty(shDir)
@@ -133,7 +170,7 @@ func SpawnEvictionSweeper(ctx context.Context, store *Store, retention time.Dura
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				n, err := store.EvictStale(retention)
+				n, err := store.EvictStale(ctx, retention)
 				if err != nil {
 					slog.Warn("store eviction sweep error", "error", err)
 				} else if n > 0 {
