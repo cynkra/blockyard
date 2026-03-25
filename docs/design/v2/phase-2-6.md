@@ -1245,7 +1245,8 @@ if (rc != 0L) {
 # Verified empirically (pak 0.9.2, R 4.5.2): lockfile_install()
 # decides to skip based on DESCRIPTION files in the target library
 # alone — no pak download cache, metadata cache, or library _cache
-# directory required. See tests/manual/test-pak-skip-*.R.
+# directory required. Confirmed via two-process test with all pak
+# caches purged between install and re-check.
 pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 
 # ── Phase 4: Ingest newly installed packages into store ──────────
