@@ -31,11 +31,12 @@ rationale. This document covers how to build the pipeline.
 5. **Build mode detection** — server dispatches on manifest contents:
    `packages` present → pinned; `description` present → unpinned; no
    manifest → bare-script pre-processing then unpinned.
-6. **Build container R scripts** — ref derivation (`record_to_ref()`:
+6. **Build container R scripts** — ref derivation (`PakRef()` in Go:
    renv-style package record → pkgdepends ref string), platform URL
-   transformation (PPM neutral → platform-specific), and the build flow:
-   `lockfile_create(refs)` → `lockfile_install()`. Pinned builds derive
-   refs from package records; unpinned builds use `deps::/app`.
+   transformation (PPM neutral → platform-specific in R), and the build
+   flow: `lockfile_create(refs)` → `lockfile_install()`. Go pre-computes
+   refs and repos into text files; the R script reads them with base R
+   only (no jsonlite dependency).
 7. **Bare script pre-processing** — R script using
    `pkgdepends::scan_deps()` to discover dependencies from scripts,
    generate a synthetic DESCRIPTION, and build an unpinned manifest.
@@ -709,34 +710,44 @@ configure repositories, derive refs, run `lockfile_create()` →
 
 ### Ref derivation (pinned mode)
 
-The `record_to_ref()` helper converts an renv-style package record to
-a pkgdepends ref string. This bridges two formats: renv's lockfile
-records (what the manifest carries) and pkgdepends refs (what pak
-consumes). See dep-mgmt.md § Ref Derivation for the full mapping.
+Ref derivation converts renv-style package records (what the manifest
+carries) to pkgdepends ref strings (what pak consumes). This logic
+lives in Go (`Package.PakRef()` and `Manifest.PakRefs()`) rather than
+R. See dep-mgmt.md § Ref Derivation for the full mapping.
 
-**Provenance:** extracted from renv's internal
+**Why Go, not R?** The pak binary from r-lib.github.io is a
+self-contained bundle — its dependencies (jsonlite, pkgdepends, etc.)
+are compiled in and not exposed as standalone packages. An R-side build
+script that calls `jsonlite::fromJSON()` to parse the manifest would
+fail on base R images that lack jsonlite. Moving ref derivation to Go
+eliminates this dependency: Go writes pre-computed refs and repos to
+text files, and the R script reads them with `readLines()`.
+
+**Provenance:** the mapping is extracted from renv's internal
 `renv_record_format_remote(record, pak = TRUE)` in
 [`R/records.R`](https://github.com/rstudio/renv/blob/main/R/records.R).
 If ref format issues arise, check renv's current implementation.
 
-```r
-# record_to_ref converts an renv-style package record (from the
-# manifest) to a pkgdepends ref string. The manifest Go struct does
-# not carry RemotePkgRef, so we always derive the ref from
-# Source/Remote* fields — the derivation is equivalent.
-record_to_ref <- function(rec) {
-  switch(rec$Source,
-    Repository =, Bioconductor = {
-      prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
-      paste0(prefix, rec$Package, "@", rec$Version)
-    },
-    GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
-    GitLab =    paste0("gitlab::", rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
-    Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/", rec$RemoteRepo, "@", rec$RemoteSha),
-    git    =    paste0("git::", rec$RemoteUrl),
-    stop("Unsupported Source for ref derivation: ", rec$Source,
-         " (url, local, and svn are not supported)")
-  )
+```go
+// internal/manifest/manifest.go
+
+func (p Package) PakRef() string {
+    switch p.Source {
+    case "Bioconductor":
+        return "bioc::" + p.Package + "@" + p.Version
+    case "Repository":
+        return p.Package + "@" + p.Version
+    case "GitHub":
+        return p.RemoteUsername + "/" + p.RemoteRepo + "@" + p.RemoteSha
+    case "GitLab":
+        return "gitlab::" + p.RemoteUsername + "/" + p.RemoteRepo + "@" + p.RemoteSha
+    case "Bitbucket":
+        return "bitbucket::" + p.RemoteUsername + "/" + p.RemoteRepo + "@" + p.RemoteSha
+    case "git":
+        return "git::" + p.RemoteUrl
+    default:
+        return p.Package
+    }
 }
 ```
 
@@ -772,43 +783,56 @@ transform_repo_url <- function(url) {
 
 ### Build flow
 
-Both modes execute the same control flow. The build R script reads
-`/app/manifest.json`, configures repositories, derives refs, and
-runs the lockfile pipeline.
+Both modes execute the same control flow. Go pre-computes refs and
+repos from the manifest and writes them to text files (`.pak-refs`,
+`.pak-repos`) in the bundle directory. The R build script reads these
+files with `readLines()` — no jsonlite or other non-base packages
+needed beyond pak itself.
+
+**Go-side (before container launch):**
+
+```go
+// Write pak refs (one per line) and repos (Name=URL per line)
+os.WriteFile(".pak-refs", strings.Join(m.PakRefs(), "\n"), 0o644)
+os.WriteFile(".pak-repos", strings.Join(m.RepoLines(), "\n"), 0o644)
+```
+
+**R-side (inside build container):**
 
 ```r
-library(pak, lib.loc = "/pak")
+.libPaths(c("/pak", .libPaths()))
+library(pak)
 Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
-# ── Read manifest ────────────────────────────────────────────────
-# simplifyVector = FALSE is critical: without it, jsonlite will
-# simplify manifest$packages into a data frame when all records have
-# identical field sets (e.g., all Source = "Repository"). vapply()
-# over a data frame iterates columns, not rows — silently producing
-# wrong refs. simplifyVector = FALSE keeps it as a named list of
-# lists, which vapply() iterates correctly.
-manifest <- jsonlite::fromJSON("/app/manifest.json",
-                               simplifyVector = FALSE)
-
 # ── Configure repositories ───────────────────────────────────────
-if (length(manifest$repositories) > 0) {
-  repo_urls <- setNames(
-    vapply(manifest$repositories, function(r) r$URL, ""),
-    vapply(manifest$repositories, function(r) r$Name, "")
-  )
-  # Transform platform-neutral PPM URLs to platform-specific.
-  repo_urls <- vapply(repo_urls, transform_repo_url, "")
-  options(repos = repo_urls)
+# Read pre-computed repos (Name=URL per line).
+repos_file <- "/app/.pak-repos"
+if (file.exists(repos_file)) {
+  lines <- readLines(repos_file, warn = FALSE)
+  lines <- lines[nzchar(lines)]
+  if (length(lines) > 0) {
+    nms  <- sub("=.*", "", lines)
+    urls <- sub("^[^=]+=", "", lines)
+    # Transform platform-neutral PPM URLs to platform-specific.
+    for (i in seq_along(urls)) {
+      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", urls[i]) &&
+          !grepl("__linux__", urls[i])) {
+        os_rel <- readLines("/etc/os-release")
+        cn <- sub("^VERSION_CODENAME=", "",
+                  grep("^VERSION_CODENAME=", os_rel, value = TRUE))
+        urls[i] <- sub("(/cran/|/bioc/)",
+                       paste0("\\1__linux__/", cn, "/"), urls[i])
+      }
+    }
+    options(repos = setNames(urls, nms))
+  }
 }
 
-# ── Derive refs ──────────────────────────────────────────────────
-if (!is.null(manifest$packages)) {
-  # Pinned mode: convert each package record to a pkgdepends ref.
-  refs <- vapply(manifest$packages, record_to_ref, "")
-} else {
-  # Unpinned mode: pak reads Imports/Depends/Remotes from DESCRIPTION.
-  refs <- "deps::/app"
-}
+# ── Read refs ────────────────────────────────────────────────────
+# Pre-computed by Go: pinned mode has one ref per package,
+# unpinned mode has "deps::/app".
+refs <- readLines("/app/.pak-refs", warn = FALSE)
+refs <- refs[nzchar(refs)]
 
 # ── Phase 1: Resolve + solve (no download, no install) ──────────
 pak::lockfile_create(
@@ -838,7 +862,7 @@ output (which scans for actual usage) as the `packages` list to
 ### Container mounts
 
 ```
-/app        (ro)  ← bundle (unpacked, includes manifest.json)
+/app        (ro)  ← bundle (unpacked, includes manifest.json, .pak-refs, .pak-repos)
 /pak        (ro)  ← cached pak package
 /pak-cache  (rw)  ← persistent pak download cache (shared across builds)
 /build-lib  (rw)  ← output library directory (per-bundle)
@@ -849,60 +873,41 @@ output (which scans for actual usage) as the `packages` list to
 ```go
 // internal/bundle/restore.go
 
+// buildCommand returns the R command that runs inside the build container.
+// The refs and repos are pre-computed by Go and written to .pak-refs and
+// .pak-repos text files in the bundle dir, so the R script only needs
+// base R + pak (no jsonlite dependency).
 func buildCommand() []string {
-    // The R script handles both pinned and unpinned modes —
-    // it reads the manifest to determine which.
     rScript := `
-        library(pak, lib.loc = "/pak")
+        .libPaths(c("/pak", .libPaths()))
+        library(pak)
         Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
-        # simplifyVector = FALSE: see build flow section above.
-        manifest <- jsonlite::fromJSON("/app/manifest.json",
-                                       simplifyVector = FALSE)
-
-        # Configure repos.
-        if (length(manifest$repositories) > 0) {
-          repo_urls <- setNames(
-            vapply(manifest$repositories, function(r) {
-              url <- r$URL
-              if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", url) &&
-                  !grepl("__linux__", url)) {
+        # Configure repos from pre-computed text file (Name=URL per line).
+        repos_file <- "/app/.pak-repos"
+        if (file.exists(repos_file)) {
+          lines <- readLines(repos_file, warn = FALSE)
+          lines <- lines[nzchar(lines)]
+          if (length(lines) > 0) {
+            nms  <- sub("=.*", "", lines)
+            urls <- sub("^[^=]+=", "", lines)
+            for (i in seq_along(urls)) {
+              if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", urls[i]) &&
+                  !grepl("__linux__", urls[i])) {
                 os_rel <- readLines("/etc/os-release")
                 cn <- sub("^VERSION_CODENAME=", "",
                           grep("^VERSION_CODENAME=", os_rel, value = TRUE))
-                url <- sub("(/cran/|/bioc/)",
-                           paste0("\\1__linux__/", cn, "/"), url)
+                urls[i] <- sub("(/cran/|/bioc/)",
+                               paste0("\\1__linux__/", cn, "/"), urls[i])
               }
-              url
-            }, ""),
-            vapply(manifest$repositories, function(r) r$Name, "")
-          )
-          options(repos = repo_urls)
+            }
+            options(repos = setNames(urls, nms))
+          }
         }
 
-        # Derive refs.
-        record_to_ref <- function(rec) {
-          switch(rec$Source,
-            Repository =, Bioconductor = {
-              prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
-              paste0(prefix, rec$Package, "@", rec$Version)
-            },
-            GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
-                              "@", rec$RemoteSha),
-            GitLab =    paste0("gitlab::", rec$RemoteUsername, "/",
-                              rec$RemoteRepo, "@", rec$RemoteSha),
-            Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/",
-                              rec$RemoteRepo, "@", rec$RemoteSha),
-            git    =    paste0("git::", rec$RemoteUrl),
-            stop("Unsupported Source: ", rec$Source)
-          )
-        }
-
-        if (!is.null(manifest$packages)) {
-          refs <- vapply(manifest$packages, record_to_ref, "")
-        } else {
-          refs <- "deps::/app"
-        }
+        # Read refs from pre-computed text file (one ref per line).
+        refs <- readLines("/app/.pak-refs", warn = FALSE)
+        refs <- refs[nzchar(refs)]
 
         pak::lockfile_create(refs,
           lockfile = "/build-lib/pak.lock", lib = "/build-lib")
@@ -977,11 +982,19 @@ func runRestore(p RestoreParams) error {
     mode := m.BuildMode()
     p.Sender.Write(fmt.Sprintf("build mode: %s", mode))
 
-    // 5. Ensure download cache dir exists.
+    // 5. Write pak refs and repos for the R build script (avoids jsonlite dep).
+    os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-refs"),
+        []byte(strings.Join(m.PakRefs(), "\n")+"\n"), 0o644)
+    if lines := m.RepoLines(); len(lines) > 0 {
+        os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-repos"),
+            []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+    }
+
+    // 6. Ensure download cache dir exists.
     dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
     os.MkdirAll(dlCachePath, 0o755)
 
-    // 6. Run build container.
+    // 7. Run build container.
     spec := backend.BuildSpec{
         AppID:    p.AppID,
         BundleID: p.BundleID,
@@ -1005,7 +1018,7 @@ func runRestore(p RestoreParams) error {
         return fmt.Errorf("dependency restore failed (exit %d)", result.ExitCode)
     }
 
-    // 7. Persist pak lockfile alongside bundle.
+    // 8. Persist pak lockfile alongside bundle.
     lockfileSrc := filepath.Join(p.Paths.Library, "pak.lock")
     lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
     if err := copyFile(lockfileSrc, lockfileDst); err != nil {
@@ -1015,14 +1028,14 @@ func runRestore(p RestoreParams) error {
         // optimization for store assembly (phase 2-6) and refresh (2-7).
     }
 
-    // 8. Persist manifest alongside bundle.
+    // 9. Persist manifest alongside bundle.
     manifestDst := filepath.Join(p.Paths.Base, "manifest.json")
     if err := m.Write(manifestDst); err != nil {
         slog.Warn("failed to persist manifest",
             "error", err, "bundle_id", p.BundleID)
     }
 
-    // 9. Activate bundle.
+    // 10. Activate bundle.
     if err := p.DB.ActivateBundle(p.AppID, p.BundleID); err != nil {
         return fmt.Errorf("activate bundle: %w", err)
     }
@@ -1272,12 +1285,14 @@ will scan it and discover `library(shiny)`.
    independent of the CLI and supports direct uploads during the
    transition.
 
-3. **One R script for both modes.** The build container runs a single R
-   script that reads the manifest and dispatches on `packages` vs
-   `description`. The only difference is ref derivation: pinned mode
-   uses `record_to_ref()`, unpinned mode uses `"deps::/app"`. Keeping
-   the dispatch in R (not Go) avoids maintaining separate R script
-   templates and makes the flow easier to test in isolation.
+3. **Go pre-computes, R executes.** Ref derivation and repo extraction
+   live in Go (`PakRefs()`, `RepoLines()`), which writes `.pak-refs`
+   and `.pak-repos` text files before launching the container. The R
+   script reads these with `readLines()` and runs the lockfile pipeline.
+   This split avoids a jsonlite dependency in the build container: the
+   pak binary from r-lib bundles its dependencies internally, so
+   jsonlite is not available as a standalone package even when `/pak` is
+   in `.libPaths()`. The R script only needs base R + pak.
 
 4. **Pre-processing as a separate container.** Bare-script scanning
    (`pkgdepends::scan_deps()`) runs in its own short-lived container

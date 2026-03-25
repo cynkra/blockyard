@@ -6,7 +6,7 @@ import (
 
 	"github.com/docker/docker/api/types/mount"
 
-	"github.com/cynkra/blockyard/internal/bundle"
+	"github.com/cynkra/blockyard/internal/backend"
 )
 
 // MountMode describes how the server's data directory is mounted.
@@ -94,32 +94,28 @@ func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, workerMount string) 
 	return binds, nil
 }
 
-// BuildMounts returns the container HostConfig fields for a build container.
-// All paths are server-side; MountConfig translates them as needed.
-func (mc MountConfig) BuildMounts(bundlePath, libraryPath, rvBinaryPath string) (binds []string, mounts []mount.Mount) {
-	if mc.Mode == MountModeVolume {
-		mounts = []mount.Mount{
-			mc.volumeMount("/app", true, bundlePath),
-			mc.volumeMount(bundle.BuildContainerLibPath, false, libraryPath),
-			mc.volumeMount("/usr/local/bin/rv", true, rvBinaryPath),
+// TranslateMount converts a single backend.MountEntry into the appropriate
+// Docker bind or volume mount for the detected mount mode.
+func (mc MountConfig) TranslateMount(m backend.MountEntry) (
+	binds []string, mounts []mount.Mount,
+) {
+	switch mc.Mode {
+	case MountModeVolume:
+		mounts = append(mounts,
+			mc.volumeMount(m.Target, m.ReadOnly, m.Source))
+	case MountModeBind:
+		flag := ":ro"
+		if !m.ReadOnly {
+			flag = ""
 		}
-		return nil, mounts
+		binds = append(binds, mc.toHostPath(m.Source)+":"+m.Target+flag)
+	default: // Native
+		flag := ":ro"
+		if !m.ReadOnly {
+			flag = ""
+		}
+		binds = append(binds, m.Source+":"+m.Target+flag)
 	}
-
-	// Native or Bind mode — use bind mounts.
-	bp := bundlePath
-	lp := libraryPath
-	rp := rvBinaryPath
-	if mc.Mode == MountModeBind {
-		bp = mc.toHostPath(bundlePath)
-		lp = mc.toHostPath(libraryPath)
-		rp = mc.toHostPath(rvBinaryPath)
-	}
-
-	binds = []string{
-		bp + ":/app:ro",
-		lp + ":" + bundle.BuildContainerLibPath,
-		rp + ":/usr/local/bin/rv:ro",
-	}
-	return binds, nil
+	return binds, mounts
 }
+

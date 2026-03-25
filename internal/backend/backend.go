@@ -47,14 +47,21 @@ type WorkerSpec struct {
 }
 
 type BuildSpec struct {
-	AppID        string
-	BundleID     string
-	Image        string
-	RvBinaryPath string            // server-side path to cached rv binary
-	BundlePath   string            // server-side path to unpacked bundle
-	LibraryPath  string            // server-side output path for restored library
-	Labels       map[string]string
-	LogWriter    func(string)       // called with each log line during the build; may be nil
+	AppID    string
+	BundleID string
+	Image    string
+	Labels   map[string]string
+	LogWriter func(string)   // called with each log line during the build; may be nil
+	Cmd      []string        // container command (e.g. R script invocation)
+	Mounts   []MountEntry    // bind/volume mounts for the build container
+	Env      []string        // environment variables (KEY=VALUE)
+}
+
+// MountEntry describes a single bind/volume mount for a build container.
+type MountEntry struct {
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 type BuildResult struct {

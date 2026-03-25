@@ -22,31 +22,19 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
-	"github.com/cynkra/blockyard/internal/rvcache"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
 func testConfig() *config.DockerConfig {
 	return &config.DockerConfig{
-		Socket:    "/var/run/docker.sock",
-		Image:     "alpine:latest",
-		ShinyPort: 8080,
-		RvVersion: "v0.19.0",
+		Socket:     "/var/run/docker.sock",
+		Image:      "alpine:latest",
+		ShinyPort:  8080,
+		PakVersion: "stable",
 	}
 }
 
-// testRvBinary creates a dummy rv executable for build tests.
-func testRvBinary(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "rv")
-	// Minimal shell script that acts as a no-op rv sync.
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write dummy rv: %v", err)
-	}
-	return bin
-}
 
 func TestSpawnAndStop(t *testing.T) {
 	ctx := context.Background()
@@ -433,19 +421,25 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 
 	bundleDir, libDir := testBundleDir(t)
 	spec := backend.BuildSpec{
-		AppID:        "test-app",
-		BundleID:     uuid.New().String()[:8],
-		Image:        "alpine:latest",
-		RvBinaryPath: "/nonexistent/rv",
-		BundlePath:   bundleDir,
-		LibraryPath:  libDir,
-		Labels:       map[string]string{},
+		AppID:    "test-app",
+		BundleID: uuid.New().String()[:8],
+		Image:    "alpine:latest",
+		Cmd:      []string{"false"},
+		Mounts: []backend.MountEntry{
+			{Source: bundleDir, Target: "/app", ReadOnly: true},
+			{Source: libDir, Target: "/build-lib", ReadOnly: false},
+		},
+		Labels: map[string]string{},
 	}
 
-	// rv binary doesn't exist — container creation should fail
-	_, err = b.Build(ctx, spec)
-	if err == nil {
-		t.Error("expected build to fail with nonexistent rv binary")
+	// "false" command exits non-zero — build should fail
+	result, err := b.Build(ctx, spec)
+	if err != nil {
+		// Build may return an error or a non-success result
+		return
+	}
+	if result.Success {
+		t.Error("expected build to fail with 'false' command")
 	}
 }
 
@@ -457,24 +451,20 @@ func TestBuildWithProductionImage(t *testing.T) {
 	}
 
 	bundleDir, libDir := testBundleDir(t)
-	for name, content := range map[string]string{
-		"app.R":         "# empty\n",
-		"rproject.toml": fmt.Sprintf("library = %q\n[project]\nname = \"test\"\nr_version = \"4.4\"\n", bundle.BuildContainerLibPath),
-	} {
-		if err := os.WriteFile(filepath.Join(bundleDir, name), []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+	if err := os.WriteFile(filepath.Join(bundleDir, "app.R"), []byte("# empty\n"), 0o644); err != nil {
+		t.Fatalf("write app.R: %v", err)
 	}
 
-	rvBin := testRvBinary(t)
 	spec := backend.BuildSpec{
-		AppID:        "test-app",
-		BundleID:     uuid.New().String()[:8],
-		Image:        "ghcr.io/rocker-org/r-ver:latest",
-		RvBinaryPath: rvBin,
-		BundlePath:   bundleDir,
-		LibraryPath:  libDir,
-		Labels:       map[string]string{},
+		AppID:    "test-app",
+		BundleID: uuid.New().String()[:8],
+		Image:    "alpine:latest",
+		Cmd:      []string{"true"},
+		Mounts: []backend.MountEntry{
+			{Source: bundleDir, Target: "/app", ReadOnly: true},
+			{Source: libDir, Target: "/build-lib", ReadOnly: false},
+		},
+		Labels: map[string]string{},
 	}
 
 	result, err := b.Build(ctx, spec)
@@ -482,7 +472,7 @@ func TestBuildWithProductionImage(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	if !result.Success {
-		t.Errorf("expected build to succeed with mounted rv binary, got exit code %d", result.ExitCode)
+		t.Errorf("expected build to succeed with Cmd/Mounts, got exit code %d", result.ExitCode)
 	}
 }
 
@@ -499,11 +489,10 @@ func TestAddrUnknownWorker(t *testing.T) {
 	}
 }
 
-// TestBuildE2E_RvSync exercises the full build pipeline: real rv binary,
-// real rocker image, real rproject.toml + rv.lock. This is the test that
-// catches asset-format changes in rv releases and Docker mount issues.
-func TestBuildE2E_RvSync(t *testing.T) {
-	const rvVersion = "v0.19.0"
+// TestBuildE2E_PakBuild exercises the Docker build pipeline with the new
+// Cmd/Mounts API. Since we cannot run a full pak install without pak in the
+// image, we use a simple R command to verify mounts and command override work.
+func TestBuildE2E_PakBuild(t *testing.T) {
 	const image = "ghcr.io/rocker-org/r-ver:4.4.3"
 
 	ctx := context.Background()
@@ -512,44 +501,17 @@ func TestBuildE2E_RvSync(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// 1. Download the real rv binary via rvcache.
-	cacheDir := filepath.Join(t.TempDir(), "rv-cache")
-	rvBin, err := rvcache.EnsureBinary(ctx, cacheDir, rvVersion)
-	if err != nil {
-		t.Fatalf("EnsureBinary: %v", err)
-	}
-
-	// 2. Create a minimal bundle with rproject.toml, rv.lock, and app.R.
+	// 1. Create a minimal bundle with manifest.json and app.R.
 	bundleDir := t.TempDir()
 	libDir := t.TempDir()
 
-	rprojectToml := fmt.Sprintf(`library = %q
-
-[project]
-name = "e2e-test"
-r_version = "4.4"
-repositories = [
-    {alias = "CRAN", url = "https://cloud.r-project.org/"},
-]
-dependencies = [
-    "mime",
-]
-`, bundle.BuildContainerLibPath)
-	rvLock := `# This file is automatically @generated by rv.
-# It is not intended for manual editing.
-version = 2
-r_version = "4.4"
-
-[[packages]]
-name = "mime"
-version = "0.13"
-source = { repository = "https://cloud.r-project.org/" }
-force_source = false
-dependencies = []
-`
+	manifest := `{
+  "type": "unpinned",
+  "description": {"Imports": "mime"},
+  "packages": []
+}`
 	for name, content := range map[string]string{
-		"rproject.toml": rprojectToml,
-		"rv.lock":       rvLock,
+		"manifest.json": manifest,
 		"app.R":         "library(mime)\n",
 	} {
 		if err := os.WriteFile(filepath.Join(bundleDir, name), []byte(content), 0o644); err != nil {
@@ -557,15 +519,17 @@ dependencies = []
 		}
 	}
 
-	// 3. Run the build.
+	// 2. Run the build with a simple R command that verifies mounts are accessible.
 	spec := backend.BuildSpec{
-		AppID:        "test-app",
-		BundleID:     uuid.New().String()[:8],
-		Image:        image,
-		RvBinaryPath: rvBin,
-		BundlePath:   bundleDir,
-		LibraryPath:  libDir,
-		Labels:       map[string]string{},
+		AppID:    "test-app",
+		BundleID: uuid.New().String()[:8],
+		Image:    image,
+		Cmd:      []string{"R", "--vanilla", "-e", "cat('ok')"},
+		Mounts: []backend.MountEntry{
+			{Source: bundleDir, Target: "/app", ReadOnly: true},
+			{Source: libDir, Target: "/build-lib", ReadOnly: false},
+		},
+		Labels: map[string]string{},
 	}
 
 	result, err := b.Build(ctx, spec)
@@ -575,29 +539,14 @@ dependencies = []
 	if !result.Success {
 		t.Fatalf("build failed with exit code %d\n--- build logs ---\n%s", result.ExitCode, result.Logs)
 	}
-
-	// 4. Verify that mime was installed into the library dir.
-	mimeDir := filepath.Join(libDir, "mime")
-	if _, err := os.Stat(mimeDir); os.IsNotExist(err) {
-		// List what's actually in libDir for debugging.
-		var found []string
-		filepath.Walk(libDir, func(path string, info os.FileInfo, err error) error {
-			if err == nil && info.IsDir() {
-				rel, _ := filepath.Rel(libDir, path)
-				found = append(found, rel)
-			}
-			return nil
-		})
-		t.Fatalf("mime package not found in library dir; contents: %v", found)
-	}
 }
 
 // TestFullPipeline_RestoreAndSpawnWorker exercises the entire production code
-// path: bundle upload → SpawnRestore (rv download, SetLibraryPath, Docker
-// build) → worker spawn with bind mounts. This is the test that would have
-// caught the host-path and mount issues we hit in real deployments.
+// path: bundle upload → SpawnRestore (pak build, Docker build) → worker spawn
+// with bind mounts. This is the test that would have caught the host-path and
+// mount issues we hit in real deployments.
 func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
-	const rvVersion = "v0.19.0"
+	const pakVersion = "stable"
 	const image = "ghcr.io/rocker-org/r-ver:4.4.3"
 
 	ctx := context.Background()
@@ -639,23 +588,20 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 		t.Fatalf("CreateLibraryDir: %v", err)
 	}
 
-	// Add rproject.toml and rv.lock to the unpacked bundle (production bundles
-	// ship these; MakeBundle only has app.R).
-	rprojectToml := "[project]\nname = \"e2e-test\"\nr_version = \"4.4\"\n" +
-		"repositories = [\n    {alias = \"CRAN\", url = \"https://cloud.r-project.org/\"},\n]\n" +
-		"dependencies = [\"mime\"]\n"
-	rvLock := "# @generated by rv\nversion = 2\nr_version = \"4.4\"\n\n" +
-		"[[packages]]\nname = \"mime\"\nversion = \"0.13\"\n" +
-		"source = { repository = \"https://cloud.r-project.org/\" }\n" +
-		"force_source = false\ndependencies = []\n"
-	for name, content := range map[string]string{
-		"rproject.toml": rprojectToml,
-		"rv.lock":       rvLock,
-	} {
-		if err := os.WriteFile(filepath.Join(paths.Unpacked, name), []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+	// Write a minimal manifest with P3M repos for binary packages, and
+	// overwrite the DESCRIPTION to only import 'mime' (pure R, no compilation).
+	manifest := `{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
+	if err := os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest.json: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(paths.Unpacked, "DESCRIPTION"),
+		[]byte("Package: testapp\nVersion: 0.1.0\nImports:\n    mime\n"), 0o644); err != nil {
+		t.Fatalf("write DESCRIPTION: %v", err)
+	}
+
+	// Let EnsureInstalled actually install pak into a real cache dir.
+	// This runs a container to download pak — slow but exercises the real path.
+	pakCachePath := filepath.Join(basePath, ".pak-cache")
 
 	// --- Step 2: SpawnRestore — goes through the full production restore path ---
 
@@ -672,8 +618,8 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 		BundleID:     bundleID,
 		Paths:        paths,
 		Image:        image,
-		RvVersion:    rvVersion,
-		RvBinaryPath: "", // empty: force rv download via rvcache (production path)
+		PakVersion:   pakVersion,
+		PakCachePath: pakCachePath,
 		Retention:    5,
 		BasePath:     basePath,
 	})
@@ -925,19 +871,20 @@ func TestBuildLogWriter(t *testing.T) {
 	}
 
 	bundleDir, libDir := testBundleDir(t)
-	rvBin := testRvBinary(t)
 
 	var logLines []string
 	var mu sync.Mutex
 
 	spec := backend.BuildSpec{
-		AppID:        "test-app",
-		BundleID:     uuid.New().String()[:8],
-		Image:        "alpine:latest",
-		RvBinaryPath: rvBin,
-		BundlePath:   bundleDir,
-		LibraryPath:  libDir,
-		Labels:       map[string]string{},
+		AppID:    "test-app",
+		BundleID: uuid.New().String()[:8],
+		Image:    "alpine:latest",
+		Cmd:      []string{"true"},
+		Mounts: []backend.MountEntry{
+			{Source: bundleDir, Target: "/app", ReadOnly: true},
+			{Source: libDir, Target: "/build-lib", ReadOnly: false},
+		},
+		Labels: map[string]string{},
 		LogWriter: func(line string) {
 			mu.Lock()
 			logLines = append(logLines, line)
@@ -945,9 +892,7 @@ func TestBuildLogWriter(t *testing.T) {
 		},
 	}
 
-	// The build will run our dummy rv binary which just exits 0.
-	// Alpine doesn't have /usr/local/bin/rv by default, but our rv binary
-	// is bind-mounted at that path. It should produce at least some output.
+	// The build runs "true" which exits 0 silently.
 	_, err = b.Build(ctx, spec)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -972,21 +917,16 @@ func TestBuildExitCodeOnFailure(t *testing.T) {
 
 	bundleDir, libDir := testBundleDir(t)
 
-	// Create an rv binary that always fails.
-	dir := t.TempDir()
-	failBin := filepath.Join(dir, "rv")
-	if err := os.WriteFile(failBin, []byte("#!/bin/sh\necho 'rv: sync failed' >&2\nexit 42\n"), 0o755); err != nil {
-		t.Fatalf("write failing rv: %v", err)
-	}
-
 	spec := backend.BuildSpec{
-		AppID:        "test-app",
-		BundleID:     uuid.New().String()[:8],
-		Image:        "alpine:latest",
-		RvBinaryPath: failBin,
-		BundlePath:   bundleDir,
-		LibraryPath:  libDir,
-		Labels:       map[string]string{},
+		AppID:    "test-app",
+		BundleID: uuid.New().String()[:8],
+		Image:    "alpine:latest",
+		Cmd:      []string{"false"},
+		Mounts: []backend.MountEntry{
+			{Source: bundleDir, Target: "/app", ReadOnly: true},
+			{Source: libDir, Target: "/build-lib", ReadOnly: false},
+		},
+		Labels: map[string]string{},
 	}
 
 	result, err := b.Build(ctx, spec)

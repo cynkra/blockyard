@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -720,25 +721,29 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 
 	containerName := "blockyard-build-" + spec.BundleID
 
-	cmd := []string{"/usr/local/bin/rv", "sync"}
-
 	// 3. Create container
-	binds, mounts := d.mountCfg.BuildMounts(spec.BundlePath, spec.LibraryPath, spec.RvBinaryPath)
+	var binds []string
+	var mounts []mount.Mount
+	for _, m := range spec.Mounts {
+		b, dm := d.mountCfg.TranslateMount(m)
+		binds = append(binds, b...)
+		mounts = append(mounts, dm...)
+	}
 
 	resp, err := d.client.ContainerCreate(ctx,
 		&container.Config{
 			Image:      spec.Image,
-			Cmd:        cmd,
+			Cmd:        spec.Cmd,
 			WorkingDir: "/app",
 			Labels:     buildLabels(spec),
+			Env:        spec.Env,
 		},
 		&container.HostConfig{
 			NetworkMode: container.NetworkMode(buildNetworkName),
 			Binds:       binds,
 			Mounts:      mounts,
 			Tmpfs: map[string]string{
-				"/tmp":            "exec",
-				"/root/.cache/rv": "",
+				"/tmp": "exec",
 			},
 			ReadonlyRootfs: true,
 			CapDrop:        []string{"ALL"},

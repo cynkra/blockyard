@@ -1,19 +1,20 @@
 package bundle
 
 import (
-	"bytes"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
 	mockmock "github.com/cynkra/blockyard/internal/backend/mock"
+	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/task"
-	"github.com/cynkra/blockyard/internal/testutil"
 )
 
 // setupRestoreTest creates the common scaffolding for SpawnRestore tests:
-// a DB with an app+bundle, unpacked bundle directory, and RestoreParams.
+// a DB with an app+bundle, unpacked bundle directory with manifest, and RestoreParams.
 func setupRestoreTest(t *testing.T, buildSuccess bool) (RestoreParams, *task.Store) {
 	t.Helper()
 
@@ -32,23 +33,29 @@ func setupRestoreTest(t *testing.T, buildSuccess bool) (RestoreParams, *task.Sto
 
 	paths := NewBundlePaths(tmp, app.ID, "b-1")
 
-	// Write and unpack a bundle so the unpacked directory exists with app.R.
-	data := testutil.MakeBundle(t)
-	if err := WriteArchive(paths, bytes.NewReader(data)); err != nil {
-		t.Fatal(err)
+	// Create unpacked dir with app.R and manifest.json.
+	os.MkdirAll(paths.Unpacked, 0o755)
+	os.MkdirAll(paths.Library, 0o755)
+	os.WriteFile(filepath.Join(paths.Unpacked, "app.R"),
+		[]byte("library(shiny)\nshinyApp(ui, server)"), 0o644)
+
+	m := manifest.Manifest{
+		Version:  1,
+		Platform: "4.4.2",
+		Metadata: manifest.Metadata{AppMode: "shiny", Entrypoint: "app.R"},
+		Description: map[string]string{
+			"Imports": "shiny",
+		},
+		Files: map[string]manifest.FileInfo{
+			"app.R": {Checksum: "abc123"},
+		},
 	}
-	if err := UnpackArchive(paths); err != nil {
-		t.Fatal(err)
-	}
-	// Create the library output directory.
-	if err := CreateLibraryDir(paths); err != nil {
-		t.Fatal(err)
-	}
-	// Write a minimal rproject.toml so SetLibraryPath succeeds.
-	if err := os.WriteFile(paths.Unpacked+"/rproject.toml",
-		[]byte("[project]\nname = \"test\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	data, _ := json.MarshalIndent(m, "", "  ")
+	os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), data, 0o644)
+
+	// Pre-create a fake pak cache dir so EnsureInstalled finds it.
+	pakCacheDir := filepath.Join(tmp, ".pak-cache")
+	os.MkdirAll(filepath.Join(pakCacheDir, "pak-stable"), 0o755)
 
 	tasks := task.NewStore()
 	sender := tasks.Create("task-1", "")
@@ -62,8 +69,8 @@ func setupRestoreTest(t *testing.T, buildSuccess bool) (RestoreParams, *task.Sto
 		BundleID:     "b-1",
 		Paths:        paths,
 		Image:        "test-image",
-		RvVersion:    "4.4.0",
-		RvBinaryPath: testutil.FakeRvBinary(t),
+		PakVersion:   "stable",
+		PakCachePath: pakCacheDir,
 		Retention:    5,
 		BasePath:     tmp,
 	}

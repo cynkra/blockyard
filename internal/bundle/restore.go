@@ -2,16 +2,18 @@ package bundle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/db"
-	"github.com/cynkra/blockyard/internal/rvcache"
+	"github.com/cynkra/blockyard/internal/pakcache"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
@@ -26,8 +28,8 @@ type RestoreParams struct {
 	BundleID     string
 	Paths        Paths
 	Image        string
-	RvVersion    string
-	RvBinaryPath string // if set, skip download and use this path directly
+	PakVersion   string // "stable" (default), or pinned version
+	PakCachePath string // base directory for pak cache
 	Retention    int
 	BasePath     string // bundle_server_path for retention cleanup
 	AuditLog     *audit.Log
@@ -117,52 +119,86 @@ func runRestore(p RestoreParams) error {
 	}
 	slog.Info("bundle state transition",
 		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "building")
-	p.Sender.Write("Starting dependency restoration...")
+	p.Sender.Write("restoring dependencies...")
 
-	// 2. Ensure rv binary is cached
-	rvBinaryPath := p.RvBinaryPath
-	if rvBinaryPath == "" {
-		cacheDir := filepath.Join(p.BasePath, ".rv-cache")
-		var rvErr error
-		rvBinaryPath, rvErr = rvcache.EnsureBinary(context.Background(), cacheDir, p.RvVersion)
-		if rvErr != nil {
-			return fmt.Errorf("ensure rv binary: %w", rvErr)
+	// 2. Ensure pak is cached.
+	pakCachePath := p.PakCachePath
+	if pakCachePath == "" {
+		pakCachePath = filepath.Join(p.BasePath, ".pak-cache")
+	}
+	pakPath, err := pakcache.EnsureInstalled(
+		context.Background(), p.Backend,
+		p.Image, p.PakVersion, pakCachePath)
+	if err != nil {
+		return fmt.Errorf("ensure pak: %w", err)
+	}
+
+	// 3. Resolve manifest from bundle contents.
+	m, err := resolveManifest(p.Paths.Unpacked)
+	if err != nil {
+		return fmt.Errorf("resolve manifest: %w", err)
+	}
+
+	// 4. Bare scripts: pre-process to generate DESCRIPTION, then retry.
+	if m == nil {
+		p.Sender.Write("scanning scripts for dependencies...")
+		if err := preProcess(context.Background(), p.Backend, pakPath, p); err != nil {
+			return fmt.Errorf("preprocess: %w", err)
+		}
+		m, err = resolveManifest(p.Paths.Unpacked)
+		if err != nil {
+			return fmt.Errorf("resolve manifest after preprocess: %w", err)
+		}
+		if m == nil {
+			return errors.New("failed to produce manifest after preprocessing")
 		}
 	}
 
-	// Sanity-check: verify the rv binary is a regular file. In Docker-in-Docker
-	// setups, a missing bind-mount source gets auto-created as a directory,
-	// producing a confusing "is a directory: permission denied" error.
-	if fi, err := os.Stat(rvBinaryPath); err != nil {
-		return fmt.Errorf("rv binary not found at %s: %w", rvBinaryPath, err)
-	} else if fi.IsDir() {
-		return fmt.Errorf("rv binary path %s is a directory, not a file", rvBinaryPath)
+	// 5. Write manifest.json to unpacked dir (if generated server-side).
+	manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
+	if !fileExists(manifestPath) {
+		if err := m.Write(manifestPath); err != nil {
+			return fmt.Errorf("write manifest: %w", err)
+		}
 	}
 
-	// 3. Set library path in rproject.toml so rv writes to the mounted volume.
-	if err := SetLibraryPath(p.Paths, BuildContainerLibPath); err != nil {
-		return fmt.Errorf("set library path: %w", err)
+	mode := m.BuildMode()
+	p.Sender.Write(fmt.Sprintf("build mode: %s", mode))
+
+	// 6. Write pak refs and repos for the R build script (avoids jsonlite dep).
+	refsData := strings.Join(m.PakRefs(), "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-refs"), []byte(refsData), 0o644); err != nil {
+		return fmt.Errorf("write pak refs: %w", err)
+	}
+	if lines := m.RepoLines(); len(lines) > 0 {
+		repoData := strings.Join(lines, "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-repos"), []byte(repoData), 0o644); err != nil {
+			return fmt.Errorf("write pak repos: %w", err)
+		}
 	}
 
-	// 4. Build the spec
-	labels := map[string]string{
-		"dev.blockyard/managed":   "true",
-		"dev.blockyard/app-id":    p.AppID,
-		"dev.blockyard/bundle-id": p.BundleID,
+	// 7. Ensure download cache dir exists.
+	dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
+	if err := os.MkdirAll(dlCachePath, 0o755); err != nil {
+		return fmt.Errorf("create download cache dir: %w", err)
 	}
 
+	// 8. Run build container.
 	spec := backend.BuildSpec{
-		AppID:        p.AppID,
-		BundleID:     p.BundleID,
-		Image:        p.Image,
-		RvBinaryPath: rvBinaryPath,
-		BundlePath:   p.Paths.Unpacked,
-		LibraryPath:  p.Paths.Library,
-		Labels:       labels,
-		LogWriter:    p.Sender.Write,
+		AppID:    p.AppID,
+		BundleID: p.BundleID,
+		Image:    p.Image,
+		Cmd:      buildCommand(),
+		Mounts:   buildMounts(pakPath, p.Paths.Unpacked, p.Paths.Library, dlCachePath),
+		Labels: map[string]string{
+			"dev.blockyard/managed":   "true",
+			"dev.blockyard/role":      "build",
+			"dev.blockyard/app-id":    p.AppID,
+			"dev.blockyard/bundle-id": p.BundleID,
+		},
+		LogWriter: func(line string) { p.Sender.Write(line) },
 	}
 
-	// 3. Run the build
 	result, err := p.Backend.Build(context.Background(), spec)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
@@ -171,10 +207,27 @@ func runRestore(p RestoreParams) error {
 		slog.Error("build container failed",
 			"app_id", p.AppID, "bundle_id", p.BundleID,
 			"exit_code", result.ExitCode, "logs", result.Logs)
-		return fmt.Errorf("build failed with exit code %d", result.ExitCode)
+		return fmt.Errorf("dependency restore failed (exit %d)", result.ExitCode)
 	}
 
-	// 4. Mark bundle as ready and activate (atomic).
+	// 9. Persist pak lockfile alongside bundle.
+	lockfileSrc := filepath.Join(p.Paths.Library, "pak.lock")
+	lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
+	if err := copyFile(lockfileSrc, lockfileDst); err != nil {
+		slog.Warn("failed to persist pak lockfile",
+			"error", err, "bundle_id", p.BundleID)
+		// Non-fatal — the build succeeded, lockfile is a downstream
+		// optimization for store assembly (phase 2-6) and refresh (2-7).
+	}
+
+	// 10. Persist manifest alongside bundle.
+	manifestDst := filepath.Join(p.Paths.Base, "manifest.json")
+	if err := m.Write(manifestDst); err != nil {
+		slog.Warn("failed to persist manifest",
+			"error", err, "bundle_id", p.BundleID)
+	}
+
+	// 11. Activate bundle.
 	p.Sender.Write("Build succeeded. Activating bundle...")
 	slog.Info("bundle state transition",
 		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "activating")
@@ -187,4 +240,64 @@ func runRestore(p RestoreParams) error {
 		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "active")
 	p.Sender.Write("Bundle activated.")
 	return nil
+}
+
+// buildCommand returns the R command that runs inside the build container.
+// The refs and repos are pre-computed by Go and written to .pak-refs and
+// .pak-repos text files in the bundle dir, so the R script only needs
+// base R + pak (no jsonlite dependency).
+func buildCommand() []string {
+	rScript := `
+		Sys.setenv(
+		  R_USER_CACHE_DIR = "/pak-cache",
+		  PKG_CACHE_DIR = "/pak-cache",
+		  PKG_SYSREQS = "false"
+		)
+		.libPaths(c("/pak", .libPaths()))
+		library(pak)
+
+		# Configure repos from pre-computed text file (Name=URL per line).
+		repos_file <- "/app/.pak-repos"
+		if (file.exists(repos_file)) {
+		  lines <- readLines(repos_file, warn = FALSE)
+		  lines <- lines[nzchar(lines)]
+		  if (length(lines) > 0) {
+		    nms  <- sub("=.*", "", lines)
+		    urls <- sub("^[^=]+=", "", lines)
+		    # Rewrite P3M URLs for binary linux packages.
+		    for (i in seq_along(urls)) {
+		      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", urls[i]) &&
+		          !grepl("__linux__", urls[i])) {
+		        os_rel <- readLines("/etc/os-release")
+		        cn <- sub("^VERSION_CODENAME=", "",
+		                  grep("^VERSION_CODENAME=", os_rel, value = TRUE))
+		        urls[i] <- sub("(/cran/|/bioc/)",
+		                       paste0("\\1__linux__/", cn, "/"), urls[i])
+		      }
+		    }
+		    options(repos = setNames(urls, nms))
+		  }
+		}
+
+		# Read refs from pre-computed text file (one ref per line).
+		refs <- readLines("/app/.pak-refs", warn = FALSE)
+		refs <- refs[nzchar(refs)]
+
+		pak::lockfile_create(refs,
+		  lockfile = "/build-lib/pak.lock", lib = "/build-lib")
+		pak::lockfile_install("/build-lib/pak.lock", lib = "/build-lib")
+	`
+	return []string{"R", "--vanilla", "-e", rScript}
+}
+
+// buildMounts returns the mount entries for the pak build container.
+func buildMounts(
+	pakCachePath, bundlePath, libraryPath, dlCachePath string,
+) []backend.MountEntry {
+	return []backend.MountEntry{
+		{Source: bundlePath, Target: "/app", ReadOnly: true},
+		{Source: libraryPath, Target: "/build-lib", ReadOnly: false},
+		{Source: pakCachePath, Target: "/pak", ReadOnly: true},
+		{Source: dlCachePath, Target: "/pak-cache", ReadOnly: false},
+	}
 }

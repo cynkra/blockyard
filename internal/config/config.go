@@ -54,8 +54,7 @@ type DockerConfig struct {
 	Socket         string `toml:"socket"`
 	Image          string `toml:"image"`
 	ShinyPort      int    `toml:"shiny_port"`
-	RvVersion      string `toml:"rv_version"`
-	RvBinaryPath   string `toml:"-"` // set at runtime; skips download if non-empty
+	PakVersion     string `toml:"pak_version"` // "stable" (default), or pinned version
 	ServiceNetwork string `toml:"service_network"` // Docker network whose containers are made reachable from workers
 }
 
@@ -159,8 +158,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.Docker.ShinyPort == 0 {
 		cfg.Docker.ShinyPort = 3838
 	}
-	if cfg.Docker.RvVersion == "" {
-		cfg.Docker.RvVersion = "v0.19.0"
+	if cfg.Docker.PakVersion == "" {
+		cfg.Docker.PakVersion = "stable"
 	}
 	if cfg.Storage.BundleServerPath == "" {
 		cfg.Storage.BundleServerPath = "/data/bundles"

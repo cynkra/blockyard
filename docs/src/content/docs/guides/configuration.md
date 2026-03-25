@@ -39,7 +39,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `socket` | `/var/run/docker.sock` | Path to the Docker (or Podman) socket |
 | `image` | *(required)* | Base container image for workers and builds |
 | `shiny_port` | `3838` | Port Shiny listens on inside the container |
-| `rv_version` | `v0.19.0` | `rv` release tag to use for dependency restoration |
+| `pak_version` | `stable` | [pak](https://pak.r-lib.org/) release channel (`stable`, `rc`, or `devel`) |
 
 ### `[storage]`
 
@@ -138,7 +138,7 @@ shutdown_timeout = "30s"
 socket     = "/var/run/docker.sock"
 image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838
-rv_version = "v0.19.0"
+pak_version = "stable"
 
 [storage]
 bundle_server_path = "/data/bundles"
