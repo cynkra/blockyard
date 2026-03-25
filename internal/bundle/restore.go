@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
@@ -164,13 +165,25 @@ func runRestore(p RestoreParams) error {
 	mode := m.BuildMode()
 	p.Sender.Write(fmt.Sprintf("build mode: %s", mode))
 
-	// 6. Ensure download cache dir exists.
+	// 6. Write pak refs and repos for the R build script (avoids jsonlite dep).
+	refsData := strings.Join(m.PakRefs(), "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-refs"), []byte(refsData), 0o644); err != nil {
+		return fmt.Errorf("write pak refs: %w", err)
+	}
+	if lines := m.RepoLines(); len(lines) > 0 {
+		repoData := strings.Join(lines, "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-repos"), []byte(repoData), 0o644); err != nil {
+			return fmt.Errorf("write pak repos: %w", err)
+		}
+	}
+
+	// 7. Ensure download cache dir exists.
 	dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
 	if err := os.MkdirAll(dlCachePath, 0o755); err != nil {
 		return fmt.Errorf("create download cache dir: %w", err)
 	}
 
-	// 7. Run build container.
+	// 8. Run build container.
 	spec := backend.BuildSpec{
 		AppID:    p.AppID,
 		BundleID: p.BundleID,
@@ -197,7 +210,7 @@ func runRestore(p RestoreParams) error {
 		return fmt.Errorf("dependency restore failed (exit %d)", result.ExitCode)
 	}
 
-	// 8. Persist pak lockfile alongside bundle.
+	// 9. Persist pak lockfile alongside bundle.
 	lockfileSrc := filepath.Join(p.Paths.Library, "pak.lock")
 	lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
 	if err := copyFile(lockfileSrc, lockfileDst); err != nil {
@@ -207,14 +220,14 @@ func runRestore(p RestoreParams) error {
 		// optimization for store assembly (phase 2-6) and refresh (2-7).
 	}
 
-	// 9. Persist manifest alongside bundle.
+	// 10. Persist manifest alongside bundle.
 	manifestDst := filepath.Join(p.Paths.Base, "manifest.json")
 	if err := m.Write(manifestDst); err != nil {
 		slog.Warn("failed to persist manifest",
 			"error", err, "bundle_id", p.BundleID)
 	}
 
-	// 10. Activate bundle.
+	// 11. Activate bundle.
 	p.Sender.Write("Build succeeded. Activating bundle...")
 	slog.Info("bundle state transition",
 		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "activating")
@@ -230,64 +243,41 @@ func runRestore(p RestoreParams) error {
 }
 
 // buildCommand returns the R command that runs inside the build container.
-// The R script handles both pinned and unpinned modes — it reads the
-// manifest to determine which.
+// The refs and repos are pre-computed by Go and written to .pak-refs and
+// .pak-repos text files in the bundle dir, so the R script only needs
+// base R + pak (no jsonlite dependency).
 func buildCommand() []string {
 	rScript := `
 		.libPaths(c("/pak", .libPaths()))
 		library(pak)
 		Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
-		# simplifyVector = FALSE: prevents jsonlite from collapsing
-		# the packages list into a data frame when all records have
-		# identical field sets. vapply() over a data frame iterates
-		# columns, not rows — silently producing wrong refs.
-		manifest <- jsonlite::fromJSON("/app/manifest.json",
-		                               simplifyVector = FALSE)
-
-		# Configure repos.
-		if (length(manifest$repositories) > 0) {
-		  repo_urls <- setNames(
-		    vapply(manifest$repositories, function(r) {
-		      url <- r$URL
-		      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", url) &&
-		          !grepl("__linux__", url)) {
+		# Configure repos from pre-computed text file (Name=URL per line).
+		repos_file <- "/app/.pak-repos"
+		if (file.exists(repos_file)) {
+		  lines <- readLines(repos_file, warn = FALSE)
+		  lines <- lines[nzchar(lines)]
+		  if (length(lines) > 0) {
+		    nms  <- sub("=.*", "", lines)
+		    urls <- sub("^[^=]+=", "", lines)
+		    # Rewrite P3M URLs for binary linux packages.
+		    for (i in seq_along(urls)) {
+		      if (grepl("p3m\\.dev|packagemanager\\.posit\\.co", urls[i]) &&
+		          !grepl("__linux__", urls[i])) {
 		        os_rel <- readLines("/etc/os-release")
 		        cn <- sub("^VERSION_CODENAME=", "",
 		                  grep("^VERSION_CODENAME=", os_rel, value = TRUE))
-		        url <- sub("(/cran/|/bioc/)",
-		                   paste0("\\1__linux__/", cn, "/"), url)
+		        urls[i] <- sub("(/cran/|/bioc/)",
+		                       paste0("\\1__linux__/", cn, "/"), urls[i])
 		      }
-		      url
-		    }, ""),
-		    vapply(manifest$repositories, function(r) r$Name, "")
-		  )
-		  options(repos = repo_urls)
+		    }
+		    options(repos = setNames(urls, nms))
+		  }
 		}
 
-		# Derive refs.
-		record_to_ref <- function(rec) {
-		  switch(rec$Source,
-		    Repository =, Bioconductor = {
-		      prefix <- if (rec$Source == "Bioconductor") "bioc::" else ""
-		      paste0(prefix, rec$Package, "@", rec$Version)
-		    },
-		    GitHub =    paste0(rec$RemoteUsername, "/", rec$RemoteRepo,
-		                      "@", rec$RemoteSha),
-		    GitLab =    paste0("gitlab::", rec$RemoteUsername, "/",
-		                      rec$RemoteRepo, "@", rec$RemoteSha),
-		    Bitbucket = paste0("bitbucket::", rec$RemoteUsername, "/",
-		                      rec$RemoteRepo, "@", rec$RemoteSha),
-		    git    =    paste0("git::", rec$RemoteUrl),
-		    stop("Unsupported Source: ", rec$Source)
-		  )
-		}
-
-		if (!is.null(manifest$packages)) {
-		  refs <- vapply(manifest$packages, record_to_ref, "")
-		} else {
-		  refs <- "deps::/app"
-		}
+		# Read refs from pre-computed text file (one ref per line).
+		refs <- readLines("/app/.pak-refs", warn = FALSE)
+		refs <- refs[nzchar(refs)]
 
 		pak::lockfile_create(refs,
 		  lockfile = "/build-lib/pak.lock", lib = "/build-lib")

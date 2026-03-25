@@ -502,6 +502,75 @@ func TestParseDCF_BasicFields(t *testing.T) {
 	}
 }
 
+// --- PakRef / PakRefs / RepoLines ---
+
+func TestPakRef(t *testing.T) {
+	tests := []struct {
+		name string
+		pkg  Package
+		want string
+	}{
+		{"Repository", Package{Package: "shiny", Version: "1.9.1", Source: "Repository"}, "shiny@1.9.1"},
+		{"Bioconductor", Package{Package: "Biobase", Version: "2.60.0", Source: "Bioconductor"}, "bioc::Biobase@2.60.0"},
+		{"GitHub", Package{Package: "dplyr", Source: "GitHub", RemoteUsername: "tidyverse", RemoteRepo: "dplyr", RemoteSha: "abc123"}, "tidyverse/dplyr@abc123"},
+		{"GitLab", Package{Package: "x", Source: "GitLab", RemoteUsername: "u", RemoteRepo: "r", RemoteSha: "def"}, "gitlab::u/r@def"},
+		{"Bitbucket", Package{Package: "x", Source: "Bitbucket", RemoteUsername: "u", RemoteRepo: "r", RemoteSha: "eee"}, "bitbucket::u/r@eee"},
+		{"git", Package{Package: "x", Source: "git", RemoteUrl: "https://example.com/repo.git"}, "git::https://example.com/repo.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.pkg.PakRef(); got != tt.want {
+				t.Fatalf("PakRef() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPakRefs_Pinned(t *testing.T) {
+	m := Manifest{
+		Packages: map[string]Package{
+			"shiny": {Package: "shiny", Version: "1.9.1", Source: "Repository"},
+		},
+	}
+	refs := m.PakRefs()
+	if len(refs) != 1 || refs[0] != "shiny@1.9.1" {
+		t.Fatalf("PakRefs() = %v", refs)
+	}
+}
+
+func TestPakRefs_Unpinned(t *testing.T) {
+	m := Manifest{
+		Description: map[string]string{"Imports": "shiny"},
+	}
+	refs := m.PakRefs()
+	if len(refs) != 1 || refs[0] != "deps::/app" {
+		t.Fatalf("PakRefs() = %v", refs)
+	}
+}
+
+func TestRepoLines(t *testing.T) {
+	m := Manifest{
+		Repositories: []Repository{
+			{Name: "CRAN", URL: "https://cloud.r-project.org"},
+			{Name: "BioCsoft", URL: "https://bioconductor.org/packages/release/bioc"},
+		},
+	}
+	lines := m.RepoLines()
+	if len(lines) != 2 {
+		t.Fatalf("RepoLines() = %v", lines)
+	}
+	if lines[0] != "CRAN=https://cloud.r-project.org" {
+		t.Fatalf("lines[0] = %q", lines[0])
+	}
+}
+
+func TestRepoLines_Empty(t *testing.T) {
+	m := Manifest{}
+	if lines := m.RepoLines(); len(lines) != 0 {
+		t.Fatalf("expected empty, got %v", lines)
+	}
+}
+
 func TestParseDCF_ContinuationLines(t *testing.T) {
 	data := []byte("Imports:\n    shiny,\n    ggplot2\n")
 	fields := parseDCF(data)

@@ -165,6 +165,51 @@ func Read(path string) (*Manifest, error) {
 	return &m, nil
 }
 
+// PakRefs returns the list of pak-style package references derived from
+// the manifest. For pinned manifests this converts each package record;
+// for unpinned manifests it returns ["deps::/app"] so pak scans the
+// DESCRIPTION file inside the bundle.
+func (m *Manifest) PakRefs() []string {
+	if len(m.Packages) == 0 {
+		return []string{"deps::/app"}
+	}
+	refs := make([]string, 0, len(m.Packages))
+	for _, pkg := range m.Packages {
+		refs = append(refs, pkg.PakRef())
+	}
+	return refs
+}
+
+// PakRef converts a single package record to a pak-style reference.
+func (p Package) PakRef() string {
+	switch p.Source {
+	case "Bioconductor":
+		return "bioc::" + p.Package + "@" + p.Version
+	case "Repository":
+		return p.Package + "@" + p.Version
+	case "GitHub":
+		return p.RemoteUsername + "/" + p.RemoteRepo + "@" + p.RemoteSha
+	case "GitLab":
+		return "gitlab::" + p.RemoteUsername + "/" + p.RemoteRepo + "@" + p.RemoteSha
+	case "Bitbucket":
+		return "bitbucket::" + p.RemoteUsername + "/" + p.RemoteRepo + "@" + p.RemoteSha
+	case "git":
+		return "git::" + p.RemoteUrl
+	default:
+		return p.Package
+	}
+}
+
+// RepoLines returns the repositories as "Name=URL" lines suitable for
+// writing to a text file that the R build script can parse without jsonlite.
+func (m *Manifest) RepoLines() []string {
+	lines := make([]string, 0, len(m.Repositories))
+	for _, r := range m.Repositories {
+		lines = append(lines, r.Name+"="+r.URL)
+	}
+	return lines
+}
+
 // Write serializes the manifest to a JSON file.
 func (m *Manifest) Write(path string) error {
 	data, err := json.MarshalIndent(m, "", "  ")
