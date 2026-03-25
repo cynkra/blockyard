@@ -219,3 +219,37 @@ func TestSpawnRestore_FailureWithAuditLog(t *testing.T) {
 		t.Fatalf("expected Failed, got %d", status)
 	}
 }
+
+func TestBuildCommand(t *testing.T) {
+	cmd := buildCommand()
+	if len(cmd) != 4 {
+		t.Fatalf("expected 4 parts, got %d", len(cmd))
+	}
+	if cmd[0] != "R" || cmd[1] != "--vanilla" || cmd[2] != "-e" {
+		t.Errorf("prefix = %v", cmd[:3])
+	}
+	// The R script should reference the by-builder store commands.
+	if len(cmd[3]) < 100 {
+		t.Error("R script appears empty or truncated")
+	}
+}
+
+func TestBuildMounts(t *testing.T) {
+	mounts := buildMounts("/pak", "/app", "/store", "/cache", "/tools/by-builder")
+	if len(mounts) != 5 {
+		t.Fatalf("expected 5 mounts, got %d", len(mounts))
+	}
+	// Verify critical mount: store must be read-write.
+	for _, m := range mounts {
+		if m.Target == "/store" {
+			if m.ReadOnly {
+				t.Error("store mount should be read-write")
+			}
+			if m.Source != "/store" {
+				t.Errorf("store source = %q", m.Source)
+			}
+			return
+		}
+	}
+	t.Error("store mount not found")
+}

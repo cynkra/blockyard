@@ -146,6 +146,87 @@ func TestLockfileEntryValidate_UnsupportedType(t *testing.T) {
 	}
 }
 
+func TestReadLockfile_FileNotFound(t *testing.T) {
+	_, err := ReadLockfile("/nonexistent/pak.lock")
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestReadLockfile_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pak.lock")
+	os.WriteFile(path, []byte(`{not json`), 0o644)
+
+	_, err := ReadLockfile(path)
+	if err == nil {
+		t.Error("expected error for malformed JSON")
+	}
+}
+
+func TestLockfileValidate_EntryError(t *testing.T) {
+	// Lockfile is valid at the top level but has an invalid entry.
+	lf := Lockfile{
+		LockfileVersion: 1,
+		Packages: []LockfileEntry{
+			{Package: "", Version: "1.0"}, // missing package name
+		},
+	}
+	if err := lf.Validate(); err == nil {
+		t.Error("expected error for invalid entry")
+	}
+}
+
+func TestLockfileEntryValidate_MissingPackage(t *testing.T) {
+	e := LockfileEntry{Version: "1.0", RVersion: "4.5", Platform: "x", Metadata: LockfileMetadata{RemoteType: "standard"}, SHA256: "a"}
+	if err := e.Validate(); err == nil {
+		t.Error("expected error for missing package")
+	}
+}
+
+func TestLockfileEntryValidate_MissingVersion(t *testing.T) {
+	e := LockfileEntry{Package: "pkg", RVersion: "4.5", Platform: "x", Metadata: LockfileMetadata{RemoteType: "standard"}, SHA256: "a"}
+	if err := e.Validate(); err == nil {
+		t.Error("expected error for missing version")
+	}
+}
+
+func TestLockfileEntryValidate_MissingPlatform(t *testing.T) {
+	e := LockfileEntry{Package: "pkg", Version: "1.0", RVersion: "4.5", Metadata: LockfileMetadata{RemoteType: "standard"}, SHA256: "a"}
+	if err := e.Validate(); err == nil {
+		t.Error("expected error for missing platform")
+	}
+}
+
+func TestLockfileEntryValidate_GitHubMissingRemoteSha(t *testing.T) {
+	e := LockfileEntry{
+		Package:  "pkg",
+		Version:  "1.0",
+		Platform: "x86_64-pc-linux-gnu",
+		RVersion: "4.5",
+		Metadata: LockfileMetadata{RemoteType: "github"},
+		// RemoteSha is empty
+	}
+	if err := e.Validate(); err == nil {
+		t.Error("expected error for github without RemoteSha")
+	}
+}
+
+func TestLockfileEntryValidate_FallbackToType(t *testing.T) {
+	// When metadata.RemoteType is empty, falls back to top-level Type.
+	e := LockfileEntry{
+		Package:  "pkg",
+		Version:  "1.0",
+		Platform: "x86_64-pc-linux-gnu",
+		RVersion: "4.5",
+		Type:     "standard",
+		SHA256:   "abc",
+	}
+	if err := e.Validate(); err != nil {
+		t.Errorf("should fall back to top-level type: %v", err)
+	}
+}
+
 func TestPlatformFromLockfile(t *testing.T) {
 	lf := &Lockfile{
 		Packages: []LockfileEntry{

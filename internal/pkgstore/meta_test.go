@@ -358,6 +358,95 @@ func TestWriteIngestMeta_AppendsConfig(t *testing.T) {
 	}
 }
 
+func TestIngestContext_MissingDESCRIPTION(t *testing.T) {
+	lf := &Lockfile{Packages: []LockfileEntry{}}
+
+	// Non-existent path — should return empty config hash, no error.
+	configHash, keys, compiled, names, err := IngestContext("/nonexistent/DESCRIPTION", lf)
+	if err != nil {
+		t.Fatalf("expected nil error for missing DESCRIPTION, got %v", err)
+	}
+	if compiled {
+		t.Error("compiled should be false")
+	}
+	if len(keys) != 0 || len(names) != 0 {
+		t.Error("expected empty linkingTo")
+	}
+	if configHash != ConfigHash(nil) {
+		t.Error("expected canonical empty config hash")
+	}
+}
+
+func TestIngestContext_LinkingToNotInLockfile(t *testing.T) {
+	dir := t.TempDir()
+	descPath := filepath.Join(dir, "DESCRIPTION")
+	os.WriteFile(descPath, []byte("Package: sf\nLinkingTo: Rcpp, NonExistent\nNeedsCompilation: yes\n"), 0o644)
+
+	rcppEntry := LockfileEntry{
+		Package:  "Rcpp",
+		Version:  "1.0",
+		Type:     "standard",
+		SHA256:   "rcpp-sha",
+		Platform: "x86_64-pc-linux-gnu",
+		RVersion: "4.5",
+		Metadata: LockfileMetadata{RemoteType: "standard"},
+	}
+	lf := &Lockfile{Packages: []LockfileEntry{rcppEntry}}
+
+	_, keys, _, names, err := IngestContext(descPath, lf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both names should be listed, but only Rcpp has a store key.
+	if len(names) != 2 {
+		t.Errorf("expected 2 names, got %d", len(names))
+	}
+	if len(keys) != 1 {
+		t.Errorf("expected 1 key (NonExistent not in lockfile), got %d", len(keys))
+	}
+}
+
+func TestParsePkgList_WithVersionConstraints(t *testing.T) {
+	got := parsePkgList("Rcpp (>= 1.0.0), s2, BH (>= 1.72)")
+	if len(got) != 3 {
+		t.Fatalf("expected 3 packages, got %d: %v", len(got), got)
+	}
+	if got[0] != "Rcpp" || got[1] != "s2" || got[2] != "BH" {
+		t.Errorf("got %v", got)
+	}
+}
+
+func TestParsePkgList_Empty(t *testing.T) {
+	got := parsePkgList("")
+	if len(got) != 0 {
+		t.Errorf("expected empty, got %v", got)
+	}
+}
+
+func TestLockfileStoreKey_NotFound(t *testing.T) {
+	lf := &Lockfile{Packages: []LockfileEntry{
+		{Package: "shiny", Version: "1.0", Type: "standard", SHA256: "abc",
+			Platform: "x", RVersion: "4.5", Metadata: LockfileMetadata{RemoteType: "standard"}},
+	}}
+	// Package not in lockfile.
+	key := lockfileStoreKey(lf, "nonexistent")
+	if key != "" {
+		t.Errorf("expected empty key for missing package, got %q", key)
+	}
+}
+
+func TestLockfileStoreKey_UnsupportedType(t *testing.T) {
+	lf := &Lockfile{Packages: []LockfileEntry{
+		{Package: "bad", Version: "1.0", Type: "url", Platform: "x", RVersion: "4.5",
+			Metadata: LockfileMetadata{RemoteType: "url"}},
+	}}
+	// StoreKey returns error for unsupported type -> lockfileStoreKey returns "".
+	key := lockfileStoreKey(lf, "bad")
+	if key != "" {
+		t.Errorf("expected empty key for unsupported type, got %q", key)
+	}
+}
+
 func TestParseDCF(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "DESCRIPTION")

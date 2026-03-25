@@ -101,6 +101,21 @@ func TestReadStoreManifest_NotFound(t *testing.T) {
 	}
 }
 
+func TestUpdatePackageManifest_NoExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	// No prior manifest — should create from scratch.
+	if err := UpdatePackageManifest(dir, map[string]string{
+		"shiny": "src1/cfg1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := ReadPackageManifest(dir)
+	if got["shiny"] != "src1/cfg1" {
+		t.Errorf("shiny = %q", got["shiny"])
+	}
+}
+
 func TestReadPackageManifest_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	_, err := ReadPackageManifest(dir)

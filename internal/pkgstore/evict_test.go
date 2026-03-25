@@ -179,6 +179,108 @@ func TestEvictStale_EmptyStore(t *testing.T) {
 	}
 }
 
+func TestEvictStale_SkipsNonDirAndDotfiles(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	platformDir := filepath.Join(root, "4.5-x86_64-pc-linux-gnu")
+	os.MkdirAll(platformDir, 0o755)
+	// Create a regular file (not a directory) — should be skipped.
+	os.WriteFile(filepath.Join(platformDir, "spurious-file"), []byte("x"), 0o644)
+	// Create a dotfile directory — should be skipped.
+	os.MkdirAll(filepath.Join(platformDir, ".hidden"), 0o755)
+
+	n, err := s.EvictStale(context.Background(), 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 evictions, got %d", n)
+	}
+}
+
+func TestEvictStale_SkipsNonDirSourceHash(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	pkgDir := filepath.Join(root, "4.5-x86_64-pc-linux-gnu", "shiny")
+	os.MkdirAll(pkgDir, 0o755)
+	// Create a file where a source hash directory is expected.
+	os.WriteFile(filepath.Join(pkgDir, "not-a-dir"), []byte("x"), 0o644)
+
+	n, err := s.EvictStale(context.Background(), 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 evictions, got %d", n)
+	}
+}
+
+func TestEvictStale_ConcurrentRefreshPreservesEntry(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	pkg, sh, ch := "shiny", "src1", "cfg1"
+	os.MkdirAll(s.Path(pkg, sh, ch), 0o755)
+	sidecar := s.ConfigMetaPath(pkg, sh, ch)
+	os.WriteFile(sidecar, []byte(`{}`), 0o644)
+	// Set old mtime so phase 1 scan picks it up.
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(sidecar, old, old)
+
+	sc := StoreConfigs{Configs: map[string]map[string]string{ch: {}}}
+	WriteStoreConfigs(s.ConfigsPath(pkg, sh), sc)
+
+	// Now "refresh" the sidecar AFTER the old mtime but BEFORE eviction
+	// runs phase 2. Simulate by touching the file with a fresh timestamp.
+	now := time.Now()
+	os.Chtimes(sidecar, now, now)
+
+	n, err := s.EvictStale(context.Background(), 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 evictions (sidecar was refreshed), got %d", n)
+	}
+	// Entry should still exist.
+	if !dirExists(s.Path(pkg, sh, ch)) {
+		t.Error("config dir should still exist after concurrent refresh")
+	}
+}
+
+func TestEvictStale_SidecarRemovedConcurrently(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	pkg, sh, ch := "shiny", "src1", "cfg1"
+	os.MkdirAll(s.Path(pkg, sh, ch), 0o755)
+	sidecar := s.ConfigMetaPath(pkg, sh, ch)
+	os.WriteFile(sidecar, []byte(`{}`), 0o644)
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(sidecar, old, old)
+
+	sc := StoreConfigs{Configs: map[string]map[string]string{ch: {}}}
+	WriteStoreConfigs(s.ConfigsPath(pkg, sh), sc)
+
+	// Remove sidecar between phase 1 scan and phase 2 re-check.
+	os.Remove(sidecar)
+
+	n, err := s.EvictStale(context.Background(), 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The entry should be skipped (sidecar gone), so 0 evictions.
+	if n != 0 {
+		t.Errorf("expected 0 evictions (sidecar removed concurrently), got %d", n)
+	}
+}
+
 func TestRemoveIfEmpty(t *testing.T) {
 	dir := t.TempDir()
 	emptyDir := filepath.Join(dir, "empty")

@@ -101,6 +101,22 @@ func TestAssembleLibraryEmpty(t *testing.T) {
 	}
 }
 
+func TestAssembleLibrary_BadStoreRef(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(root)
+	s.SetPlatform("4.5-x86_64-pc-linux-gnu")
+
+	libDir := filepath.Join(root, ".workers", "w4")
+	manifest := map[string]string{
+		"shiny": "malformed-no-slash",
+	}
+
+	_, err := s.AssembleLibrary(libDir, manifest)
+	if err == nil {
+		t.Error("expected error for malformed store ref")
+	}
+}
+
 func TestSplitStoreRef(t *testing.T) {
 	src, cfg, err := SplitStoreRef("abc123/def456")
 	if err != nil {
