@@ -24,7 +24,7 @@ build pipeline and worker lifecycle.
    directory with two-level keying:
    `{platform}/{package}/{source_hash}/{config_hash}`. The `platform`
    prefix encodes R version (minor), OS, and architecture (e.g.,
-   `4.4-linux-x86_64`). Source hash is SHA-256 of selected identity
+   `4.5-x86_64-pc-linux-gnu`). Source hash is SHA-256 of selected identity
    fields from the pak lockfile entry. Config hash is SHA-256 of the
    sorted `LinkingTo` dependency store keys (canonical empty hash for
    packages without `LinkingTo`).
@@ -46,9 +46,10 @@ build pipeline and worker lifecycle.
    this phase ensures the mount is present in the store-aware build flow.
 6. **Worker library assembly** — at worker startup, assemble a single
    mutable `/lib` per container by hard-linking from the store based on
-   the bundle's pak lockfile. Each lockfile entry maps to a store path
-   via the curated hash. Assembly also writes a `.packages.json`
-   manifest (`{package: store_key}`) that tracks what's installed in
+   the bundle's `store-manifest.json`. Each entry maps directly to a
+   store path — no hash computation or config resolution needed.
+   Assembly also writes a `.packages.json` manifest initialized as a
+   copy of the bundle's store-manifest that tracks what's installed in
    each worker — the source of truth for live installs (phase 2-7).
 7. **Worker lifecycle integration** — create `/lib` directories on spawn,
    populate from store, mount into containers. Clean up on eviction.
@@ -74,7 +75,7 @@ New package: `internal/pkgstore/`.
 
 type Store struct {
     root     string // host-side store root, e.g., {bundle_server_path}/.pkg-store
-    platform string // e.g., 4.4-linux-x86_64; set via DetectPlatform or SetPlatform
+    platform string // e.g., 4.5-x86_64-pc-linux-gnu; set via PlatformFromLockfile
 }
 
 func NewStore(root string) *Store {
@@ -91,7 +92,7 @@ func (s *Store) SetPlatform(p string) { s.platform = p }
 
 ```
 {root}/
-├── 4.4-linux-x86_64/            ← platform prefix
+├── 4.5-x86_64-pc-linux-gnu/     ← platform prefix
 │   ├── shiny/
 │   │   └── e3b0c442.../         ← source hash (v1.9.1)
 │   │       ├── configs.json     ← source-level metadata + config map
@@ -118,7 +119,7 @@ func (s *Store) SetPlatform(p string) { s.platform = p }
 │       ├── shiny/               ← hard-linked package trees
 │       └── ...
 └── .locks/                       ← concurrency locks
-    └── 4.4-linux-x86_64/
+    └── 4.5-x86_64-pc-linux-gnu/
         └── shiny/
             └── e3b0c442.lock    ← one lock per source hash
 ```
@@ -138,42 +139,59 @@ and atomic `rename()`.
 Parsed from the pak lockfile (JSON). The curated hash and worker
 library assembly are computed from these fields.
 
-**NOTE:** The JSON field names below (`package`, `version`,
-`RemoteType`, `sha256`, `RemoteSha`, `RemoteSubdir`) must be verified
-against the actual output of `pak::lockfile_create()` before
-implementation. Preliminary inspection of the actual pak lockfile
-output shows:
+Verified against `pak::lockfile_create()` output (pak 0.8.0, R 4.5.2).
+Key structural points:
 
-- `metadata.RemoteType` (nested under `metadata`, not top-level)
-- `metadata.RemoteSha` (nested; for standard type it's the version string)
-- `type` at top level (value: `"standard"`)
-- `needscompilation` (boolean, not string)
-- `sha256` at top level (matches)
-- `rversion` per-package (short form like `"4.5"`)
-- `platform` per-package
-
-The struct below preserves the current field mapping for clarity but
-needs to be aligned with the actual nested format during
-implementation. The `RemoteType`/`RemoteSha`/`RemoteSubdir` fields
-will likely come from `metadata.*` paths when unmarshaling.
+- `RemoteType`, `RemoteSha`, `RemoteSubdir` are nested under `metadata`
+  (a per-package object), not at the top level. A nested Go struct
+  handles this.
+- `type` at top level has the same value as `metadata.RemoteType` (e.g.,
+  `"standard"`). We use `metadata.RemoteType` for consistency with the
+  other `Remote*` fields but keep `type` as a convenient alias.
+- `sha256` is the archive hash, at top level.
+- For **standard** packages, `metadata.RemoteSha` is the version string
+  (e.g., `"1.9.1"`) — NOT a git SHA. The actual content hash is in
+  `sha256`. The store key for standard packages uses `sha256`, not
+  `metadata.RemoteSha`.
+- For **github**/**gitlab**/**git** packages, `metadata.RemoteSha` is
+  the git commit SHA.
+- `needscompilation` is a JSON boolean (not a `"yes"`/`"no"` string).
+- Each package carries its own `rversion` (short form, e.g., `"4.5"`)
+  and `platform` (R platform triple, e.g., `"x86_64-pc-linux-gnu"`).
+  These per-package fields are used for platform detection — see
+  `PlatformFromLockfile()`.
+- Top-level `r_version` is a long human-readable string
+  (e.g., `"R version 4.5.2 (2025-10-31)"`), not a bare version number.
+  Not used directly; the per-package `rversion` field is preferred.
 
 ```go
 // internal/pkgstore/lockfile.go
 
-type LockfileEntry struct {
-    Package      string `json:"package"`
-    Version      string `json:"version"`
+// LockfileMetadata holds the nested metadata object from a pak lockfile
+// entry. Only the fields needed for store key computation are mapped.
+type LockfileMetadata struct {
     RemoteType   string `json:"RemoteType"`
-    SHA256       string `json:"sha256"`
     RemoteSha    string `json:"RemoteSha"`
-    RemoteSubdir string `json:"RemoteSubdir"`
+    RemoteSubdir string `json:"RemoteSubdir,omitempty"`
+}
+
+type LockfileEntry struct {
+    Package          string           `json:"package"`
+    Version          string           `json:"version"`
+    Type             string           `json:"type"`              // "standard", "github", etc.
+    NeedsCompilation bool             `json:"needscompilation"`
+    Metadata         LockfileMetadata `json:"metadata"`
+    SHA256           string           `json:"sha256"`            // archive hash (top-level)
+    Platform         string           `json:"platform"`          // per-pkg R triple, e.g. "x86_64-pc-linux-gnu"
+    RVersion         string           `json:"rversion"`          // per-pkg short R version, e.g. "4.5"
 }
 
 type Lockfile struct {
-    RVersion string          `json:"r_version"`
-    OS       string          `json:"os"`
-    Arch     string          `json:"arch"`
-    Packages []LockfileEntry `json:"packages"`
+    LockfileVersion int              `json:"lockfile_version"`
+    RVersion        string           `json:"r_version"`  // "R version 4.5.2 (2025-10-31)"
+    OS              string           `json:"os"`          // "Ubuntu 24.04.2 LTS" (human-readable)
+    Platform        string           `json:"platform"`    // "x86_64-pc-linux-gnu" (R triple)
+    Packages        []LockfileEntry  `json:"packages"`
 }
 
 func ReadLockfile(path string) (*Lockfile, error) {
@@ -185,7 +203,76 @@ func ReadLockfile(path string) (*Lockfile, error) {
     if err := json.Unmarshal(data, &lf); err != nil {
         return nil, fmt.Errorf("parse pak lockfile: %w", err)
     }
+    if err := lf.Validate(); err != nil {
+        return nil, fmt.Errorf("invalid pak lockfile %s: %w", path, err)
+    }
     return &lf, nil
+}
+
+// Validate checks that the pak lockfile has the structure and fields
+// we depend on. Catches upstream format changes at parse time rather
+// than as wrong store keys or nil-pointer panics downstream.
+func (lf *Lockfile) Validate() error {
+    if lf.LockfileVersion != 1 {
+        return fmt.Errorf(
+            "unsupported lockfile_version %d (expected 1)",
+            lf.LockfileVersion)
+    }
+    if len(lf.Packages) == 0 {
+        return errors.New("lockfile has no packages")
+    }
+    for i, entry := range lf.Packages {
+        if err := entry.Validate(); err != nil {
+            return fmt.Errorf("packages[%d]: %w", i, err)
+        }
+    }
+    return nil
+}
+
+// Validate checks that a lockfile entry has the fields needed for
+// store key computation and platform detection.
+func (e LockfileEntry) Validate() error {
+    if e.Package == "" {
+        return errors.New("missing \"package\" field")
+    }
+    if e.Version == "" {
+        return fmt.Errorf("package %s: missing \"version\"", e.Package)
+    }
+    if e.RVersion == "" {
+        return fmt.Errorf("package %s: missing \"rversion\"", e.Package)
+    }
+    if e.Platform == "" {
+        return fmt.Errorf("package %s: missing \"platform\"", e.Package)
+    }
+
+    // RemoteType: prefer metadata.RemoteType, fall back to top-level type.
+    remoteType := e.Metadata.RemoteType
+    if remoteType == "" {
+        remoteType = e.Type
+    }
+    if remoteType == "" {
+        return fmt.Errorf("package %s: missing type/metadata.RemoteType",
+            e.Package)
+    }
+
+    switch remoteType {
+    case "standard":
+        if e.SHA256 == "" {
+            return fmt.Errorf(
+                "package %s: type \"standard\" requires \"sha256\"",
+                e.Package)
+        }
+    case "github", "gitlab", "git":
+        if e.Metadata.RemoteSha == "" {
+            return fmt.Errorf(
+                "package %s: type %q requires metadata.RemoteSha",
+                e.Package, remoteType)
+        }
+    default:
+        return fmt.Errorf("package %s: unsupported type %q",
+            e.Package, remoteType)
+    }
+    return nil
 }
 ```
 
@@ -207,18 +294,35 @@ Store and Cache Key Design for the full rationale.
 // Hash input format:
 //     {RemoteType}\0{field1}\0{field2}[...\0{fieldN}]
 func StoreKey(entry LockfileEntry) (string, error) {
-    var fields []string
-    switch entry.RemoteType {
-    case "standard":
-        fields = []string{entry.Package, entry.Version, entry.SHA256}
-    case "github", "gitlab", "git":
-        fields = []string{entry.Package, entry.RemoteSha, entry.RemoteSubdir}
-    default:
-        return "", fmt.Errorf(
-            "unsupported RemoteType for store key: %q", entry.RemoteType)
+    // Use metadata.RemoteType (canonical). Falls back to top-level
+    // type field — they carry the same value but metadata.RemoteType
+    // is consistent with the other Remote* fields.
+    remoteType := entry.Metadata.RemoteType
+    if remoteType == "" {
+        remoteType = entry.Type
     }
 
-    input := entry.RemoteType + "\x00" + strings.Join(fields, "\x00")
+    var fields []string
+    switch remoteType {
+    case "standard":
+        // sha256 is the archive hash (top-level). For standard
+        // packages, metadata.RemoteSha is just the version string
+        // (redundant with entry.Version) — NOT a content hash.
+        fields = []string{entry.Package, entry.Version, entry.SHA256}
+    case "github", "gitlab", "git":
+        // metadata.RemoteSha is the git commit SHA for remote packages.
+        // metadata.RemoteSubdir selects which package within a monorepo.
+        fields = []string{
+            entry.Package,
+            entry.Metadata.RemoteSha,
+            entry.Metadata.RemoteSubdir,
+        }
+    default:
+        return "", fmt.Errorf(
+            "unsupported RemoteType for store key: %q", remoteType)
+    }
+
+    input := remoteType + "\x00" + strings.Join(fields, "\x00")
     h := sha256.Sum256([]byte(input))
     return hex.EncodeToString(h[:]), nil
 }
@@ -336,12 +440,19 @@ type ConfigMeta struct {
     CreatedAt time.Time `json:"created_at"`
 }
 
+// WriteStoreConfigs atomically writes configs.json via write-to-temp +
+// rename. This is called under lock but atomic writes guard against
+// partial writes from crashes or disk-full conditions.
 func WriteStoreConfigs(path string, sc StoreConfigs) error {
     data, err := json.MarshalIndent(sc, "", "  ")
     if err != nil {
         return err
     }
-    return os.WriteFile(path, data, 0o644)
+    tmp := path + ".tmp"
+    if err := os.WriteFile(tmp, data, 0o644); err != nil {
+        return err
+    }
+    return os.Rename(tmp, path)
 }
 
 func ReadStoreConfigs(path string) (StoreConfigs, error) {
@@ -586,11 +697,18 @@ func lockfileStoreKey(lf *Lockfile, pkg string) string {
 
 ## Step 2: Platform detection
 
-The store key includes a platform prefix (`{R_major}.{R_minor}-linux-{arch}`)
-to prevent mixing packages compiled under different R versions or
-architectures. The platform is derived from the pak lockfile — both the
-server (worker assembly) and the `by-builder` binary (store operations
-inside build containers) use `PlatformFromLockfile()`.
+The store key includes a platform prefix to prevent mixing packages
+compiled under different R versions or architectures. The platform is
+derived from the pak lockfile — both the server (worker assembly) and
+the `by-builder` binary (store operations inside build containers) use
+`PlatformFromLockfile()`.
+
+The platform is derived from per-package fields in the lockfile (not
+the top-level fields, which use long human-readable strings). Each
+package carries `rversion` (short form, e.g., `"4.5"`) and `platform`
+(R platform triple, e.g., `"x86_64-pc-linux-gnu"`). These are
+consistent across all packages in a lockfile — pak resolves for a
+single platform.
 
 Derived from the pak lockfile after the first successful build, then
 cached in the `Store` struct.
@@ -599,11 +717,16 @@ cached in the `Store` struct.
 // internal/pkgstore/platform.go
 
 // PlatformFromLockfile derives the platform prefix from a pak lockfile.
-// R version is truncated to major.minor (e.g., "4.4.2" → "4.4").
+// Uses per-package fields (short form) rather than top-level fields
+// (which contain long human-readable strings like
+// "R version 4.5.2 (2025-10-31)").
 func PlatformFromLockfile(lf *Lockfile) string {
-    parts := strings.SplitN(lf.RVersion, ".", 3)
-    rVersion := parts[0] + "." + parts[1]
-    return rVersion + "-" + lf.OS + "-" + lf.Arch
+    if len(lf.Packages) == 0 {
+        return ""
+    }
+    // All packages share the same rversion and platform within a lockfile.
+    pkg := lf.Packages[0]
+    return pkg.RVersion + "-" + pkg.Platform
 }
 ```
 
@@ -622,7 +745,8 @@ On subsequent server restarts, the platform is recovered by scanning
 for existing lockfiles or existing platform directories in the store
 root.
 
-**Format:** `{major}.{minor}-linux-{arch}`, e.g., `4.4-linux-x86_64`.
+**Format:** `{rversion}-{R_platform_triple}`, e.g.,
+`4.5-x86_64-pc-linux-gnu`.
 
 ---
 
@@ -663,11 +787,14 @@ func (s *Store) LockPath(pkg, sourceHash string) string {
     return filepath.Join(s.root, ".locks", s.platform, pkg, sourceHash+".lock")
 }
 
-func (s *Store) Acquire(pkg, sourceHash string, staleThreshold time.Duration) error {
+func (s *Store) Acquire(ctx context.Context, pkg, sourceHash string, staleThreshold time.Duration) error {
     lockDir := s.LockPath(pkg, sourceHash)
     os.MkdirAll(filepath.Dir(lockDir), 0o755)
 
     for {
+        if err := ctx.Err(); err != nil {
+            return fmt.Errorf("lock acquisition cancelled for %s: %w", pkg, err)
+        }
         if err := os.Mkdir(lockDir, 0o755); err == nil {
             return nil // acquired
         }
@@ -834,6 +961,11 @@ func ingestCmd() *cobra.Command {
                 refManifest, _ = pkgstore.ReadPackageManifest(refLib)
             }
 
+            // Build the store-manifest as we go — every package gets
+            // an entry, whether it was already in the store or newly
+            // ingested.
+            storeManifest := make(map[string]string)
+
             for _, entry := range lf.Packages {
                 sourceHash, err := pkgstore.StoreKey(entry)
                 if err != nil {
@@ -854,6 +986,10 @@ func ingestCmd() *cobra.Command {
                         entry.Package, err)
                 }
 
+                // Record in store-manifest regardless of whether the
+                // package needs ingestion.
+                storeManifest[entry.Package] = pkgstore.StoreRef(sourceHash, configHash)
+
                 // Skip packages whose compound ref matches the reference
                 // library — same source AND config already present.
                 expectedRef := pkgstore.StoreRef(sourceHash, configHash)
@@ -866,7 +1002,7 @@ func ingestCmd() *cobra.Command {
                 }
 
                 // Ingest under lock (one lock per source hash).
-                s.Acquire(entry.Package, sourceHash, 30*time.Minute)
+                s.Acquire(cmd.Context(), entry.Package, sourceHash, 30*time.Minute)
                 if !s.Has(entry.Package, sourceHash, configHash) {
                     s.Ingest(entry.Package, sourceHash, configHash, pkgPath)
                     s.WriteIngestMeta(entry, lf,
@@ -878,7 +1014,10 @@ func ingestCmd() *cobra.Command {
                 fmt.Fprintf(os.Stderr, "store: ingested %s (config %s)\n",
                     entry.Package, configHash[:12])
             }
-            return nil
+
+            // Write store-manifest: the pre-computed {package: "sourceHash/configHash"}
+            // map persisted per-bundle for assembly, refresh comparison, and rollback.
+            return pkgstore.WriteStoreManifest(lib, storeManifest)
         },
     }
     cmd.Flags().StringVar(&lockfile, "lockfile", "", "path to pak.lock")
@@ -1028,8 +1167,10 @@ system2("/tools/by-builder", c(
 ```
 
 For full store hits, phase 3 is a no-op — the build completes in
-seconds. The lockfile serves double duty: it drives both the store
-lookup (phase 2) and the installation (phase 3).
+seconds. The lockfile drives both the store lookup (phase 2) and the
+installation (phase 3). The store-manifest (output of phase 4) drives
+all downstream operations: worker assembly, refresh comparison, and
+rollback.
 
 ### Container mounts (updated from phase 2-5)
 
@@ -1177,14 +1318,24 @@ func runRestore(p RestoreParams) error {
         return fmt.Errorf("dependency restore failed (exit %d)", result.ExitCode)
     }
 
-    // 8. Extract lockfile from the build directory.
+    // 8. Extract store-manifest and lockfile from the build directory.
     buildDir := filepath.Join(p.Store.Root(), ".builds", buildUUID)
     defer os.RemoveAll(buildDir) // clean up temp build dir
 
+    // store-manifest.json is required — it drives assembly and rollback.
+    manifestSrc := filepath.Join(buildDir, "store-manifest.json")
+    manifestDst := filepath.Join(p.Paths.Base, "store-manifest.json")
+    if err := copyFile(manifestSrc, manifestDst); err != nil {
+        return fmt.Errorf("persist store-manifest: %w", err)
+    }
+
+    // pak.lock is retained as a debug/audit artifact; extraction failure
+    // is non-fatal.
     lockfileSrc := filepath.Join(buildDir, "pak.lock")
     lockfileDst := filepath.Join(p.Paths.Base, "pak.lock")
     if err := copyFile(lockfileSrc, lockfileDst); err != nil {
-        return fmt.Errorf("persist pak lockfile: %w", err)
+        slog.Warn("failed to persist pak lockfile (debug artifact)",
+            "error", err, "bundle_id", p.BundleID)
     }
 
     // 9. Set store platform from lockfile (first build bootstraps this).
@@ -1238,33 +1389,20 @@ type RestoreParams struct {
 }
 ```
 
-### BuildSpec changes
-
-`BuildSpec` gains an `Env` field for injecting environment variables
-into build containers:
-
-```go
-type BuildSpec struct {
-    // ... existing fields from phase 2-5 ...
-    Env []string // environment variables (KEY=VALUE)
-}
-```
-
-The Docker backend sets these via `ContainerConfig.Env`.
-
 ### Post-build artifacts
 
 ```
 {bundle_server_path}/{app_id}/bundles/{bundle_id}/
-├── unpacked/          # bundle contents (app.R, manifest.json, ...)
-├── pak.lock           # pak lockfile — exact versions, sources, hashes
-└── manifest.json      # canonical manifest (pinned or unpinned)
+├── unpacked/              # bundle contents (app.R, manifest.json, ...)
+├── store-manifest.json    # {package: "sourceHash/configHash"} — drives assembly & rollback
+├── pak.lock               # pak lockfile — debug/audit artifact (not parsed at runtime)
+└── manifest.json          # canonical manifest (pinned or unpinned)
 ```
 
 The per-bundle `library/` directory from phase 2-5 is no longer
 needed. Workers assemble their libraries from the store at startup.
 The build library is temporary (created under `{store}/.builds/` and
-cleaned up after the lockfile is extracted).
+cleaned up after the store-manifest is extracted).
 
 ---
 
@@ -1272,63 +1410,64 @@ cleaned up after the lockfile is extracted).
 
 At worker startup, the server assembles a per-container library at
 `{store}/.workers/{worker_id}/` by hard-linking packages from the store
-based on the bundle's pak lockfile. The directory is mounted into the
-container at `/lib`. R runs with `.libPaths("/lib")`.
+based on the bundle's `store-manifest.json`. The directory is mounted
+into the container at `/lib`. R runs with `.libPaths("/lib")`.
 
 ```go
 // internal/pkgstore/assembly.go
 
+// SplitStoreRef splits a compound store ref "sourceHash/configHash"
+// into its two components. Returns an error if the ref is malformed.
+func SplitStoreRef(ref string) (sourceHash, configHash string, err error) {
+    parts := strings.SplitN(ref, "/", 2)
+    if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+        return "", "", fmt.Errorf("malformed store ref: %q", ref)
+    }
+    return parts[0], parts[1], nil
+}
+
 // AssembleLibrary creates a library directory by hard-linking packages
-// from the store based on pak lockfile entries. Each lockfile entry maps
-// to a source hash, then configs.json is consulted to find the matching
-// config hash. After linking, it writes a .packages.json manifest
-// mapping each installed package to its compound store ref
-// ("sourceHash/configHash").
+// from the store based on a pre-computed store-manifest (the
+// {package: "sourceHash/configHash"} map written by `store ingest`).
+// No hash computation or config resolution needed — the manifest
+// entries map directly to store paths. After linking, it writes a
+// .packages.json manifest initialized as a copy of the store-manifest.
 func (s *Store) AssembleLibrary(
-    libDir string, lf *Lockfile,
+    libDir string, storeManifest map[string]string,
 ) (missing []string, err error) {
     if err := os.MkdirAll(libDir, 0o755); err != nil {
         return nil, fmt.Errorf("create lib dir: %w", err)
     }
 
-    manifest := make(map[string]string) // package → "sourceHash/configHash"
-
-    for _, entry := range lf.Packages {
-        sourceHash, err := StoreKey(entry)
+    for pkg, ref := range storeManifest {
+        sourceHash, configHash, err := SplitStoreRef(ref)
         if err != nil {
-            return nil, fmt.Errorf("store key for %s: %w", entry.Package, err)
+            return nil, fmt.Errorf("store ref for %s: %w", pkg, err)
         }
 
-        // Resolve matching config from configs.json.
-        configHash, ok := s.ResolveConfig(entry.Package, sourceHash, lf)
-        if !ok {
-            missing = append(missing, entry.Package)
-            continue
-        }
-
-        storePath := s.Path(entry.Package, sourceHash, configHash)
+        storePath := s.Path(pkg, sourceHash, configHash)
         if !dirExists(storePath) {
-            missing = append(missing, entry.Package)
+            missing = append(missing, pkg)
             continue
         }
 
-        destPath := filepath.Join(libDir, entry.Package)
+        destPath := filepath.Join(libDir, pkg)
         // cp -al: hard-link the package tree.
         out, cpErr := exec.Command(
             "cp", "-al", storePath, destPath,
         ).CombinedOutput()
         if cpErr != nil {
             return nil, fmt.Errorf(
-                "hard-link %s: %s: %w", entry.Package, out, cpErr)
+                "hard-link %s: %s: %w", pkg, out, cpErr)
         }
 
         // Touch config sidecar to update last-accessed time.
-        s.Touch(entry.Package, sourceHash, configHash)
-        manifest[entry.Package] = StoreRef(sourceHash, configHash)
+        s.Touch(pkg, sourceHash, configHash)
     }
 
-    // Write per-worker package manifest.
-    if err := WritePackageManifest(libDir, manifest); err != nil {
+    // Write per-worker package manifest (initialized as a copy of
+    // the bundle's store-manifest).
+    if err := WritePackageManifest(libDir, storeManifest); err != nil {
         return nil, fmt.Errorf("write package manifest: %w", err)
     }
 
@@ -1354,6 +1493,8 @@ func (s *Store) CleanupWorkerLib(workerID string) error {
 
 Each worker's `/lib` contains a `.packages.json` file that maps every
 installed package to its compound store ref (`sourceHash/configHash`).
+At assembly time, `.packages.json` is initialized as a copy of the
+bundle's store-manifest. It can diverge via runtime package installs.
 This is the source of truth for what's actually installed in that
 specific worker — needed because live installs (phase 2-7) can add
 packages beyond the app-level lockfile. Storing the compound ref
@@ -1409,6 +1550,30 @@ func UpdatePackageManifest(libDir string, additions map[string]string) error {
         manifest[pkg] = key
     }
     return WritePackageManifest(libDir, manifest)
+}
+
+// storeManifestFile is the filename for the per-bundle store-manifest.
+const storeManifestFile = "store-manifest.json"
+
+// WriteStoreManifest writes the store-manifest ({package: "sourceHash/configHash"})
+// to the given directory. Called by `store ingest` at the end of a build.
+func WriteStoreManifest(dir string, manifest map[string]string) error {
+    data, err := json.MarshalIndent(manifest, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(filepath.Join(dir, storeManifestFile), data, 0o644)
+}
+
+// ReadStoreManifest reads a store-manifest from the given path.
+// The path should be the full file path (e.g., "{bundle}/store-manifest.json").
+func ReadStoreManifest(path string) (map[string]string, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil, err
+    }
+    var manifest map[string]string
+    return manifest, json.Unmarshal(data, &manifest)
 }
 ```
 
@@ -1498,15 +1663,15 @@ if srv.PkgStore != nil {
     wid := workerID
     libDir = srv.PkgStore.WorkerLibDir(wid)
 
-    // Read the bundle's pak lockfile.
-    lockfilePath := filepath.Join(bundlePaths.Base, "pak.lock")
-    lf, err := pkgstore.ReadLockfile(lockfilePath)
+    // Read the bundle's store-manifest.
+    manifestPath := filepath.Join(bundlePaths.Base, "store-manifest.json")
+    storeManifest, err := pkgstore.ReadStoreManifest(manifestPath)
     if err != nil {
-        return "", "", fmt.Errorf("read pak lockfile: %w", err)
+        return "", "", fmt.Errorf("read store-manifest: %w", err)
     }
 
     // Assemble library from store.
-    missing, err := srv.PkgStore.AssembleLibrary(libDir, lf)
+    missing, err := srv.PkgStore.AssembleLibrary(libDir, storeManifest)
     if err != nil {
         return "", "", fmt.Errorf("assemble library: %w", err)
     }
@@ -1593,7 +1758,7 @@ if platform := recoverPlatform(storePath, cfg); platform != "" {
 ```
 
 `recoverPlatform()` scans the store root for existing platform
-directories (e.g., `4.4-linux-x86_64/`) or reads a cached platform
+directories (e.g., `4.5-x86_64-pc-linux-gnu/`) or reads a cached platform
 file written after the first successful build.
 
 ---
@@ -1651,9 +1816,18 @@ file written after the first successful build.
 - `TestIngestContext_WithLinkingTo` — returns correct config hash,
   sorted linkingto names, store key map.
 
-**Lockfile parsing:**
-- `TestReadLockfile` — valid pak lockfile JSON.
-- `TestPlatformFromLockfile` — `"4.4.2"` → `"4.4-linux-x86_64"`.
+**Lockfile parsing and validation:**
+- `TestReadLockfile` — valid pak lockfile JSON parses and validates.
+- `TestReadLockfile_UnsupportedVersion` — `lockfile_version: 2` rejected.
+- `TestReadLockfile_EmptyPackages` — rejected (no packages).
+- `TestLockfileEntryValidate_Standard` — requires `sha256`.
+- `TestLockfileEntryValidate_StandardMissingSha` — rejected with clear error.
+- `TestLockfileEntryValidate_GitHub` — requires `metadata.RemoteSha`.
+- `TestLockfileEntryValidate_MissingType` — rejected when both `type` and
+  `metadata.RemoteType` are empty.
+- `TestLockfileEntryValidate_MissingRversion` — rejected.
+- `TestLockfileEntryValidate_UnsupportedType` — `"url"` rejected with type in error.
+- `TestPlatformFromLockfile` — per-package `rversion: "4.5"`, `platform: "x86_64-pc-linux-gnu"` → `"4.5-x86_64-pc-linux-gnu"`.
 
 **Library assembly:**
 - `TestAssembleLibrary` — creates lib dir with hard-linked packages.
@@ -1724,13 +1898,14 @@ file written after the first successful build.
    atomic rename for ingestion) happen within a single filesystem. No
    cross-filesystem copies needed.
 
-2. **Lockfile extraction, not library persistence.** Phase 2-5 persists
-   the installed library alongside the bundle and mounts it directly
-   into workers. Phase 2-6 discards the build library after extracting
-   the lockfile. Workers reconstruct their library from the store on
-   demand. This decouples worker libraries from build artifacts — any
-   worker's library can be reconstructed from its lockfile at any time,
-   and the store serves as the single source of truth.
+2. **Store-manifest extraction, not library persistence.** Phase 2-5
+   persists the installed library alongside the bundle and mounts it
+   directly into workers. Phase 2-6 discards the build library after
+   extracting the store-manifest. Workers reconstruct their library
+   from the store on demand. This decouples worker libraries from build
+   artifacts — any worker's library can be reconstructed from its
+   store-manifest at any time, and the store serves as the single
+   source of truth.
 
 3. **`mkdir` for locking, not `flock`.** `flock()` is not reliable
    across all NFS implementations and Docker volume drivers. `mkdir` is
@@ -1769,7 +1944,8 @@ file written after the first successful build.
    configuration constraint.
 
 8. **No per-bundle library directory.** The `library/` subdirectory
-   from phase 2-5 is removed. The lockfile is the portable record;
-   the library is reconstructed on demand from the store. This reduces
-   disk usage (packages stored once in the store, not once per bundle
-   plus once in the store) and simplifies bundle cleanup.
+   from phase 2-5 is removed. The store-manifest is the portable
+   record; the lockfile is retained only for debug/audit. The library
+   is reconstructed on demand from the store. This reduces disk usage
+   (packages stored once in the store, not once per bundle plus once
+   in the store) and simplifies bundle cleanup.

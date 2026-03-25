@@ -90,7 +90,7 @@ and let the server figure it out). blockyard's scan mode is novel.
                                                             ▼
                                                   ┌────────────────────┐
                                                   │ Package store      │
-                                                  │ (lockfile-keyed)   │
+                                                  │ (content-addressed)│
                                                   └────────────────────┘
                                                             │
                                                       hard links
@@ -156,10 +156,21 @@ pinned path; if absent, unpinned path. A manifest carrying both
 `packages` and `description` is invalid — the server rejects it.
 
 From **renv** we take the package record format (pinned shape):
-field names, platform-neutral repository URLs (renv strips PPM
-platform segments at snapshot time), and DESCRIPTION-based hashes.
-When an `renv.lock` exists, package records copy into the manifest
-verbatim — no translation at all.
+field names and platform-neutral repository URLs (renv strips PPM
+platform segments at snapshot time). When an `renv.lock` exists,
+the Go conversion extracts the fields consumed by the build pipeline
+— `Package`, `Version`, `Source`, `Repository`, and `Remote*` —
+and drops everything else.
+
+**renv.lock format versions.** renv 1.1+ defaults to a v2 lockfile
+format that embeds the full DESCRIPTION per package (Title, Authors@R,
+Depends, Imports, Suggests, etc.). The v1 format
+(`options(renv.lockfile.version = 1)`) produces minimal records with
+`Hash` and `Requirements` instead. The manifest needs neither —
+`record_to_ref()` uses only `Source` and `Remote*` fields, which are
+present in both formats. When the CLI invokes renv for pinning
+(case 1c), it forces v1 for compactness. When a user provides an
+renv.lock (case 1b), either format works.
 
 From **Connect** we take the idea of a deployment manifest: a
 single artifact that carries app metadata (mode, entrypoint),
@@ -190,16 +201,12 @@ representation (renv records) avoids dual specs that can diverge.
       "Package": "shiny",
       "Version": "1.9.1",
       "Source": "Repository",
-      "Repository": "CRAN",
-      "Hash": "a1b2c3d4e5f6...",
-      "Requirements": ["httpuv", "mime", "jsonlite", "htmltools", "R6"]
+      "Repository": "CRAN"
     },
     "myghpkg": {
       "Package": "myghpkg",
       "Version": "0.3.1",
       "Source": "GitHub",
-      "Hash": "d4e5f6a7b8c9...",
-      "Requirements": ["rlang", "cli"],
       "RemoteType": "github",
       "RemoteHost": "api.github.com",
       "RemoteUsername": "owner",
@@ -210,9 +217,7 @@ representation (renv records) avoids dual specs that can diverge.
     "GenomicRanges": {
       "Package": "GenomicRanges",
       "Version": "1.56.0",
-      "Source": "Bioconductor",
-      "Hash": "b3c4d5e6f7a8...",
-      "Requirements": ["BiocGenerics", "S4Vectors", "IRanges", "GenomeInfoDb"]
+      "Source": "Bioconductor"
     }
   },
   "files": {
@@ -263,24 +268,28 @@ upstream.
 
 ### Relationship to renv and Connect
 
-**Package records follow renv.lock conventions.** Each package
+**Package records use renv.lock field names.** Each package
 entry uses the same field names and casing as an renv.lock record:
-`Package`, `Version`, `Source`, `Repository`, `Hash`,
-`Requirements`, and `Remote*` fields (`RemoteType`,
-`RemoteUsername`, `RemoteRepo`, `RemoteRef`, `RemoteSha`, etc.).
-When an `renv.lock` exists, these fields are copied verbatim —
-no renaming, no semantic translation.
+`Package`, `Version`, `Source`, `Repository`, and `Remote*` fields
+(`RemoteType`, `RemoteUsername`, `RemoteRepo`, `RemoteRef`,
+`RemoteSha`, etc.). When an `renv.lock` exists, these fields are
+copied unchanged — no renaming, no semantic translation. Fields
+not consumed by the build pipeline (`Hash`, `Requirements`, and
+DESCRIPTION metadata like `Title`, `Authors@R`, etc.) are not
+carried — they differ between renv.lock v1 and v2 formats and
+nothing in the pipeline reads them.
 
 Key differences from renv.lock:
 - **Top-level metadata** (added) — `version`, `platform`,
   `metadata` (appmode, entrypoint), and `files` (checksums). These
   are deployment concerns that renv.lock doesn't cover.
-- **No embedded DESCRIPTION** — renv.lock doesn't carry full
-  DESCRIPTION data, and neither do we. The server reads DESCRIPTION
-  from installed packages when it needs fields like `Depends`,
-  `Imports`, `LinkingTo`, or `NeedsCompilation`.
-- **Package records are identical** — no added fields, no removed
-  fields. A manifest's package entry IS an renv.lock package entry.
+- **Curated subset of fields** — the manifest carries only the fields
+  needed for ref derivation: `Package`, `Version`, `Source`,
+  `Repository`, and `Remote*`. Fields like `Hash`, `Requirements`
+  (v1), and full DESCRIPTION metadata (v2) are not consumed by the
+  build pipeline and are not carried. The server reads `Depends`,
+  `Imports`, `LinkingTo`, and `NeedsCompilation` from installed
+  packages when needed (at ingest time).
 
 **Repository URLs are platform-neutral.** The `repositories` array
 carries base PPM URLs without platform segments (e.g.,
@@ -306,7 +315,7 @@ maps to a URL via the top-level `repositories` array.
   License, BugReports, etc.); we omit this entirely.
 - Connect records platform-specific repo URLs per-package; we
   carry platform-neutral URLs in a top-level array.
-- Connect has no `Hash` field.
+
 
 ### Schema Versioning
 
@@ -342,14 +351,6 @@ Connect proved that a single manifest carrying app metadata,
 file checksums, and a packages map is the right shape for
 server-side deployment. renv.lock doesn't carry any of this — it's
 a project isolation tool, not a deployment artifact.
-
-**Why include `Hash`?**
-The renv-style hash is carried for compatibility with renv's cache
-and for clients that inspect the manifest (e.g., comparing two
-manifests for drift). The package store uses a different key — a
-curated hash derived from the pak lockfile (see below) — but
-retaining the renv hash in the manifest costs nothing and keeps
-the package records faithful to the renv.lock source.
 
 **Why no `Ref` field?**
 pak consumes [pkgdepends ref strings](https://r-lib.github.io/pkgdepends/reference/pkg_refs.html)
@@ -422,8 +423,9 @@ library to resolve exact versions.
 ### renv.lock → Manifest Translation
 
 The entire renv.lock → manifest translation is pure Go — no R
-subprocess needed. The lockfile is plain JSON. Package records
-copy verbatim; the only transformations are at the top level.
+subprocess needed. The lockfile is plain JSON. The Go conversion
+extracts package identity and source fields; the only transformations
+are at the top level.
 
 ```
 renv.lock                          manifest.json
@@ -431,15 +433,17 @@ renv.lock                          manifest.json
 R.Version               →          platform
 R.Repositories          →          repositories (URLs already platform-neutral)
 Packages.*.Package      →          packages key + packages.*.Package
-Packages.*.*            →          packages.*.* (all fields copied verbatim)
+Packages.*.{identity}   →          packages.*.{identity} (copied unchanged)
 ```
 
-All renv.lock package fields (`Version`, `Source`, `Repository`,
-`Hash`, `Requirements`, `RemoteType`, `RemoteUsername`,
-`RemoteRepo`, `RemoteRef`, `RemoteSha`, `RemoteHost`,
-`RemoteSubdir`, etc.) pass through unchanged. The CLI adds the
-top-level `metadata` and `files` sections; it does not transform
-package records in any way.
+Package identity and source fields (`Version`, `Source`,
+`Repository`, `RemoteType`, `RemoteUsername`, `RemoteRepo`,
+`RemoteRef`, `RemoteSha`, `RemoteHost`, `RemoteSubdir`) pass
+through unchanged. The CLI adds the top-level `metadata` and `files`
+sections. Fields not consumed by the pipeline (`Hash`,
+`Requirements`, DESCRIPTION metadata) are dropped — the Go struct
+maps only the fields needed for `record_to_ref()`. This works
+identically for v1 and v2 lockfiles.
 
 ### renv Availability
 
@@ -467,7 +471,10 @@ directory:
 ```r
 tmp <- tempfile()
 file.copy("/app", tmp, recursive = TRUE)
-options(renv.consent = TRUE)
+# Force v1 lockfile format: minimal records with Hash and Requirements.
+# v2 (renv 1.1+ default) embeds the full DESCRIPTION per package —
+# more data than the manifest needs.
+options(renv.consent = TRUE, renv.lockfile.version = 1)
 renv::init(project = tmp, bare = TRUE)
 deps <- renv::dependencies(tmp, quiet = TRUE, progress = FALSE)
 renv::snapshot(tmp, packages = deps$Package,
@@ -544,13 +551,13 @@ in their own DESCRIPTION `Imports` or adds a `library(pkg.B)` call
 so the scanner picks it up. This keeps dependency trees lean and
 avoids pulling in dev/test tooling from upstream packages.
 
-After a successful unpinned build, the server stores the **pak
-lockfile** (generated during the build's lockfile_create phase)
-alongside the bundle. This means every successful build produces a
-lockfile with exact versions and store keys — useful for auditing,
-for re-building the same bundle without re-resolving, and for
-assembling worker libraries from the store. The original unpinned
-manifest is retained separately for refresh operations.
+After a successful unpinned build, `by-builder store ingest` emits
+a `store-manifest.json` alongside the bundle. This is the driver
+for worker assembly, refresh comparison, and rollback. The raw
+`pak.lock` is also persisted as a debug/audit artifact (exact
+versions, sources, hashes) but the server never re-parses it. The
+original unpinned manifest is retained separately for refresh
+operations.
 
 ### Ref Derivation and Platform URLs
 
@@ -725,7 +732,9 @@ pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
 # ── Phase 4: Ingest new packages into store (Go binary) ─────────
 # by-builder reads each installed DESCRIPTION for NeedsCompilation
 # and LinkingTo, computes config hashes, creates config directories,
-# updates configs.json, and writes config sidecar files.
+# updates configs.json, and writes config sidecar files. It also
+# writes store-manifest.json to the build library directory — a JSON
+# map of {package: "sourceHash/configHash"}.
 system2("/tools/by-builder", c(
   "store", "ingest",
   "--lockfile", file.path(build_lib, "pak.lock"),
@@ -733,8 +742,10 @@ system2("/tools/by-builder", c(
 ```
 
 For full store hits, phase 3 is a no-op — the build completes in
-seconds. The lockfile serves double duty: it drives both the store
-lookup (phase 2) and the installation (phase 3).
+seconds. The lockfile drives the store lookup (phase 2) and the
+installation (phase 3). The store-manifest (output of phase 4)
+drives all downstream operations: worker assembly, refresh
+comparison, and rollback.
 
 **Repository-based resolution.** The server reads repository URLs
 from the manifest's `repositories` array for both pinned and
@@ -746,13 +757,13 @@ repository snapshots. When `repositories` is absent, the server
 resolves against its default repository configuration.
 
 **Post-build outputs.** After a successful build, the server stores
-the pak lockfile alongside the bundle. For unpinned builds, this
-lockfile is the pinned record — it has exact versions, sources,
-and sha256 hashes for every package, and maps directly to store
-entries via the curated hash. The original unpinned manifest is
-retained separately for refresh operations. At worker startup, the
-lockfile drives library assembly: each entry maps to a store path,
-and the worker's `/lib` is assembled by hardlinking from the store.
+two artifacts alongside the bundle: (1) `store-manifest.json` (the
+`{package: "sourceHash/configHash"}` map emitted by `by-builder
+store ingest`), which drives worker assembly, refresh comparison,
+and rollback; (2) `pak.lock` (the raw pak lockfile), retained as a
+debug/audit artifact. At worker startup, the store-manifest drives
+library assembly: each entry maps directly to a store path, no hash
+computation or config resolution needed.
 
 ---
 
@@ -800,21 +811,30 @@ lookup without reading any installed DESCRIPTION files.
 ```
 
 The `platform` prefix encodes the three dimensions that determine
-binary compatibility: R version (minor), OS, and architecture.
-Format: `{r_major}.{r_minor}-{os}-{arch}`, e.g.,
-`4.4-linux-x86_64`. This ensures packages compiled under different
-R versions, operating systems, or architectures are never mixed —
-even when the system runs a single R version today. When
+binary compatibility: R version (minor), OS, and architecture. It is
+derived from per-package fields in the pak lockfile: `rversion` (short
+form, e.g., `"4.5"`) and `platform` (R platform triple, e.g.,
+`"x86_64-pc-linux-gnu"`). Format: `{rversion}-{R_platform_triple}`,
+e.g., `4.5-x86_64-pc-linux-gnu`. This ensures packages compiled under
+different R versions, operating systems, or architectures are never
+mixed — even when the system runs a single R version today. When
 user-supplied build images or multi-arch support are added, the
 store handles it correctly without migration.
 
-**Curated hash computation.** The hash dispatches on `RemoteType`
-so that each package source includes only the fields that
-determine *what source code was compiled* — no redundant or
-absent fields. The hash is implemented once in Go
-(`internal/pkgstore/key.go`) and used by both the server (worker
-library assembly) and the `by-builder` binary (store operations
+**Curated hash computation.** The hash dispatches on
+`metadata.RemoteType` from the pak lockfile so that each package
+source includes only the fields that determine *what source code was
+compiled* — no redundant or absent fields. The hash is implemented
+once in Go (`internal/pkgstore/key.go`) and used by both the server
+(worker library assembly) and the `by-builder` binary (store operations
 inside build containers). No R implementation exists.
+
+**Important:** for `standard` packages, `metadata.RemoteSha` is the
+*version string* (e.g., `"1.9.1"`), NOT a content hash. The actual
+archive hash is in the top-level `sha256` field. The store key for
+standard packages uses `sha256`, not `metadata.RemoteSha`. For
+`github`/`gitlab`/`git` packages, `metadata.RemoteSha` is the git
+commit SHA — the correct content identifier.
 
 ```
 hash input = {RemoteType}\0{field1}\0{field2}[...\0{fieldN}]
@@ -826,10 +846,10 @@ prevent cross-type collisions (e.g., a CRAN package and a GitHub
 package with the same name). Fields are joined with a `\x00`
 delimiter to prevent concatenation collisions.
 
-| RemoteType | Identity fields | Rationale |
+| RemoteType | Identity fields (pak lockfile path) | Rationale |
 |---|---|---|
-| `standard` | `package`, `version`, `sha256` | `sha256` (archive hash) is the strongest identifier — catches PPM rebuilds where the version is unchanged but the binary differs. |
-| `github`, `gitlab`, `git` | `package`, `RemoteSha`, `RemoteSubdir` | The commit hash fully identifies the source code. `version` is redundant (it's whatever DESCRIPTION contains at that commit). `RemoteSubdir` selects which package within a monorepo. |
+| `standard` | `package`, `version`, `sha256` (all top-level) | `sha256` (archive hash) is the strongest identifier — catches PPM rebuilds where the version is unchanged but the binary differs. |
+| `github`, `gitlab`, `git` | `package` (top-level), `metadata.RemoteSha`, `metadata.RemoteSubdir` | The commit hash fully identifies the source code. `version` is redundant (it's whatever DESCRIPTION contains at that commit). `RemoteSubdir` selects which package within a monorepo. |
 
 What this produces per package type:
 
@@ -853,9 +873,9 @@ later if demand appears.
 
 Examples:
 ```
-4.4-linux-x86_64/shiny/e3b0c44298fc.../
-4.4-linux-x86_64/Rcpp/a7ffc6f8bf1e.../
-4.4-linux-x86_64/blockr/2c26b46b68ff.../
+4.5-x86_64-pc-linux-gnu/shiny/e3b0c44298fc.../
+4.5-x86_64-pc-linux-gnu/Rcpp/a7ffc6f8bf1e.../
+4.5-x86_64-pc-linux-gnu/blockr/2c26b46b68ff.../
 ```
 
 **ABI safety relies on two mechanisms:**
@@ -920,7 +940,7 @@ host path is a deployment concern.
 
 ```
 /store/
-└── 4.4-linux-x86_64/
+└── 4.5-x86_64-pc-linux-gnu/
     ├── shiny/
     │   └── e3b0c442.../                ← source hash (v1.9.1 from CRAN)
     │       ├── configs.json            ← source-level metadata + config map
@@ -1009,15 +1029,16 @@ from the store.
 └── blockr/   → hardlink from /store/.../blockr/{src_hash}/{cfg_hash}/
 ```
 
-Version selection is always driven by the pak lockfile. Each
-lockfile entry maps to a source hash via the curated hash. The
-config hash is determined by looking up `configs.json` and matching
-the current lockfile's store keys for the package's `LinkingTo`
-dependencies. This is the same at build time (assembling the build
-library under `/store/.builds/{uuid}/`), at worker startup
-(assembling `/lib` from the stored lockfile), and at runtime
-(adding packages to `/lib` after a runtime request produces a new
-lockfile).
+At build time, version selection is driven by the pak lockfile:
+each lockfile entry maps to a source hash via the curated hash, and
+the config hash is determined by looking up `configs.json` and
+matching the current lockfile's store keys for the package's
+`LinkingTo` dependencies. At worker startup, the store-manifest
+(a pre-computed `{package: "sourceHash/configHash"}` map) drives
+assembly directly — no lockfile re-parsing, no hash computation or
+config resolution needed. At runtime (adding packages to `/lib`
+after a runtime request produces a new lockfile), the same
+build-time resolution applies.
 
 Hard links (not symlinks) are used so the store does not need to
 be mounted into worker containers at runtime. The view is
@@ -1108,8 +1129,9 @@ released after both writes finish.
 
 When a worker container starts, the server assembles a single
 per-container library at `/lib` by hardlinking packages from the
-store based on the bundle's pak lockfile — each lockfile entry
-maps to a store path via the curated hash. R runs with
+store based on the bundle's `store-manifest.json` — each entry
+maps directly to a store path (`sourceHash/configHash`), with no
+hash computation or config resolution needed. R runs with
 `.libPaths("/lib")` — one library, one search path.
 
 A single library is simpler than a dual read-only/read-write split:
@@ -1148,12 +1170,14 @@ staging <- file.path("/store", ".staging", uuid::UUIDgenerate())
 dir.create(staging, recursive = TRUE)
 
 # ── Phase 1: Resolve against existing library (R — needs pak) ────
+# Multi-library: staging is the install target (first element),
+# worker lib is the reference (second element). pak scans both to
+# see what's installed, applies upgrade = FALSE.
 pak::lockfile_create(
   "xyz",
   lockfile = file.path(staging, "pak.lock"),
-  lib = "/containers/{id}/lib"
+  lib = c(staging, "/containers/{id}/lib")
 )
-# Resolver sees /lib packages, respects upgrade = FALSE.
 # Lockfile contains the full solution (existing + new).
 
 # ── Phase 2: Check store for NEW entries (Go binary) ─────────────
@@ -1205,7 +1229,8 @@ the R session waits.
 **3. Transfer required (version conflict):** after resolving, the
 server compares the new lockfile entries against the worker's
 per-container package manifest (`.packages.json` — a `{package →
-"sourceHash/configHash"}` map written at library assembly and
+"sourceHash/configHash"}` map initialized from the bundle's
+store-manifest.json at library assembly and
 updated on each live install). For each loaded namespace reported
 in the request, the server compares the current compound ref
 against the new lockfile's compound ref for that package. If any
@@ -1391,14 +1416,15 @@ re-uploading code:
    undated → latest repo state).
 3. Run the standard lockfile-based build flow (lockfile → store
    check → pre-populate → install misses → ingest).
-4. Store the new pak lockfile alongside the bundle.
+4. Store the new store-manifest.json alongside the bundle (along
+   with the new pak.lock as a debug/audit artifact).
 5. Spawn new worker(s) with the updated library. Mark old workers
    as **draining** — no new sessions routed to them. Existing
    sessions continue undisturbed until they naturally end, then the
    old worker is evicted.
 
 The bundle's code is unchanged — only the dependency versions move
-forward. The previous pak lockfile is kept for rollback.
+forward. The previous store-manifest is kept for rollback.
 
 **No session disruption.** Unlike live install conflicts (which
 require container transfer because a loaded package must change),
@@ -1477,11 +1503,11 @@ a new deploy.
 
 ### Rollback
 
-Each refresh produces a new pak lockfile. The server retains the
-previous lockfile, so rolling back is a library reassembly from the
-prior lockfile — same mechanism as the initial refresh, just
-pointing at the old lockfile. The store still holds the old package
-versions (append-only), so rollback is instant.
+Each refresh produces a new store-manifest. The server retains the
+previous store-manifest, so rolling back is a library reassembly
+from the prior store-manifest — same mechanism as the initial
+refresh, just pointing at the old manifest. The store still holds
+the old package versions (append-only), so rollback is instant.
 
 ---
 
@@ -1599,7 +1625,12 @@ versions (append-only), so rollback is instant.
    keys from lockfile entries → pre-populate the library with store
    hits → call `lockfile_install()` which skips them. No plan
    modification, no internal API hacking — just the public lockfile
-   API plus filesystem pre-population.
+   API plus filesystem pre-population. After ingest, `by-builder`
+   emits a `store-manifest.json` that captures the resolved store
+   paths for each package. This pre-computed manifest becomes the
+   integration point for all downstream operations (worker assembly,
+   refresh comparison, rollback), eliminating the need to re-parse
+   the lockfile or re-compute store keys outside the build.
 
 8. **Persistent pak download cache across builds.** pak's pkgcache
    stores downloaded archives keyed by URL + ETag. Mounting a
@@ -1634,8 +1665,9 @@ versions (append-only), so rollback is instant.
    `url::` and `local::` refs are unsupported (clear error); both
    are niche and lack reliable content identifiers in the lockfile.
 
-10. **Platform-aware store key.** The store key includes an
-   `{r_version}-{os}-{arch}` prefix (e.g., `4.4-linux-x86_64`).
+10. **Platform-aware store key.** The store key includes a
+   `{rversion}-{R_platform_triple}` prefix (e.g.,
+   `4.5-x86_64-pc-linux-gnu`).
    R binary packages are incompatible across minor R versions, and
    compiled code is architecture- and OS-specific. Including all
    three dimensions from the start means the store is correct by
@@ -1678,7 +1710,7 @@ versions (append-only), so rollback is instant.
    mount prevents `install.packages()` from inside R, which is
    correct since installations must go through the server's packages
    API. The store is the immutability guarantee. Any container's
-   library can be reconstructed from its pak lockfile at any time.
+   library can be reconstructed from its store-manifest at any time.
 
 14. **Blocking API for runtime package requests.** The runtime
    package API (`POST /api/v1/packages`) blocks until the package

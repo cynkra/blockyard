@@ -5,8 +5,8 @@ installation for running workers and dependency refresh for unpinned
 deployments. Both use the same store-aware build flow from phase 2-6,
 differing only in resolution context and trigger.
 
-Depends on phase 2-6 (package store, worker library assembly, lockfile
-output).
+Depends on phase 2-6 (package store, worker library assembly,
+store-manifest output).
 
 See [dep-mgmt.md](../dep-mgmt.md) for the full runtime assembly flow,
 container transfer protocol, refresh mechanics, and design rationale.
@@ -32,7 +32,7 @@ This document covers how to build them.
    installed and applies the lazy upgrade policy. `lockfile_install()`
    installs into the staging directory only.
 5. **Version conflict detection** — after resolution, compare the
-   lockfile's versions against the R session's loaded namespaces. If a
+   store-manifest's refs against the R session's loaded namespaces. If a
    dependency must change version and is already loaded, return
    `"transfer"` status.
 6. **Container transfer** — when a version conflict requires a new
@@ -42,13 +42,13 @@ This document covers how to build them.
    worker. Non-blockr apps get a hard restart.
 7. **Dependency refresh API** (`POST /api/v1/apps/{id}/refresh`) — for
    unpinned deployments only. Re-resolves dependencies using the original
-   unpinned manifest. Produces a new pak lockfile, reassembles the worker
-   library via container transfer.
+   unpinned manifest. Produces a new store-manifest, reassembles the
+   worker library. Also persists the new pak.lock as audit artifact.
 8. **Refresh triggers** — manual (CLI command, dashboard button),
    scheduled (per-app cron), and optionally on cold start.
-9. **Refresh rollback** — previous pak lockfiles are retained. Rollback
-   reassembles the library from the prior lockfile (instant — store is
-   append-only).
+9. **Refresh rollback** — previous store-manifests are retained. Rollback
+   reassembles the library from the prior store-manifest (instant — store
+   is append-only).
 
 ---
 
@@ -324,24 +324,24 @@ func (srv *Server) InstallPackage(
     }
 
     // 6. Check for version conflicts using the worker's package manifest.
-    lockfilePath := filepath.Join(stagingDir, "pak.lock")
+    storeManifestPath := filepath.Join(stagingDir, "store-manifest.json")
     workerManifest, err := pkgstore.ReadPackageManifest(workerLibDir)
     if err != nil {
         return api.PackageResponse{}, fmt.Errorf("read package manifest: %w", err)
     }
     conflict, conflictPkg, err := detectConflict(
-        lockfilePath, srv.PkgStore, workerManifest, req.LoadedNamespaces)
+        storeManifestPath, workerManifest, req.LoadedNamespaces)
     if err != nil {
         return api.PackageResponse{}, fmt.Errorf("conflict check: %w", err)
     }
 
     if conflict {
-        return srv.handleTransfer(ctx, appID, workerID, lockfilePath, result)
+        return srv.handleTransfer(ctx, appID, workerID, storeManifestPath, result)
     }
 
     // 7. No conflict — hardlink new packages from store/staging into /lib.
     if err := srv.linkNewPackages(
-        lockfilePath, stagingDir, workerLibDir,
+        storeManifestPath, workerLibDir,
     ); err != nil {
         return api.PackageResponse{}, fmt.Errorf("link packages: %w", err)
     }
@@ -543,12 +543,13 @@ func (srv *Server) runRuntimeInstall(
 
 ## Step 6: Version conflict detection
 
-After resolution, compare the new lockfile's compound store refs
-against the worker's current package manifest (`.packages.json`). The
-manifest is a `{package → "sourceHash/configHash"}` map written at
-library assembly time (phase 2-6) and updated on live installs (step 7).
-If any loaded namespace has a different compound ref in the new lockfile,
-R cannot unload and reload it in the same session — that's a version
+After resolution, compare the new store-manifest (written by
+`by-builder store ingest` to the staging directory) against the worker's
+current package manifest (`.packages.json`). The manifest is a
+`{package → "sourceHash/configHash"}` map written at library assembly
+time (phase 2-6) and updated on live installs (step 7). If any loaded
+namespace has a different compound ref in the new store-manifest, R
+cannot unload and reload it in the same session — that's a version
 conflict.
 
 Using compound store refs instead of version strings catches every
@@ -560,51 +561,31 @@ new Rcpp version).
 ```go
 // internal/server/conflict.go
 
-// detectConflict checks whether the resolved lockfile conflicts with
+// detectConflict checks whether the new store-manifest conflicts with
 // the R session's loaded namespaces by comparing compound store refs
-// from the worker's .packages.json manifest against those derived from
-// the new lockfile. The compound ref encodes both the source identity
-// (version/sha256) and the ABI configuration (LinkingTo store keys),
-// catching both version changes and LinkingTo recompilation needs.
+// from the worker's .packages.json manifest against those in the
+// store-manifest (written by `by-builder store ingest`). The compound
+// ref encodes both the source identity (version/sha256) and the ABI
+// configuration (LinkingTo store keys), catching both version changes
+// and LinkingTo recompilation needs.
 func detectConflict(
-    lockfilePath string,
-    store *pkgstore.Store,
-    workerManifest map[string]string, // from .packages.json: {pkg → "sourceHash/configHash"}
+    storeManifestPath string,
+    workerManifest map[string]string,
     loadedNamespaces []string,
 ) (conflict bool, pkg string, err error) {
-    lf, err := pkgstore.ReadLockfile(lockfilePath)
+    newRefs, err := pkgstore.ReadStoreManifest(storeManifestPath)
     if err != nil {
         return false, "", err
     }
 
-    // Build map of new lockfile's package → compound store ref.
-    newRefs := make(map[string]string)
-    for _, entry := range lf.Packages {
-        sourceHash, err := pkgstore.StoreKey(entry)
-        if err != nil {
-            return false, "", err
-        }
-        // Resolve config hash from configs.json using the new
-        // lockfile's LinkingTo store keys.
-        configHash, ok := store.ResolveConfig(entry.Package, sourceHash, lf)
-        if !ok {
-            // Store miss — no configs.json yet. Use empty config hash
-            // as placeholder; this will mismatch any existing ref,
-            // which is correct (the package needs to be installed).
-            configHash = pkgstore.ConfigHash(nil)
-        }
-        newRefs[entry.Package] = pkgstore.StoreRef(sourceHash, configHash)
-    }
-
-    // Check each loaded namespace against current vs new compound ref.
     for _, ns := range loadedNamespaces {
         currentRef, installed := workerManifest[ns]
         if !installed {
-            continue // base package or not tracked — skip
+            continue
         }
-        newRef, inNewLockfile := newRefs[ns]
-        if !inNewLockfile {
-            continue // package not in new lockfile — no conflict
+        newRef, inNewManifest := newRefs[ns]
+        if !inNewManifest {
+            continue
         }
         if currentRef != newRef {
             return true, ns, nil
@@ -633,84 +614,51 @@ existing build has stale ABI.
 // internal/server/packages.go
 
 func (srv *Server) linkNewPackages(
-    lockfilePath, stagingDir, workerLibDir string,
+    storeManifestPath, workerLibDir string,
 ) error {
-
-    lf, err := pkgstore.ReadLockfile(lockfilePath)
+    newManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
     if err != nil {
         return err
     }
 
-    // Load current worker manifest to compare compound refs.
     workerManifest, _ := pkgstore.ReadPackageManifest(workerLibDir)
     if workerManifest == nil {
         workerManifest = make(map[string]string)
     }
 
-    // Track new/updated entries to append to the worker's .packages.json.
     newEntries := make(map[string]string)
 
-    for _, entry := range lf.Packages {
-        // Resolve source hash + config hash for the expected compound ref.
-        sourceHash, err := pkgstore.StoreKey(entry)
-        if err != nil {
-            return fmt.Errorf("store key for %s: %w", entry.Package, err)
+    for pkg, ref := range newManifest {
+        sourceHash, configHash := pkgstore.SplitStoreRef(ref)
+
+        storePath := srv.PkgStore.Path(pkg, sourceHash, configHash)
+        if !dirExists(storePath) {
+            return fmt.Errorf(
+                "package %s not in store at %s", pkg, ref)
         }
 
-        var srcPath string
-        configHash, ok := srv.PkgStore.ResolveConfig(
-            entry.Package, sourceHash, lf)
-        if ok {
-            storePath := srv.PkgStore.Path(
-                entry.Package, sourceHash, configHash)
-            if dirExists(storePath) {
-                srcPath = storePath
-            }
-        }
-        if srcPath == "" {
-            // Fallback to staging (package was just installed).
-            srcPath = filepath.Join(stagingDir, entry.Package)
-        }
-
-        expectedRef := pkgstore.StoreRef(sourceHash, configHash)
-        destPath := filepath.Join(workerLibDir, entry.Package)
-
+        destPath := filepath.Join(workerLibDir, pkg)
         if dirExists(destPath) {
-            // Package already in /lib — check if the compound ref matches.
-            currentRef := workerManifest[entry.Package]
-            if currentRef == expectedRef {
-                continue // correct source + config — skip
+            if workerManifest[pkg] == ref {
+                continue
             }
-            // Different source or config hash — replace the stale build.
-            // This handles LinkingTo ABI changes (same source, different
-            // config) and version bumps for non-loaded packages.
             os.RemoveAll(destPath)
         }
 
-        if !dirExists(srcPath) {
-            return fmt.Errorf("package %s not found in store or staging",
-                entry.Package)
-        }
-
-        // Hard-link into worker library.
-        out, err := exec.Command("cp", "-al", srcPath, destPath).CombinedOutput()
+        out, err := exec.Command("cp", "-al", storePath, destPath).CombinedOutput()
         if err != nil {
-            return fmt.Errorf("link %s: %s: %w", entry.Package, out, err)
+            return fmt.Errorf("link %s: %s: %w", pkg, out, err)
         }
 
-        if ok {
-            srv.PkgStore.Touch(entry.Package, sourceHash, configHash)
-        }
-        newEntries[entry.Package] = expectedRef
+        srv.PkgStore.Touch(pkg, sourceHash, configHash)
+        newEntries[pkg] = ref
     }
 
-    // Update the worker's .packages.json with newly linked packages.
     if len(newEntries) > 0 {
         if err := pkgstore.UpdatePackageManifest(workerLibDir, newEntries); err != nil {
             return fmt.Errorf("update package manifest: %w", err)
         }
     }
-
     return nil
 }
 ```
@@ -741,7 +689,7 @@ func (srv *Server) TransferDir(workerID string) string {
 ```go
 func (srv *Server) handleTransfer(
     ctx context.Context,
-    appID, workerID, lockfilePath string,
+    appID, workerID, storeManifestPath string,
     buildResult *backend.BuildResult,
 ) (api.PackageResponse, error) {
 
@@ -750,17 +698,17 @@ func (srv *Server) handleTransfer(
     // inside the container.
     transferDir := srv.TransferDir(workerID)
 
-    // Copy the lockfile to the transfer directory before returning.
-    // The staging directory (where the lockfile lives) is cleaned up
-    // by the caller's defer — completeTransfer reads it from here.
-    transferLockfile := filepath.Join(transferDir, "pak.lock")
-    if err := copyFile(lockfilePath, transferLockfile); err != nil {
+    // Copy the store-manifest to the transfer directory before returning.
+    // The staging directory (where the store-manifest lives) is cleaned
+    // up by the caller's defer — completeTransfer reads it from here.
+    transferManifest := filepath.Join(transferDir, "store-manifest.json")
+    if err := copyFile(storeManifestPath, transferManifest); err != nil {
         return api.PackageResponse{},
-            fmt.Errorf("copy lockfile to transfer dir: %w", err)
+            fmt.Errorf("copy store-manifest to transfer dir: %w", err)
     }
 
     // Start watching for the board state file in a background goroutine.
-    go srv.watchTransfer(ctx, appID, workerID, transferLockfile, transferDir)
+    go srv.watchTransfer(ctx, appID, workerID, transferManifest, transferDir)
 
     // Return the container-side path. The worker's /transfer mount
     // maps to transferDir on the host. The R session writes board.json
@@ -784,7 +732,7 @@ HTTP response is sent immediately.
 
 func (srv *Server) watchTransfer(
     ctx context.Context,
-    appID, workerID, lockfilePath, transferDir string,
+    appID, workerID, storeManifestPath, transferDir string,
 ) {
     boardPath := filepath.Join(transferDir, "board.json")
     timeout := 30 * time.Second
@@ -795,7 +743,7 @@ func (srv *Server) watchTransfer(
         if _, err := os.Stat(boardPath); err == nil {
             // Board state written — proceed with transfer.
             srv.completeTransfer(ctx, appID, workerID,
-                lockfilePath, transferDir)
+                storeManifestPath, transferDir)
             return
         }
         time.Sleep(pollInterval)
@@ -813,18 +761,18 @@ func (srv *Server) watchTransfer(
 ```go
 func (srv *Server) completeTransfer(
     ctx context.Context,
-    appID, oldWorkerID, lockfilePath, transferDir string,
+    appID, oldWorkerID, storeManifestPath, transferDir string,
 ) {
-    // 1. Read the new lockfile and assemble a library for the new worker.
-    lf, err := pkgstore.ReadLockfile(lockfilePath)
+    // 1. Read the new store-manifest and assemble a library for the new worker.
+    storeManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
     if err != nil {
-        slog.Error("transfer: read lockfile", "error", err)
+        slog.Error("transfer: read store-manifest", "error", err)
         return
     }
 
     newWorkerID := uuid.New().String()
     newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
-    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, lf)
+    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
     if err != nil {
         slog.Error("transfer: assemble library", "error", err)
         return
@@ -1079,29 +1027,36 @@ func (srv *Server) RunRefresh(
         return false
     }
 
-    // 4. Extract new lockfile from the build directory.
+    // 4. Extract store-manifest (primary) and pak.lock (audit) from build dir.
     buildDir := filepath.Join(srv.PkgStore.Root(), ".builds", buildUUID)
     defer os.RemoveAll(buildDir)
 
+    newManifestSrc := filepath.Join(buildDir, "store-manifest.json")
+    newManifestDst := filepath.Join(bundlePaths.Base, "store-manifest.json")
+
+    // Also persist pak.lock as a debug/audit artifact (never re-parsed).
     newLockfileSrc := filepath.Join(buildDir, "pak.lock")
     newLockfileDst := filepath.Join(bundlePaths.Base, "pak.lock")
-
-    // 5. Archive previous lockfile for rollback.
-    prevLockfile := filepath.Join(bundlePaths.Base, "pak.lock.prev")
-    if fileExists(newLockfileDst) {
-        copyFile(newLockfileDst, prevLockfile)
+    if fileExists(newLockfileSrc) {
+        copyFile(newLockfileSrc, newLockfileDst)
     }
 
-    if err := copyFile(newLockfileSrc, newLockfileDst); err != nil {
+    // 5. Archive previous store-manifest for rollback.
+    prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
+    if fileExists(newManifestDst) {
+        copyFile(newManifestDst, prevManifest)
+    }
+
+    if err := copyFile(newManifestSrc, newManifestDst); err != nil {
         srv.Tasks.Fail(taskID,
-            fmt.Errorf("persist new lockfile: %w", err))
+            fmt.Errorf("persist new store-manifest: %w", err))
         return false
     }
 
-    // 6. Check if anything actually changed (semantic comparison via store keys).
-    changed, err := lockfilesChanged(prevLockfile, newLockfileDst)
+    // 6. Check if anything actually changed (map comparison).
+    changed, err := storeManifestsChanged(prevManifest, newManifestDst)
     if err != nil {
-        slog.Warn("refresh: lockfile comparison failed, assuming changed",
+        slog.Warn("refresh: store-manifest comparison failed, assuming changed",
             "error", err)
         changed = true
     }
@@ -1112,7 +1067,7 @@ func (srv *Server) RunRefresh(
 
     // 7. Graceful drain: spawn new worker, drain old ones.
     sender.Write("dependencies updated — spawning new worker...")
-    srv.drainAndReplace(ctx, app, newLockfileDst, sender)
+    srv.drainAndReplace(ctx, app, newManifestDst, sender)
     return true
 }
 ```
@@ -1132,19 +1087,19 @@ exclusively for live install conflicts (step 8).
 func (srv *Server) drainAndReplace(
     ctx context.Context,
     app *db.App,
-    lockfilePath string,
+    storeManifestPath string,
     sender task.Sender,
 ) {
-    lf, err := pkgstore.ReadLockfile(lockfilePath)
+    storeManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
     if err != nil {
-        sender.Write("error reading new lockfile: " + err.Error())
+        sender.Write("error reading store-manifest: " + err.Error())
         return
     }
 
     // 1. Spawn a new worker with the updated library.
     newWorkerID := uuid.New().String()
     newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
-    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, lf)
+    missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
     if err != nil {
         sender.Write("error assembling library: " + err.Error())
         return
@@ -1184,42 +1139,29 @@ continue on the old worker until they disconnect. The worker eviction
 loop (already running in the server's background) periodically checks
 drained workers and evicts any that have zero active sessions.
 
-### lockfilesChanged
+### storeManifestsChanged
 
-Semantic comparison using store keys — the canonical package identity.
-Robust against JSON formatting differences between pak versions.
+Trivial map comparison — the store-manifest is already a
+`{package → "sourceHash/configHash"}` map, so no store-key derivation
+is needed.
 
 ```go
 // internal/server/refresh.go
 
-func lockfilesChanged(oldPath, newPath string) (bool, error) {
-    oldLF, err := pkgstore.ReadLockfile(oldPath)
+func storeManifestsChanged(oldPath, newPath string) (bool, error) {
+    oldManifest, err := pkgstore.ReadStoreManifest(oldPath)
     if err != nil {
         return false, err
     }
-    newLF, err := pkgstore.ReadLockfile(newPath)
+    newManifest, err := pkgstore.ReadStoreManifest(newPath)
     if err != nil {
         return false, err
     }
-
-    oldKeys := make(map[string]string, len(oldLF.Packages))
-    for _, e := range oldLF.Packages {
-        key, err := pkgstore.StoreKey(e)
-        if err != nil {
-            return false, err
-        }
-        oldKeys[e.Package] = key
-    }
-
-    if len(newLF.Packages) != len(oldLF.Packages) {
+    if len(oldManifest) != len(newManifest) {
         return true, nil
     }
-    for _, e := range newLF.Packages {
-        key, err := pkgstore.StoreKey(e)
-        if err != nil {
-            return false, err
-        }
-        if oldKeys[e.Package] != key {
+    for pkg, ref := range newManifest {
+        if oldManifest[pkg] != ref {
             return true, nil
         }
     }
@@ -1293,7 +1235,7 @@ if app.RefreshOnStart && !manifest.IsPinned() {
         return
     }
     // Dependencies unchanged — fall through to normal worker spawn
-    // using the existing lockfile.
+    // using the existing store-manifest.
 }
 // Proceed with normal worker spawn.
 ```
@@ -1301,15 +1243,16 @@ if app.RefreshOnStart && !manifest.IsPinned() {
 This keeps long-lived scan-mode apps current without manual
 intervention. Disabled by default. When refresh detects no changes,
 the cold-start path spawns a worker as usual using the existing
-lockfile.
+store-manifest.
 
 ---
 
 ## Step 11: Refresh rollback
 
-Each refresh archives the previous pak lockfile as `pak.lock.prev`.
-Rolling back is a library reassembly from the prior lockfile — same
-mechanism as the refresh itself, just pointing at the old lockfile.
+Each refresh archives the previous store-manifest as
+`store-manifest.json.prev`. Rolling back is a library reassembly from
+the prior store-manifest — same mechanism as the refresh itself, just
+pointing at the old store-manifest.
 
 ```go
 // internal/server/refresh.go
@@ -1319,30 +1262,30 @@ func (srv *Server) RollbackRefresh(
 ) error {
     bundlePaths := srv.BundlePaths(app.ID, app.ActiveBundleID)
 
-    prevLockfile := filepath.Join(bundlePaths.Base, "pak.lock.prev")
-    if !fileExists(prevLockfile) {
-        return fmt.Errorf("no previous lockfile to roll back to")
+    prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
+    if !fileExists(prevManifest) {
+        return fmt.Errorf("no previous store-manifest to roll back to")
     }
 
-    currentLockfile := filepath.Join(bundlePaths.Base, "pak.lock")
+    currentManifest := filepath.Join(bundlePaths.Base, "store-manifest.json")
 
     // Swap current ↔ previous.
-    tmpPath := currentLockfile + ".tmp"
-    if err := copyFile(currentLockfile, tmpPath); err != nil {
+    tmpPath := currentManifest + ".tmp"
+    if err := copyFile(currentManifest, tmpPath); err != nil {
         return err
     }
-    if err := copyFile(prevLockfile, currentLockfile); err != nil {
+    if err := copyFile(prevManifest, currentManifest); err != nil {
         return err
     }
-    if err := os.Rename(tmpPath, prevLockfile); err != nil {
+    if err := os.Rename(tmpPath, prevManifest); err != nil {
         return err
     }
 
-    // Reassemble workers with the rolled-back lockfile (graceful drain).
+    // Reassemble workers with the rolled-back store-manifest (graceful drain).
     taskID := srv.Tasks.Create(app.ID, "rollback-refresh")
     sender := srv.Tasks.Sender(taskID)
     sender.Write("rolling back dependencies...")
-    srv.drainAndReplace(ctx, app, currentLockfile, sender)
+    srv.drainAndReplace(ctx, app, currentManifest, sender)
     srv.Tasks.Complete(taskID)
 
     return nil
@@ -1351,7 +1294,7 @@ func (srv *Server) RollbackRefresh(
 
 The store still holds the old package versions (append-only), so
 rollback is instant — no rebuilding, just library reassembly from
-the prior lockfile via hardlinks.
+the prior store-manifest via hardlinks.
 
 ### Rollback API
 
@@ -1428,7 +1371,7 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
 **Version conflict detection:**
 - `TestDetectConflict_NoConflict` — new package, not loaded.
 - `TestDetectConflict_SameCompoundRef` — loaded package's compound ref
-  (sourceHash/configHash) matches lockfile-derived ref → no conflict.
+  (sourceHash/configHash) matches store-manifest ref → no conflict.
 - `TestDetectConflict_DifferentSourceHash` — source hash differs
   (version bump) → conflict.
 - `TestDetectConflict_SameSourceDifferentConfig` — same source hash but
@@ -1436,24 +1379,22 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
   new Rcpp) → conflict.
 - `TestDetectConflict_BasePackage` — base R packages (not in
   `.packages.json`) skipped.
-- `TestDetectConflict_NotInNewLockfile` — loaded package absent from
-  new lockfile → no conflict.
+- `TestDetectConflict_NotInNewManifest` — loaded package absent from
+  new store-manifest → no conflict.
 
-**Lockfile comparison:**
-- `TestLockfilesChanged_Identical` — same packages/versions → false.
-- `TestLockfilesChanged_VersionBump` — one package version changed → true.
-- `TestLockfilesChanged_PackageAdded` — new package in lockfile → true.
-- `TestLockfilesChanged_PackageRemoved` — package removed → true.
-- `TestLockfilesChanged_JSONFormatDiffers` — same packages but different
-  JSON whitespace/ordering → false (semantic comparison, not byte-level).
+**Store-manifest comparison:**
+- `TestStoreManifestsChanged_Identical` — same packages/refs → false.
+- `TestStoreManifestsChanged_VersionBump` — one package ref changed → true.
+- `TestStoreManifestsChanged_PackageAdded` — new package in manifest → true.
+- `TestStoreManifestsChanged_PackageRemoved` — package removed → true.
 
 **Staging directory:**
 - `TestCreateStagingDir` — creates directory under store root.
 - `TestCleanupStagingDir` — removes directory.
 
 **Refresh rollback:**
-- `TestRollbackRefresh_SwapsLockfiles` — current ↔ prev swapped.
-- `TestRollbackRefresh_NoPrevious` — error when no prev lockfile.
+- `TestRollbackRefresh_SwapsStoreManifests` — current ↔ prev swapped.
+- `TestRollbackRefresh_NoPrevious` — error when no prev store-manifest.
 
 ### Integration tests
 
@@ -1471,13 +1412,13 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
 - **Dependency refresh (unchanged):** refresh with no upstream changes
   → verify "no action needed" message, no new worker spawned.
 - **Dependency refresh (changed):** change upstream (e.g., advance
-  Remotes commit) → refresh → verify new lockfile, new worker spawned,
+  Remotes commit) → refresh → verify new store-manifest, new worker spawned,
   old worker marked draining.
 - **Refresh with active sessions:** refresh while sessions are active
   on old worker → verify sessions on old worker continue undisturbed,
   new sessions routed to new worker, old worker evicted only after all
   sessions disconnect.
-- **Refresh rollback:** refresh → rollback → verify previous lockfile
+- **Refresh rollback:** refresh → rollback → verify previous store-manifest
   restored, new worker spawned, old workers drained.
 - **Refresh pinned app:** attempt refresh on pinned app → verify 409
   error with clear message.
@@ -1539,15 +1480,15 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
    the complete store-aware build pipeline (lockfile → store check →
    install misses → ingest). This reuses the existing build code (no
    new pipeline) and ensures any new dependency versions are properly
-   ingested into the store. The lockfile comparison after the build
-   detects whether anything actually changed — if not, no new worker
+   ingested into the store. The store-manifest comparison after the
+   build detects whether anything actually changed — if not, no new worker
    is spawned. When dependencies have changed, a new worker is spawned
    with the updated library and old workers are drained gracefully
    rather than swapped immediately.
 
-6. **Single-depth rollback (prev lockfile).** Refresh retains exactly
-   one previous lockfile. Multiple levels of rollback would require
-   a lockfile history table — complexity that can be added later if
+6. **Single-depth rollback (prev store-manifest).** Refresh retains
+   exactly one previous store-manifest. Multiple levels of rollback
+   would require a manifest history table — complexity that can be added later if
    needed. The store is append-only, so even old package versions
    remain available indefinitely (until eviction). For deeper
    rollback, redeploy from the original source.

@@ -84,15 +84,18 @@ type Repository struct {
     URL  string `json:"URL"`
 }
 
-// Package mirrors renv.lock package record fields exactly.
-// Fields are copied verbatim — no renaming, no semantic translation.
+// Package holds the renv.lock fields consumed by the build pipeline.
+// Only identity and source fields are mapped — record_to_ref() uses
+// Source/Remote* to derive pkgdepends refs. Fields like Hash,
+// Requirements, and DESCRIPTION metadata (Title, Authors@R, etc.)
+// are not consumed by any part of the pipeline and are not carried.
+// Works with both renv.lock v1 (minimal) and v2 (full DESCRIPTION)
+// formats — extra fields are silently dropped during unmarshaling.
 type Package struct {
-    Package      string   `json:"Package"`
-    Version      string   `json:"Version"`
-    Source       string   `json:"Source"`
-    Repository   string   `json:"Repository,omitempty"`
-    Hash         string   `json:"Hash,omitempty"`
-    Requirements []string `json:"Requirements,omitempty"`
+    Package        string `json:"Package"`
+    Version        string `json:"Version"`
+    Source         string `json:"Source"`
+    Repository     string `json:"Repository,omitempty"`
     RemoteType     string `json:"RemoteType,omitempty"`
     RemoteHost     string `json:"RemoteHost,omitempty"`
     RemoteUsername string `json:"RemoteUsername,omitempty"`
@@ -100,6 +103,45 @@ type Package struct {
     RemoteRef      string `json:"RemoteRef,omitempty"`
     RemoteSha      string `json:"RemoteSha,omitempty"`
     RemoteSubdir   string `json:"RemoteSubdir,omitempty"`
+    RemoteUrl      string `json:"RemoteUrl,omitempty"` // git:: sources
+}
+
+// Validate checks that a package record has the fields required by
+// record_to_ref() for its Source type.
+func (p Package) Validate() error {
+    if p.Package == "" {
+        return errors.New("missing Package field")
+    }
+    if p.Source == "" {
+        return fmt.Errorf("package %s: missing Source field", p.Package)
+    }
+
+    switch p.Source {
+    case "Repository", "Bioconductor":
+        if p.Version == "" {
+            return fmt.Errorf("package %s: Source %q requires Version",
+                p.Package, p.Source)
+        }
+    case "GitHub", "GitLab":
+        for _, f := range []struct{ name, val string }{
+            {"RemoteUsername", p.RemoteUsername},
+            {"RemoteRepo", p.RemoteRepo},
+            {"RemoteSha", p.RemoteSha},
+        } {
+            if f.val == "" {
+                return fmt.Errorf("package %s: Source %q requires %s",
+                    p.Package, p.Source, f.name)
+            }
+        }
+    case "git":
+        if p.RemoteUrl == "" {
+            return fmt.Errorf("package %s: Source \"git\" requires RemoteUrl",
+                p.Package)
+        }
+    default:
+        return fmt.Errorf("package %s: unsupported Source %q", p.Package, p.Source)
+    }
+    return nil
 }
 
 type FileInfo struct {
@@ -131,6 +173,11 @@ func (m *Manifest) Validate() error {
     }
     if m.Metadata.Entrypoint == "" {
         return errors.New("manifest missing metadata.entrypoint")
+    }
+    for _, pkg := range m.Packages {
+        if err := pkg.Validate(); err != nil {
+            return fmt.Errorf("invalid package record: %w", err)
+        }
     }
     return nil
 }
@@ -175,6 +222,9 @@ top-level renv.lock fields to the manifest envelope. See dep-mgmt.md
 // internal/manifest/renvlock.go
 
 // renvLock mirrors the relevant structure of renv.lock (JSON).
+// Works with both v1 (minimal records) and v2 (full DESCRIPTION)
+// lockfile formats — the Package struct maps only the fields we
+// need; extra v2 fields are silently dropped during unmarshaling.
 type renvLock struct {
     R struct {
         Version      string       `json:"Version"`
@@ -184,7 +234,8 @@ type renvLock struct {
 }
 
 // FromRenvLock converts an renv.lock file to a pinned manifest.
-// Package records are copied verbatim — no field transformation.
+// Package identity and source fields are preserved unchanged.
+// Extra DESCRIPTION fields from v2 lockfiles are not carried.
 func FromRenvLock(
     lockPath string,
     meta Metadata,
@@ -212,9 +263,11 @@ func FromRenvLock(
 }
 ```
 
-All renv.lock package fields (`Version`, `Source`, `Repository`, `Hash`,
-`Requirements`, `RemoteType`, `RemoteUsername`, `RemoteRepo`, `RemoteRef`,
-`RemoteSha`, `RemoteHost`, `RemoteSubdir`, etc.) pass through unchanged.
+Package identity and source fields (`Version`, `Source`, `Repository`,
+`RemoteType`, `RemoteUsername`, `RemoteRepo`, `RemoteRef`, `RemoteSha`,
+`RemoteHost`, `RemoteSubdir`) pass through unchanged. Fields not consumed
+by the pipeline (`Hash`, `Requirements`, DESCRIPTION metadata) are
+silently dropped during unmarshaling.
 
 ---
 
@@ -242,9 +295,12 @@ func FromDescription(
     fields := parseDCF(data)
 
     // Extract only dependency-relevant fields.
+    // Suggests is excluded: deps:: tells pak to read Imports and
+    // Depends only, and the design explicitly excludes Suggests
+    // (see dep-mgmt.md § Server-Side Build Pipeline).
     desc := make(map[string]string)
     for _, key := range []string{
-        "Imports", "Depends", "Suggests", "Remotes", "LinkingTo",
+        "Imports", "Depends", "Remotes", "LinkingTo",
     } {
         if v, ok := fields[key]; ok {
             desc[key] = v
@@ -401,6 +457,7 @@ type BuildSpec struct {
     LogWriter    func(string)
     Cmd          []string          // overrides default command when set
     Mounts       []MountEntry      // overrides default mounts when set
+    Env          []string          // environment variables (KEY=VALUE)
 }
 
 type MountEntry struct {
@@ -1119,11 +1176,22 @@ will scan it and discover `library(shiny)`.
 - `TestManifestIsPinned` — true when `packages` present, false otherwise.
 - `TestManifestReadWrite` — round-trip through JSON.
 
+**Package validation:**
+- `TestPackageValidate_CRAN` — Repository source with Package/Version/Source.
+- `TestPackageValidate_GitHub` — requires RemoteUsername/RemoteRepo/RemoteSha.
+- `TestPackageValidate_GitHubMissingSha` — rejected with clear error.
+- `TestPackageValidate_Git` — requires RemoteUrl.
+- `TestPackageValidate_GitMissingUrl` — rejected.
+- `TestPackageValidate_MissingSource` — rejected.
+- `TestPackageValidate_UnsupportedSource` — rejected with Source name in error.
+
 **renv.lock → manifest:**
-- `TestFromRenvLock_BasicCRAN` — packages copy verbatim, R.Version → platform.
+- `TestFromRenvLock_BasicCRAN` — identity fields preserved, R.Version → platform.
 - `TestFromRenvLock_GitHubPackage` — Remote* fields preserved.
 - `TestFromRenvLock_BiocPackage` — Bioconductor source handled.
 - `TestFromRenvLock_Repositories` — R.Repositories → manifest repositories.
+- `TestFromRenvLock_V2Format` — v2 lockfile (full DESCRIPTION) works; extra fields dropped.
+- `TestFromRenvLock_MissingRemoteSha` — GitHub package without RemoteSha rejected.
 - `TestFromRenvLock_InvalidJSON` — error returned.
 
 **DESCRIPTION → manifest:**
