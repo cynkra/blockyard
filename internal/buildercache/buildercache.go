@@ -17,14 +17,11 @@ var mu sync.Mutex
 const preInstalledPath = "/usr/local/lib/blockyard/by-builder"
 
 // EnsureCached returns the path to the by-builder binary for the
-// current platform. Checks for a pre-installed binary first (Docker
-// image), then falls back to compiling from source (development).
+// current platform. The binary must reside on a shared volume so it
+// can be bind-mounted into build containers. Checks cache first, then
+// copies from a pre-installed path (Docker image), then falls back to
+// compiling from source (development).
 func EnsureCached(cachePath, version string) (string, error) {
-	// Fast path: pre-installed binary (production Docker image).
-	if fileExists(preInstalledPath) {
-		return preInstalledPath, nil
-	}
-
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -38,6 +35,17 @@ func EnsureCached(cachePath, version string) (string, error) {
 		return "", fmt.Errorf("create builder cache dir: %w", err)
 	}
 
+	// Try pre-installed binary (production Docker image).
+	if fileExists(preInstalledPath) {
+		slog.Info("copying pre-installed by-builder to cache",
+			"src", preInstalledPath, "dst", binPath)
+		if err := copyBinary(preInstalledPath, binPath); err != nil {
+			return "", fmt.Errorf("copy pre-installed by-builder: %w", err)
+		}
+		return binPath, nil
+	}
+
+	// Fall back to compiling from source (development).
 	slog.Info("compiling by-builder", "version", version, "arch", runtime.GOARCH)
 	if err := buildFromSource(binPath); err != nil {
 		return "", fmt.Errorf("compile by-builder: %w", err)
@@ -45,6 +53,19 @@ func EnsureCached(cachePath, version string) (string, error) {
 
 	slog.Info("by-builder cached", "path", binPath)
 	return binPath, nil
+}
+
+// copyBinary copies a file preserving its permissions.
+func copyBinary(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // buildFromSource compiles the by-builder binary from the Go module.
