@@ -50,6 +50,19 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		tpl.Close()
+
+		// Prevent the "source database is being accessed by other users"
+		// error: kill any lingering pool connections and disallow future
+		// connections.  CREATE DATABASE … TEMPLATE still works because it
+		// copies at the filesystem level without connecting.
+		admin2, err := sql.Open("pgx", pgBaseURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "postgres admin reconnect: %v\n", err)
+			os.Exit(1)
+		}
+		admin2.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '" + pgTemplateDB + "'")
+		admin2.Exec("ALTER DATABASE " + pgTemplateDB + " WITH ALLOW_CONNECTIONS = false")
+		admin2.Close()
 	}
 
 	code := m.Run()
@@ -58,6 +71,7 @@ func TestMain(m *testing.M) {
 	if pgBaseURL != "" {
 		admin, err := sql.Open("pgx", pgBaseURL)
 		if err == nil {
+			admin.Exec("ALTER DATABASE " + pgTemplateDB + " WITH ALLOW_CONNECTIONS = true")
 			admin.Exec("DROP DATABASE IF EXISTS " + pgTemplateDB)
 			admin.Close()
 		}
