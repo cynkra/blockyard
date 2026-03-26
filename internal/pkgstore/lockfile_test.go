@@ -212,6 +212,22 @@ func TestLockfileEntryValidate_GitHubMissingRemoteSha(t *testing.T) {
 	}
 }
 
+func TestLockfileEntryValidate_MetaEntrySkipped(t *testing.T) {
+	// "deps" entries are pak pseudo-packages (e.g. deps::/app).
+	for _, rt := range []string{"deps", "local", "installed"} {
+		e := LockfileEntry{
+			Package:  "my-app-deps",
+			Metadata: LockfileMetadata{RemoteType: rt},
+		}
+		if !e.IsMetaEntry() {
+			t.Errorf("IsMetaEntry() should return true for type %q", rt)
+		}
+		if err := e.Validate(); err != nil {
+			t.Errorf("meta entry type %q should pass validation: %v", rt, err)
+		}
+	}
+}
+
 func TestLockfileEntryValidate_FallbackToType(t *testing.T) {
 	// When metadata.RemoteType is empty, falls back to top-level Type.
 	e := LockfileEntry{

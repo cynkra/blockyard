@@ -71,9 +71,24 @@ func (lf *Lockfile) Validate() error {
 	return nil
 }
 
+// IsMetaEntry reports whether this lockfile entry is a pak
+// pseudo-package (e.g. "deps::/app") rather than a real package.
+// Meta-entries are skipped during validation and store operations.
+func (e LockfileEntry) IsMetaEntry() bool {
+	rt := e.Metadata.RemoteType
+	if rt == "" {
+		rt = e.Type
+	}
+	return rt == "deps" || rt == "local" || rt == "installed"
+}
+
 // Validate checks that a lockfile entry has the fields needed for
-// store key computation and platform detection.
+// store key computation and platform detection. Meta-entries (deps,
+// local, installed) are skipped.
 func (e LockfileEntry) Validate() error {
+	if e.IsMetaEntry() {
+		return nil
+	}
 	if e.Package == "" {
 		return errors.New("missing \"package\" field")
 	}

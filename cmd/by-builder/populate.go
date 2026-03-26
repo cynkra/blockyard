@@ -33,6 +33,9 @@ func populateCmd() *cobra.Command {
 
 			var hits, misses int
 			for _, entry := range lf.Packages {
+				if entry.IsMetaEntry() {
+					continue
+				}
 				sourceHash, err := pkgstore.StoreKey(entry)
 				if err != nil {
 					return err

@@ -35,6 +35,9 @@ func ingestCmd() *cobra.Command {
 			storeManifest := make(map[string]string)
 
 			for _, entry := range lf.Packages {
+				if entry.IsMetaEntry() {
+					continue
+				}
 				sourceHash, err := pkgstore.StoreKey(entry)
 				if err != nil {
 					return err
