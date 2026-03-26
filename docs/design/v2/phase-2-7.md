@@ -100,7 +100,7 @@ Same pattern as Kubernetes projected service account tokens.
 // internal/proxy/workertoken.go
 
 // tokenDir returns the host-side directory for a worker's token file.
-// Lives under the store root for same-filesystem guarantees.
+// Lives under bundleServerPath alongside other per-worker state.
 func tokenDir(bundleServerPath, workerID string) string {
     return filepath.Join(bundleServerPath, ".worker-tokens", workerID)
 }
@@ -419,14 +419,16 @@ func (srv *Server) InstallPackage(
     defer srv.PkgStore.CleanupStagingDir(stagingDir)
 
     // 4. Ensure pak and by-builder are cached.
+    bsp := srv.Config.Storage.BundleServerPath
     pakPath, err := pakcache.EnsureInstalled(
         ctx, srv.Backend, srv.Config.Docker.Image,
-        srv.Config.Docker.PakVersion, srv.Config.Docker.PakCachePath())
+        srv.Config.Docker.PakVersion,
+        filepath.Join(bsp, ".pak-cache"))
     if err != nil {
         return api.PackageResponse{}, fmt.Errorf("ensure pak: %w", err)
     }
     builderPath, err := buildercache.EnsureCached(
-        srv.Config.Docker.BuilderCachePath(), srv.Config.Docker.BuilderVersion)
+        filepath.Join(bsp, ".by-builder-cache"), srv.Version)
     if err != nil {
         return api.PackageResponse{}, fmt.Errorf("ensure by-builder: %w", err)
     }
@@ -786,7 +788,8 @@ func (srv *Server) runRuntimeInstall(
             {Source: p.WorkerLibDir, Target: "/worker-lib", ReadOnly: true},
             {Source: p.StagingDir, Target: "/staging", ReadOnly: false},
             {Source: p.PakPath, Target: "/pak", ReadOnly: true},
-            {Source: srv.DLCachePath(), Target: "/pak-cache", ReadOnly: false},
+            {Source: filepath.Join(srv.Config.Storage.BundleServerPath, ".pak-dl-cache"),
+                Target: "/pak-cache", ReadOnly: false},
             {Source: p.StoreRoot, Target: "/store", ReadOnly: false},
             {Source: p.BuilderPath, Target: "/tools/by-builder", ReadOnly: true},
         },
@@ -1272,8 +1275,9 @@ func PostRefresh(srv *server.Server) http.HandlerFunc {
         }
 
         // Start refresh as a background task.
-        taskID := srv.Tasks.Create(app.ID, "refresh")
-        go srv.RunRefresh(context.Background(), app, m, taskID)
+        taskID := uuid.New().String()
+        sender := srv.Tasks.Create(taskID, app.ID)
+        go srv.RunRefresh(context.Background(), app, m, sender)
 
         writeJSON(w, http.StatusAccepted, map[string]string{
             "task_id": taskID,
@@ -1300,25 +1304,29 @@ func (srv *Server) RunRefresh(
     ctx context.Context,
     app *db.AppRow,
     m *manifest.Manifest,
-    taskID string,
+    sender task.Sender,
 ) bool {
-    sender := srv.Tasks.Sender(taskID)
-    defer srv.Tasks.Complete(taskID)
+    defer sender.Complete(task.Completed)
 
     sender.Write("refreshing dependencies...")
+
+    bsp := srv.Config.Storage.BundleServerPath
 
     // 1. Ensure pak and by-builder are cached.
     pakPath, err := pakcache.EnsureInstalled(
         ctx, srv.Backend, srv.Config.Docker.Image,
-        srv.Config.Docker.PakVersion, srv.Config.Docker.PakCachePath())
+        srv.Config.Docker.PakVersion,
+        filepath.Join(bsp, ".pak-cache"))
     if err != nil {
-        srv.Tasks.Fail(taskID, fmt.Errorf("ensure pak: %w", err))
+        sender.Write(fmt.Sprintf("ensure pak: %v", err))
+        sender.Complete(task.Failed)
         return false
     }
     builderPath, err := buildercache.EnsureCached(
-        srv.Config.Docker.BuilderCachePath(), srv.Config.Docker.BuilderVersion)
+        filepath.Join(bsp, ".by-builder-cache"), srv.Version)
     if err != nil {
-        srv.Tasks.Fail(taskID, fmt.Errorf("ensure by-builder: %w", err))
+        sender.Write(fmt.Sprintf("ensure by-builder: %v", err))
+        sender.Complete(task.Failed)
         return false
     }
 
@@ -1352,12 +1360,13 @@ func (srv *Server) RunRefresh(
 
     result, err := srv.Backend.Build(ctx, spec)
     if err != nil {
-        srv.Tasks.Fail(taskID, fmt.Errorf("refresh build: %w", err))
+        sender.Write(fmt.Sprintf("refresh build: %v", err))
+        sender.Complete(task.Failed)
         return false
     }
     if !result.Success {
-        srv.Tasks.Fail(taskID,
-            fmt.Errorf("refresh failed (exit %d)", result.ExitCode))
+        sender.Write(fmt.Sprintf("refresh failed (exit %d)", result.ExitCode))
+        sender.Complete(task.Failed)
         return false
     }
 
@@ -1386,8 +1395,8 @@ func (srv *Server) RunRefresh(
     }
 
     if err := copyFile(newManifestSrc, newManifestDst); err != nil {
-        srv.Tasks.Fail(taskID,
-            fmt.Errorf("persist new store-manifest: %w", err))
+        sender.Write(fmt.Sprintf("persist new store-manifest: %v", err))
+        sender.Complete(task.Failed)
         return false
     }
 
@@ -1614,11 +1623,11 @@ func (srv *Server) RollbackRefresh(
     // is not preserved. To go further back, use RollbackToBuild.
 
     // Reassemble workers with the rolled-back store-manifest (graceful drain).
-    taskID := srv.Tasks.Create(app.ID, "rollback-refresh")
-    sender := srv.Tasks.Sender(taskID)
+    taskID := uuid.New().String()
+    sender := srv.Tasks.Create(taskID, app.ID)
     sender.Write("rolling back dependencies to previous refresh...")
     srv.drainAndReplace(ctx, app, currentManifest, sender)
-    srv.Tasks.Complete(taskID)
+    sender.Complete(task.Completed)
 
     return nil
 }
@@ -1647,11 +1656,11 @@ func (srv *Server) RollbackToBuild(
     os.Remove(prevManifest)
 
     // Reassemble workers with the original build store-manifest.
-    taskID := srv.Tasks.Create(app.ID, "rollback-to-build")
-    sender := srv.Tasks.Sender(taskID)
+    taskID := uuid.New().String()
+    sender := srv.Tasks.Create(taskID, app.ID)
     sender.Write("rolling back dependencies to original build...")
     srv.drainAndReplace(ctx, app, currentManifest, sender)
-    srv.Tasks.Complete(taskID)
+    sender.Complete(task.Completed)
 
     return nil
 }
@@ -1855,13 +1864,15 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
    sentinel files (extra coordination). The poll has a timeout — if
    the file doesn't appear, the server aborts.
 
-4. **Worker token as long-lived HMAC.** The worker token is generated
-   at spawn time with a long TTL. The token is effectively revoked
-   when the worker is evicted (the worker ID is no longer recognized).
-   Using the existing HMAC-SHA256 signing infrastructure (from session
-   tokens) avoids adding a new auth mechanism. The `worker:` prefix
-   in the Sub claim prevents worker tokens from being used as user
-   session tokens.
+4. **Worker token as short-lived HMAC with server-side refresh.** The
+   worker token has a 15-minute TTL and is written to a mounted file
+   that the server refreshes at TTL/2. The token is effectively
+   revoked when the worker is evicted (the refresher stops and the
+   last token expires within one TTL period). Using the existing
+   HMAC-SHA256 signing infrastructure (from session tokens) avoids
+   adding a new auth mechanism. The `worker:` prefix in the Sub
+   claim prevents worker tokens from being used as user session
+   tokens.
 
 5. **Refresh re-runs the full build pipeline with graceful drain.**
    Rather than a lightweight "re-resolve and diff" flow, refresh runs

@@ -1194,26 +1194,37 @@ pak::lockfile_create(
 )
 # Lockfile contains the full solution (existing + new).
 
-# ── Phase 2: Check store for NEW entries (Go binary) ─────────────
-# by-builder skips packages in the worker library (--reference-lib),
-# checks the store, and hard-links hits into staging.
+# ── Phase 2: Pre-populate staging from store + worker library ────
+# In runtime mode (--runtime), by-builder:
+#   1. Hardlinks unchanged packages from worker lib into staging.
+#   2. For packages whose LinkingTo deps changed: looks up a new
+#      config in the store (fast path) or excludes from staging
+#      (slow path — pak recompiles in phase 3).
+#   3. Hardlinks store hits for new/changed packages into staging.
+# After this step, staging is a complete library minus packages
+# that need ABI recompilation.
 rc <- system2("/tools/by-builder", c(
   "store", "populate",
   "--lockfile", file.path(staging, "pak.lock"),
   "--lib", staging, "--store", "/store",
-  "--reference-lib", "/containers/{id}/lib"))
+  "--reference-lib", "/containers/{id}/lib",
+  "--runtime"))
 if (rc != 0L) {
   message("WARNING: store populate failed (exit ", rc,
           "); falling back to full install")
 }
 
 # ── Phase 3: Install store misses (R — needs pak) ───────────────
+# staging only — NOT c(staging, "/containers/{id}/lib"). Phase 2
+# already hardlinked all unchanged packages from the worker library
+# into staging. Packages excluded by the ABI check (LinkingTo deps
+# changed, no matching store config) are missing from staging, so
+# pak reinstalls them — compiling against the new headers already
+# present in staging.
 pak::lockfile_install(
   file.path(staging, "pak.lock"),
-  lib = c(staging, "/containers/{id}/lib")
+  lib = staging
 )
-# Installs into staging only. Packages in /lib are scanned as
-# reference — not re-installed.
 
 # ── Phase 4: Ingest into store (Go binary) ───────────────────────
 # by-builder ingests new packages from staging into the store and
