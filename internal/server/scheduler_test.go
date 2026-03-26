@@ -1,8 +1,16 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/manifest"
+	"github.com/cynkra/blockyard/internal/task"
 )
 
 func TestShouldRun_NeverRunBefore(t *testing.T) {
@@ -56,5 +64,99 @@ func TestShouldRun_DailyDue(t *testing.T) {
 	last := time.Date(2026, 3, 26, 0, 1, 0, 0, time.UTC).Format(time.RFC3339)
 	if !shouldRun("0 0 * * *", &last, now) {
 		t.Error("expected shouldRun=true when daily schedule is past due")
+	}
+}
+
+func TestTriggerRefresh_NoActiveBundle(t *testing.T) {
+	srv := setupRefreshTest(t)
+	app := &db.AppRow{ID: "app-1", ActiveBundle: nil}
+
+	// Should return immediately without error.
+	srv.triggerRefresh(context.Background(), app)
+}
+
+func TestTriggerRefresh_PinnedManifest(t *testing.T) {
+	srv := setupRefreshTest(t)
+	bundleID := "bundle-1"
+	app := &db.AppRow{
+		ID:           "app-1",
+		ActiveBundle: &bundleID,
+	}
+
+	// Set up bundle directory with a pinned manifest (has packages).
+	bundlePaths := srv.BundlePaths("app-1", bundleID)
+	os.MkdirAll(bundlePaths.Base, 0o755)
+
+	m := &manifest.Manifest{
+		Version: 1,
+		Packages: map[string]manifest.Package{
+			"shiny": {Package: "shiny", Version: "1.0"},
+		},
+	}
+	data, _ := json.Marshal(m)
+	os.WriteFile(filepath.Join(bundlePaths.Base, "manifest.json"), data, 0o644)
+
+	// Pinned manifest → should skip refresh.
+	srv.triggerRefresh(context.Background(), app)
+}
+
+func TestTriggerRefresh_ManifestReadError(t *testing.T) {
+	srv := setupRefreshTest(t)
+	bundleID := "bundle-1"
+	app := &db.AppRow{
+		ID:           "app-1",
+		ActiveBundle: &bundleID,
+	}
+
+	// No manifest file exists → should log warning and return.
+	srv.triggerRefresh(context.Background(), app)
+}
+
+func TestRunRefreshScheduler_StopsOnCancel(t *testing.T) {
+	srv := setupRefreshTest(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	done := make(chan struct{})
+	go func() {
+		srv.RunRefreshScheduler(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Returned as expected.
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunRefreshScheduler did not return after context cancel")
+	}
+}
+
+func TestRunRefresh_UnchangedDeps(t *testing.T) {
+	srv := setupRefreshTest(t)
+	bundleID := "bundle-1"
+	app := &db.AppRow{
+		ID:           "app-1",
+		ActiveBundle: &bundleID,
+	}
+
+	bundlePaths := srv.BundlePaths("app-1", bundleID)
+	os.MkdirAll(bundlePaths.Unpacked, 0o755)
+
+	m := &manifest.Manifest{
+		Metadata: manifest.Metadata{Entrypoint: "app.R"},
+	}
+
+	// The mock build succeeds but doesn't create any output files.
+	// This means copyFile for the store-manifest will fail — task should be Failed.
+	sender := srv.Tasks.Create("task-1", "app-1")
+	changed := srv.RunRefresh(context.Background(), app, m, sender)
+
+	if changed {
+		t.Error("expected no change when build output is missing")
+	}
+	status, _ := srv.Tasks.Status("task-1")
+	if status != task.Failed {
+		t.Errorf("expected Failed, got %v", status)
 	}
 }

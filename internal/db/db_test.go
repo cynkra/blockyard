@@ -1229,6 +1229,34 @@ func TestPATCRUD(t *testing.T) {
 	})
 }
 
+func TestUpdatePATLastUsed(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		user, err := db.UpsertUser("pat-lu-user", "lu@example.com", "LU User")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := hashPAT("by_lastusedtest")
+		_, err = db.CreatePAT("pat-lu", hash, user.Sub, "last-used-token", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx := context.Background()
+		db.UpdatePATLastUsed(ctx, "pat-lu")
+
+		pats, err := db.ListPATsByUser(user.Sub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pats) == 0 {
+			t.Fatal("expected at least one PAT")
+		}
+		if pats[0].LastUsedAt == nil {
+			t.Error("expected last_used_at to be set after UpdatePATLastUsed")
+		}
+	})
+}
+
 func TestCreateBundleForeignKeyViolation(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		_, err := db.CreateBundle("b-orphan", "nonexistent-app-id")

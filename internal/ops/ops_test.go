@@ -218,6 +218,43 @@ func TestStartupCleanupFailsStaleBuilds(t *testing.T) {
 	}
 }
 
+func TestEvictDrainedWorkersEvictsZeroSessions(t *testing.T) {
+	srv, be := testServer(t)
+	spawnWorker(t, srv, be, "w-drain", "app1")
+	srv.Workers.SetDraining("w-drain")
+
+	// No sessions for w-drain → should be evicted.
+	evictDrainedWorkers(context.Background(), srv)
+
+	if _, ok := srv.Workers.Get("w-drain"); ok {
+		t.Error("draining worker with zero sessions should be evicted")
+	}
+}
+
+func TestEvictDrainedWorkersKeepsWithSessions(t *testing.T) {
+	srv, be := testServer(t)
+	spawnWorker(t, srv, be, "w-drain", "app1")
+	srv.Workers.SetDraining("w-drain")
+	srv.Sessions.Set("sess1", session.Entry{WorkerID: "w-drain"})
+
+	evictDrainedWorkers(context.Background(), srv)
+
+	if _, ok := srv.Workers.Get("w-drain"); !ok {
+		t.Error("draining worker with active sessions should NOT be evicted")
+	}
+}
+
+func TestEvictDrainedWorkersSkipsNonDraining(t *testing.T) {
+	srv, be := testServer(t)
+	spawnWorker(t, srv, be, "w-healthy", "app1")
+
+	evictDrainedWorkers(context.Background(), srv)
+
+	if _, ok := srv.Workers.Get("w-healthy"); !ok {
+		t.Error("non-draining worker should not be evicted")
+	}
+}
+
 func TestHealthPollerEvictsAfterConsecutiveMisses(t *testing.T) {
 	srv, be := testServer(t)
 	spawnWorker(t, srv, be, "w1", "app1")

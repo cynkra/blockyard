@@ -158,6 +158,18 @@ func TestSubscribeMissing(t *testing.T) {
 	}
 }
 
+func TestAppID(t *testing.T) {
+	s := NewStore()
+	s.Create("task-1", "app-42")
+
+	if got := s.AppID("task-1"); got != "app-42" {
+		t.Errorf("AppID = %q, want %q", got, "app-42")
+	}
+	if got := s.AppID("nonexistent"); got != "" {
+		t.Errorf("AppID for missing = %q, want empty", got)
+	}
+}
+
 func TestCompleteFailed(t *testing.T) {
 	s := NewStore()
 	sender := s.Create("task-1", "")

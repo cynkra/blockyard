@@ -236,6 +236,99 @@ func TestLinkNewPackages_AlreadyLinked(t *testing.T) {
 	}
 }
 
+func TestStoreManifestsChanged_SameContent(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	pkgstore.WriteStoreManifest(dir1, map[string]string{"shiny": "src1/cfg1", "dplyr": "src2/cfg2"})
+	pkgstore.WriteStoreManifest(dir2, map[string]string{"shiny": "src1/cfg1", "dplyr": "src2/cfg2"})
+
+	changed, err := storeManifestsChanged(
+		filepath.Join(dir1, "store-manifest.json"),
+		filepath.Join(dir2, "store-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("expected no change for identical manifests")
+	}
+}
+
+func TestStoreManifestsChanged_DifferentLength(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	pkgstore.WriteStoreManifest(dir1, map[string]string{"shiny": "src1/cfg1"})
+	pkgstore.WriteStoreManifest(dir2, map[string]string{"shiny": "src1/cfg1", "dplyr": "src2/cfg2"})
+
+	changed, err := storeManifestsChanged(
+		filepath.Join(dir1, "store-manifest.json"),
+		filepath.Join(dir2, "store-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("expected change for different-length manifests")
+	}
+}
+
+func TestStoreManifestsChanged_DifferentValues(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	pkgstore.WriteStoreManifest(dir1, map[string]string{"shiny": "src1/cfg1"})
+	pkgstore.WriteStoreManifest(dir2, map[string]string{"shiny": "src2/cfg2"})
+
+	changed, err := storeManifestsChanged(
+		filepath.Join(dir1, "store-manifest.json"),
+		filepath.Join(dir2, "store-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("expected change for different values")
+	}
+}
+
+func TestStoreManifestsChanged_OldMissing(t *testing.T) {
+	dir := t.TempDir()
+	pkgstore.WriteStoreManifest(dir, map[string]string{"shiny": "src1/cfg1"})
+
+	_, err := storeManifestsChanged(
+		filepath.Join(dir, "nonexistent.json"),
+		filepath.Join(dir, "store-manifest.json"))
+	if err == nil {
+		t.Error("expected error for missing old manifest")
+	}
+}
+
+func TestLinkNewPackages_ReplacesDifferentRef(t *testing.T) {
+	srv := setupRefreshTest(t)
+
+	// Add a second package to the store.
+	pkgDir2 := srv.PkgStore.Path("shiny", "src2", "cfg2")
+	os.MkdirAll(pkgDir2, 0o755)
+	os.WriteFile(filepath.Join(pkgDir2, "DESCRIPTION"), []byte("Package: shiny"), 0o644)
+	metaPath2 := srv.PkgStore.ConfigMetaPath("shiny", "src2", "cfg2")
+	os.WriteFile(metaPath2, []byte(`{}`), 0o644)
+
+	workerLibDir := t.TempDir()
+	// Pre-populate with old ref.
+	pkgstore.WritePackageManifest(workerLibDir, map[string]string{"shiny": "src1/cfg1"})
+	os.MkdirAll(filepath.Join(workerLibDir, "shiny"), 0o755)
+
+	stageDir := t.TempDir()
+	pkgstore.WriteStoreManifest(stageDir, map[string]string{"shiny": "src2/cfg2"})
+	manifestPath := filepath.Join(stageDir, "store-manifest.json")
+
+	err := srv.linkNewPackages(manifestPath, workerLibDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pm, _ := pkgstore.ReadPackageManifest(workerLibDir)
+	if pm["shiny"] != "src2/cfg2" {
+		t.Errorf("package manifest: shiny = %q, want %q", pm["shiny"], "src2/cfg2")
+	}
+}
+
 func TestLinkNewPackages_MissingFromStore(t *testing.T) {
 	srv := setupRefreshTest(t)
 

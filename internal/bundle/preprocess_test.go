@@ -248,3 +248,42 @@ func TestCopyFile_SourceMissing(t *testing.T) {
 		t.Fatal("expected error for missing source")
 	}
 }
+
+func TestLastLines(t *testing.T) {
+	// More lines than n — should trim.
+	s := "line1\nline2\nline3\nline4\nline5\n"
+	got := lastLines(s, 2)
+	if !strings.Contains(got, "line4") || !strings.Contains(got, "line5") {
+		t.Errorf("lastLines(5 lines, 2) = %q", got)
+	}
+	if strings.Contains(got, "line3") {
+		t.Errorf("should not contain line3: %q", got)
+	}
+
+	// Fewer lines than n — return original.
+	short := "only\ntwo\n"
+	if got := lastLines(short, 5); got != short {
+		t.Errorf("lastLines(2 lines, 5) = %q, want %q", got, short)
+	}
+
+	// Empty string.
+	if got := lastLines("", 3); got != "" {
+		t.Errorf("lastLines(empty, 3) = %q", got)
+	}
+}
+
+func TestSplitLines(t *testing.T) {
+	lines := splitLines("a\nb\nc")
+	if len(lines) != 3 {
+		t.Errorf("expected 3 lines, got %d", len(lines))
+	}
+	if lines[2] != "c" {
+		t.Errorf("last line = %q, want %q", lines[2], "c")
+	}
+
+	// Trailing newline.
+	lines2 := splitLines("a\nb\n")
+	if len(lines2) != 2 {
+		t.Errorf("expected 2 lines (trailing newline), got %d", len(lines2))
+	}
+}
