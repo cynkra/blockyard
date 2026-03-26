@@ -127,6 +127,69 @@ func TestStartupCleanupRemovesOrphans(t *testing.T) {
 	}
 }
 
+func TestStartupCleanupRemovesOrphanDirs(t *testing.T) {
+	srv, _ := testServer(t)
+	bsp := srv.Config.Storage.BundleServerPath
+
+	// Set up PkgStore with orphaned staging directories.
+	storeRoot := filepath.Join(bsp, ".pkg-store")
+	os.MkdirAll(storeRoot, 0o755)
+	srv.PkgStore = pkgstore.NewStore(storeRoot)
+
+	stagingDir := filepath.Join(storeRoot, ".staging", "orphan-1")
+	os.MkdirAll(stagingDir, 0o755)
+	os.WriteFile(filepath.Join(stagingDir, "data"), []byte("stale"), 0o644)
+
+	// Create orphaned transfer directories.
+	transferDir := filepath.Join(bsp, ".transfers", "old-worker")
+	os.MkdirAll(transferDir, 0o755)
+	os.WriteFile(filepath.Join(transferDir, "board.json"), []byte("{}"), 0o644)
+
+	// Create orphaned token directories.
+	tokenDir := filepath.Join(bsp, ".worker-tokens", "old-worker")
+	os.MkdirAll(tokenDir, 0o755)
+	os.WriteFile(filepath.Join(tokenDir, "token"), []byte("tok"), 0o644)
+
+	if err := StartupCleanup(context.Background(), srv); err != nil {
+		t.Fatal(err)
+	}
+
+	// All orphaned directories should be removed.
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Error("staging dir should be removed")
+	}
+	if _, err := os.Stat(transferDir); !os.IsNotExist(err) {
+		t.Error("transfer dir should be removed")
+	}
+	if _, err := os.Stat(tokenDir); !os.IsNotExist(err) {
+		t.Error("token dir should be removed")
+	}
+}
+
+func TestEvictWorkerCleansUpTransferAndToken(t *testing.T) {
+	srv, be := testServer(t)
+	spawnWorker(t, srv, be, "w1", "app1")
+	bsp := srv.Config.Storage.BundleServerPath
+
+	// Create transfer and token directories for the worker.
+	transferDir := filepath.Join(bsp, ".transfers", "w1")
+	os.MkdirAll(transferDir, 0o755)
+	os.WriteFile(filepath.Join(transferDir, "board.json"), []byte("{}"), 0o644)
+
+	tokenDir := filepath.Join(bsp, ".worker-tokens", "w1")
+	os.MkdirAll(tokenDir, 0o755)
+	os.WriteFile(filepath.Join(tokenDir, "token"), []byte("tok"), 0o644)
+
+	EvictWorker(context.Background(), srv, "w1")
+
+	if _, err := os.Stat(transferDir); !os.IsNotExist(err) {
+		t.Error("transfer dir should be removed after eviction")
+	}
+	if _, err := os.Stat(tokenDir); !os.IsNotExist(err) {
+		t.Error("token dir should be removed after eviction")
+	}
+}
+
 func TestStartupCleanupFailsStaleBuilds(t *testing.T) {
 	srv, _ := testServer(t)
 
