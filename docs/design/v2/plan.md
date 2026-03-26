@@ -42,31 +42,34 @@ internal/
 │   └── assembly.go             # library assembly from store (hard links)
 ├── proxy/
 │   ├── ... (existing)
-│   └── loading.go              # cold-start loading page handler
+│   ├── loading.go              # cold-start loading page handler
+│   └── loading.html            # cold-start spinner page (proxy concern, not ui/)
 ├── ui/
 │   ├── ... (existing)
 │   └── templates/
-│       ├── loading.html        # cold-start spinner page
 │       ├── app_settings.html   # per-app settings panel
 │       └── app_logs.html       # per-app log viewer
 
-migrations/
-├── sqlite/
-│   ├── 001_initial.up.sql      # existing v1 schema
-│   ├── 001_initial.down.sql
-│   ├── 002_v2_soft_delete.up.sql
-│   ├── 002_v2_soft_delete.down.sql
-│   ├── 003_v2_pre_warming.up.sql
-│   └── 003_v2_pre_warming.down.sql
-└── postgres/
-    ├── 001_initial.up.sql      # existing v1 schema (PostgreSQL dialect)
-    ├── 001_initial.down.sql
-    ├── 002_v2_soft_delete.up.sql
-    ├── 002_v2_soft_delete.down.sql
-    ├── 003_v2_pre_warming.up.sql
-    ├── 003_v2_pre_warming.down.sql
-    ├── 004_v2_boards.up.sql    # board storage (PostgreSQL only)
-    └── 004_v2_boards.down.sql
+├── db/
+│   ├── db.go
+│   ├── dialect.go
+│   └── migrations/             # co-located with embed.FS declarations
+│       ├── sqlite/
+│       │   ├── 001_initial.up.sql
+│       │   ├── 001_initial.down.sql
+│       │   ├── 002_v2_soft_delete.up.sql
+│       │   ├── 002_v2_soft_delete.down.sql
+│       │   ├── 003_v2_pre_warming.up.sql
+│       │   └── 003_v2_pre_warming.down.sql
+│       └── postgres/
+│           ├── 001_initial.up.sql
+│           ├── 001_initial.down.sql
+│           ├── 002_v2_soft_delete.up.sql
+│           ├── 002_v2_soft_delete.down.sql
+│           ├── 003_v2_pre_warming.up.sql
+│           ├── 003_v2_pre_warming.down.sql
+│           ├── 004_v2_boards.up.sql    # board storage (PostgreSQL only)
+│           └── 004_v2_boards.down.sql
 ```
 
 ## New Dependencies
@@ -118,8 +121,8 @@ url = ""                             # PostgreSQL connection string; used when d
 postgrest_url = ""
 
 [proxy]
-# existing fields unchanged; new additions:
-pre_warmed_seats = 0     # per-app default; 0 = scale-to-zero (no warm pool)
+# existing fields unchanged; no new server-wide additions.
+# pre_warmed_seats is per-app only (stored in apps table, default 0).
 
 [build]
 # NEW: pak version, replaces rv_version from v1.
@@ -174,6 +177,7 @@ CREATE TABLE board_versions (
     owner_sub   TEXT NOT NULL,
     board_id    TEXT NOT NULL,
     data        JSONB NOT NULL,
+    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ DEFAULT now(),
     FOREIGN KEY (owner_sub, board_id)
         REFERENCES boards(owner_sub, board_id) ON DELETE CASCADE
@@ -375,14 +379,16 @@ infrastructure. Low risk, high usability impact.
    /api/v1/apps/{id}` sets `deleted_at` instead of removing the row.
    All queries filter `WHERE deleted_at IS NULL`. A background sweeper
    goroutine runs periodically and purges soft-deleted apps older than
-   a configurable retention period (default: 30 days) — stopping
-   workers, removing files, deleting bundle rows, then the app row.
+   a configurable retention period — stopping workers, removing files,
+   deleting bundle rows, then the app row. No default — absent/zero
+   means soft-delete is disabled (delete is permanent, matching v1
+   behavior). Operators opt in by setting a positive value.
 
    New config field:
 
    ```toml
    [storage]
-   soft_delete_retention = "720h"   # 30 days; 0 = immediate hard delete
+   # soft_delete_retention = "720h"   # example: 30 days; omit or 0 = immediate hard delete
    ```
 
    A restore endpoint allows undoing a soft-delete before purge:
