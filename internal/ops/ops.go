@@ -20,6 +20,10 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 	w, found := srv.Workers.Get(workerID)
 	srv.Workers.Delete(workerID)
 	if found {
+		// Cancel the token refresher goroutine.
+		if w.CancelToken != nil {
+			w.CancelToken()
+		}
 		slog.Info("evicting worker", "worker_id", workerID, "app_id", w.AppID)
 		if err := srv.Backend.Stop(ctx, workerID); err != nil {
 			slog.Warn("evict: failed to stop worker",
@@ -44,6 +48,13 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 	// Clean up transfer directory.
 	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", workerID)
 	_ = os.RemoveAll(transferDir)
+
+	// Clean up worker token directory.
+	tokenDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".worker-tokens", workerID)
+	_ = os.RemoveAll(tokenDir)
+
+	// Clean up per-worker install mutex.
+	srv.CleanupInstallMu(workerID)
 }
 
 // StartupCleanup removes orphaned resources and fails stale builds.
@@ -51,6 +62,26 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 func StartupCleanup(ctx context.Context, srv *server.Server) error {
 	// Remove orphaned iptables rules from previous runs.
 	docker.CleanupOrphanMetadataRules()
+
+	// Clean up orphaned staging directories from previous runs.
+	if srv.PkgStore != nil {
+		stagingDir := filepath.Join(srv.PkgStore.Root(), ".staging")
+		entries, _ := os.ReadDir(stagingDir)
+		for _, e := range entries {
+			if e.IsDir() {
+				os.RemoveAll(filepath.Join(stagingDir, e.Name()))
+			}
+		}
+	}
+
+	// Clean up orphaned worker token directories.
+	tokenBaseDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".worker-tokens")
+	entries, _ := os.ReadDir(tokenBaseDir)
+	for _, e := range entries {
+		if e.IsDir() {
+			os.RemoveAll(filepath.Join(tokenBaseDir, e.Name()))
+		}
+	}
 
 	resources, err := srv.Backend.ListManaged(ctx)
 	if err != nil {
@@ -80,6 +111,22 @@ func StartupCleanup(ctx context.Context, srv *server.Server) error {
 }
 
 const maxMisses = 2
+
+// evictDrainedWorkers checks draining workers and evicts those with
+// zero active sessions. Called from the health poller tick.
+func evictDrainedWorkers(ctx context.Context, srv *server.Server) {
+	for _, wid := range srv.Workers.All() {
+		w, ok := srv.Workers.Get(wid)
+		if !ok || !w.Draining {
+			continue
+		}
+		if srv.Sessions.CountForWorker(wid) == 0 {
+			slog.Info("evicting drained worker with zero sessions",
+				"worker_id", wid, "app_id", w.AppID)
+			EvictWorker(ctx, srv, wid)
+		}
+	}
+}
 
 func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
 	workerIDs := srv.Workers.All()
@@ -149,6 +196,7 @@ func SpawnHealthPoller(ctx context.Context, srv *server.Server) {
 			return
 		case <-ticker.C:
 			pollOnce(ctx, srv, misses)
+			evictDrainedWorkers(ctx, srv)
 			if srv.VaultTokenCache != nil {
 				srv.VaultTokenCache.Sweep()
 			}

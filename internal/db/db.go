@@ -222,6 +222,8 @@ type AppRow struct {
 	UpdatedAt            string   `db:"updated_at" json:"updated_at"`
 	DeletedAt            *string  `db:"deleted_at" json:"deleted_at,omitempty"`
 	PreWarmedSeats       int      `db:"pre_warmed_seats" json:"pre_warmed_seats"`
+	RefreshSchedule      string   `db:"refresh_schedule" json:"refresh_schedule"`
+	LastRefreshAt        *string  `db:"last_refresh_at" json:"last_refresh_at,omitempty"`
 }
 
 type BundleRow struct {
@@ -377,6 +379,26 @@ func (db *DB) ListExpiredDeletedApps(cutoff string) ([]AppRow, error) {
 		return nil, err
 	}
 	return apps, nil
+}
+
+// ListAppsWithRefreshSchedule returns non-deleted apps that have a
+// non-empty refresh_schedule. Used by the refresh scheduler.
+func (db *DB) ListAppsWithRefreshSchedule() ([]AppRow, error) {
+	var apps []AppRow
+	err := db.DB.Select(&apps,
+		`SELECT * FROM apps WHERE deleted_at IS NULL AND refresh_schedule != '' ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	return apps, nil
+}
+
+// UpdateLastRefresh records the timestamp of the last refresh for an app.
+func (db *DB) UpdateLastRefresh(appID string, t time.Time) error {
+	_, err := db.Exec(db.rebind(
+		`UPDATE apps SET last_refresh_at = ? WHERE id = ?`),
+		t.UTC().Format(time.RFC3339), appID)
+	return err
 }
 
 // --- Bundles ---

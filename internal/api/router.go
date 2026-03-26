@@ -197,6 +197,14 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Delete("/tokens/{tokenID}", RevokeToken(srv))
 	})
 
+	// Worker packages API — authenticated by worker HMAC token.
+	r.Route("/api/v1/packages", func(r chi.Router) {
+		if srv.WorkerTokenKey != nil {
+			r.Use(WorkerAuth(srv.WorkerTokenKey))
+		}
+		r.Post("/", PostPackages(srv))
+	})
+
 	// Authenticated API — general rate limit.
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(120, time.Minute))
@@ -250,6 +258,10 @@ func NewRouter(srv *server.Server) http.Handler {
 
 		// Content discovery
 		r.Get("/catalog", CatalogHandler(srv))
+
+		// Dependency refresh
+		r.Post("/apps/{id}/refresh", PostRefresh(srv))
+		r.Post("/apps/{id}/refresh/rollback", PostRefreshRollback(srv))
 
 		}) // end limitBody group
 	})

@@ -115,6 +115,27 @@ func (s *Store) CountForWorkers(workerIDs []string) int {
 	return n
 }
 
+// RerouteWorker reassigns all sessions from oldWorkerID to newWorkerID.
+// Used by container transfer to migrate sessions to the new worker.
+func (s *Store) RerouteWorker(oldWorkerID, newWorkerID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for sid, e := range s.sessions {
+		if e.WorkerID == oldWorkerID {
+			e.WorkerID = newWorkerID
+			s.sessions[sid] = e
+			n++
+		}
+	}
+	if n > 0 {
+		slog.Debug("session: rerouted worker",
+			"old_worker_id", oldWorkerID, "new_worker_id", newWorkerID,
+			"count", n)
+	}
+	return n
+}
+
 // SweepIdle removes sessions whose LastAccess is older than maxAge.
 // Returns the number of sessions removed.
 func (s *Store) SweepIdle(maxAge time.Duration) int {

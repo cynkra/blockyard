@@ -221,7 +221,7 @@ func TestSpawnRestore_FailureWithAuditLog(t *testing.T) {
 }
 
 func TestBuildCommand(t *testing.T) {
-	cmd := buildCommand()
+	cmd := BuildCommand()
 	if len(cmd) != 4 {
 		t.Fatalf("expected 4 parts, got %d", len(cmd))
 	}
@@ -235,7 +235,7 @@ func TestBuildCommand(t *testing.T) {
 }
 
 func TestBuildMounts(t *testing.T) {
-	mounts := buildMounts("/pak", "/app", "/store", "/cache", "/tools/by-builder")
+	mounts := BuildMounts("/pak", "/app", "/store", "/cache", "/tools/by-builder")
 	if len(mounts) != 5 {
 		t.Fatalf("expected 5 mounts, got %d", len(mounts))
 	}

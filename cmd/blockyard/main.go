@@ -93,6 +93,18 @@ func main() {
 		srv.PkgStore.SetPlatform(platform)
 	}
 
+	// Generate ephemeral HMAC key for worker tokens.
+	workerKeyBytes := make([]byte, 32)
+	if _, err := rand.Read(workerKeyBytes); err != nil {
+		slog.Error("failed to generate worker token key", "error", err)
+		os.Exit(1)
+	}
+	srv.WorkerTokenKey = auth.NewSigningKey(workerKeyBytes)
+
+	// Set operation hooks to avoid import cycles.
+	srv.EvictWorkerFn = ops.EvictWorker
+	srv.SpawnLogCaptureFn = ops.SpawnLogCapture
+
 	// Background goroutine context — used for vault token renewal and others.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	var bgWg sync.WaitGroup
@@ -281,6 +293,13 @@ func main() {
 	if cfg.Docker.StoreRetention.Duration > 0 {
 		pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Docker.StoreRetention.Duration)
 	}
+
+	// Refresh scheduler.
+	bgWg.Add(1)
+	go func() {
+		defer bgWg.Done()
+		srv.RunRefreshScheduler(bgCtx)
+	}()
 
 	// Start audit log background writer.
 	if srv.AuditLog != nil {

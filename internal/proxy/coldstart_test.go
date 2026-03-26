@@ -586,14 +586,20 @@ func TestPtrOrNil(t *testing.T) {
 }
 
 // TestWorkerEnvNilOpenbao verifies that WorkerEnv returns nil when
-// srv.Config.Openbao is nil.
+// srv.Config.Openbao is nil — env should still contain BLOCKYARD_API_URL.
 func TestWorkerEnvNilOpenbao(t *testing.T) {
 	srv := testColdstartServer(t)
 	srv.Config.Openbao = nil
 
-	env := WorkerEnv(srv)
-	if env != nil {
-		t.Errorf("expected nil, got %v", env)
+	env := server.WorkerEnv(srv)
+	if env == nil {
+		t.Fatal("expected non-nil env map")
+	}
+	if _, ok := env["BLOCKYARD_API_URL"]; !ok {
+		t.Error("expected BLOCKYARD_API_URL to be set")
+	}
+	if _, ok := env["VAULT_ADDR"]; ok {
+		t.Error("expected VAULT_ADDR to not be set when openbao is nil")
 	}
 }
 
@@ -606,7 +612,7 @@ func TestWorkerEnvWithExternalURL(t *testing.T) {
 	}
 	srv.Config.Server.ExternalURL = "https://blockyard.example.com"
 
-	env := WorkerEnv(srv)
+	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
 	}
@@ -631,7 +637,7 @@ func TestWorkerEnvWithServices(t *testing.T) {
 	}
 	srv.Config.Server.ExternalURL = "http://blockyard:8080"
 
-	env := WorkerEnv(srv)
+	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
 	}
@@ -668,7 +674,7 @@ func TestWorkerEnvWithServiceNetwork(t *testing.T) {
 	srv.Config.Server.Bind = "0.0.0.0:8080"
 	srv.Config.Docker.ServiceNetwork = "blockyard-services"
 
-	env := WorkerEnv(srv)
+	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
 	}
@@ -691,7 +697,7 @@ func TestWorkerEnvServiceNetworkOverridesExternalURL(t *testing.T) {
 	srv.Config.Server.Bind = "0.0.0.0:9090"
 	srv.Config.Docker.ServiceNetwork = "my-services"
 
-	env := WorkerEnv(srv)
+	env := server.WorkerEnv(srv)
 	if got, want := env["BLOCKYARD_API_URL"], "http://blockyard:9090"; got != want {
 		t.Errorf("BLOCKYARD_API_URL = %q, want %q", got, want)
 	}
@@ -709,7 +715,7 @@ func TestWorkerEnvWithBoardStorage(t *testing.T) {
 		PostgrestURL: "http://postgrest:3000",
 	}
 
-	env := WorkerEnv(srv)
+	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
 	}
@@ -727,7 +733,7 @@ func TestWorkerEnvWithoutBoardStorage(t *testing.T) {
 	}
 	srv.Config.Server.ExternalURL = "http://blockyard:8080"
 
-	env := WorkerEnv(srv)
+	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
 	}

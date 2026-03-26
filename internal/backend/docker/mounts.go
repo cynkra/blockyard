@@ -76,7 +76,7 @@ func (mc MountConfig) volumeMount(target string, readOnly bool, serverPath strin
 //
 // libraryPath is the legacy per-bundle library from phase 2-5; used when
 // libDir is empty (pre-store bundles).
-func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir, workerMount string) (binds []string, mounts []mount.Mount) {
+func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir, tokenDir, workerMount string) (binds []string, mounts []mount.Mount) {
 	// Choose the library path: prefer store-assembled libDir over legacy libraryPath.
 	effectiveLib := libDir
 	libMount := "/blockyard-lib-store"
@@ -95,6 +95,9 @@ func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir,
 		if transferDir != "" {
 			mounts = append(mounts, mc.volumeMount("/transfer", false, transferDir))
 		}
+		if tokenDir != "" {
+			mounts = append(mounts, mc.volumeMount("/var/run/blockyard", true, tokenDir))
+		}
 		return nil, mounts
 	}
 
@@ -102,6 +105,7 @@ func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir,
 	bp := bundlePath
 	lp := effectiveLib
 	tp := transferDir
+	tkp := tokenDir
 	if mc.Mode == MountModeBind {
 		bp = mc.toHostPath(bundlePath)
 		if lp != "" {
@@ -109,6 +113,9 @@ func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir,
 		}
 		if tp != "" {
 			tp = mc.toHostPath(tp)
+		}
+		if tkp != "" {
+			tkp = mc.toHostPath(tkp)
 		}
 	}
 
@@ -120,6 +127,9 @@ func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir,
 	}
 	if tp != "" {
 		binds = append(binds, tp+":/transfer")
+	}
+	if tkp != "" {
+		binds = append(binds, tkp+":/var/run/blockyard:ro")
 	}
 	return binds, nil
 }

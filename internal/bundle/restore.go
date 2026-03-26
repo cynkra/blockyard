@@ -245,8 +245,8 @@ func runRestore(p RestoreParams) error {
 			AppID:    p.AppID,
 			BundleID: p.BundleID,
 			Image:    p.Image,
-			Cmd:      buildCommand(),
-			Mounts:   buildMounts(pakPath, p.Paths.Unpacked, p.Store.Root(), dlCachePath, builderPath),
+			Cmd:      BuildCommand(),
+			Mounts:   BuildMounts(pakPath, p.Paths.Unpacked, p.Store.Root(), dlCachePath, builderPath),
 			Env:      []string{"BUILD_UUID=" + buildUUID},
 			Labels: map[string]string{
 				"dev.blockyard/managed":   "true",
@@ -357,7 +357,9 @@ func runRestore(p RestoreParams) error {
 //   - Phase 2: by-builder store populate (pre-populate from store)
 //   - Phase 3: lockfile_install (install store misses)
 //   - Phase 4: by-builder store ingest (ingest into store)
-func buildCommand() []string {
+// BuildCommand returns the R command for the store-aware build container.
+// Exported for use by the refresh pipeline (server/refresh.go).
+func BuildCommand() []string {
 	rScript := `
 Sys.setenv(
   R_USER_CACHE_DIR = "/pak-cache",
@@ -472,8 +474,9 @@ if (rc != 0L) {
 	return []string{"R", "--vanilla", "-e", rScript}
 }
 
-// buildMounts returns the mount entries for the store-aware build container.
-func buildMounts(
+// BuildMounts returns the mount entries for the store-aware build container.
+// Exported for use by the refresh pipeline (server/refresh.go).
+func BuildMounts(
 	pakCachePath, bundlePath, storePath, dlCachePath, builderPath string,
 ) []backend.MountEntry {
 	return []backend.MountEntry{

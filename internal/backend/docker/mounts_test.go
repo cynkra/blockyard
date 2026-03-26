@@ -9,7 +9,7 @@ import (
 func TestMountConfig_WorkerMounts_NativeMode(t *testing.T) {
 	mc := MountConfig{Mode: MountModeNative}
 
-	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "", "", "/app")
+	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "", "", "", "/app")
 	if len(mounts) != 0 {
 		t.Fatalf("expected no mounts in native mode, got %d", len(mounts))
 	}
@@ -26,7 +26,7 @@ func TestMountConfig_WorkerMounts_NativeMode(t *testing.T) {
 
 func TestMountConfig_WorkerMounts_NativeMode_NoLibrary(t *testing.T) {
 	mc := MountConfig{Mode: MountModeNative}
-	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "", "", "", "/app")
+	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "", "", "", "", "/app")
 	if len(mounts) != 0 {
 		t.Fatalf("expected no mounts, got %d", len(mounts))
 	}
@@ -42,7 +42,7 @@ func TestMountConfig_WorkerMounts_BindMode(t *testing.T) {
 		MountDest:  "/data",
 	}
 
-	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "", "", "/app")
+	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "", "", "", "/app")
 	if len(mounts) != 0 {
 		t.Fatalf("expected no mounts in bind mode, got %d", len(mounts))
 	}
@@ -64,7 +64,7 @@ func TestMountConfig_WorkerMounts_VolumeMode(t *testing.T) {
 		MountDest:  "/data",
 	}
 
-	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "", "", "/app")
+	binds, mounts := mc.WorkerMounts("/data/bundles/app1/b1", "/data/bundles/app1/b1_lib", "", "", "", "/app")
 	if len(binds) != 0 {
 		t.Fatalf("expected no binds in volume mode, got %d", len(binds))
 	}
