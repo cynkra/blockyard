@@ -852,37 +852,45 @@ type PackageResponse struct {
 
 ### Phase 2-8: Web UI Expansion
 
-Extends the v1 dashboard with per-app management and operational
-visibility. Server-rendered HTML, no JavaScript framework.
+Extends the v1 dashboard with a per-app settings sidebar and
+operational visibility. Server-rendered HTML with htmx for dynamic
+fragment loading. No JavaScript framework.
+
+Content filtering (search by name/title/description + tag filter
+dropdown) is already implemented in the dashboard and is not revisited
+here.
+
+See [phase-2-8.md](phase-2-8.md) for the full implementation plan.
 
 **Deliverables:**
 
-1. **Per-app settings panel** — accessible from the dashboard via a
-   detail/edit link per app. Displays and allows editing of:
-   - Name, title, description
-   - Access type (acl / logged_in / public)
-   - ACL management (grant/revoke user access)
-   - Resource limits (memory, CPU)
-   - Worker scaling (max_workers_per_app, max_sessions_per_worker)
-   - Pre-warmed seats
-   - Tags
-   - Bundle list with rollback action
-   - Dependency refresh (unpinned apps only)
-   - Soft-delete (with confirmation)
+1. **htmx integration** — vendored `htmx.min.js` as a static asset.
+   No npm, no build step.
 
-   Uses existing API endpoints — the UI is a form that POSTs to
-   `PATCH /api/v1/apps/{id}`, `POST /api/v1/apps/{id}/rollback`,
-   `POST /api/v1/apps/{id}/refresh`, etc.
+2. **Per-app settings sidebar** — a right-side slide-in panel opened
+   via a gear icon on each app card. Four tabs:
 
-2. **Content filtering** — add search/filter controls to the dashboard
-   app list. Filter by tag, search by name/title/description. Uses the
-   existing `ListCatalog` endpoint with query parameters.
+   - **Settings** — title, description, access type, ACL management,
+     tags, soft-delete. Uses `PATCH /api/v1/apps/{id}`,
+     `POST/DELETE /api/v1/apps/{id}/access`,
+     `POST/DELETE /api/v1/apps/{id}/tags`,
+     `DELETE /api/v1/apps/{id}`.
+   - **Runtime** — memory/CPU limits, worker scaling, pre-warmed
+     seats, start/stop. Uses `PATCH /api/v1/apps/{id}`,
+     `POST /api/v1/apps/{id}/start`, `POST /api/v1/apps/{id}/stop`.
+   - **Bundles** — bundle list with active indicator, rollback,
+     dependency refresh (unpinned only). Uses
+     `GET /api/v1/apps/{id}/bundles`,
+     `POST /api/v1/apps/{id}/rollback`,
+     `POST /api/v1/apps/{id}/refresh`.
+   - **Logs** — streaming log viewer via `fetch()` + `ReadableStream`.
+     Uses `GET /api/v1/apps/{id}/logs`.
 
-3. **Per-app log viewer** — accessible from the per-app settings panel.
-   Streams logs via `GET /api/v1/apps/{id}/logs` using chunked transfer
-   encoding. The UI uses `fetch()` with a `ReadableStream` reader to
-   append log lines to a `<pre>` element in real time. Historical logs
-   are loaded first, then live lines are appended.
+   Sidebar shell and tab content loaded as HTML fragments via htmx.
+   New `/ui/` route prefix for fragment endpoints.
+
+3. **Authorization in sidebar** — admin/publisher see edit controls;
+   viewers see read-only settings.
 
 No new navigation chrome (navbar, app switcher) — deferred to v3.
 
