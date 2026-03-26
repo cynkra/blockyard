@@ -1725,7 +1725,7 @@ timestamp columns in shared tables.
 ```go
 // internal/db/db.go
 
-func (d *DB) ListAppsWithRefreshSchedule() ([]App, error) {
+func (d *DB) ListAppsWithRefreshSchedule() ([]AppRow, error) {
     return d.listApps("refresh_schedule != ''")
 }
 

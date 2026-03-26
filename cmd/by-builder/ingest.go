@@ -109,6 +109,19 @@ func ingestCmd() *cobra.Command {
 					entry.Package, configHash[:12])
 			}
 
+			// Carry forward all remaining packages from the reference
+			// library that aren't already in the store-manifest.
+			// This makes the manifest complete for container transfer
+			// (AssembleLibrary needs every package, not just the
+			// lockfile's dependency subgraph).
+			if refManifest != nil {
+				for pkg, ref := range refManifest {
+					if _, exists := storeManifest[pkg]; !exists {
+						storeManifest[pkg] = ref
+					}
+				}
+			}
+
 			// Write store-manifest.
 			return pkgstore.WriteStoreManifest(lib, storeManifest)
 		},
