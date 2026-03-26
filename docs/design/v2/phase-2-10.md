@@ -1,6 +1,6 @@
-# Phase 2-9: CLI Tool (Draft)
+# Phase 2-10: CLI
 
-Draft design for the CLI binary (`cmd/by/`). Final phase — built last to
+Design for the CLI binary (`cmd/by/`). Final phase — built last to
 target the stable v2 API surface. The deploy command is the primary new
 complexity; all other subcommands are thin REST API wrappers.
 
@@ -26,12 +26,27 @@ convenience command is a future addition.
 `BLOCKYARD_URL` environment variable (e.g.,
 `https://blockyard.example.com`).
 
+## Output Format
+
+All commands default to human-readable output (tables, formatted text).
+A global `--json` flag switches to machine-readable JSON output — useful
+for scripting and CI pipelines.
+
+For thin API wrappers, `--json` passes through the API response body
+directly. For commands with client-side logic (deploy, refresh), `--json`
+emits a structured JSON object on completion instead of streaming
+progress text.
+
 ## Deploy Flow
 
 The `by deploy` command prepares a bundle and uploads it. From the user's
 perspective, two choices exist: deploy with pinned dependencies
 (reproducible) or unpinned dependencies (convenient). Pinning requires
 R + renv on the client. Unpinned deploys need no R on the client at all.
+
+Deploy is focused on getting code running — bundle prep, manifest
+generation, upload. Resource configuration, access control, and metadata
+are managed via separate commands after deployment.
 
 ### Input Cases
 
@@ -155,31 +170,116 @@ All other paths are pure Go or need no client-side processing at all.
 
 ## Subcommands
 
+All commands accept `<app>` as either the unique app name or UUID.
+Common aliases are supported: `ls` → `list`, `rm` → `remove`/`delete`.
+
+### App Lifecycle
+
 ```
 by deploy <path> [--name NAME] [--pin]   Prepare bundle, generate manifest, upload
 by list                                   List apps (status, active bundle, owner)
-by get <app>                              Get app details
-by start <app>                            Start an app
-by stop <app>                             Stop an app
-by rollback <app> <bundle-id>             Roll back to a previous bundle
-by logs <app> [--follow]                  Tail app logs
-by bundles <app>                          List bundles for an app
-by delete <app>                           Soft-delete an app
+by get <app>                              App details (config, active bundle, status)
+by enable <app>                           Allow traffic (cold-start, pre-warming)
+by disable <app>                          Block new traffic, drain existing sessions
+by delete <app> [--purge]                 Soft-delete (--purge: admin-only hard delete)
 by restore <app>                          Restore a soft-deleted app
-by config <app> [flags]                   Update app config (--memory, --cpu, etc.)
-by refresh <app> [--rollback]              Refresh unpinned dependencies
-by users list                             List users (admin only)
-by users update <sub> [flags]             Update user role/active status
 ```
 
-All commands except `deploy` and `refresh` are thin wrappers around the
-REST API — parse flags, call endpoint, format response.
+#### Enable / Disable
+
+Replace the previous start/stop commands with proper state management.
+`disable` sets an `enabled` flag to false on the app, which:
+
+- Prevents the proxy from cold-starting new workers
+- Prevents the autoscaler from pre-warming
+- Lets existing sessions drain naturally
+- Returns 503 for new requests
+
+`enable` re-enables the app, allowing cold-start and pre-warming to
+resume normally.
+
+**Requires new server-side work:** a migration adding
+`enabled INTEGER NOT NULL DEFAULT 1` to the `apps` table, plus checks
+in the proxy cold-start path and autoscaler pre-warming loop.
+
+### Bundles & Rollback
+
+```
+by bundles <app>                          List bundles (id, status, upload time)
+by rollback <app> <bundle-id>             Roll back to a previous bundle
+```
+
+### Configuration
+
+```
+by scale <app> [flags]                    Resource tuning
+    --memory TEXT                            Memory limit (e.g., "2g")
+    --cpu FLOAT                              CPU limit
+    --max-workers INT                        Max workers per app
+    --max-sessions INT                       Max sessions per worker
+    --pre-warm INT                           Pre-warmed standby workers
+
+by update <app> [flags]                   App metadata
+    --title TEXT                             Display title
+    --description TEXT                       Description
+
+by rename <app> <new-name>                Change app name (changes URL)
+```
+
+### Access Control
+
+```
+by access <app> show                      Show access type + ACL entries
+by access <app> set-type <type>           Set access mode (acl|logged_in|public)
+by access <app> grant <user> --role ROLE  Add ACL entry (viewer|collaborator)
+by access <app> revoke <user>             Remove ACL entry
+```
+
+### Tags
+
+```
+by tags list                              List all tags (global pool)
+by tags create <tag>                      Create tag (admin only)
+by tags delete <tag>                      Delete tag (admin only, cascades)
+
+by tags <app> list                        List tags on an app
+by tags <app> add <tag>                   Attach tag to app
+by tags <app> remove <tag>               Detach tag from app
+```
+
+### Dependencies
+
+```
+by refresh <app> [--rollback]             Refresh unpinned dependencies
+```
+
+### Logs
+
+```
+by logs <app> [--follow]                  Tail app logs
+```
+
+### User Management (Admin)
+
+```
+by users list                             List users
+by users update <sub> [flags]             Update user role/active status
+    --role ROLE                              Set role (admin|publisher|viewer)
+    --active BOOL                            Enable/disable user account
+```
+
+## Command Details
 
 ### deploy
 
 The primary value over raw `curl`. Handles manifest generation from
 multiple input types (renv.lock, DESCRIPTION, bare scripts), bundle
 preparation (tar.gz), and upload.
+
+Sensible defaults: newly deployed apps start with restrictive settings
+(access_type=acl, no pre-warming, default resource limits). Users
+configure access, scaling, and metadata via separate commands after
+the initial deploy.
 
 ### refresh
 
@@ -218,16 +318,29 @@ instant.
 
 - Print the `message` field from error responses, not raw JSON.
 - Non-zero exit codes on failure.
+- `--json` mode: errors are JSON objects with `error` and `message`
+  fields, still with non-zero exit codes.
 - `by refresh` on a pinned app: clear error explaining why.
 - `by deploy --pin` without R/renv: clear error with install guidance.
+- `by delete --purge` on a non-deleted app: error requiring soft-delete
+  first.
 
 ## Deliverables
 
-1. **CLI binary** (`cmd/by/main.go`) — cobra-based subcommand structure.
-2. **Deploy command** — manifest generation from all input types, bundle
+1. **Server-side: enable/disable** — migration adding `enabled` column,
+   proxy and autoscaler checks, API endpoints for enable/disable.
+2. **Server-side: hard delete** — API endpoint for permanent app removal
+   (admin only, requires prior soft-delete).
+3. **CLI binary** (`cmd/by/main.go`) — cobra-based subcommand structure
+   with global `--json` flag.
+4. **Deploy command** — manifest generation from all input types, bundle
    preparation, upload. The primary complexity in the CLI.
-3. **Refresh command** — wraps the refresh API from phase 2-7.
-4. **CRUD commands** — thin API wrappers for list, get, start, stop,
-   rollback, logs, bundles, delete, restore, config, users.
-5. **Error formatting** — human-friendly error messages from API
-   responses.
+5. **Refresh command** — wraps the refresh API from phase 2-7.
+6. **Scale command** — resource and scaling configuration.
+7. **Access command** — ACL management with show/set-type/grant/revoke
+   subcommands.
+8. **Tags command** — global pool management + per-app tag operations.
+9. **CRUD commands** — thin API wrappers for list, get, enable, disable,
+   rollback, logs, bundles, delete, restore, update, rename, users.
+10. **Error formatting** — human-friendly error messages from API
+    responses, with JSON error output in `--json` mode.
