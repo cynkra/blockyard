@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/cynkra/blockyard/internal/backend/mock"
@@ -144,7 +145,19 @@ func TestRunRefresh_BuildFails(t *testing.T) {
 		Metadata: manifest.Metadata{Entrypoint: "app.R"},
 	}
 
-	// Make the build fail.
+	// Set PakVersion and pre-create pak cache so EnsureInstalled skips its Build.
+	srv.Config.Docker.PakVersion = "stable"
+	bsp := srv.Config.Storage.BundleServerPath
+	os.MkdirAll(filepath.Join(bsp, ".pak-cache", "pak-stable"), 0o755)
+
+	// Pre-create builder cache so EnsureCached skips compilation.
+	builderCacheDir := filepath.Join(bsp, ".by-builder-cache")
+	os.MkdirAll(builderCacheDir, 0o755)
+	// Create a fake builder binary matching the expected name.
+	fakeBuilder := filepath.Join(builderCacheDir, "by-builder-"+srv.Version+"-linux-"+runtime.GOARCH)
+	os.WriteFile(fakeBuilder, []byte("#!/bin/sh\n"), 0o755)
+
+	// Make the refresh build itself fail.
 	srv.Backend.(*mock.MockBackend).BuildSuccess.Store(false)
 
 	sender := srv.Tasks.Create("task-1", "app-1")
@@ -296,6 +309,58 @@ func TestStoreManifestsChanged_OldMissing(t *testing.T) {
 		filepath.Join(dir, "store-manifest.json"))
 	if err == nil {
 		t.Error("expected error for missing old manifest")
+	}
+}
+
+func TestRunRefresh_PakInstallFails(t *testing.T) {
+	srv := setupRefreshTest(t)
+	// Use an invalid pak version to make EnsureInstalled fail.
+	srv.Config.Docker.PakVersion = "invalid-version"
+
+	bundleID := "bundle-1"
+	app := &db.AppRow{
+		ID:           "app-1",
+		ActiveBundle: &bundleID,
+	}
+
+	bundlePaths := srv.BundlePaths("app-1", bundleID)
+	os.MkdirAll(bundlePaths.Unpacked, 0o755)
+
+	m := &manifest.Manifest{
+		Metadata: manifest.Metadata{Entrypoint: "app.R"},
+	}
+
+	sender := srv.Tasks.Create("task-1", "app-1")
+	changed := srv.RunRefresh(context.Background(), app, m, sender)
+
+	if changed {
+		t.Error("expected no change when pak install fails")
+	}
+	status, _ := srv.Tasks.Status("task-1")
+	if status != task.Failed {
+		t.Errorf("expected Failed, got %v", status)
+	}
+}
+
+func TestRunRollback_NoBuildManifest(t *testing.T) {
+	srv := setupRefreshTest(t)
+	bundleID := "bundle-1"
+	app := &db.AppRow{
+		ID:           "app-1",
+		ActiveBundle: &bundleID,
+	}
+
+	bundlePaths := srv.BundlePaths("app-1", bundleID)
+	os.MkdirAll(bundlePaths.Base, 0o755)
+	pkgstore.WriteStoreManifest(bundlePaths.Base, map[string]string{"shiny": "src1/cfg1"})
+
+	// No .build manifest exists.
+	sender := srv.Tasks.Create("task-1", "app-1")
+	srv.RunRollback(context.Background(), app, "build", sender)
+
+	status, _ := srv.Tasks.Status("task-1")
+	if status != task.Failed {
+		t.Errorf("expected Failed when build manifest missing, got %v", status)
 	}
 }
 
