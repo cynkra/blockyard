@@ -761,10 +761,24 @@ func TestTriggerSpawnSpawnsWorker(t *testing.T) {
 	}
 }
 
+// slowBackend wraps MockBackend with a delay on Spawn so concurrent
+// callers have time to enter the singleflight before the first completes.
+type slowBackend struct {
+	*mock.MockBackend
+	delay chan struct{} // closed to unblock Spawn
+}
+
+func (s *slowBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
+	<-s.delay
+	return s.MockBackend.Spawn(ctx, spec)
+}
+
 // TestTriggerSpawnDeduplicates verifies that concurrent triggerSpawn calls
 // for the same app only spawn one worker (via spawnGroup).
 func TestTriggerSpawnDeduplicates(t *testing.T) {
-	srv := testColdstartServer(t)
+	delay := make(chan struct{})
+	sb := &slowBackend{MockBackend: mock.New(), delay: delay}
+	srv := testColdstartServerWithBackend(t, sb)
 	srv.Config.Proxy.WorkerStartTimeout = config.Duration{Duration: 5 * time.Second}
 
 	app := createTestApp(t, srv, "dedup-app", true)
@@ -777,6 +791,12 @@ func TestTriggerSpawnDeduplicates(t *testing.T) {
 			done <- struct{}{}
 		}()
 	}
+
+	// Give goroutines time to enter spawnGroup.do and block on Spawn.
+	time.Sleep(100 * time.Millisecond)
+	// Unblock the single Spawn call — all waiters share its result.
+	close(delay)
+
 	for range 5 {
 		<-done
 	}
