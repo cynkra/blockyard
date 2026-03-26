@@ -12,11 +12,19 @@ import (
 
 var mu sync.Mutex
 
+// preInstalledPath is the well-known location where the Docker image
+// places the pre-built by-builder binary.
+const preInstalledPath = "/usr/local/lib/blockyard/by-builder"
+
 // EnsureCached returns the path to the by-builder binary for the
-// current platform. In development, the binary is compiled from source
-// via `go build`. In production, it would be extracted from embedded
-// release artifacts.
+// current platform. Checks for a pre-installed binary first (Docker
+// image), then falls back to compiling from source (development).
 func EnsureCached(cachePath, version string) (string, error) {
+	// Fast path: pre-installed binary (production Docker image).
+	if fileExists(preInstalledPath) {
+		return preInstalledPath, nil
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 
