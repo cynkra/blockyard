@@ -79,7 +79,7 @@ func (mc MountConfig) volumeMount(target string, readOnly bool, serverPath strin
 func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir, workerMount string) (binds []string, mounts []mount.Mount) {
 	// Choose the library path: prefer store-assembled libDir over legacy libraryPath.
 	effectiveLib := libDir
-	libMount := "/lib"
+	libMount := "/blockyard-lib-store"
 	if effectiveLib == "" {
 		effectiveLib = libraryPath
 		libMount = "/blockyard-lib"

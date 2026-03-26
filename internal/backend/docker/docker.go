@@ -370,11 +370,12 @@ func (d *DockerBackend) createWorkerContainer(
 
 	binds, mounts := d.mountCfg.WorkerMounts(spec.BundlePath, spec.LibraryPath, spec.LibDir, spec.TransferDir, spec.WorkerMount)
 
-	// R_LIBS: use /lib when store-assembled library is available, else
-	// legacy /blockyard-lib.
+	// R_LIBS: use /blockyard-lib-store when store-assembled library is
+	// available, else legacy /blockyard-lib. Must not use /lib as that
+	// shadows the system shared library directory on Linux.
 	rLibs := "/blockyard-lib"
 	if spec.LibDir != "" {
-		rLibs = "/lib"
+		rLibs = "/blockyard-lib-store"
 	}
 	env := []string{
 		fmt.Sprintf("SHINY_PORT=%d", spec.ShinyPort),
