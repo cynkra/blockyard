@@ -114,11 +114,10 @@ func (e LockfileEntry) Validate() error {
 
 	switch remoteType {
 	case "standard":
-		if e.SHA256 == "" {
-			return fmt.Errorf(
-				"package %s: type \"standard\" requires \"sha256\"",
-				e.Package)
-		}
+		// sha256 is optional — pak's lockfile_create may not populate it
+		// for binary packages resolved from repos. The store key uses
+		// package+version+sha256; when sha256 is empty the key degrades
+		// to package+version which is still unique per source version.
 	case "github", "gitlab", "bitbucket", "git":
 		if e.Metadata.RemoteSha == "" {
 			return fmt.Errorf(

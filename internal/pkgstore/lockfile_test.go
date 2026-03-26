@@ -79,7 +79,9 @@ func TestLockfileEntryValidate_Standard(t *testing.T) {
 	}
 }
 
-func TestLockfileEntryValidate_StandardMissingSha(t *testing.T) {
+func TestLockfileEntryValidate_StandardWithoutSha(t *testing.T) {
+	// sha256 is optional — pak's lockfile_create omits it for binary
+	// packages resolved from repos before download.
 	e := LockfileEntry{
 		Package:  "shiny",
 		Version:  "1.9.1",
@@ -87,8 +89,8 @@ func TestLockfileEntryValidate_StandardMissingSha(t *testing.T) {
 		RVersion: "4.5",
 		Metadata: LockfileMetadata{RemoteType: "standard"},
 	}
-	if err := e.Validate(); err == nil {
-		t.Error("expected error for standard without sha256")
+	if err := e.Validate(); err != nil {
+		t.Errorf("standard without sha256 should be valid: %v", err)
 	}
 }
 
