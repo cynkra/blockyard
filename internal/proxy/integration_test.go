@@ -993,6 +993,8 @@ func TestRedirectTrailingSlash(t *testing.T) {
 	}{
 		{"/app/my-app", "/app/my-app/", http.StatusMovedPermanently},
 		{"/app/other", "/app/other/", http.StatusMovedPermanently},
+		{"/app/INVALID", "", http.StatusNotFound},
+		{"/app/has%20spaces", "", http.StatusNotFound},
 	}
 	for _, tt := range tests {
 		rec := httptest.NewRecorder()

@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
@@ -51,8 +54,58 @@ type Server struct {
 	// Package store — nil when not available (no builds yet).
 	PkgStore *pkgstore.Store
 
+	// Ephemeral HMAC key for worker tokens. Generated from crypto/rand
+	// at startup — independent of SessionSecret and OIDC. Workers are
+	// evicted on restart, so no persistence needed.
+	WorkerTokenKey *auth.SigningKey
+
+	// Per-worker mutex for runtime package installs. Serializes
+	// installs to the same worker to avoid races on .packages.json,
+	// library state, and conflict detection.
+	installMus sync.Map // workerID → *sync.Mutex
+
 	// Version is the server version string, set at build time.
 	Version string
+
+	// RestoreWG is used in tests to wait for background restore goroutines
+	// to complete before cleanup. Nil in production.
+	RestoreWG *sync.WaitGroup
+
+	// Hooks for operations that would cause import cycles if called
+	// directly from server. Set during initialization in main().
+	EvictWorkerFn    func(ctx context.Context, srv *Server, workerID string)
+	SpawnLogCaptureFn func(ctx context.Context, srv *Server, workerID, appID string)
+}
+
+// workerInstallMu returns a per-worker mutex, creating one if needed.
+func (srv *Server) workerInstallMu(workerID string) *sync.Mutex {
+	v, _ := srv.installMus.LoadOrStore(workerID, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// CleanupInstallMu removes the per-worker mutex (called on eviction).
+func (srv *Server) CleanupInstallMu(workerID string) {
+	srv.installMus.Delete(workerID)
+}
+
+// BundlePaths returns the filesystem paths for a bundle.
+func (srv *Server) BundlePaths(appID, bundleID string) bundle.Paths {
+	return bundle.NewBundlePaths(srv.Config.Storage.BundleServerPath, appID, bundleID)
+}
+
+// InternalAPIURL returns the URL workers should use to reach this server.
+func (srv *Server) InternalAPIURL() string {
+	if srv.Config.Docker.ServiceNetwork != "" {
+		_, port, _ := net.SplitHostPort(srv.Config.Server.Bind)
+		if port == "" {
+			port = "8080"
+		}
+		return "http://blockyard:" + port
+	}
+	if srv.Config.Server.ExternalURL != "" {
+		return srv.Config.Server.ExternalURL
+	}
+	return "http://host.docker.internal" + srv.Config.Server.Bind
 }
 
 // NewServer creates a Server with all in-memory stores initialized.
@@ -72,23 +125,25 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 // AuthDeps returns an auth.Deps populated from this server's fields.
 // Used by the router to wire auth handlers and middleware without a
 // circular import.
-func (s *Server) AuthDeps() *auth.Deps {
+func (srv *Server) AuthDeps() *auth.Deps {
 	return &auth.Deps{
-		Config:       s.Config,
-		OIDCClient:   s.OIDCClient,
-		SigningKey:    s.SigningKey,
-		UserSessions: s.UserSessions,
-		AuditLog:     s.AuditLog,
-		DB:           s.DB,
+		Config:       srv.Config,
+		OIDCClient:   srv.OIDCClient,
+		SigningKey:    srv.SigningKey,
+		UserSessions: srv.UserSessions,
+		AuditLog:     srv.AuditLog,
+		DB:           srv.DB,
 	}
 }
 
 // ActiveWorker represents a running worker tracked by the server.
 // The worker ID is the map key in WorkerMap, not stored here.
 type ActiveWorker struct {
-	AppID    string
-	Draining bool      // set by graceful drain; no new sessions routed
-	IdleSince time.Time // zero value = not idle; set when session count hits 0
+	AppID       string
+	BundleID    string    // bundle active at spawn time; runtime installs resolve against this
+	Draining    bool      // set by graceful drain; no new sessions routed
+	IdleSince   time.Time // zero value = not idle; set when session count hits 0
+	CancelToken func()    // stops the token refresher goroutine; nil if no token
 }
 
 // WorkerMap is a concurrent map of worker ID → ActiveWorker.
@@ -189,6 +244,18 @@ func (m *WorkerMap) MarkDraining(appID string) []string {
 		}
 	}
 	return ids
+}
+
+// SetDraining sets the draining flag on a single worker by ID.
+// Used by refresh drain-and-replace to drain specific old workers
+// while keeping newly spawned workers available.
+func (m *WorkerMap) SetDraining(workerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.workers[workerID]; ok {
+		w.Draining = true
+		m.workers[workerID] = w
+	}
 }
 
 // SetIdleSince marks when a worker became idle (zero sessions).

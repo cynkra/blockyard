@@ -13,7 +13,71 @@ import (
 
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 )
+
+// pgTemplateDB is the name of the pre-migrated template database, created
+// once in TestMain.  Each postgres subtest clones it via CREATE DATABASE …
+// TEMPLATE, which is near-instant compared to running migrations every time.
+const pgTemplateDB = "blockyard_test_template"
+
+// pgBaseURL is the postgres connection URL, set once in TestMain.
+var pgBaseURL string
+
+func TestMain(m *testing.M) {
+	pgBaseURL = os.Getenv("BLOCKYARD_TEST_POSTGRES_URL")
+	if pgBaseURL != "" {
+		// Create (or replace) the template database once for the whole
+		// test binary.  This runs migrations a single time.
+		admin, err := sql.Open("pgx", pgBaseURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "postgres admin connect: %v\n", err)
+			os.Exit(1)
+		}
+		// Drop any stale template from a previous interrupted run.
+		admin.Exec("DROP DATABASE IF EXISTS " + pgTemplateDB)
+		if _, err := admin.Exec("CREATE DATABASE " + pgTemplateDB); err != nil {
+			fmt.Fprintf(os.Stderr, "create template db: %v\n", err)
+			os.Exit(1)
+		}
+		admin.Close()
+
+		// Open via our normal path so migrations run against the template.
+		tplURL := replaceDBName(pgBaseURL, pgTemplateDB)
+		tpl, err := Open(config.DatabaseConfig{Driver: "postgres", URL: tplURL})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "migrate template db: %v\n", err)
+			os.Exit(1)
+		}
+		tpl.Close()
+
+		// Prevent the "source database is being accessed by other users"
+		// error: kill any lingering pool connections and disallow future
+		// connections.  CREATE DATABASE … TEMPLATE still works because it
+		// copies at the filesystem level without connecting.
+		admin2, err := sql.Open("pgx", pgBaseURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "postgres admin reconnect: %v\n", err)
+			os.Exit(1)
+		}
+		admin2.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '" + pgTemplateDB + "'")
+		admin2.Exec("ALTER DATABASE " + pgTemplateDB + " WITH ALLOW_CONNECTIONS = false")
+		admin2.Close()
+	}
+
+	code := m.Run()
+
+	// Tear down the template database.
+	if pgBaseURL != "" {
+		admin, err := sql.Open("pgx", pgBaseURL)
+		if err == nil {
+			admin.Exec("ALTER DATABASE " + pgTemplateDB + " WITH ALLOW_CONNECTIONS = true")
+			admin.Exec("DROP DATABASE IF EXISTS " + pgTemplateDB)
+			admin.Close()
+		}
+	}
+	os.Exit(code)
+}
 
 func testDB(t *testing.T) *DB {
 	t.Helper()
@@ -28,36 +92,35 @@ func testDB(t *testing.T) *DB {
 func testPostgresDB(t *testing.T) *DB {
 	t.Helper()
 
-	baseURL := os.Getenv("BLOCKYARD_TEST_POSTGRES_URL")
-	if baseURL == "" {
+	if pgBaseURL == "" {
 		t.Skip("BLOCKYARD_TEST_POSTGRES_URL not set; skipping PostgreSQL tests")
 	}
 
-	// Create a unique database for this test to avoid cross-test pollution.
+	// Clone the pre-migrated template — much faster than running migrations.
 	dbName := "test_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
 
-	// Connect to the default database to create the test database.
-	adminDB, err := sql.Open("pgx", baseURL)
+	admin, err := sql.Open("pgx", pgBaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adminDB.Exec("CREATE DATABASE " + dbName); err != nil {
-		adminDB.Close()
+	if _, err := admin.Exec("CREATE DATABASE " + dbName + " TEMPLATE " + pgTemplateDB); err != nil {
+		admin.Close()
 		t.Fatal(err)
 	}
-	adminDB.Close()
+	admin.Close()
 
-	// Build the test database URL by replacing the database name.
-	testURL := replaceDBName(baseURL, dbName)
-	db, err := Open(config.DatabaseConfig{Driver: "postgres", URL: testURL})
+	// Open without running migrations — the schema is already in place.
+	testURL := replaceDBName(pgBaseURL, dbName)
+	rawDB, err := sqlx.Open("pgx", testURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	rawDB.SetMaxOpenConns(5)
+	db := &DB{DB: rawDB, dialect: DialectPostgres}
 
 	t.Cleanup(func() {
 		db.Close()
-		// Drop the test database.
-		cleanup, _ := sql.Open("pgx", baseURL)
+		cleanup, _ := sql.Open("pgx", pgBaseURL)
 		cleanup.Exec("DROP DATABASE IF EXISTS " + dbName)
 		cleanup.Close()
 	})
@@ -75,11 +138,14 @@ func replaceDBName(rawURL, newDB string) string {
 }
 
 // eachDB runs a test function against both SQLite and PostgreSQL.
+// Subtests run in parallel — each uses an isolated database.
 func eachDB(t *testing.T, fn func(t *testing.T, db *DB)) {
 	t.Run("sqlite", func(t *testing.T) {
+		t.Parallel()
 		fn(t, testDB(t))
 	})
 	t.Run("postgres", func(t *testing.T) {
+		t.Parallel()
 		fn(t, testPostgresDB(t))
 	})
 }
@@ -1159,6 +1225,34 @@ func TestPATCRUD(t *testing.T) {
 		}
 		if count != 2 {
 			t.Errorf("expected 2 PATs revoked, got %d", count)
+		}
+	})
+}
+
+func TestUpdatePATLastUsed(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		user, err := db.UpsertUser("pat-lu-user", "lu@example.com", "LU User")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := hashPAT("by_lastusedtest")
+		_, err = db.CreatePAT("pat-lu", hash, user.Sub, "last-used-token", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx := context.Background()
+		db.UpdatePATLastUsed(ctx, "pat-lu")
+
+		pats, err := db.ListPATsByUser(user.Sub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pats) == 0 {
+			t.Fatal("expected at least one PAT")
+		}
+		if pats[0].LastUsedAt == nil {
+			t.Error("expected last_used_at to be set after UpdatePATLastUsed")
 		}
 	})
 }

@@ -19,7 +19,6 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
-	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/telemetry"
@@ -633,7 +632,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			MemoryLimit: stringOrEmpty(app.MemoryLimit),
 			CPULimit:    floatOrZero(app.CPULimit),
 			Labels:      labels,
-			Env:         proxy.WorkerEnv(srv),
+			Env:         server.WorkerEnv(srv),
 		}
 
 		slog.Info("starting app via API",
@@ -650,7 +649,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID})
+		srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID, BundleID: *app.ActiveBundle})
 
 		addr, err := srv.Backend.Addr(spawnCtx, workerID)
 		if err != nil {

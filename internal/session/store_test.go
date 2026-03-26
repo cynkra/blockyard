@@ -96,6 +96,48 @@ func TestTouch(t *testing.T) {
 	}
 }
 
+func TestRerouteWorker(t *testing.T) {
+	s := NewStore()
+	s.Set("s1", Entry{WorkerID: "old-worker", LastAccess: time.Now()})
+	s.Set("s2", Entry{WorkerID: "old-worker", LastAccess: time.Now()})
+	s.Set("s3", Entry{WorkerID: "other-worker", LastAccess: time.Now()})
+
+	n := s.RerouteWorker("old-worker", "new-worker")
+	if n != 2 {
+		t.Errorf("rerouted %d sessions, want 2", n)
+	}
+
+	e1, _ := s.Get("s1")
+	if e1.WorkerID != "new-worker" {
+		t.Errorf("s1 worker = %q, want %q", e1.WorkerID, "new-worker")
+	}
+	e3, _ := s.Get("s3")
+	if e3.WorkerID != "other-worker" {
+		t.Errorf("s3 should be unchanged, got %q", e3.WorkerID)
+	}
+}
+
+func TestCountForWorkers(t *testing.T) {
+	s := NewStore()
+	s.Set("sess-1", Entry{WorkerID: "worker-1"})
+	s.Set("sess-2", Entry{WorkerID: "worker-1"})
+	s.Set("sess-3", Entry{WorkerID: "worker-2"})
+	s.Set("sess-4", Entry{WorkerID: "worker-3"})
+
+	if n := s.CountForWorkers([]string{"worker-1", "worker-2"}); n != 3 {
+		t.Errorf("expected 3, got %d", n)
+	}
+	if n := s.CountForWorkers([]string{"worker-3"}); n != 1 {
+		t.Errorf("expected 1, got %d", n)
+	}
+	if n := s.CountForWorkers(nil); n != 0 {
+		t.Errorf("expected 0 for nil, got %d", n)
+	}
+	if n := s.CountForWorkers([]string{"nonexistent"}); n != 0 {
+		t.Errorf("expected 0 for nonexistent, got %d", n)
+	}
+}
+
 func TestSweepIdle(t *testing.T) {
 	s := NewStore()
 	s.Set("old", Entry{WorkerID: "w1", LastAccess: time.Now().Add(-2 * time.Hour)})

@@ -42,8 +42,10 @@ rationale. This document covers how to build the pipeline.
    generate a synthetic DESCRIPTION, and build an unpinned manifest.
    Both artifacts persisted alongside the bundle.
 8. **Post-build lockfile storage** — persist the pak lockfile alongside
-   the bundle after successful builds. Drives worker library assembly
-   (phase 2-6) and runtime requests (phase 2-7).
+   the bundle after successful builds. Retained as a debug/audit artifact
+   (exact versions, sources, hashes). Worker library assembly (phase 2-6)
+   and refresh comparison (phase 2-7) are driven by `store-manifest.json`
+   (output of `by-builder store ingest`), not the pak lockfile.
 9. **BuildSpec extension** — add `Cmd` and `Mounts` fields to `BuildSpec`
    so the `Build` method supports flexible commands and mount
    configurations.

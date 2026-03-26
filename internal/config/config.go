@@ -83,6 +83,7 @@ type ProxyConfig struct {
 	IdleWorkerTimeout  Duration `toml:"idle_worker_timeout"`
 	HTTPForwardTimeout Duration `toml:"http_forward_timeout"`
 	MaxCPULimit        *float64 `toml:"max_cpu_limit"`
+	TransferTimeout    Duration `toml:"transfer_timeout"` // default 60s when unset
 }
 
 type OidcConfig struct {

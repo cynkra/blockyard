@@ -16,6 +16,12 @@ type SigningKey struct {
 	key []byte
 }
 
+// NewSigningKey creates a signing key from raw bytes.
+// Used for ephemeral keys generated from crypto/rand.
+func NewSigningKey(key []byte) *SigningKey {
+	return &SigningKey{key: key}
+}
+
 // DeriveSigningKey derives a signing key from a secret using HMAC
 // with a domain separation string.
 func DeriveSigningKey(secret string) *SigningKey {

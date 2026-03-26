@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,12 +41,21 @@ type RestoreParams struct {
 	Store            *pkgstore.Store
 	AuditLog         *audit.Log
 	AuditActor       string // sub of the user who triggered the upload
+	WG               *sync.WaitGroup // if non-nil, Add(1) before goroutine, Done() on exit
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
-// Returns immediately.
-func SpawnRestore(params RestoreParams) {
+// Returns a channel that is closed when the goroutine finishes.
+func SpawnRestore(params RestoreParams) <-chan struct{} {
+	done := make(chan struct{})
+	if params.WG != nil {
+		params.WG.Add(1)
+	}
 	go func() {
+		defer close(done)
+		if params.WG != nil {
+			defer params.WG.Done()
+		}
 		slog.Info("bundle restore started",
 			"app_id", params.AppID, "bundle_id", params.BundleID)
 		defer func() {
@@ -116,6 +126,7 @@ func SpawnRestore(params RestoreParams) {
 			params.BundleID, params.Retention,
 		)
 	}()
+	return done
 }
 
 func runRestore(p RestoreParams) error {
@@ -234,8 +245,8 @@ func runRestore(p RestoreParams) error {
 			AppID:    p.AppID,
 			BundleID: p.BundleID,
 			Image:    p.Image,
-			Cmd:      buildCommand(),
-			Mounts:   buildMounts(pakPath, p.Paths.Unpacked, p.Store.Root(), dlCachePath, builderPath),
+			Cmd:      BuildCommand(),
+			Mounts:   BuildMounts(pakPath, p.Paths.Unpacked, p.Store.Root(), dlCachePath, builderPath),
 			Env:      []string{"BUILD_UUID=" + buildUUID},
 			Labels: map[string]string{
 				"dev.blockyard/managed":   "true",
@@ -340,13 +351,15 @@ func runRestore(p RestoreParams) error {
 	return nil
 }
 
-// buildCommand returns the R command that runs inside the build container.
+// BuildCommand returns the R command that runs inside the build container.
 // The four-phase store-aware build script:
 //   - Phase 1: lockfile_create (pak resolves + solves)
 //   - Phase 2: by-builder store populate (pre-populate from store)
 //   - Phase 3: lockfile_install (install store misses)
 //   - Phase 4: by-builder store ingest (ingest into store)
-func buildCommand() []string {
+//
+// Exported for use by the refresh pipeline (server/refresh.go).
+func BuildCommand() []string {
 	rScript := `
 Sys.setenv(
   R_USER_CACHE_DIR = "/pak-cache",
@@ -461,8 +474,9 @@ if (rc != 0L) {
 	return []string{"R", "--vanilla", "-e", rScript}
 }
 
-// buildMounts returns the mount entries for the store-aware build container.
-func buildMounts(
+// BuildMounts returns the mount entries for the store-aware build container.
+// Exported for use by the refresh pipeline (server/refresh.go).
+func BuildMounts(
 	pakCachePath, bundlePath, storePath, dlCachePath, builderPath string,
 ) []backend.MountEntry {
 	return []backend.MountEntry{

@@ -45,7 +45,7 @@ build pipeline and worker lifecycle.
 5. **Persistent pak download cache** — already set up in phase 2-5;
    this phase ensures the mount is present in the store-aware build flow.
 6. **Worker library assembly** — at worker startup, assemble a single
-   mutable `/lib` per container by hard-linking from the store based on
+   per-container `/lib` (read-only inside the container) by hard-linking from the store based on
    the bundle's `store-manifest.json`. Each entry maps directly to a
    store path — no hash computation or config resolution needed.
    Assembly also writes a `.packages.json` manifest initialized as a

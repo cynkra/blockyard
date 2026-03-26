@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +11,7 @@ import (
 
 func populateCmd() *cobra.Command {
 	var lockfile, lib, storeRoot, refLib string
+	var runtime bool
 	cmd := &cobra.Command{
 		Use:   "populate",
 		Short: "Pre-populate build library from the package store",
@@ -31,49 +30,22 @@ func populateCmd() *cobra.Command {
 				refManifest, _ = pkgstore.ReadPackageManifest(refLib)
 			}
 
-			var hits, misses int
-			for _, entry := range lf.Packages {
-				if entry.IsMetaEntry() {
-					continue
-				}
-				sourceHash, err := pkgstore.StoreKey(entry)
+			if runtime && refManifest != nil {
+				st, err := s.PopulateRuntime(lf, lib, refLib, refManifest)
 				if err != nil {
 					return err
 				}
-
-				// Skip packages already in the build/staging library.
-				if dirExists(filepath.Join(lib, entry.Package)) {
-					continue
-				}
-
-				// Resolve matching config via configs.json.
-				configHash, ok := s.ResolveConfig(entry.Package, sourceHash, lf)
-				if !ok {
-					misses++
-					continue
-				}
-
-				// Skip packages whose compound ref matches the reference
-				// library.
-				expectedRef := pkgstore.StoreRef(sourceHash, configHash)
-				if refManifest != nil && refManifest[entry.Package] == expectedRef {
-					continue
-				}
-
-				// Hard-link config's package tree into build library.
-				dest := filepath.Join(lib, entry.Package)
-				out, cpErr := exec.Command(
-					"cp", "-al",
-					s.Path(entry.Package, sourceHash, configHash), dest,
-				).CombinedOutput()
-				if cpErr != nil {
-					return fmt.Errorf("link %s: %s: %w", entry.Package, out, cpErr)
-				}
-				s.Touch(entry.Package, sourceHash, configHash)
-				hits++
+				fmt.Fprintf(os.Stderr,
+					"store: %d hits, %d misses, %d ABI hits, %d ABI rebuilds\n",
+					st.Hits, st.Misses, st.ABIHits, st.ABIRebuilds)
+				return nil
 			}
 
-			fmt.Fprintf(os.Stderr, "store: %d hits, %d misses\n", hits, misses)
+			st, err := s.PopulateBuild(lf, lib, refManifest)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "store: %d hits, %d misses\n", st.Hits, st.Misses)
 			return nil
 		},
 	}
@@ -81,13 +53,9 @@ func populateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&lib, "lib", "", "build library path")
 	cmd.Flags().StringVar(&storeRoot, "store", "", "store root path")
 	cmd.Flags().StringVar(&refLib, "reference-lib", "", "skip packages present here (optional)")
+	cmd.Flags().BoolVar(&runtime, "runtime", false, "runtime mode: pre-populate from worker library with ABI check")
 	_ = cmd.MarkFlagRequired("lockfile")
 	_ = cmd.MarkFlagRequired("lib")
 	_ = cmd.MarkFlagRequired("store")
 	return cmd
-}
-
-func dirExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
 }

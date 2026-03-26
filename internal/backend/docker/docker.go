@@ -368,7 +368,7 @@ func (d *DockerBackend) createWorkerContainer(
 ) (string, error) {
 	containerName := "blockyard-worker-" + spec.WorkerID
 
-	binds, mounts := d.mountCfg.WorkerMounts(spec.BundlePath, spec.LibraryPath, spec.LibDir, spec.TransferDir, spec.WorkerMount)
+	binds, mounts := d.mountCfg.WorkerMounts(spec.BundlePath, spec.LibraryPath, spec.LibDir, spec.TransferDir, spec.TokenDir, spec.WorkerMount)
 
 	// R_LIBS: use /blockyard-lib-store when store-assembled library is
 	// available, else legacy /blockyard-lib. Must not use /lib as that

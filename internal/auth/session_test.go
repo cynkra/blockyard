@@ -195,6 +195,23 @@ func TestUserSessionStoreUpdateTokensMissing(t *testing.T) {
 	}
 }
 
+func TestNewSigningKey(t *testing.T) {
+	key := NewSigningKey([]byte("raw-secret-key-bytes"))
+	payload := &CookiePayload{Sub: "user-1", IssuedAt: 1700000000}
+
+	encoded, err := payload.Encode(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeCookie(encoded, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Sub != "user-1" {
+		t.Errorf("Sub = %q, want user-1", decoded.Sub)
+	}
+}
+
 func TestDeriveSigningKeyDeterministic(t *testing.T) {
 	k1 := DeriveSigningKey("same-secret")
 	k2 := DeriveSigningKey("same-secret")

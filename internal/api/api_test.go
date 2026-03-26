@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,9 +54,14 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
+	// Track background restore goroutines so cleanup waits for them.
+	var wg sync.WaitGroup
+	srv.RestoreWG = &wg
 	handler := NewRouter(srv)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
+	// Wait for restore goroutines before DB/TempDir cleanup (LIFO order).
+	t.Cleanup(wg.Wait)
 
 	return srv, ts
 }
@@ -1116,6 +1122,8 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
+	var wg sync.WaitGroup
+	srv.RestoreWG = &wg
 
 	// Create and start audit log.
 	auditLog := audit.New(auditPath)
@@ -1127,6 +1135,7 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 	handler := NewRouter(srv)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
+	t.Cleanup(wg.Wait)
 
 	return srv, ts, auditPath
 }

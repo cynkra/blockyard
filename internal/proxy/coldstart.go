@@ -2,11 +2,9 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -180,7 +178,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		"dev.blockyard/role":      "worker",
 	}
 
-	extraEnv := WorkerEnv(srv)
+	extraEnv := server.WorkerEnv(srv)
 
 	// Assemble per-worker library from the package store.
 	var libDir string
@@ -207,12 +205,27 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		}
 	}
 
-	// Pre-create transfer directory for container transfer signaling
-	// (phase 2-7). Mounted rw at /transfer inside the container.
+	// Pre-create transfer directory for container transfer signaling.
+	// Mounted rw at /transfer inside the container.
 	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", wid)
 	if err := os.MkdirAll(transferDir, 0o755); err != nil {
 		slog.Warn("failed to create transfer dir", "worker_id", wid, "error", err)
 		transferDir = ""
+	}
+
+	// Start token refresher so the worker can authenticate to the
+	// packages endpoint. Writes an initial token synchronously.
+	var tokDir string
+	var cancelToken func()
+	if srv.WorkerTokenKey != nil {
+		var tokErr error
+		tokDir, cancelToken, tokErr = server.SpawnTokenRefresher(
+			context.Background(), srv.Config.Storage.BundleServerPath,
+			srv.WorkerTokenKey, app.ID, wid)
+		if tokErr != nil {
+			slog.Warn("failed to start token refresher",
+				"worker_id", wid, "error", tokErr)
+		}
 	}
 
 	spec := backend.WorkerSpec{
@@ -226,6 +239,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		LibraryPath: hostPaths.Library,
 		LibDir:      libDir,
 		TransferDir: transferDir,
+		TokenDir:    tokDir,
 		WorkerMount: srv.Config.Storage.BundleWorkerPath,
 		ShinyPort:   srv.Config.Docker.ShinyPort,
 		MemoryLimit: ptrOr(app.MemoryLimit, ""),
@@ -244,7 +258,10 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		return "", "", fmt.Errorf("resolve worker address: %w", err)
 	}
 
-	srv.Workers.Set(wid, server.ActiveWorker{AppID: app.ID})
+	srv.Workers.Set(wid, server.ActiveWorker{
+		AppID: app.ID, BundleID: *app.ActiveBundle,
+		CancelToken: cancelToken,
+	})
 	srv.Registry.Set(wid, a)
 
 	// 6. Start log capture before health polling so startup output is captured.
@@ -292,47 +309,6 @@ func pollHealthy(ctx context.Context, srv *server.Server, workerID string) error
 	}
 }
 
-// WorkerEnv builds the environment variable map for worker containers.
-// Includes Vault/OpenBao integration vars when configured. Shared by
-// the proxy cold-start path and the explicit StartApp API handler.
-func WorkerEnv(srv *server.Server) map[string]string {
-	if srv.Config.Openbao == nil {
-		return nil
-	}
-
-	// When service_network is configured, the server joins each worker's
-	// network with the DNS alias "blockyard". Use that for the API URL
-	// so workers can reach the credential exchange endpoint directly.
-	apiURL := srv.Config.Server.ExternalURL
-	if srv.Config.Docker.ServiceNetwork != "" {
-		_, port, _ := net.SplitHostPort(srv.Config.Server.Bind)
-		if port == "" {
-			port = "8080"
-		}
-		apiURL = "http://blockyard:" + port
-	} else if apiURL == "" {
-		// Dev mode fallback: containers can reach the host via
-		// host.docker.internal on Docker Desktop, or the bind address.
-		apiURL = "http://host.docker.internal" + srv.Config.Server.Bind
-	}
-	env := map[string]string{
-		"VAULT_ADDR":        srv.Config.Openbao.Address,
-		"BLOCKYARD_API_URL": apiURL,
-	}
-	// Board storage: inject PostgREST URL so R apps can discover it.
-	if srv.Config.BoardStorage != nil && srv.Config.BoardStorage.PostgrestURL != "" {
-		env["POSTGREST_URL"] = srv.Config.BoardStorage.PostgrestURL
-	}
-	if len(srv.Config.Openbao.Services) > 0 {
-		svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
-		for _, svc := range srv.Config.Openbao.Services {
-			svcMap[svc.ID] = "apikeys/" + svc.ID
-		}
-		svcJSON, _ := json.Marshal(svcMap)
-		env["BLOCKYARD_VAULT_SERVICES"] = string(svcJSON)
-	}
-	return env
-}
 
 func ptrOr[T any](p *T, fallback T) T {
 	if p == nil {

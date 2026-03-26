@@ -121,3 +121,46 @@ func TestCallerFromContextNil(t *testing.T) {
 	}
 }
 
+func TestCanManageTags(t *testing.T) {
+	if auth.RolePublisher.CanManageTags() {
+		t.Error("RolePublisher should not manage tags")
+	}
+	if !auth.RoleAdmin.CanManageTags() {
+		t.Error("RoleAdmin should manage tags")
+	}
+	if auth.RoleViewer.CanManageTags() {
+		t.Error("RoleViewer should not manage tags")
+	}
+}
+
+func TestDisplayName(t *testing.T) {
+	c := &auth.CallerIdentity{Sub: "user-1", Name: "Alice"}
+	if got := c.DisplayName(); got != "Alice" {
+		t.Errorf("DisplayName() = %q, want %q", got, "Alice")
+	}
+
+	c2 := &auth.CallerIdentity{Sub: "user-2"}
+	if got := c2.DisplayName(); got != "user-2" {
+		t.Errorf("DisplayName() = %q, want %q", got, "user-2")
+	}
+}
+
+func TestContextWithUser(t *testing.T) {
+	u := &auth.AuthenticatedUser{Sub: "u1", AccessToken: "tok"}
+	ctx := auth.ContextWithUser(context.Background(), u)
+	got := auth.UserFromContext(ctx)
+	if got == nil {
+		t.Fatal("expected user from context")
+	}
+	if got.Sub != "u1" {
+		t.Errorf("Sub = %q, want %q", got.Sub, "u1")
+	}
+}
+
+func TestUserFromContextNil(t *testing.T) {
+	got := auth.UserFromContext(context.Background())
+	if got != nil {
+		t.Error("expected nil for empty context")
+	}
+}
+

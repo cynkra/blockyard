@@ -160,6 +160,29 @@ func TestDetectEntrypoint(t *testing.T) {
 	}
 }
 
+func TestDetectAppMode(t *testing.T) {
+	// server.R + ui.R → shiny
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "server.R"), []byte("# server"), 0o644)
+	os.WriteFile(filepath.Join(dir, "ui.R"), []byte("# ui"), 0o644)
+	if got := detectAppMode(dir); got != "shiny" {
+		t.Errorf("server.R+ui.R = %q, want shiny", got)
+	}
+
+	// app.R only → shiny
+	dir2 := t.TempDir()
+	os.WriteFile(filepath.Join(dir2, "app.R"), []byte("# app"), 0o644)
+	if got := detectAppMode(dir2); got != "shiny" {
+		t.Errorf("app.R = %q, want shiny", got)
+	}
+
+	// No files → default shiny
+	dir3 := t.TempDir()
+	if got := detectAppMode(dir3); got != "shiny" {
+		t.Errorf("empty = %q, want shiny", got)
+	}
+}
+
 func TestComputeFileChecksums(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "app.R"), []byte("# app"), 0o644)

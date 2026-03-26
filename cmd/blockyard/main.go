@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -14,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/cynkra/blockyard/internal/api"
 	"github.com/cynkra/blockyard/internal/audit"
@@ -89,9 +87,21 @@ func main() {
 		os.Exit(1)
 	}
 	srv.PkgStore = pkgstore.NewStore(storePath)
-	if platform := recoverPlatform(storePath); platform != "" {
+	if platform := pkgstore.RecoverPlatform(storePath); platform != "" {
 		srv.PkgStore.SetPlatform(platform)
 	}
+
+	// Generate ephemeral HMAC key for worker tokens.
+	workerKeyBytes := make([]byte, 32)
+	if _, err := rand.Read(workerKeyBytes); err != nil {
+		slog.Error("failed to generate worker token key", "error", err)
+		os.Exit(1)
+	}
+	srv.WorkerTokenKey = auth.NewSigningKey(workerKeyBytes)
+
+	// Set operation hooks to avoid import cycles.
+	srv.EvictWorkerFn = ops.EvictWorker
+	srv.SpawnLogCaptureFn = ops.SpawnLogCapture
 
 	// Background goroutine context — used for vault token renewal and others.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -106,7 +116,7 @@ func main() {
 
 		if cfg.Openbao.RoleID != "" {
 			// AppRole auth flow.
-			token, ttl, err := initVaultAppRole(cfg.Openbao.Address, cfg.Openbao.RoleID, tokenFilePath)
+			token, ttl, err := integration.InitAppRole(context.Background(), cfg.Openbao.Address, cfg.Openbao.RoleID, tokenFilePath)
 			if err != nil {
 				slog.Error("vault authentication failed", "error", err)
 				os.Exit(1)
@@ -138,7 +148,7 @@ func main() {
 
 		// Auto-generate session_secret if empty and vault is available.
 		if cfg.OIDC != nil && (cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty()) {
-			secret, err := resolveSessionSecret(srv.VaultClient)
+			secret, err := integration.ResolveSessionSecret(context.Background(), srv.VaultClient)
 			if err != nil {
 				slog.Error("failed to resolve session_secret", "error", err)
 				os.Exit(1)
@@ -282,6 +292,13 @@ func main() {
 		pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Docker.StoreRetention.Duration)
 	}
 
+	// Refresh scheduler.
+	bgWg.Add(1)
+	go func() {
+		defer bgWg.Done()
+		srv.RunRefreshScheduler(bgCtx)
+	}()
+
 	// Start audit log background writer.
 	if srv.AuditLog != nil {
 		bgWg.Add(1)
@@ -348,98 +365,3 @@ func main() {
 	slog.Info("shutdown complete")
 }
 
-// initVaultAppRole authenticates to vault using AppRole. It first tries
-// a persisted token (renew-self), then falls back to AppRole login with
-// secret_id from the environment.
-func initVaultAppRole(addr, roleID, tokenFile string) (token string, ttl time.Duration, err error) {
-	httpClient := &http.Client{}
-
-	// 1. Try persisted token.
-	persisted, err := integration.ReadTokenFile(tokenFile)
-	if err != nil {
-		slog.Warn("failed to read persisted vault token", "error", err)
-	}
-	if persisted != "" {
-		renewTTL, err := integration.RenewSelf(context.Background(), httpClient, addr, persisted)
-		if err == nil {
-			slog.Info("reusing persisted vault token")
-			return persisted, renewTTL, nil
-		}
-		slog.Warn("persisted vault token renewal failed, trying AppRole login", "error", err)
-	}
-
-	// 2. AppRole login with secret_id from env.
-	secretID := os.Getenv("BLOCKYARD_OPENBAO_SECRET_ID")
-	if secretID == "" {
-		return "", 0, fmt.Errorf("vault bootstrap required: set BLOCKYARD_OPENBAO_SECRET_ID")
-	}
-
-	token, ttl, err = integration.AppRoleLogin(context.Background(), httpClient, addr, roleID, secretID)
-	if err != nil {
-		return "", 0, fmt.Errorf("AppRole login failed: %w", err)
-	}
-
-	// Persist the token for restart reuse.
-	if writeErr := integration.WriteTokenFile(tokenFile, token); writeErr != nil {
-		slog.Warn("failed to persist vault token", "error", writeErr)
-	}
-
-	slog.Info("vault AppRole authentication successful")
-	return token, ttl, nil
-}
-
-// resolveSessionSecret reads or generates session_secret from vault.
-// If the key exists at secret/data/blockyard/server-secrets, it's used.
-// Otherwise, a new 32-byte random value is generated, stored, and returned.
-func resolveSessionSecret(client *integration.Client) (string, error) {
-	const kvPath = "blockyard/server-secrets"
-
-	// Try reading existing.
-	data, err := client.KVRead(context.Background(), kvPath, client.AdminToken())
-	if err == nil {
-		if v, ok := data["session_secret"]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				slog.Info("session_secret loaded from vault")
-				return s, nil
-			}
-		}
-	}
-
-	// Generate new.
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate session_secret: %w", err)
-	}
-	secret := base64.RawURLEncoding.EncodeToString(buf)
-
-	// Store in vault.
-	if err := client.KVWrite(context.Background(), kvPath, map[string]any{
-		"session_secret": secret,
-	}); err != nil {
-		return "", fmt.Errorf("store session_secret in vault: %w", err)
-	}
-
-	slog.Info("auto-generated session_secret (stored in vault)")
-	return secret, nil
-}
-
-// recoverPlatform scans the store root for existing platform
-// directories (e.g., "4.5-x86_64-pc-linux-gnu/") to restore the
-// platform after a server restart.
-func recoverPlatform(storePath string) string {
-	entries, err := os.ReadDir(storePath)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		// Platform dirs look like "4.5-x86_64-pc-linux-gnu".
-		if strings.Contains(e.Name(), "-") {
-			slog.Info("recovered store platform", "platform", e.Name())
-			return e.Name()
-		}
-	}
-	return ""
-}

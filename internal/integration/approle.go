@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -52,6 +54,46 @@ func AppRoleLogin(ctx context.Context, httpClient *http.Client, addr, roleID, se
 	}
 
 	return result.Auth.ClientToken, time.Duration(result.Auth.LeaseDuration) * time.Second, nil
+}
+
+// InitAppRole authenticates to vault using AppRole. It first tries
+// a persisted token (renew-self), then falls back to AppRole login with
+// secret_id from the environment.
+func InitAppRole(ctx context.Context, addr, roleID, tokenFile string) (token string, ttl time.Duration, err error) {
+	httpClient := &http.Client{}
+
+	// 1. Try persisted token.
+	persisted, err := ReadTokenFile(tokenFile)
+	if err != nil {
+		slog.Warn("failed to read persisted vault token", "error", err)
+	}
+	if persisted != "" {
+		renewTTL, err := RenewSelf(ctx, httpClient, addr, persisted)
+		if err == nil {
+			slog.Info("reusing persisted vault token")
+			return persisted, renewTTL, nil
+		}
+		slog.Warn("persisted vault token renewal failed, trying AppRole login", "error", err)
+	}
+
+	// 2. AppRole login with secret_id from env.
+	secretID := os.Getenv("BLOCKYARD_OPENBAO_SECRET_ID")
+	if secretID == "" {
+		return "", 0, fmt.Errorf("vault bootstrap required: set BLOCKYARD_OPENBAO_SECRET_ID")
+	}
+
+	token, ttl, err = AppRoleLogin(ctx, httpClient, addr, roleID, secretID)
+	if err != nil {
+		return "", 0, fmt.Errorf("AppRole login failed: %w", err)
+	}
+
+	// Persist the token for restart reuse.
+	if writeErr := WriteTokenFile(tokenFile, token); writeErr != nil {
+		slog.Warn("failed to persist vault token", "error", writeErr)
+	}
+
+	slog.Info("vault AppRole authentication successful")
+	return token, ttl, nil
 }
 
 // tokenRenewResponse is the relevant subset of the token renew-self response.
