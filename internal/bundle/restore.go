@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,12 +41,21 @@ type RestoreParams struct {
 	Store            *pkgstore.Store
 	AuditLog         *audit.Log
 	AuditActor       string // sub of the user who triggered the upload
+	WG               *sync.WaitGroup // if non-nil, Add(1) before goroutine, Done() on exit
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
-// Returns immediately.
-func SpawnRestore(params RestoreParams) {
+// Returns a channel that is closed when the goroutine finishes.
+func SpawnRestore(params RestoreParams) <-chan struct{} {
+	done := make(chan struct{})
+	if params.WG != nil {
+		params.WG.Add(1)
+	}
 	go func() {
+		defer close(done)
+		if params.WG != nil {
+			defer params.WG.Done()
+		}
 		slog.Info("bundle restore started",
 			"app_id", params.AppID, "bundle_id", params.BundleID)
 		defer func() {
@@ -116,6 +126,7 @@ func SpawnRestore(params RestoreParams) {
 			params.BundleID, params.Retention,
 		)
 	}()
+	return done
 }
 
 func runRestore(p RestoreParams) error {

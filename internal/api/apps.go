@@ -650,7 +650,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID})
+		srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID, BundleID: *app.ActiveBundle})
 
 		addr, err := srv.Backend.Addr(spawnCtx, workerID)
 		if err != nil {

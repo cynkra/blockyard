@@ -107,6 +107,7 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			Store:            srv.PkgStore,
 			AuditLog:         srv.AuditLog,
 			AuditActor:       actorSub,
+			WG:               srv.RestoreWG,
 		})
 
 		telemetry.BundlesUploaded.Inc()

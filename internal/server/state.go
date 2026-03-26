@@ -53,6 +53,10 @@ type Server struct {
 
 	// Version is the server version string, set at build time.
 	Version string
+
+	// RestoreWG is used in tests to wait for background restore goroutines
+	// to complete before cleanup. Nil in production.
+	RestoreWG *sync.WaitGroup
 }
 
 // NewServer creates a Server with all in-memory stores initialized.
@@ -87,6 +91,7 @@ func (s *Server) AuthDeps() *auth.Deps {
 // The worker ID is the map key in WorkerMap, not stored here.
 type ActiveWorker struct {
 	AppID    string
+	BundleID string    // bundle active at spawn time; runtime installs resolve against this
 	Draining bool      // set by graceful drain; no new sessions routed
 	IdleSince time.Time // zero value = not idle; set when session count hits 0
 }

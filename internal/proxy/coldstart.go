@@ -244,7 +244,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		return "", "", fmt.Errorf("resolve worker address: %w", err)
 	}
 
-	srv.Workers.Set(wid, server.ActiveWorker{AppID: app.ID})
+	srv.Workers.Set(wid, server.ActiveWorker{AppID: app.ID, BundleID: *app.ActiveBundle})
 	srv.Registry.Set(wid, a)
 
 	// 6. Start log capture before health polling so startup output is captured.
