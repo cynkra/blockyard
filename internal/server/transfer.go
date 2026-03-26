@@ -77,9 +77,11 @@ func (srv *Server) watchTransfer(
 		}
 	}
 
-	// Timeout — abort transfer.
+	// Timeout — abort transfer. Remove the transfer directory to prevent
+	// a stale board.json from being picked up by a subsequent transfer.
 	slog.Error("transfer timeout",
 		"worker_id", workerID, "app_id", appID)
+	os.RemoveAll(transferDir)
 }
 
 // completeTransfer assembles a new library, spawns a new worker, reroutes

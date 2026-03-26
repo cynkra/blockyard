@@ -74,6 +74,15 @@ func StartupCleanup(ctx context.Context, srv *server.Server) error {
 		}
 	}
 
+	// Clean up orphaned transfer directories from previous runs.
+	transferBaseDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers")
+	transferEntries, _ := os.ReadDir(transferBaseDir)
+	for _, e := range transferEntries {
+		if e.IsDir() {
+			os.RemoveAll(filepath.Join(transferBaseDir, e.Name()))
+		}
+	}
+
 	// Clean up orphaned worker token directories.
 	tokenBaseDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".worker-tokens")
 	entries, _ := os.ReadDir(tokenBaseDir)

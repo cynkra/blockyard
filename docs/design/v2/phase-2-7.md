@@ -56,15 +56,34 @@ This document covers how to build them.
 ## Step 1: Worker HMAC authentication
 
 Workers need to call the packages endpoint from inside the container.
-The existing session token mechanism (HMAC-SHA256 via `auth.SigningKey`)
-is reused with a worker-scoped claim. Tokens are short-lived (15
-minutes) and the server refreshes them automatically via a mounted
-token file — R code never manages token lifecycle.
+The session token format (HMAC-SHA256) is reused with a worker-scoped
+claim, but signed with a **dedicated ephemeral key** (`WorkerTokenKey`)
+generated at server startup from `crypto/rand`. This key is independent
+of `SessionSecret` and OIDC — worker tokens work in all configurations.
+Tokens are short-lived (15 minutes) and the server refreshes them
+automatically via a mounted token file — R code never manages token
+lifecycle.
+
+### Worker token signing key
+
+The server generates a random 32-byte HMAC key at startup, stored as
+`srv.WorkerTokenKey`. Because worker tokens are only created and
+consumed by the same server process, and all workers are evicted on
+restart (`GracefulShutdown` + `StartupCleanup`), an ephemeral key is
+sufficient — no persistence needed. This also isolates worker token
+security from `SessionSecret` (compromising one does not compromise
+the other).
+
+```go
+// internal/server/state.go — added to NewServer()
+
+WorkerTokenKey *auth.SigningKey // ephemeral, generated at startup
+```
 
 ### Token generation
 
 ```go
-// internal/proxy/workertoken.go
+// internal/server/workertoken.go
 
 const workerTokenTTL = 15 * time.Minute
 
@@ -97,7 +116,7 @@ within one TTL period (15 minutes).
 Same pattern as Kubernetes projected service account tokens.
 
 ```go
-// internal/proxy/workertoken.go
+// internal/server/workertoken.go
 
 // tokenDir returns the host-side directory for a worker's token file.
 // Lives under bundleServerPath alongside other per-worker state.
@@ -169,7 +188,7 @@ At spawn time, start the token refresher and mount the directory:
 // Start token refresher (before container creation).
 tokDir, cancelToken, err := SpawnTokenRefresher(
     ctx, srv.Config.Storage.BundleServerPath,
-    srv.SigningKey, app.ID, workerID)
+    srv.WorkerTokenKey, app.ID, workerID)
 if err != nil {
     return fmt.Errorf("start token refresher: %w", err)
 }
@@ -201,7 +220,10 @@ The token directory is mounted read-only into the container:
 
 ### WorkerSpec.Env update
 
-The API URL is still injected as an env var (it doesn't change):
+The API URL is injected as an env var (it doesn't change). `WorkerEnv()`
+is restructured to always set `BLOCKYARD_API_URL` — the URL construction
+logic is extracted into `Server.InternalAPIURL()` and is no longer gated
+on OpenBao being configured:
 
 ```go
 env["BLOCKYARD_API_URL"] = srv.InternalAPIURL() // e.g., http://host.docker.internal:3939
@@ -222,8 +244,8 @@ as long as the worker is alive.
 ### Middleware
 
 The packages endpoint validates the worker token and extracts the
-worker ID. The only change from a long-lived token is that
-`DecodeSessionToken` now enforces expiry:
+worker ID. `DecodeSessionToken` already enforces expiry. The
+middleware uses `srv.WorkerTokenKey` (the ephemeral key):
 
 ```go
 // internal/api/workerauth.go
@@ -264,7 +286,7 @@ func WorkerAuth(signingKey *auth.SigningKey) func(http.Handler) http.Handler {
 ### Types
 
 ```go
-// internal/api/packages.go
+// internal/server/packagetypes.go
 
 type PackageRequest struct {
     Name             string   `json:"name"`              // package name or pkgdepends ref
@@ -285,20 +307,20 @@ type PackageResponse struct {
 
 func PostPackages(srv *server.Server) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
-        workerID := r.Context().Value(workerIDKey).(string)
-        appID := r.Context().Value(appIDKey).(string)
+        workerID := WorkerIDFromContext(r.Context())
+        appID := AppIDFromContext(r.Context())
 
-        var req PackageRequest
+        var req server.PackageRequest
         if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
             writeJSON(w, http.StatusBadRequest,
-                PackageResponse{Status: "error", Message: "invalid request"})
+                server.PackageResponse{Status: "error", Message: "invalid request"})
             return
         }
 
         result, err := srv.InstallPackage(r.Context(), appID, workerID, req)
         if err != nil {
             writeJSON(w, http.StatusInternalServerError,
-                PackageResponse{Status: "error", Message: err.Error()})
+                server.PackageResponse{Status: "error", Message: err.Error()})
             return
         }
 
@@ -313,7 +335,7 @@ func PostPackages(srv *server.Server) http.HandlerFunc {
 // internal/api/routes.go
 
 r.Route("/api/v1/packages", func(r chi.Router) {
-    r.Use(api.WorkerAuth(srv.SigningKey))
+    r.Use(api.WorkerAuth(srv.WorkerTokenKey))
     r.Post("/", api.PostPackages(srv))
 })
 ```
@@ -350,16 +372,24 @@ func (s *Store) CleanupStagingDir(dir string) error {
 
 ### Startup cleanup
 
-Clean up orphaned staging directories from previous runs (same pattern
-as worker library cleanup in phase 2-6):
+Clean up orphaned staging and transfer directories from previous runs
+(same pattern as worker library cleanup in phase 2-6):
 
 ```go
-// At server startup:
+// At server startup (internal/ops/ops.go — StartupCleanup):
 stagingDir := filepath.Join(srv.PkgStore.Root(), ".staging")
 entries, _ := os.ReadDir(stagingDir)
 for _, e := range entries {
     if e.IsDir() {
         os.RemoveAll(filepath.Join(stagingDir, e.Name()))
+    }
+}
+
+transferBaseDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers")
+transferEntries, _ := os.ReadDir(transferBaseDir)
+for _, e := range transferEntries {
+    if e.IsDir() {
+        os.RemoveAll(filepath.Join(transferBaseDir, e.Name()))
     }
 }
 ```
@@ -385,8 +415,8 @@ and ensures the library is consistent for conflict detection.
 func (srv *Server) InstallPackage(
     ctx context.Context,
     appID, workerID string,
-    req api.PackageRequest,
-) (api.PackageResponse, error) {
+    req PackageRequest,
+) (PackageResponse, error) {
 
     // Serialize runtime installs per-worker. A worker can have multiple
     // sessions (max_sessions_per_worker), and two sessions requesting
@@ -502,10 +532,15 @@ type runtimeInstallParams struct {
 ### Server struct additions
 
 ```go
-// internal/server/server.go
+// internal/server/state.go
 
 type Server struct {
     // ... existing fields from phase 2-6 ...
+
+    // Ephemeral HMAC key for worker tokens. Generated from crypto/rand
+    // at startup — independent of SessionSecret and OIDC. Workers are
+    // evicted on restart, so no persistence needed.
+    WorkerTokenKey *auth.SigningKey
 
     // Per-worker mutex for runtime package installs. Serializes
     // installs to the same worker to avoid races on .packages.json,
@@ -1010,7 +1045,7 @@ func (srv *Server) handleTransfer(
     ctx context.Context,
     appID, workerID, storeManifestPath string,
     buildResult *backend.BuildResult,
-) (api.PackageResponse, error) {
+) (PackageResponse, error) {
 
     // The transfer directory was pre-created and mounted into the
     // worker at spawn time (phase 2-6). It's already at /transfer
@@ -1032,7 +1067,7 @@ func (srv *Server) handleTransfer(
     // Return the container-side path. The worker's /transfer mount
     // maps to transferDir on the host. The R session writes board.json
     // to this path; the server watches the host-side path.
-    return api.PackageResponse{
+    return PackageResponse{
         Status:       "transfer",
         Message:      "version conflict — container transfer required",
         TransferPath: "/transfer",
@@ -1068,10 +1103,16 @@ func (srv *Server) watchTransfer(
                 storeManifestPath, transferDir)
             return
         }
-        time.Sleep(pollInterval)
+        select {
+        case <-ctx.Done():
+            return
+        case <-time.After(pollInterval):
+        }
     }
 
-    // Timeout — abort transfer.
+    // Timeout — abort transfer. Remove the transfer directory to
+    // prevent a stale board.json from being picked up by a
+    // subsequent transfer.
     slog.Error("transfer timeout",
         "worker_id", workerID, "app_id", appID)
     os.RemoveAll(transferDir)
@@ -1111,7 +1152,7 @@ func (srv *Server) completeTransfer(
     // 2. Spawn new worker with updated library. Mount the old worker's
     // transfer dir (containing board.json) read-only at /transfer.
     oldWorker, _ := srv.Workers.Get(oldWorkerID)
-    spec := srv.buildTransferWorkerSpec(appID, newWorkerID, newLibDir, transferDir)
+    spec := srv.buildTransferWorkerSpec(appID, newWorkerID, newLibDir, transferDir, oldWorker.BundleID)
     if err := srv.Backend.Spawn(ctx, spec); err != nil {
         slog.Error("transfer: spawn worker", "error", err)
         return
@@ -1122,8 +1163,18 @@ func (srv *Server) completeTransfer(
         slog.Error("transfer: resolve worker address", "error", err)
         return
     }
-    srv.Workers.Set(newWorkerID, server.ActiveWorker{
+
+    // Start token refresher for the new worker.
+    var cancelToken func()
+    if srv.WorkerTokenKey != nil {
+        _, cancelToken, _ = SpawnTokenRefresher(
+            context.Background(), srv.Config.Storage.BundleServerPath,
+            srv.WorkerTokenKey, appID, newWorkerID)
+    }
+
+    srv.Workers.Set(newWorkerID, ActiveWorker{
         AppID: oldWorker.AppID, BundleID: oldWorker.BundleID,
+        CancelToken: cancelToken,
     })
     srv.Registry.Set(newWorkerID, addr)
 
@@ -1136,11 +1187,8 @@ func (srv *Server) completeTransfer(
     // 4. Reroute sessions from old worker to new worker.
     srv.Sessions.RerouteWorker(oldWorkerID, newWorkerID)
 
-    // 5. Evict old worker (stops container, cleans up).
-    ops.EvictWorker(ctx, srv, oldWorkerID)
-
-    // 6. Clean up transfer directory.
-    os.RemoveAll(transferDir)
+    // 5. Evict old worker (stops container, cleans up transfer dir).
+    srv.EvictWorkerFn(ctx, srv, oldWorkerID)
 
     slog.Info("transfer complete",
         "app_id", appID,
@@ -1158,9 +1206,9 @@ the new worker's empty one, and `BLOCKYARD_TRANSFER_PATH` is set:
 
 ```go
 func (srv *Server) buildTransferWorkerSpec(
-    appID, workerID, libDir, oldTransferDir string,
+    appID, workerID, libDir, oldTransferDir, bundleID string,
 ) backend.WorkerSpec {
-    spec := srv.defaultWorkerSpec(appID, workerID, libDir)
+    spec := srv.defaultWorkerSpec(appID, workerID, libDir, bundleID)
 
     if oldTransferDir != "" {
         // Override the default transfer mount with the old worker's
@@ -1306,7 +1354,8 @@ func (srv *Server) RunRefresh(
     m *manifest.Manifest,
     sender task.Sender,
 ) bool {
-    defer sender.Complete(task.Completed)
+    status := task.Completed
+    defer func() { sender.Complete(status) }()
 
     sender.Write("refreshing dependencies...")
 
@@ -1319,14 +1368,14 @@ func (srv *Server) RunRefresh(
         filepath.Join(bsp, ".pak-cache"))
     if err != nil {
         sender.Write(fmt.Sprintf("ensure pak: %v", err))
-        sender.Complete(task.Failed)
+        status = task.Failed
         return false
     }
     builderPath, err := buildercache.EnsureCached(
         filepath.Join(bsp, ".by-builder-cache"), srv.Version)
     if err != nil {
         sender.Write(fmt.Sprintf("ensure by-builder: %v", err))
-        sender.Complete(task.Failed)
+        status = task.Failed
         return false
     }
 
@@ -1361,12 +1410,12 @@ func (srv *Server) RunRefresh(
     result, err := srv.Backend.Build(ctx, spec)
     if err != nil {
         sender.Write(fmt.Sprintf("refresh build: %v", err))
-        sender.Complete(task.Failed)
+        status = task.Failed
         return false
     }
     if !result.Success {
         sender.Write(fmt.Sprintf("refresh failed (exit %d)", result.ExitCode))
-        sender.Complete(task.Failed)
+        status = task.Failed
         return false
     }
 
@@ -1396,7 +1445,7 @@ func (srv *Server) RunRefresh(
 
     if err := copyFile(newManifestSrc, newManifestDst); err != nil {
         sender.Write(fmt.Sprintf("persist new store-manifest: %v", err))
-        sender.Complete(task.Failed)
+        status = task.Failed
         return false
     }
 
@@ -1579,12 +1628,19 @@ func (srv *Server) runRefreshScheduler(ctx context.Context) {
 ```
 
 The scheduler runs in the server's main goroutine. `shouldRun()`
-parses the cron expression and checks whether it fires between
-`LastRefresh` and `now`.
+uses `robfig/cron/v3` (standard Go cron expression parser, ~1k LOC,
+no transitive dependencies) to parse the expression and check whether
+it fires between `LastRefresh` and `now`.
 
 ---
 
 ## Step 11: Refresh rollback
+
+**Prerequisite:** The restore pipeline (phase 2-6, `bundle/restore.go`)
+must write `store-manifest.json.build` alongside the bundle after the
+initial build completes. This is a copy of the `store-manifest.json`
+written once at deploy time and never overwritten by refresh. Added as
+part of this phase.
 
 Two rollback targets are available:
 
@@ -1598,71 +1654,48 @@ Two rollback targets are available:
 ```go
 // internal/server/refresh.go
 
-// RollbackRefresh rolls back to the previous refresh's store-manifest.
-// The current (bad) manifest is discarded and .prev is promoted to
-// current. After rollback, .prev is removed — there is no "redo."
-// To go further back, use RollbackToBuild.
-func (srv *Server) RollbackRefresh(
-    ctx context.Context, app *db.AppRow,
-) error {
+// RunRollback performs a rollback to either the previous refresh or the
+// original build, then drains and replaces workers. Runs as a background
+// task (same pattern as RunRefresh).
+func (srv *Server) RunRollback(
+    ctx context.Context,
+    app *db.AppRow,
+    target string,  // "build" or "" (previous refresh)
+    sender task.Sender,
+) {
+    status := task.Completed
+    defer func() { sender.Complete(status) }()
+
     bundlePaths := srv.BundlePaths(app.ID, *app.ActiveBundle)
-
-    prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
-    if !fileExists(prevManifest) {
-        return fmt.Errorf("no previous refresh to roll back to " +
-            "(use ?target=build to roll back to the original deploy)")
-    }
-
     currentManifest := filepath.Join(bundlePaths.Base, "store-manifest.json")
 
-    // Promote prev to current, discard the bad manifest.
-    if err := os.Rename(prevManifest, currentManifest); err != nil {
-        return fmt.Errorf("promote prev manifest: %w", err)
+    switch target {
+    case "build":
+        sender.Write("rolling back dependencies to original build...")
+        buildManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.build")
+        if err := copyFile(buildManifest, currentManifest); err != nil {
+            sender.Write(fmt.Sprintf("restore build manifest: %v", err))
+            status = task.Failed
+            return
+        }
+        // Remove .prev — it's no longer relevant.
+        os.Remove(filepath.Join(bundlePaths.Base, "store-manifest.json.prev"))
+
+    default:
+        sender.Write("rolling back dependencies to previous refresh...")
+        prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
+        // Promote prev to current, discard the bad manifest.
+        if err := os.Rename(prevManifest, currentManifest); err != nil {
+            sender.Write(fmt.Sprintf("promote prev manifest: %v", err))
+            status = task.Failed
+            return
+        }
+        // .prev is now gone — no "redo" possible. The discarded manifest
+        // is not preserved. To go further back, use target=build.
     }
-    // .prev is now gone — no "redo" possible. The discarded manifest
-    // is not preserved. To go further back, use RollbackToBuild.
 
     // Reassemble workers with the rolled-back store-manifest (graceful drain).
-    taskID := uuid.New().String()
-    sender := srv.Tasks.Create(taskID, app.ID)
-    sender.Write("rolling back dependencies to previous refresh...")
     srv.drainAndReplace(ctx, app, currentManifest, sender)
-    sender.Complete(task.Completed)
-
-    return nil
-}
-
-// RollbackToBuild rolls back to the original deploy's store-manifest.
-// This is the ultimate fallback — returns to exactly the dependency
-// set from the initial build. The current manifest and .prev (if any)
-// are discarded.
-func (srv *Server) RollbackToBuild(
-    ctx context.Context, app *db.AppRow,
-) error {
-    bundlePaths := srv.BundlePaths(app.ID, *app.ActiveBundle)
-
-    buildManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.build")
-    if !fileExists(buildManifest) {
-        return fmt.Errorf("no build store-manifest available")
-    }
-
-    currentManifest := filepath.Join(bundlePaths.Base, "store-manifest.json")
-    prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
-
-    // Copy .build to current. Remove .prev — it's no longer relevant.
-    if err := copyFile(buildManifest, currentManifest); err != nil {
-        return fmt.Errorf("restore build manifest: %w", err)
-    }
-    os.Remove(prevManifest)
-
-    // Reassemble workers with the original build store-manifest.
-    taskID := uuid.New().String()
-    sender := srv.Tasks.Create(taskID, app.ID)
-    sender.Write("rolling back dependencies to original build...")
-    srv.drainAndReplace(ctx, app, currentManifest, sender)
-    sender.Complete(task.Completed)
-
-    return nil
 }
 ```
 
@@ -1688,22 +1721,38 @@ func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
         // ?target=build rolls back to original deploy; default is
         // previous refresh.
         target := r.URL.Query().Get("target")
-        var rollbackErr error
+
+        // Validate rollback target before starting the async task.
+        bundlePaths := srv.BundlePaths(app.ID, *app.ActiveBundle)
         switch target {
         case "build":
-            rollbackErr = srv.RollbackToBuild(r.Context(), app)
+            buildManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.build")
+            if !fileExists(buildManifest) {
+                writeJSON(w, http.StatusConflict,
+                    map[string]string{"message": "no build store-manifest available"})
+                return
+            }
         default:
-            rollbackErr = srv.RollbackRefresh(r.Context(), app)
+            prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
+            if !fileExists(prevManifest) {
+                writeJSON(w, http.StatusConflict,
+                    map[string]string{
+                        "message": "no previous refresh to roll back to " +
+                            "(use ?target=build to roll back to the original deploy)",
+                    })
+                return
+            }
         }
 
-        if rollbackErr != nil {
-            writeJSON(w, http.StatusConflict,
-                map[string]string{"message": rollbackErr.Error()})
-            return
-        }
+        // Start rollback as a background task (same pattern as refresh).
+        taskID := uuid.New().String()
+        sender := srv.Tasks.Create(taskID, app.ID)
+        go srv.RunRollback(context.Background(), app, target, sender)
 
-        writeJSON(w, http.StatusOK,
-            map[string]string{"message": "rollback complete"})
+        writeJSON(w, http.StatusAccepted, map[string]string{
+            "task_id": taskID,
+            "message": "rollback started",
+        })
     }
 }
 
@@ -1720,7 +1769,8 @@ func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
 
 ```sql
 -- Migration 005: add refresh columns to apps table.
--- Shared across SQLite and PostgreSQL (same SQL on both dialects).
+-- SQLite: 005 (skipping 004 to stay in sync with PostgreSQL, which has
+-- 004_v2_boards). Same SQL on both dialects.
 
 ALTER TABLE apps ADD COLUMN refresh_schedule TEXT NOT NULL DEFAULT '';
 ALTER TABLE apps ADD COLUMN last_refresh_at TEXT;
@@ -1864,15 +1914,17 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
    sentinel files (extra coordination). The poll has a timeout — if
    the file doesn't appear, the server aborts.
 
-4. **Worker token as short-lived HMAC with server-side refresh.** The
+4. **Worker token as short-lived HMAC with ephemeral key.** The
    worker token has a 15-minute TTL and is written to a mounted file
    that the server refreshes at TTL/2. The token is effectively
    revoked when the worker is evicted (the refresher stops and the
-   last token expires within one TTL period). Using the existing
-   HMAC-SHA256 signing infrastructure (from session tokens) avoids
-   adding a new auth mechanism. The `worker:` prefix in the Sub
-   claim prevents worker tokens from being used as user session
-   tokens.
+   last token expires within one TTL period). Tokens are signed with
+   a dedicated ephemeral key (`WorkerTokenKey`) generated from
+   `crypto/rand` at server startup — independent of `SessionSecret`
+   and OIDC, so worker tokens work in all configurations. The key
+   does not need persistence because all workers are evicted on
+   restart. The `worker:` prefix in the Sub claim prevents worker
+   tokens from being used as user session tokens.
 
 5. **Refresh re-runs the full build pipeline with graceful drain.**
    Rather than a lightweight "re-resolve and diff" flow, refresh runs
@@ -1905,12 +1957,14 @@ func (d *DB) UpdateLastRefresh(appID string, t time.Time) error {
    This makes refresh fast (no upload, no scan) and safe (code is
    the same, only deps change).
 
-8. **Scheduled refresh via lightweight polling, not cron library.**
+8. **Scheduled refresh via lightweight polling with `robfig/cron/v3`.**
    The scheduler checks once per minute whether any app's cron
-   expression fires. This avoids adding a cron library dependency for
-   what is fundamentally a simple timer. The per-minute poll is
-   sufficient because refresh operations take seconds to minutes —
-   sub-minute scheduling precision is not needed.
+   expression fires. `robfig/cron/v3` provides cron expression parsing
+   (~1k LOC, no transitive dependencies) — correct handling of
+   day-of-week, month ranges, and step values without a hand-rolled
+   parser. The per-minute poll is sufficient because refresh operations
+   take seconds to minutes — sub-minute scheduling precision is not
+   needed.
 
 9. **Graceful drain on refresh, transfer only on live conflicts.**
    Refresh spawns a new worker and drains old ones — running sessions
