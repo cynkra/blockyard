@@ -66,30 +66,60 @@ func (mc MountConfig) volumeMount(target string, readOnly bool, serverPath strin
 
 // WorkerMounts returns the container HostConfig fields for a worker container.
 // All paths are server-side; MountConfig translates them as needed.
-func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, workerMount string) (binds []string, mounts []mount.Mount) {
+//
+// libDir is the store-assembled per-worker library (phase 2-6); mounted ro
+// at /lib. Host-side writes (runtime package hardlinks by the server) are
+// visible through the bind mount regardless of the ro flag.
+//
+// transferDir is pre-created for container transfer signaling (phase 2-7);
+// mounted rw at /transfer.
+//
+// libraryPath is the legacy per-bundle library from phase 2-5; used when
+// libDir is empty (pre-store bundles).
+func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir, workerMount string) (binds []string, mounts []mount.Mount) {
+	// Choose the library path: prefer store-assembled libDir over legacy libraryPath.
+	effectiveLib := libDir
+	libMount := "/blockyard-lib-store"
+	if effectiveLib == "" {
+		effectiveLib = libraryPath
+		libMount = "/blockyard-lib"
+	}
+
 	if mc.Mode == MountModeVolume {
 		mounts = []mount.Mount{
 			mc.volumeMount(workerMount, true, bundlePath),
 		}
-		if libraryPath != "" {
-			mounts = append(mounts, mc.volumeMount("/blockyard-lib", true, libraryPath))
+		if effectiveLib != "" {
+			mounts = append(mounts, mc.volumeMount(libMount, true, effectiveLib))
+		}
+		if transferDir != "" {
+			mounts = append(mounts, mc.volumeMount("/transfer", false, transferDir))
 		}
 		return nil, mounts
 	}
 
 	// Native or Bind mode — use bind mounts.
 	bp := bundlePath
-	lp := libraryPath
+	lp := effectiveLib
+	tp := transferDir
 	if mc.Mode == MountModeBind {
 		bp = mc.toHostPath(bundlePath)
-		lp = mc.toHostPath(libraryPath)
+		if lp != "" {
+			lp = mc.toHostPath(lp)
+		}
+		if tp != "" {
+			tp = mc.toHostPath(tp)
+		}
 	}
 
 	binds = []string{
 		bp + ":" + workerMount + ":ro",
 	}
-	if libraryPath != "" {
-		binds = append(binds, lp+":/blockyard-lib:ro")
+	if lp != "" {
+		binds = append(binds, lp+":"+libMount+":ro")
+	}
+	if tp != "" {
+		binds = append(binds, tp+":/transfer")
 	}
 	return binds, nil
 }

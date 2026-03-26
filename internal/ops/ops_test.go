@@ -2,6 +2,8 @@ package ops
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
 )
@@ -83,6 +86,27 @@ func TestEvictWorkerIdempotent(t *testing.T) {
 
 	EvictWorker(context.Background(), srv, "w1")
 	EvictWorker(context.Background(), srv, "w1") // must not panic
+}
+
+func TestEvictWorkerCleansUpPkgStore(t *testing.T) {
+	srv, be := testServer(t)
+	spawnWorker(t, srv, be, "w1", "app1")
+
+	// Set up a PkgStore with a worker library directory.
+	store := pkgstore.NewStore(filepath.Join(srv.Config.Storage.BundleServerPath, ".pkg-store"))
+	store.SetPlatform("4.5-x86_64-pc-linux-gnu")
+	srv.PkgStore = store
+
+	workerLib := store.WorkerLibDir("w1")
+	os.MkdirAll(workerLib, 0o755)
+	os.WriteFile(filepath.Join(workerLib, "marker"), []byte("x"), 0o644)
+
+	EvictWorker(context.Background(), srv, "w1")
+
+	// Worker library should be removed.
+	if _, err := os.Stat(workerLib); !os.IsNotExist(err) {
+		t.Error("worker lib dir should be removed after eviction")
+	}
 }
 
 func TestStartupCleanupRemovesOrphans(t *testing.T) {

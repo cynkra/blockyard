@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -31,6 +33,17 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 	srv.Sessions.DeleteByWorker(workerID)
 	srv.LogStore.MarkEnded(workerID)
 	telemetry.SessionsActive.Sub(float64(sessionCount))
+
+	// Clean up worker library from the package store.
+	if srv.PkgStore != nil {
+		if err := srv.PkgStore.CleanupWorkerLib(workerID); err != nil {
+			slog.Warn("evict: failed to clean worker lib",
+				"worker_id", workerID, "error", err)
+		}
+	}
+	// Clean up transfer directory.
+	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", workerID)
+	_ = os.RemoveAll(transferDir)
 }
 
 // StartupCleanup removes orphaned resources and fails stale builds.

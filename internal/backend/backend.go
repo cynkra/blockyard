@@ -37,7 +37,9 @@ type WorkerSpec struct {
 	Image       string
 	Cmd         []string          // container command; nil = use image entrypoint
 	BundlePath  string            // server-side path to unpacked bundle
-	LibraryPath string            // server-side path to restored R library
+	LibraryPath string            // server-side path to restored R library (legacy, phase 2-5)
+	LibDir      string            // server-side path to per-worker lib dir from store; empty if no store
+	TransferDir string            // server-side path to per-worker transfer dir (phase 2-7)
 	WorkerMount string            // in-container mount point (BundleWorkerPath)
 	ShinyPort   int
 	MemoryLimit string            // e.g. "512m", "" if unset

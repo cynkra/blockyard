@@ -8,5 +8,5 @@ coverage:
         informational: true
 
 ignore:
-  - "cmd/**"                        # main() wiring — not unit-testable
+  - "cmd/blockyard/**"              # main() server wiring — not unit-testable
   - "internal/testutil/**"          # test helpers only

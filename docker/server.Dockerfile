@@ -9,6 +9,7 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 
 RUN CGO_ENABLED=0 go build -o /blockyard ./cmd/blockyard
+RUN CGO_ENABLED=0 go build -o /by-builder ./cmd/by-builder
 
 FROM debian:bookworm-slim
 
@@ -18,6 +19,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /blockyard /usr/local/bin/blockyard
+COPY --from=builder /by-builder /usr/local/lib/blockyard/by-builder
 COPY blockyard.toml /etc/blockyard/blockyard.toml
 
 EXPOSE 8080

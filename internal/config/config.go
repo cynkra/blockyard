@@ -51,11 +51,12 @@ type ServerConfig struct {
 }
 
 type DockerConfig struct {
-	Socket         string `toml:"socket"`
-	Image          string `toml:"image"`
-	ShinyPort      int    `toml:"shiny_port"`
-	PakVersion     string `toml:"pak_version"` // "stable" (default), or pinned version
-	ServiceNetwork string `toml:"service_network"` // Docker network whose containers are made reachable from workers
+	Socket         string   `toml:"socket"`
+	Image          string   `toml:"image"`
+	ShinyPort      int      `toml:"shiny_port"`
+	PakVersion     string   `toml:"pak_version"`     // "stable" (default), or pinned version
+	ServiceNetwork string   `toml:"service_network"` // Docker network whose containers are made reachable from workers
+	StoreRetention Duration `toml:"store_retention"`  // 0 = disabled (store grows indefinitely)
 }
 
 type StorageConfig struct {

@@ -90,20 +90,23 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			actorSub = caller.Sub
 		}
 		bundle.SpawnRestore(bundle.RestoreParams{
-			Backend:      srv.Backend,
-			DB:           srv.DB,
-			Tasks:        srv.Tasks,
-			Sender:       sender,
-			AppID:        app.ID,
-			BundleID:     bundleID,
-			Paths:        paths,
-			Image:        srv.Config.Docker.Image,
-			PakVersion:   srv.Config.Docker.PakVersion,
-			PakCachePath: filepath.Join(srv.Config.Storage.BundleServerPath, ".pak-cache"),
-			Retention:    srv.Config.Storage.BundleRetention,
-			BasePath:     srv.Config.Storage.BundleServerPath,
-			AuditLog:     srv.AuditLog,
-			AuditActor:   actorSub,
+			Backend:          srv.Backend,
+			DB:               srv.DB,
+			Tasks:            srv.Tasks,
+			Sender:           sender,
+			AppID:            app.ID,
+			BundleID:         bundleID,
+			Paths:            paths,
+			Image:            srv.Config.Docker.Image,
+			PakVersion:       srv.Config.Docker.PakVersion,
+			PakCachePath:     filepath.Join(srv.Config.Storage.BundleServerPath, ".pak-cache"),
+			BuilderVersion:   srv.Version,
+			BuilderCachePath: filepath.Join(srv.Config.Storage.BundleServerPath, ".by-builder-cache"),
+			Retention:        srv.Config.Storage.BundleRetention,
+			BasePath:         srv.Config.Storage.BundleServerPath,
+			Store:            srv.PkgStore,
+			AuditLog:         srv.AuditLog,
+			AuditActor:       actorSub,
 		})
 
 		telemetry.BundlesUploaded.Inc()

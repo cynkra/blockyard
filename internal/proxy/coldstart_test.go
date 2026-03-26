@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
 )
@@ -845,5 +848,82 @@ func TestHasAvailableWorkerFalseDraining(t *testing.T) {
 
 	if hasAvailableWorker(srv, "app1") {
 		t.Error("expected hasAvailableWorker to return false when draining")
+	}
+}
+
+// TestSpawnWorkerWithPkgStore verifies that spawnWorker assembles a
+// per-worker library from the package store when a store-manifest exists.
+func TestSpawnWorkerWithPkgStore(t *testing.T) {
+	srv := testColdstartServer(t)
+	tmp := srv.Config.Storage.BundleServerPath
+
+	// Set up the package store with one entry.
+	store := pkgstore.NewStore(filepath.Join(tmp, ".pkg-store"))
+	store.SetPlatform("4.5-x86_64-pc-linux-gnu")
+	srv.PkgStore = store
+
+	storePath := store.Path("shiny", "src1", "cfg1")
+	os.MkdirAll(storePath, 0o755)
+	os.WriteFile(filepath.Join(storePath, "DESCRIPTION"),
+		[]byte("Package: shiny\n"), 0o644)
+	// Create config sidecar for Touch.
+	os.WriteFile(store.ConfigMetaPath("shiny", "src1", "cfg1"),
+		[]byte(`{"created_at":"2020-01-01T00:00:00Z"}`), 0o644)
+
+	app := createTestApp(t, srv, "my-app", true)
+
+	// Write store-manifest.json inside the bundle's base dir.
+	// createTestApp only sets DB state; we need to create the
+	// filesystem directory that spawnWorker reads the manifest from.
+	appDir := filepath.Join(tmp, app.ID)
+	os.MkdirAll(appDir, 0o755)
+	manifest := map[string]string{"shiny": "src1/cfg1"}
+	data, _ := json.Marshal(manifest)
+	os.WriteFile(filepath.Join(appDir, "store-manifest.json"), data, 0o644)
+
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Per-worker library should be assembled.
+	libDir := store.WorkerLibDir(wid)
+	desc := filepath.Join(libDir, "shiny", "DESCRIPTION")
+	if _, err := os.Stat(desc); err != nil {
+		t.Error("DESCRIPTION not found in assembled worker library")
+	}
+
+	// .packages.json should have been written.
+	pm, err := pkgstore.ReadPackageManifest(libDir)
+	if err != nil {
+		t.Fatalf("read package manifest: %v", err)
+	}
+	if pm["shiny"] != "src1/cfg1" {
+		t.Errorf("manifest entry: %q", pm["shiny"])
+	}
+}
+
+// TestSpawnWorkerWithPkgStoreNoManifest verifies graceful fallback when
+// the bundle has no store-manifest (pre-store bundle).
+func TestSpawnWorkerWithPkgStoreNoManifest(t *testing.T) {
+	srv := testColdstartServer(t)
+	tmp := srv.Config.Storage.BundleServerPath
+
+	store := pkgstore.NewStore(filepath.Join(tmp, ".pkg-store"))
+	store.SetPlatform("4.5-x86_64-pc-linux-gnu")
+	srv.PkgStore = store
+
+	app := createTestApp(t, srv, "my-app", true)
+
+	// No store-manifest.json — should fall back to legacy library path.
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker lib dir should NOT exist (fell back to legacy).
+	libDir := store.WorkerLibDir(wid)
+	if _, err := os.Stat(libDir); !os.IsNotExist(err) {
+		t.Error("worker lib dir should not exist for pre-store bundle")
 	}
 }
