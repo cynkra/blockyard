@@ -3,6 +3,7 @@ package pkgstore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,8 +19,9 @@ func TestCreateStagingDir(t *testing.T) {
 		t.Fatalf("staging dir should exist: %v", err)
 	}
 	// Should be under store root.
-	if !filepath.HasPrefix(dir, filepath.Join(root, ".staging")) {
-		t.Errorf("dir = %q, expected under %q", dir, filepath.Join(root, ".staging"))
+	expected := filepath.Join(root, ".staging")
+	if !strings.HasPrefix(dir, expected) {
+		t.Errorf("dir = %q, expected under %q", dir, expected)
 	}
 }
 

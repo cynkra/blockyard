@@ -284,7 +284,7 @@ func (srv *Server) linkNewPackages(
 			if workerManifest[pkg] == ref {
 				continue
 			}
-			os.RemoveAll(destPath)
+			os.RemoveAll(destPath) //nolint:errcheck
 		}
 
 		out, err := exec.Command("cp", "-al", storePath, destPath).CombinedOutput()

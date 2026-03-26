@@ -81,7 +81,7 @@ func (srv *Server) watchTransfer(
 	// a stale board.json from being picked up by a subsequent transfer.
 	slog.Error("transfer timeout",
 		"worker_id", workerID, "app_id", appID)
-	os.RemoveAll(transferDir)
+	os.RemoveAll(transferDir) //nolint:errcheck
 }
 
 // completeTransfer assembles a new library, spawns a new worker, reroutes

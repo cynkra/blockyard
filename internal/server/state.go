@@ -125,14 +125,14 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 // AuthDeps returns an auth.Deps populated from this server's fields.
 // Used by the router to wire auth handlers and middleware without a
 // circular import.
-func (s *Server) AuthDeps() *auth.Deps {
+func (srv *Server) AuthDeps() *auth.Deps {
 	return &auth.Deps{
-		Config:       s.Config,
-		OIDCClient:   s.OIDCClient,
-		SigningKey:    s.SigningKey,
-		UserSessions: s.UserSessions,
-		AuditLog:     s.AuditLog,
-		DB:           s.DB,
+		Config:       srv.Config,
+		OIDCClient:   srv.OIDCClient,
+		SigningKey:    srv.SigningKey,
+		UserSessions: srv.UserSessions,
+		AuditLog:     srv.AuditLog,
+		DB:           srv.DB,
 	}
 }
 

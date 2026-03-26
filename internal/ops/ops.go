@@ -69,7 +69,7 @@ func StartupCleanup(ctx context.Context, srv *server.Server) error {
 		entries, _ := os.ReadDir(stagingDir)
 		for _, e := range entries {
 			if e.IsDir() {
-				os.RemoveAll(filepath.Join(stagingDir, e.Name()))
+				os.RemoveAll(filepath.Join(stagingDir, e.Name())) //nolint:errcheck
 			}
 		}
 	}
@@ -79,7 +79,7 @@ func StartupCleanup(ctx context.Context, srv *server.Server) error {
 	transferEntries, _ := os.ReadDir(transferBaseDir)
 	for _, e := range transferEntries {
 		if e.IsDir() {
-			os.RemoveAll(filepath.Join(transferBaseDir, e.Name()))
+			os.RemoveAll(filepath.Join(transferBaseDir, e.Name())) //nolint:errcheck
 		}
 	}
 
@@ -88,7 +88,7 @@ func StartupCleanup(ctx context.Context, srv *server.Server) error {
 	entries, _ := os.ReadDir(tokenBaseDir)
 	for _, e := range entries {
 		if e.IsDir() {
-			os.RemoveAll(filepath.Join(tokenBaseDir, e.Name()))
+			os.RemoveAll(filepath.Join(tokenBaseDir, e.Name())) //nolint:errcheck
 		}
 	}
 

@@ -351,13 +351,13 @@ func runRestore(p RestoreParams) error {
 	return nil
 }
 
-// buildCommand returns the R command that runs inside the build container.
+// BuildCommand returns the R command that runs inside the build container.
 // The four-phase store-aware build script:
 //   - Phase 1: lockfile_create (pak resolves + solves)
 //   - Phase 2: by-builder store populate (pre-populate from store)
 //   - Phase 3: lockfile_install (install store misses)
 //   - Phase 4: by-builder store ingest (ingest into store)
-// BuildCommand returns the R command for the store-aware build container.
+//
 // Exported for use by the refresh pipeline (server/refresh.go).
 func BuildCommand() []string {
 	rScript := `
