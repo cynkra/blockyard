@@ -58,7 +58,7 @@ jobs:
       - uses: golangci/golangci-lint-action@v7
       - name: Check for known vulnerabilities
         run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
-      - run: go test -coverprofile=coverage-check.out ./...
+      - run: go test -coverprofile=coverage-check.out ./internal/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-check
@@ -74,7 +74,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: docker pull alpine:latest && docker pull ghcr.io/rocker-org/r-ver:latest && docker pull ghcr.io/rocker-org/r-ver:4.4.3
-      - run: sudo --preserve-env=PATH go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./... ./...
+      - run: sudo --preserve-env=PATH go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/... ./internal/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker
@@ -90,7 +90,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: docker pull quay.io/keycloak/keycloak:26.0
-      - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./... ./internal/auth/...
+      - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./internal/... ./internal/auth/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-idp
@@ -106,7 +106,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: docker pull ghcr.io/openbao/openbao:latest
-      - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./... ./internal/integration/...
+      - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./internal/... ./internal/integration/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-openbao
