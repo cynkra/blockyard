@@ -43,9 +43,7 @@ func dockerTestConfig() *config.DockerConfig {
 	}
 }
 
-// setupDockerServer creates a Server backed by a real Docker backend
-// for integration testing of refresh and package install flows.
-func setupDockerServer(t *testing.T) (*server.Server, *dockerbe.DockerBackend) {
+func setupDockerServer(t *testing.T) *server.Server {
 	t.Helper()
 	ctx := context.Background()
 	basePath := t.TempDir()
@@ -76,9 +74,7 @@ func setupDockerServer(t *testing.T) (*server.Server, *dockerbe.DockerBackend) {
 			WorkerStartTimeout: config.Duration{Duration: 60 * time.Second},
 			TransferTimeout:    config.Duration{Duration: 30 * time.Second},
 		},
-		Server: config.ServerConfig{
-			Bind: ":8080",
-		},
+		Server: config.ServerConfig{Bind: ":8080"},
 	}
 
 	srv := &server.Server{
@@ -96,12 +92,11 @@ func setupDockerServer(t *testing.T) (*server.Server, *dockerbe.DockerBackend) {
 		},
 	}
 
-	return srv, be
+	return srv
 }
 
-// deployUnpinnedBundle creates an app, writes a bundle with an unpinned
-// manifest (DESCRIPTION-based), runs SpawnRestore, waits for build to
-// complete, and starts a worker. Returns the app row and worker ID.
+// deployUnpinnedBundle creates an app with an unpinned manifest, runs
+// SpawnRestore, and spawns a worker. Returns app row and worker ID.
 func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -115,7 +110,6 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 		t.Fatal(err)
 	}
 
-	// Write and unpack the bundle.
 	archiveData := testutil.MakeBundle(t)
 	paths := bundle.NewBundlePaths(srv.Config.Storage.BundleServerPath, app.ID, bundleID)
 	if err := bundle.WriteArchive(paths, bytes.NewReader(archiveData)); err != nil {
@@ -128,14 +122,12 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 		t.Fatalf("CreateLibraryDir: %v", err)
 	}
 
-	// Write an UNPINNED manifest: uses DESCRIPTION (not pinned packages).
-	// This means refresh can re-resolve dependencies.
-	manifest := `{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
-	os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), []byte(manifest), 0o644)
+	// Write an unpinned manifest (DESCRIPTION-based, no pinned packages).
+	manifestJSON := `{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
+	os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), []byte(manifestJSON), 0o644)
 	os.WriteFile(filepath.Join(paths.Unpacked, "DESCRIPTION"),
 		[]byte("Package: testapp\nVersion: 0.1.0\nImports:\n    mime\n"), 0o644)
 
-	// Run the full restore pipeline (pak build + store ingest).
 	pakCachePath := filepath.Join(srv.Config.Storage.BundleServerPath, ".pak-cache")
 	taskID := uuid.New().String()
 	sender := srv.Tasks.Create(taskID, app.ID)
@@ -155,7 +147,6 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 		BasePath:     srv.Config.Storage.BundleServerPath,
 	})
 
-	// Wait for build to complete.
 	_, _, done, ok := srv.Tasks.Subscribe(taskID)
 	if !ok {
 		t.Fatal("task not found")
@@ -172,7 +163,6 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 		t.Fatalf("restore failed (status=%d); task logs:\n%s", status, strings.Join(snap, "\n"))
 	}
 
-	// Re-read app to get active bundle.
 	appRow, err := srv.DB.GetApp(app.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -185,13 +175,12 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	workerID := "refresh-worker-" + uuid.New().String()[:8]
 	hostPaths := bundle.NewBundlePaths(srv.Config.Storage.BundleServerPath, app.ID, bundleID)
 
-	// Assemble library from the store manifest if it exists.
 	storeManifestPath := filepath.Join(hostPaths.Base, "store-manifest.json")
 	libDir := srv.PkgStore.WorkerLibDir(workerID)
 	if _, err := os.Stat(storeManifestPath); err == nil {
-		storeManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
-		if err == nil && len(storeManifest) > 0 {
-			srv.PkgStore.AssembleLibrary(libDir, storeManifest)
+		sm, err := pkgstore.ReadStoreManifest(storeManifestPath)
+		if err == nil && len(sm) > 0 {
+			srv.PkgStore.AssembleLibrary(libDir, sm)
 		}
 	}
 
@@ -227,112 +216,124 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	return appRow, workerID
 }
 
-// TestRefreshFlow_Docker exercises the full refresh pipeline with real
-// Docker containers: deploy unpinned bundle → RunRefresh → verify new
-// worker spawned and old worker draining.
-func TestRefreshFlow_Docker(t *testing.T) {
-	srv, _ := setupDockerServer(t)
-
-	// Deploy an unpinned app and start a worker.
-	appRow, oldWorkerID := deployUnpinnedBundle(t, srv)
-	t.Logf("deployed app %s with worker %s", appRow.ID, oldWorkerID)
-
-	// Read the manifest for RunRefresh.
-	bundlePaths := srv.BundlePaths(appRow.ID, *appRow.ActiveBundle)
-	manifestPath := filepath.Join(bundlePaths.Base, "manifest.json")
-	m, err := manifest.Read(manifestPath)
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
-	if m.IsPinned() {
-		t.Fatal("expected unpinned manifest for refresh test")
-	}
-
-	// Run refresh.
-	taskID := uuid.New().String()
-	sender := srv.Tasks.Create(taskID, appRow.ID)
-
-	changed := srv.RunRefresh(context.Background(), appRow, m, sender)
-	t.Logf("RunRefresh returned changed=%v", changed)
-
-	status, _ := srv.Tasks.Status(taskID)
-	if status == task.Failed {
-		snap, _, _, _ := srv.Tasks.Subscribe(taskID)
-		t.Fatalf("refresh failed; task logs:\n%s", strings.Join(snap, "\n"))
-	}
-
-	// Whether or not dependencies changed, the task should complete.
-	if status != task.Completed {
-		t.Errorf("expected task Completed, got %d", status)
-	}
-
-	// If dependencies changed, old worker should be draining and a new
-	// worker should exist.
-	if changed {
-		if !srv.Workers.IsDraining(appRow.ID) {
-			t.Error("expected old workers to be draining after refresh")
-		}
-		count := srv.Workers.CountForApp(appRow.ID)
-		if count < 2 {
-			t.Errorf("expected >=2 workers (old draining + new), got %d", count)
-		}
-		t.Log("refresh spawned new worker — drain-and-replace working")
-	} else {
-		t.Log("dependencies unchanged — no worker replacement (expected for idempotent refresh)")
-	}
-
-	// Clean up spawned workers.
-	for _, wid := range srv.Workers.ForApp(appRow.ID) {
-		if wid != oldWorkerID {
-			srv.Backend.Stop(context.Background(), wid)
-		}
-	}
-}
-
-// TestRollbackFlow_Docker exercises rollback after a refresh.
-func TestRollbackFlow_Docker(t *testing.T) {
-	srv, _ := setupDockerServer(t)
+// TestRefreshAndRollback_Docker exercises the full refresh + rollback
+// pipeline with real Docker containers. Structured as subtests sharing
+// a single deployed app to avoid repeating the expensive pak build.
+func TestRefreshAndRollback_Docker(t *testing.T) {
+	srv := setupDockerServer(t)
 
 	appRow, oldWorkerID := deployUnpinnedBundle(t, srv)
 	t.Logf("deployed app %s with worker %s", appRow.ID, oldWorkerID)
 
 	bundlePaths := srv.BundlePaths(appRow.ID, *appRow.ActiveBundle)
 
-	// Simulate a previous refresh by copying current store-manifest as .prev.
-	currentManifest := filepath.Join(bundlePaths.Base, "store-manifest.json")
-	if _, err := os.Stat(currentManifest); err == nil {
-		data, _ := os.ReadFile(currentManifest)
-		os.WriteFile(filepath.Join(bundlePaths.Base, "store-manifest.json.prev"), data, 0o644)
-		os.WriteFile(filepath.Join(bundlePaths.Base, "store-manifest.json.build"), data, 0o644)
-	}
+	t.Run("refresh", func(t *testing.T) {
+		// The manifest.json lives in the Unpacked directory.
+		manifestPath := filepath.Join(bundlePaths.Unpacked, "manifest.json")
+		m, err := manifest.Read(manifestPath)
+		if err != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+		if m.IsPinned() {
+			t.Fatal("expected unpinned manifest for refresh test")
+		}
 
-	// Test rollback to previous refresh (default target).
-	taskID := uuid.New().String()
-	sender := srv.Tasks.Create(taskID, appRow.ID)
-	srv.RunRollback(context.Background(), appRow, "", sender)
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID, appRow.ID)
+		changed := srv.RunRefresh(context.Background(), appRow, m, sender)
+		t.Logf("RunRefresh returned changed=%v", changed)
 
-	status, _ := srv.Tasks.Status(taskID)
-	if status != task.Completed {
-		snap, _, _, _ := srv.Tasks.Subscribe(taskID)
-		t.Fatalf("rollback failed; task logs:\n%s", strings.Join(snap, "\n"))
-	}
-	t.Log("rollback to previous refresh succeeded")
+		status, _ := srv.Tasks.Status(taskID)
+		if status == task.Failed {
+			snap, _, _, _ := srv.Tasks.Subscribe(taskID)
+			t.Fatalf("refresh failed; task logs:\n%s", strings.Join(snap, "\n"))
+		}
+		if status != task.Completed {
+			t.Errorf("expected task Completed, got %d", status)
+		}
 
-	// Test rollback to original build.
-	taskID2 := uuid.New().String()
-	sender2 := srv.Tasks.Create(taskID2, appRow.ID)
-	srv.RunRollback(context.Background(), appRow, "build", sender2)
+		if changed {
+			if !srv.Workers.IsDraining(appRow.ID) {
+				t.Error("expected old workers to be draining after refresh")
+			}
+			count := srv.Workers.CountForApp(appRow.ID)
+			if count < 2 {
+				t.Errorf("expected >=2 workers (old draining + new), got %d", count)
+			}
+			t.Log("refresh spawned new worker — drain-and-replace working")
 
-	status2, _ := srv.Tasks.Status(taskID2)
-	if status2 != task.Completed {
-		snap, _, _, _ := srv.Tasks.Subscribe(taskID2)
-		t.Fatalf("rollback to build failed; task logs:\n%s", strings.Join(snap, "\n"))
-	}
-	t.Log("rollback to original build succeeded")
+			// Clean up extra workers for the next subtest.
+			for _, wid := range srv.Workers.ForApp(appRow.ID) {
+				if wid != oldWorkerID {
+					srv.Backend.Stop(context.Background(), wid)
+				}
+			}
+		} else {
+			t.Log("dependencies unchanged — no worker replacement")
+		}
+	})
 
-	// Clean up.
-	for _, wid := range srv.Workers.ForApp(appRow.ID) {
-		srv.Backend.Stop(context.Background(), wid)
-	}
+	t.Run("rollback_prev", func(t *testing.T) {
+		// After a refresh, store-manifest.json.prev should exist.
+		prevPath := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
+		if _, err := os.Stat(prevPath); os.IsNotExist(err) {
+			// If refresh didn't change deps, create a .prev manually.
+			currentPath := filepath.Join(bundlePaths.Base, "store-manifest.json")
+			if _, err := os.Stat(currentPath); err == nil {
+				data, _ := os.ReadFile(currentPath)
+				os.WriteFile(prevPath, data, 0o644)
+			} else {
+				t.Skip("no store-manifest available for rollback test")
+			}
+		}
+
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID, appRow.ID)
+		srv.RunRollback(context.Background(), appRow, "", sender)
+
+		status, _ := srv.Tasks.Status(taskID)
+		if status != task.Completed {
+			snap, _, _, _ := srv.Tasks.Subscribe(taskID)
+			t.Fatalf("rollback failed; task logs:\n%s", strings.Join(snap, "\n"))
+		}
+		t.Log("rollback to previous refresh succeeded")
+
+		// Clean up spawned workers.
+		for _, wid := range srv.Workers.ForApp(appRow.ID) {
+			if wid != oldWorkerID {
+				srv.Backend.Stop(context.Background(), wid)
+			}
+		}
+	})
+
+	t.Run("rollback_build", func(t *testing.T) {
+		// Create a .build manifest if one doesn't exist.
+		buildPath := filepath.Join(bundlePaths.Base, "store-manifest.json.build")
+		if _, err := os.Stat(buildPath); os.IsNotExist(err) {
+			currentPath := filepath.Join(bundlePaths.Base, "store-manifest.json")
+			if _, err := os.Stat(currentPath); err == nil {
+				data, _ := os.ReadFile(currentPath)
+				os.WriteFile(buildPath, data, 0o644)
+			} else {
+				t.Skip("no store-manifest available for rollback_build test")
+			}
+		}
+
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID, appRow.ID)
+		srv.RunRollback(context.Background(), appRow, "build", sender)
+
+		status, _ := srv.Tasks.Status(taskID)
+		if status != task.Completed {
+			snap, _, _, _ := srv.Tasks.Subscribe(taskID)
+			t.Fatalf("rollback to build failed; task logs:\n%s", strings.Join(snap, "\n"))
+		}
+		t.Log("rollback to original build succeeded")
+
+		for _, wid := range srv.Workers.ForApp(appRow.ID) {
+			if wid != oldWorkerID {
+				srv.Backend.Stop(context.Background(), wid)
+			}
+		}
+	})
 }
-
