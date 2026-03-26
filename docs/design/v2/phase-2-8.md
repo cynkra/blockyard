@@ -1,4 +1,4 @@
-# Phase 2-8b: Web UI Expansion
+# Phase 2-8: Web UI Expansion
 
 Restructures the single-page dashboard into a multi-page layout with
 persistent left navigation, adds a per-app management sidebar, and
@@ -6,12 +6,246 @@ improves operational visibility. Server-rendered HTML with htmx for
 dynamic fragment loading. No JavaScript framework.
 
 Depends on phases 2-2 (rollback, soft-delete), 2-3 (pre-warming config),
-2-7 (refresh API), and **2-8a (backend prerequisites)** which provides
-the sessions table, per-session log infrastructure, deployment tracking
-columns, and new API endpoints that this phase's UI depends on.
+and 2-7 (refresh API).
 
 Content filtering (search + tag) is already implemented in the
 dashboard — this phase does not revisit it.
+
+## Sessions Table
+
+A new `sessions` table tracks the full chain: **user → app → worker →
+session → logs**. This enables the primary debugging workflow: "user X
+reported a problem" → find their session → read its logs.
+
+```sql
+CREATE TABLE sessions (
+    id          TEXT PRIMARY KEY,
+    app_id      TEXT NOT NULL REFERENCES apps(id),
+    worker_id   TEXT NOT NULL,
+    user_sub    TEXT,           -- NULL for public/unauthenticated apps
+    started_at  TEXT NOT NULL,
+    ended_at    TEXT,           -- NULL while active
+    status      TEXT NOT NULL DEFAULT 'active'  -- active / ended / crashed
+);
+
+CREATE INDEX idx_sessions_app_started ON sessions(app_id, started_at DESC);
+CREATE INDEX idx_sessions_user ON sessions(user_sub, app_id, started_at DESC);
+CREATE INDEX idx_sessions_worker ON sessions(worker_id, started_at DESC);
+```
+
+This table serves three purposes:
+
+1. **Logs** — per-session log drill-down (user → session → logs).
+2. **Activity metrics** — derived from session records:
+   - Total views: `COUNT(*) WHERE app_id = ?`
+   - Last 7 days: `COUNT(*) WHERE app_id = ? AND started_at >= ?`
+   - Unique visitors: `COUNT(DISTINCT user_sub) WHERE app_id = ?`
+   - Avg session duration: `AVG(ended_at - started_at) WHERE ended_at IS NOT NULL`
+3. **Debugging** — multiple lookup paths:
+   - By user: "alice had a crash" → filter by `user_sub`
+   - By worker: "worker is misbehaving" → filter by `worker_id`
+   - By status: "what crashed recently?" → filter by `status = 'crashed'`
+
+No separate `app_views` counter table is needed — all activity metrics
+are derived from sessions.
+
+## Bundle Schema Changes
+
+Add deployment tracking columns to the existing `bundles` table:
+
+```sql
+ALTER TABLE bundles ADD COLUMN deployed_by TEXT;
+ALTER TABLE bundles ADD COLUMN deployed_at TEXT;
+```
+
+- `deployed_by` — user_sub of the person who triggered the deployment
+  (upload or rollback). Set in `ActivateBundle()`.
+- `deployed_at` — timestamp of bundle activation (distinct from
+  `uploaded_at` which records the upload time before build).
+
+**Migration:** For existing bundles with status "ready", set
+`deployed_at = uploaded_at` and `deployed_by` to the app owner.
+Bundles with status "pending" or "failed" get NULL for both.
+
+## Session Lifecycle Tracking
+
+The proxy layer must create and update session records as it routes
+requests to workers.
+
+### Session Creation
+
+When the proxy assigns a user to a worker (new WebSocket connection or
+first HTTP request in a session), it:
+
+1. Generates a session ID.
+2. Inserts a row into `sessions` with status "active".
+3. Passes the session ID to the worker so it can tag log lines.
+
+```go
+// In the proxy's session assignment logic:
+sessionID := ulid.New()
+db.CreateSession(sessionID, appID, workerID, userSub)
+// Pass sessionID to worker via environment or header
+```
+
+### Session End
+
+When a session ends normally (WebSocket close, idle timeout):
+
+```go
+db.EndSession(sessionID, "ended")
+```
+
+### Session Crash
+
+When a worker crashes or is killed, all its active sessions are marked:
+
+```go
+db.CrashWorkerSessions(workerID)
+// UPDATE sessions SET status = 'crashed', ended_at = NOW()
+// WHERE worker_id = ? AND status = 'active'
+```
+
+## Per-Session Log Tagging
+
+Workers must tag log output with session IDs so logs can be stored and
+queried per-session.
+
+### Log Format
+
+Each log line is prefixed with the session ID:
+
+```
+[session:01ABC123] 2026-03-26T11:02:51Z stdout: Loading package...
+[session:01ABC123] 2026-03-26T11:02:52Z stderr: Warning: deprecated function
+```
+
+### Log Storage
+
+Log lines are written to per-session files or a structured log store
+keyed by session ID. The exact storage mechanism depends on the
+existing log infrastructure, but must support:
+
+- Retrieving all log lines for a given session ID.
+- Streaming new log lines for an active session.
+- Retention policy (e.g., 30 days).
+
+## API Endpoints
+
+### Deployments
+
+`GET /api/v1/deployments`
+
+Cross-app deployment listing. Queries bundles joined with apps,
+filtered by user role:
+
+- **admin** — all deployments.
+- **publisher** — deployments for own apps.
+- **viewer** — deployments for apps shared with them.
+
+Query parameters:
+- `page` (int, default 1)
+- `per_page` (int, default 25, max 100)
+- `search` (string, optional — filters by app name)
+
+Response:
+
+```json
+{
+  "deployments": [
+    {
+      "app_id": "...",
+      "app_name": "my-app",
+      "bundle_id": "01ABC...",
+      "deployed_by": "alice@company.com",
+      "deployed_at": "2026-03-26T10:00:00Z",
+      "status": "ready"
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "per_page": 25
+}
+```
+
+### Sessions
+
+`GET /api/v1/apps/{id}/sessions`
+
+List sessions for an app, most recent first. Default: last 50 sessions.
+
+Query parameters:
+- `user` (string, optional — filter by user_sub)
+- `status` (string, optional — filter by status)
+- `limit` (int, default 50, max 200)
+
+Response:
+
+```json
+{
+  "sessions": [
+    {
+      "id": "01ABC...",
+      "app_id": "...",
+      "worker_id": "w-a3f2...",
+      "user_sub": "alice@company.com",
+      "started_at": "2026-03-26T11:00:00Z",
+      "ended_at": "2026-03-26T11:15:00Z",
+      "status": "ended"
+    }
+  ]
+}
+```
+
+### Session Logs
+
+`GET /api/v1/apps/{id}/sessions/{sid}/logs`
+
+Historical logs for a completed or active session. Returns plain text.
+
+`GET /api/v1/apps/{id}/sessions/{sid}/logs?stream=true`
+
+Streams live logs for an active session via chunked transfer encoding.
+Connection stays open until the session ends or the client disconnects.
+
+### App Overview Data
+
+`GET /api/v1/apps/{id}` — extend existing response with:
+
+```json
+{
+  "active_sessions": 3,
+  "total_views": 1247,
+  "recent_views": 89,
+  "unique_visitors": 42,
+  "last_deployed_at": "2026-03-26T10:00:00Z"
+}
+```
+
+These are derived from the sessions table and bundle deployment
+columns. No additional storage needed.
+
+## Database Operations
+
+New DB methods:
+
+```go
+// Sessions
+CreateSession(id, appID, workerID, userSub string) error
+EndSession(id string, status string) error
+CrashWorkerSessions(workerID string) error
+ListSessions(appID string, opts SessionListOpts) ([]SessionRow, error)
+GetSession(id string) (*SessionRow, error)
+
+// Activity metrics (derived from sessions)
+CountSessions(appID string) (int, error)
+CountRecentSessions(appID string, since time.Time) (int, error)
+CountUniqueVisitors(appID string) (int, error)
+
+// Deployment tracking
+SetBundleDeployed(bundleID, deployedBy string) error
+ListDeployments(opts DeploymentListOpts) ([]DeploymentRow, int, error)
+```
 
 ## New Dependency
 
@@ -297,14 +531,14 @@ in a new tab. A close button (✕) dismisses the sidebar.
 
 ### Tabs
 
-Five tabs below the header. Each tab fetches its content via htmx on
+Six tabs below the header. Each tab fetches its content via htmx on
 click. The first tab (Overview) loads automatically when the sidebar
 opens.
 
 ```
-┌──────────┬──────────┬─────────┬─────────┬───────────────┐
-│ Overview │ Settings │ Runtime │ Bundles │ Collaborators │
-└──────────┴──────────┴─────────┴─────────┴───────────────┘
+┌──────────┬──────────┬─────────┬─────────┬───────────────┬──────┐
+│ Overview │ Settings │ Runtime │ Bundles │ Collaborators │ Logs │
+└──────────┴──────────┴─────────┴─────────┴───────────────┴──────┘
 ```
 
 ```html
@@ -324,6 +558,9 @@ opens.
     <button class="tab"
             hx-get="/ui/apps/{{.App.Name}}/tab/collaborators"
             hx-target="#tab-content">Collaborators</button>
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/logs"
+            hx-target="#tab-content">Logs</button>
 </nav>
 <div id="tab-content"></div>
 ```
@@ -395,8 +632,8 @@ needed since selection is already an intentional action.
 The default tab shown when the sidebar opens. Provides at-a-glance
 status for the app without requiring navigation to other tabs.
 
-| Section | Content | Data source (phase 2-8a) |
-|---------|---------|--------------------------|
+| Section | Content | Data source |
+|---------|---------|-------------|
 | Status | Deployment status (running / stopped / failed), last deployed timestamp | App status + `bundles.deployed_at` |
 | Workers | Active worker count, active session count | Worker map + `sessions` table |
 | Activity | Total sessions, last 7 days, unique visitors | Derived from `sessions` table |
@@ -621,8 +858,6 @@ Each grant shows the user and a role dropdown. A remove button
 
 **Endpoint:** `GET /ui/apps/{name}/tab/logs`
 
-Depends on the sessions table and per-session log API from phase 2-8a.
-
 The logs tab uses a user-centric drill-down. The default view lists
 recent sessions showing **who** connected, to **which worker**, with
 what **outcome** — enabling the primary debugging workflow: "user X
@@ -754,16 +989,15 @@ internal to the UI and not part of the public API contract.
 
 ## API Dependencies
 
-This phase consumes API endpoints. Backend implementation is split
-between existing code and phase 2-8a:
+This phase consumes the following API endpoints:
 
 | Method | Path | Provided by |
 |--------|------|-------------|
-| GET | `/api/v1/apps/{id}/sessions` | Phase 2-8a |
-| GET | `/api/v1/apps/{id}/sessions/{sid}/logs` | Phase 2-8a |
-| GET | `/api/v1/apps/{id}/sessions/{sid}/logs?stream=true` | Phase 2-8a |
-| GET | `/api/v1/deployments` | Phase 2-8a |
-| GET | `/api/v1/apps/{id}` (extended with session/activity data) | Phase 2-8a |
+| GET | `/api/v1/apps/{id}/sessions` | New (this phase) |
+| GET | `/api/v1/apps/{id}/sessions/{sid}/logs` | New (this phase) |
+| GET | `/api/v1/apps/{id}/sessions/{sid}/logs?stream=true` | New (this phase) |
+| GET | `/api/v1/deployments` | New (this phase) |
+| GET | `/api/v1/apps/{id}` (extended with session/activity data) | New (this phase) |
 | POST | `/api/v1/users/me/tokens` | Already implemented |
 | GET | `/api/v1/users/me/tokens` | Already implemented |
 | DELETE | `/api/v1/users/me/tokens/{id}` | Already implemented |
@@ -909,56 +1143,101 @@ Read-only mode hides edit controls and action buttons in the templates
 
 ## Deliverables
 
+**Backend:**
+
+1. **Database migration** — sessions table, bundle schema additions,
+   indexes.
+2. **Session lifecycle** — create/end/crash tracking in the proxy.
+3. **Per-session log tagging** — session ID in log lines, per-session
+   storage and retrieval.
+4. **Deployments API** — `GET /api/v1/deployments` with pagination
+   and role-based filtering.
+5. **Sessions API** — `GET /api/v1/apps/{id}/sessions` with filtering.
+6. **Session logs API** — historical retrieval and live streaming per
+   session.
+7. **App overview data** — extend app response with session counts,
+   activity metrics, last deployed timestamp.
+8. **Bundle deployment tracking** — populate `deployed_by` and
+   `deployed_at` on activation.
+
 **Navigation and pages:**
 
-1. **Left navigation** — persistent nav sidebar with Apps, Deployment
+9. **Left navigation** — persistent nav sidebar with Apps, Deployment
    History, API Keys, Profile links. Active page highlighting.
-2. **Apps page** — app grid with search/filter (migrated from
-   dashboard, credentials section removed).
-3. **Deployment History page** — cross-app deployment table with
-   search, pagination, role-based visibility (consumes 2-8a API).
-4. **API Keys page** — third-party credential management (migrated
-   from dashboard).
-5. **Profile page** — user identity, role display, sign out.
-6. **PAT management UI** — create, list, and revoke personal access
-   tokens on the Profile page (consumes existing PAT API).
+10. **Apps page** — app grid with search/filter (migrated from
+    dashboard, credentials section removed).
+11. **Deployment History page** — cross-app deployment table with
+    search, pagination, role-based visibility.
+12. **API Keys page** — third-party credential management (migrated
+    from dashboard).
+13. **Profile page** — user identity, role display, sign out.
+14. **PAT management UI** — create, list, and revoke personal access
+    tokens on the Profile page.
 
 **Per-app sidebar:**
 
-7. **htmx integration** — vendor htmx.min.js, add script tag to base
+15. **htmx integration** — vendor htmx.min.js, add script tag to base
     template.
-8. **Sidebar infrastructure** — sidebar container, overlay, open/close
+16. **Sidebar infrastructure** — sidebar container, overlay, open/close
     JS, responsive CSS transitions.
-9. **Gear icon on app cards** — opens sidebar via `hx-get`.
-10. **Overview tab** — status, workers, activity, and bundle summary
-    as the default landing tab (consumes 2-8a session/activity data).
-11. **Settings tab** — app metadata editing (title, description, tags),
+17. **Gear icon on app cards** — opens sidebar via `hx-get`.
+18. **Overview tab** — status, workers, activity, and bundle summary
+    as the default landing tab.
+19. **Settings tab** — app metadata editing (title, description, tags),
     per-field save with inline validation, soft-delete.
-12. **Runtime tab** — resource limits (memory with unit dropdown,
+20. **Runtime tab** — resource limits (memory with unit dropdown,
     step-constrained CPU), worker scaling, pre-warmed seats,
     start/stop controls.
-13. **Bundles tab** — bundle list, active indicator, rollback action,
+21. **Bundles tab** — bundle list, active indicator, rollback action,
     dependency refresh (unpinned only).
-14. **Collaborators tab** — access type dropdown, ACL grant/revoke
+22. **Collaborators tab** — access type dropdown, ACL grant/revoke
     management.
-15. **Logs tab** — user-centric per-session log viewer with session
+23. **Logs tab** — user-centric per-session log viewer with session
     table, user search, historical log display, and live streaming
-    for active sessions (consumes 2-8a session/log APIs).
+    for active sessions.
 
 **Cross-cutting:**
 
-16. **Fragment routes** — `/ui/apps/{name}/sidebar` and six tab
+24. **Fragment routes** — `/ui/apps/{name}/sidebar` and six tab
     endpoints plus session log endpoint, with authorization.
-17. **Template partials** — page templates + sidebar shell + six tab
+25. **Template partials** — page templates + sidebar shell + six tab
     templates + session log template.
-18. **CSS** — left nav, page layouts, sidebar, tabs, overview grid,
+26. **CSS** — left nav, page layouts, sidebar, tabs, overview grid,
     field editing, ACL table, log viewer, danger zone styles.
-19. **Authorization + read-only mode** — `CanEdit` flag in templates,
+27. **Authorization + read-only mode** — `CanEdit` flag in templates,
     role-based visibility across all pages and sidebar tabs.
 
 ## Implementation Steps
 
-### Step 1: htmx + Left Navigation + Page Restructure
+### Step 1: Database Migration
+
+Add sessions table and bundle columns. Write up/down migration for
+both SQLite and PostgreSQL.
+
+### Step 2: Session Lifecycle Tracking
+
+Instrument the proxy to create session records on assignment, end them
+on disconnect, and crash them on worker failure. Pass session ID to
+workers.
+
+### Step 3: Per-Session Log Tagging
+
+Modify worker log capture to tag lines with session IDs. Implement
+per-session log storage and retrieval.
+
+### Step 4: Bundle Deployment Tracking
+
+Update `ActivateBundle()` and rollback handlers to set `deployed_by`
+and `deployed_at`. Run backfill migration for existing bundles.
+
+### Step 5: API Endpoints
+
+Implement `GET /api/v1/deployments`, `GET /api/v1/apps/{id}/sessions`,
+`GET /api/v1/apps/{id}/sessions/{sid}/logs` (historical + streaming).
+Extend `GET /api/v1/apps/{id}` with session counts and activity
+metrics.
+
+### Step 6: htmx + Left Navigation + Page Restructure
 
 Vendor htmx.min.js. Modify `base.html` to include left nav and htmx
 script tag. Create `apps.html` (migrated from `dashboard.html`,
@@ -966,72 +1245,78 @@ credentials removed), `deployments.html`, `api_keys.html`, and
 `profile.html`. Register new page routes. Verify navigation between
 pages works.
 
-### Step 2: Deployment History Page
+### Step 7: Deployment History Page
 
 Build the deployment history table consuming
-`GET /api/v1/deployments` (from 2-8a). Search, pagination,
+`GET /api/v1/deployments`. Search, pagination,
 role-based visibility.
 
-### Step 3: API Keys Page
+### Step 8: API Keys Page
 
 Migrate credential management from the dashboard to its own page.
 Wire htmx form submissions (replacing the existing inline JS).
 
-### Step 4: Profile Page + PAT Management UI
+### Step 9: Profile Page + PAT Management UI
 
 Implement the profile page with identity display and sign out.
 Wire PAT management UI to existing PAT API: token creation form
 with one-time display, token table with revoke buttons.
 
-### Step 5: Sidebar Infrastructure
+### Step 10: Sidebar Infrastructure
 
 Add sidebar container to apps page template, open/close mechanics,
 responsive CSS. Wire the gear icon to open the sidebar via `hx-get`.
 Verify open/close/overlay works.
 
-### Step 6: Fragment Route Scaffolding
+### Step 11: Fragment Route Scaffolding
 
 Register `/ui/` routes in the router. Set up template parsing for
 partial templates. Implement the sidebar shell endpoint that returns
 header + tabs + loads the Overview tab.
 
-### Step 7: Overview Tab
+### Step 12: Overview Tab
 
 Implement the overview tab partial. Wire to extended app API
-(status, worker count, session count, activity metrics from 2-8a,
+(status, worker count, session count, activity metrics,
 active bundle).
 
-### Step 8: Settings Tab
+### Step 13: Settings Tab
 
 Implement the settings tab partial. Wire per-field save with inline
 validation for title, description. Add tag management. Add soft-delete
 button.
 
-### Step 9: Runtime Tab
+### Step 14: Runtime Tab
 
 Implement the runtime tab partial. Wire per-field save for resource
 limits (number + unit dropdown for memory, step-constrained CPU input).
 Add start/stop controls.
 
-### Step 10: Bundles Tab
+### Step 15: Bundles Tab
 
 Implement the bundles tab partial. List bundles with active indicator.
 Wire rollback button. Add refresh section for unpinned apps.
 
-### Step 11: Collaborators Tab
+### Step 16: Collaborators Tab
 
 Implement the collaborators tab partial. Wire access type dropdown
 with auto-save. Add ACL grant list with add/remove.
 
-### Step 12: Logs Tab
+### Step 17: Logs Tab
 
 Implement the logs tab partial with user-centric session table,
 user search filter, and drill-down. Wire session log viewer with
-historical fetch and live streaming JS. Consumes session and log
-APIs from 2-8a.
+historical fetch and live streaming JS.
 
-### Step 13: Authorization + Read-Only Mode
+### Step 18: Authorization + Read-Only Mode
 
 Add `CanEdit` flag to template data. Hide edit controls for viewers.
 Verify admin/publisher/viewer access patterns across all pages and
 sidebar tabs.
+
+### Step 19: Tests
+
+Integration tests for session lifecycle (create → end, create → crash).
+API tests for deployments listing, session listing, session log
+retrieval. UI handler tests for page and fragment routes. Verify
+role-based filtering and authorization.
