@@ -246,14 +246,25 @@ App metadata and resource configuration with per-field save.
 **Start / Stop controls:**
 
 ```html
-<div class="app-controls">
+<div class="app-controls"
+     hx-trigger="appStarted from:body, appStopped from:body"
+     hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+     hx-target="#tab-content">
     {{if eq .Status "running"}}
-    <button class="btn" hx-post="/api/v1/apps/{{.App.ID}}/stop">Stop</button>
+    <button class="btn" hx-post="/api/v1/apps/{{.App.ID}}/stop"
+            hx-swap="none">Stop</button>
     {{else}}
-    <button class="btn btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/start">Start</button>
+    <button class="btn btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/start"
+            hx-swap="none">Start</button>
     {{end}}
 </div>
 ```
+
+The API endpoints return JSON as usual. When the `HX-Request` header
+is present, they add an `HX-Trigger` response header (e.g.,
+`appStarted` or `appStopped`). The `hx-trigger` listener on the
+controls container re-fetches the settings tab to reflect the new
+state.
 
 **Soft-delete** at the bottom:
 
@@ -340,8 +351,16 @@ Non-active ready bundles have a rollback button:
         hx-post="/api/v1/apps/{{$.App.ID}}/rollback"
         hx-vals='{"bundle_id": "{{.ID}}"}'
         hx-confirm="Roll back to bundle {{.ID | truncate}}?"
-        hx-target="#tab-content"
-        hx-swap="innerHTML">Rollback</button>
+        hx-swap="none">Rollback</button>
+```
+
+The rollback API returns JSON with `HX-Trigger: bundleRolledBack`.
+The bundles tab container listens and re-fetches:
+
+```html
+<div id="tab-content"
+     hx-trigger="bundleRolledBack from:body"
+     hx-get="/ui/apps/{{.App.Name}}/tab/bundles">
 ```
 
 **Dependency refresh** (shown only for unpinned deployments, using
@@ -352,8 +371,11 @@ the `pinned` field on the active bundle from phase 2-8):
 <div class="refresh-section">
     <button class="btn"
             hx-post="/api/v1/apps/{{.App.ID}}/refresh"
-            hx-target="#refresh-status">Refresh dependencies</button>
-    <div id="refresh-status"></div>
+            hx-swap="none">Refresh dependencies</button>
+    <div id="refresh-status"
+         hx-trigger="refreshStarted from:body"
+         hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
+         hx-target="#tab-content"></div>
 </div>
 {{end}}
 ```
@@ -414,8 +436,7 @@ principal (OIDC subject) is shown instead.
     </table>
     <form class="acl-add-form"
           hx-post="/api/v1/apps/{{.App.ID}}/access"
-          hx-target=".acl-table tbody"
-          hx-swap="beforeend">
+          hx-swap="none">
         <input type="text" name="user" placeholder="Username or email" required>
         <select name="role">
             <option value="viewer">Viewer</option>
@@ -426,6 +447,11 @@ principal (OIDC subject) is shown instead.
 </div>
 {{end}}
 ```
+
+The grant API returns JSON with `HX-Trigger: accessGranted`. The ACL
+section listens and re-fetches the collaborators tab to show the new
+row with a resolved display name. The delete endpoint returns 204
+(empty), so `hx-swap="outerHTML"` removes the row directly.
 
 ### Logs Tab
 

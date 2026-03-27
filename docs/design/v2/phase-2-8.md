@@ -238,6 +238,7 @@ endpoint returning live operational data:
       "id": "w-a3f2...",
       "bundle_id": "01ABC...",
       "status": "active",
+      "started_at": "2026-03-26T10:55:00Z",
       "idle_since": null,
       "stats": {
         "cpu_percent": 12.5,
@@ -279,6 +280,42 @@ Implemented in `backend/docker/` using the Docker SDK's
 `ContainerStats` API call. Returns a point-in-time snapshot (not a
 stream). The mock backend returns zero values.
 
+The runtime endpoint also needs worker start time. Extend
+`server.ActiveWorker` to include `StartedAt time.Time`. Set this in
+`StartApp()` and in the proxy cold-start path when a new worker is
+spawned. The Logs tab (phase 2-11) uses worker start time to show
+"Since" in the worker list.
+
+#### Logs Stream Parameter
+
+`GET /api/v1/apps/{id}/logs` gains an optional `stream` query
+parameter (default `true`). When `stream=false`, the endpoint writes
+the historical log snapshot and closes the response immediately
+without subscribing to live updates.
+
+Phase 2-11's Logs tab uses this to pre-fill historical logs in the
+worker log viewer fragment (`stream=false`), with live streaming
+handled separately via JS `fetch()` with `stream=true`.
+
+#### htmx Content Negotiation
+
+The form-encoded PATCH (below) is one instance of a general pattern:
+when a request includes the `HX-Request` header, action endpoints
+return an `HX-Trigger` response header naming the event that occurred
+(e.g., `appStarted`, `accessGranted`) alongside the normal JSON body.
+htmx listeners on the page re-fetch the relevant fragment in response.
+
+This avoids having every action endpoint render HTML. The UI fragment
+routes (phase 2-11) listen for the triggered events and re-fetch the
+affected tab content. The specific event names are defined when the
+fragment routes are registered.
+
+Endpoints where this applies: `POST .../start`, `POST .../stop`,
+`POST .../rollback`, `POST .../access`, `POST .../refresh`.
+For `DELETE` actions (access revoke, app delete, token revoke) the
+existing 204 empty response works directly with htmx's
+`hx-swap="outerHTML"` to remove the target element.
+
 #### RBAC Tightening
 
 The following existing endpoints need stricter authorization:
@@ -288,6 +325,19 @@ The following existing endpoints need stricter authorization:
 | `GET /api/v1/apps/{id}/bundles` | any access | collaborator+ (`CanDeploy`) |
 | `POST /api/v1/apps/{id}/refresh` | any access | collaborator+ (`CanDeploy`) |
 | `POST /api/v1/apps/{id}/refresh/rollback` | any access | collaborator+ (`CanDeploy`) |
+
+#### App Rename
+
+`PATCH /api/v1/apps/{id}` with `name` field -- owner+ (`CanDelete`).
+
+Renaming changes the app's URL (`/app/{name}/`), so it requires owner+
+rather than collaborator+. The existing `validateAppName()` rules
+apply. Returns 409 if the new name conflicts with another live app.
+
+The `updateAppRequest` gains an optional `Name` field. The handler
+checks owner+ permission when `name` is present (same as `access_type`
+which checks `CanManageACL`). The DB layer adds `Name` to `AppUpdate`
+and includes it in the UPDATE query.
 
 #### Enable/Disable API
 
@@ -316,9 +366,9 @@ Without `?purge`, behavior is unchanged (soft-delete, owner+).
 
 `GET /api/v1/deployments` -- collaborator+ per-app.
 
-Cross-app deployment listing. Queries bundles joined with apps.
-Results are filtered to apps where the caller has collaborator+
-access (viewers are excluded).
+Cross-app deployment listing. Queries bundles joined with apps and
+the users table (for display names). Results are filtered to apps
+where the caller has collaborator+ access (viewers are excluded).
 
 Query parameters:
 - `page` (int, default 1)
@@ -338,6 +388,7 @@ Response:
       "app_name": "my-app",
       "bundle_id": "01ABC...",
       "deployed_by": "alice@company.com",
+      "deployed_by_name": "Alice Chen",
       "deployed_at": "2026-03-26T10:00:00Z",
       "status": "ready"
     }
@@ -416,7 +467,7 @@ CountSessions(appID string) (int, error)
 CountRecentSessions(appID string, since time.Time) (int, error)
 CountUniqueVisitors(appID string) (int, error)
 
-// Deployment tracking
+// Deployment tracking (DeploymentRow includes deployed_by_name from users join)
 SetBundleDeployed(bundleID, deployedBy string) error
 ListDeployments(opts DeploymentListOpts) ([]DeploymentRow, int, error)
 
@@ -450,7 +501,7 @@ owner+. Hard delete (purge) requires admin.
 |----------|------------------|
 | `GET /api/v1/apps/{id}` | any access (metadata only, no workers) |
 | `GET /api/v1/apps/{id}/runtime` | collaborator+ |
-| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`) |
+| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`); `name` field requires owner+ (`CanDelete`) |
 | `DELETE /api/v1/apps/{id}` | owner+ (`CanDelete`) |
 | `DELETE /api/v1/apps/{id}?purge=true` | admin only |
 | `GET /api/v1/apps/{id}/bundles` | collaborator+ (`CanDeploy`) |
@@ -489,8 +540,9 @@ owner+. Hard delete (purge) requires admin.
    `POST /apps/{id}/disable` endpoints, proxy and autoscaler checks.
 8. **Hard delete** -- `DELETE /apps/{id}?purge=true` endpoint
    (admin only, requires prior soft-delete).
-9. **Deployments API** -- `GET /api/v1/deployments` with pagination
-   and collaborator+ per-app filtering.
+9. **Deployments API** -- `GET /api/v1/deployments` with pagination,
+   collaborator+ per-app filtering, and `deployed_by_name` from users
+   table join.
 10. **Sessions API** -- `GET /api/v1/apps/{id}/sessions` with filtering.
 11. **Shared app resolution** -- extract `resolveApp()` and
     `resolveAppRelation()` to shared location for reuse by UI handlers.
@@ -498,6 +550,16 @@ owner+. Hard delete (purge) requires admin.
     form-encoded bodies, returns HTML fragments for htmx requests.
 13. **Collaborator display names** -- `ListAppAccessWithNames()` DB
     method joining `app_access` with `users`.
+14. **App rename** -- add `name` field to `PATCH /api/v1/apps/{id}`
+    with owner+ permission check and name validation/conflict handling.
+15. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
+    the runtime API and logs tab.
+16. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
+    `stream` query parameter (default `true`); `stream=false` returns
+    historical snapshot only.
+17. **htmx event triggers** -- action endpoints return `HX-Trigger`
+    response headers for htmx requests, enabling UI fragment re-fetch
+    without HTML rendering in the API layer.
 
 ## Implementation Steps
 
@@ -524,9 +586,11 @@ similarly. Run backfill migration for existing bundles.
 ### Step 4: Backend Interface + API Changes
 
 Add `ContainerStats()` to `Backend` interface. Implement in Docker
-backend. Add `GET /api/v1/apps/{id}/runtime` endpoint. Remove workers
-from `GetApp` response. Add per-app `relation` to list response.
-Tighten RBAC on `ListBundles`, `PostRefresh`, `PostRefreshRollback`.
+backend. Extend `ActiveWorker` with `StartedAt`. Add
+`GET /api/v1/apps/{id}/runtime` endpoint. Remove workers from
+`GetApp` response. Add per-app `relation` to list response. Tighten
+RBAC on `ListBundles`, `PostRefresh`, `PostRefreshRollback`. Add
+`stream` query parameter to `AppLogs`.
 
 ### Step 5: Enable/Disable + Hard Delete
 
@@ -543,7 +607,9 @@ filtering. Implement `GET /api/v1/apps/{id}/sessions`.
 
 Extract `resolveApp()` and `resolveAppRelation()` to shared location.
 Add form-encoded PATCH support to `UpdateApp` (dual JSON + form
-encoding, htmx fragment responses). Implement
+encoding, htmx fragment responses). Add `name` to `AppUpdate` with
+owner+ permission check and conflict detection. Add `HX-Trigger`
+response headers to action endpoints for htmx requests. Implement
 `ListAppAccessWithNames()` DB method.
 
 ### Step 8: Tests

@@ -153,7 +153,7 @@ A cross-app timeline of all deployments the user has visibility into
         <tr>
             <td>{{.AppName}}</td>
             <td class="monospace">{{.BundleID | truncate}}</td>
-            <td>{{.DeployedBy}}</td>
+            <td>{{.DeployedByName}}</td>
             <td>{{.DeployedAt | timeAgo}}</td>
             <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
         </tr>
@@ -193,8 +193,8 @@ full-page redirect with an inline fragment swap:
     </div>
     <form class="credential-form"
           hx-post="/api/v1/users/me/credentials/{{.ID}}"
-          hx-target="closest .credential-row"
-          hx-swap="outerHTML">
+          hx-swap="none"
+          hx-on::after-request="if(event.detail.successful) location.reload()">
         <input type="password" name="key" placeholder="Enter API key" required>
         <button type="submit" class="btn btn-sm">Save</button>
     </form>
