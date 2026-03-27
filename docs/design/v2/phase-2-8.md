@@ -221,12 +221,66 @@ viewers should only see app metadata.
 The `workers` field is **removed** from this response. The `enabled`
 field is added. The `relation` field is added (see below).
 
-**`GET /api/v1/apps`** -- list apps. Each app in the response includes
-a `relation` field indicating the caller's access level (`"viewer"`,
-`"collaborator"`, `"owner"`, `"admin"`). This is computed during the
-existing access-filtering query (which already evaluates access) and
-avoids N+1 lookups when the UI needs to know per-app permissions (e.g.,
-whether to show the gear icon on each app card in phase 2-10).
+**`GET /api/v1/apps`** -- list apps. Consolidates the current list
+endpoint with the catalog endpoint (`GET /api/v1/catalog`). The catalog
+endpoint is deprecated and will be removed in a future version.
+
+Query parameters:
+- `search` (string, optional -- case-insensitive match on name, title,
+  or description)
+- `tag` (string, optional -- filter by tag name)
+- `page` (int, default 1)
+- `per_page` (int, default 25, max 100)
+- `deleted` (bool, default false -- admin-only, returns soft-deleted
+  apps; mutually exclusive with search/tag/page)
+
+Access control: results are filtered to apps the caller can see
+(owned, granted via ACL, public, logged_in). Admins see all apps.
+Requires authentication (unauthenticated callers get 401; the
+landing page for public apps is handled by the UI handler calling
+the DB directly, as it does today).
+
+Each app in the response includes:
+
+- A `relation` field indicating the caller's access level (`"viewer"`,
+  `"collaborator"`, `"owner"`, `"admin"`). Computed in the same query
+  that evaluates access -- no N+1 lookups. Used by the UI to decide
+  whether to show the gear icon on each app card (phase 2-10).
+- A `tags` array of tag names, fetched via a single JOIN (replacing
+  the catalog's per-app `ListAppTags` calls).
+- The `enabled` field (added by this phase).
+
+Response (paginated envelope):
+
+```json
+{
+  "items": [
+    {
+      "id": "...",
+      "name": "my-app",
+      "owner": "...",
+      "access_type": "acl",
+      "active_bundle": "...",
+      "title": "My App",
+      "description": "...",
+      "enabled": true,
+      "status": "running",
+      "relation": "collaborator",
+      "tags": ["production", "shiny"],
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "per_page": 25
+}
+```
+
+List items include the core display fields. Resource configuration
+fields (`max_workers_per_app`, `memory_limit`, `cpu_limit`, etc.)
+are omitted from list items -- use `GET /api/v1/apps/{id}` for the
+full app record.
 
 **`GET /api/v1/apps/{id}/runtime`** -- collaborator+ only. New
 endpoint returning live operational data:
@@ -479,9 +533,9 @@ Conflict if the name is taken.
 
 Requires collaborator+ (`CanUpdateConfig`), same as other PATCH fields.
 
-#### Form-Encoded PATCH
+#### htmx-Aware Response Handling
 
-`PATCH /api/v1/apps/{id}` is extended to accept
+**`PATCH /api/v1/apps/{id}`** is extended to accept
 `application/x-www-form-urlencoded` in addition to JSON. When the
 request includes an `HX-Request` header (htmx), the response is an
 HTML fragment (success indicator or validation error) instead of JSON.
@@ -490,6 +544,17 @@ For non-htmx requests, behavior is unchanged.
 This dual-format support enables the per-app sidebar (phase 2-11) to
 use `hx-patch` for inline field editing without client-side JSON
 serialization.
+
+**DELETE endpoints** (`DELETE /api/v1/users/me/tokens/{id}`,
+`DELETE /api/v1/apps/{id}/access/...`): when the request includes an
+`HX-Request` header, return 200 with empty body instead of 204. htmx
+ignores 204 responses (no swap is performed), so the UI's row-removal
+pattern (`hx-swap="outerHTML"`) requires a 200 response.
+
+**`POST /api/v1/users/me/credentials/{service}`**: accept
+`application/x-www-form-urlencoded` in addition to JSON, same as the
+PATCH change above. The API Keys page (phase 2-10) posts credentials
+via an htmx form.
 
 ### Shared App Resolution
 
@@ -584,8 +649,11 @@ owner+. Hard delete (purge) requires admin.
    time, `deployed_at` at activation time, `pinned` at creation time.
 4. **Backend interface** -- add `ContainerStats()` method for live
    CPU/memory data.
-5. **API split** -- remove workers from `GetApp`, add per-app `relation`
-   to list response, add `GET /api/v1/apps/{id}/runtime` (collaborator+).
+5. **API split** -- remove workers from `GetApp`, add
+   `GET /api/v1/apps/{id}/runtime` (collaborator+). Consolidate
+   `GET /api/v1/apps` with catalog: add `search`, `tag`, `page`,
+   `per_page` query params, per-app `relation` and `tags` in response,
+   paginated envelope. Deprecate `GET /api/v1/catalog`.
 6. **RBAC tightening** -- `ListBundles`, `PostRefresh`,
    `PostRefreshRollback` require collaborator+.
 7. **Enable/disable** -- `POST /apps/{id}/enable` and
@@ -598,8 +666,11 @@ owner+. Hard delete (purge) requires admin.
 10. **Sessions API** -- `GET /api/v1/apps/{id}/sessions` with filtering.
 11. **Shared app resolution** -- extract `resolveApp()` and
     `resolveAppRelation()` to shared location for reuse by UI handlers.
-12. **Form-encoded PATCH** -- `PATCH /api/v1/apps/{id}` accepts
-    form-encoded bodies, returns HTML fragments for htmx requests.
+12. **htmx-aware responses** -- `PATCH /api/v1/apps/{id}` accepts
+    form-encoded bodies and returns HTML fragments for htmx requests.
+    DELETE endpoints return 200 (not 204) for htmx requests so
+    `outerHTML` swaps can remove rows. Credential enrollment endpoint
+    accepts form-encoded bodies.
 13. **Collaborator display names** -- `ListAppAccessWithNames()` DB
     method joining `app_access` with `users`.
 14. **User profile endpoint** -- `GET /api/v1/users/me` returning the
@@ -646,9 +717,12 @@ similarly. Run backfill migration for existing bundles.
 Add `ContainerStats()` to `Backend` interface. Implement in Docker
 backend. Extend `ActiveWorker` with `StartedAt`. Add
 `GET /api/v1/apps/{id}/runtime` endpoint. Remove workers from
-`GetApp` response. Add per-app `relation` to list response. Tighten
-RBAC on `ListBundles`, `PostRefresh`, `PostRefreshRollback`. Add
-`stream` query parameter to `AppLogs`.
+`GetApp` response. Consolidate `GET /api/v1/apps` with catalog:
+add search/tag/pagination query params, compute per-app `relation`
+and `tags` in a single query (replacing catalog's N+1 `ListAppTags`
+calls), return paginated envelope. Deprecate `GET /api/v1/catalog`.
+Tighten RBAC on `ListBundles`, `PostRefresh`, `PostRefreshRollback`.
+Add `stream` query parameter to `AppLogs`.
 
 ### Step 5: Enable/Disable + Hard Delete
 
@@ -664,11 +738,12 @@ filtering. Implement `GET /api/v1/apps/{id}/sessions`.
 ### Step 7: Shared Infrastructure
 
 Extract `resolveApp()` and `resolveAppRelation()` to shared location.
-Add form-encoded PATCH support to `UpdateApp` (dual JSON + form
-encoding, htmx fragment responses). Add `name` to `AppUpdate` with
-owner+ permission check and conflict detection. Add `HX-Trigger`
-response headers to action endpoints for htmx requests. Implement
-`ListAppAccessWithNames()` DB method.
+Add htmx-aware response handling: form-encoded PATCH on `UpdateApp`
+(dual JSON + form encoding, fragment responses), 200-not-204 on
+DELETE endpoints for htmx callers, form-encoded credential enrollment.
+Add `name` to `AppUpdate` with owner+ permission check and conflict
+detection. Add `HX-Trigger` response headers to action endpoints for
+htmx requests. Implement `ListAppAccessWithNames()` DB method.
 
 ### Step 8: Tests
 
@@ -676,5 +751,6 @@ Integration tests for session lifecycle (create -> end, create -> crash).
 API tests for runtime endpoint, deployments listing, session listing.
 RBAC tests verifying viewer cannot access runtime API, bundles listing,
 or refresh endpoints. Enable/disable behavior tests. Hard-delete
-precondition tests. Form-encoded PATCH tests. `ListAppAccessWithNames`
-tests.
+precondition tests. htmx-aware response tests (form-encoded PATCH,
+DELETE 200-not-204, form-encoded credential enrollment).
+`ListAppAccessWithNames` tests.

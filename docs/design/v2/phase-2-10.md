@@ -4,8 +4,10 @@ Converts the single-page dashboard into a multi-page layout with
 persistent left navigation, htmx integration, and four distinct pages:
 Apps, Deployment History, API Keys, and Profile (with PAT management).
 
-Depends on phase 2-8 (backend prerequisites) for the API endpoints
-consumed by the Deployment History page and Profile page.
+Depends on phase 2-8 (backend prerequisites) for the consolidated
+`GET /api/v1/apps` endpoint (search, tags, pagination, per-app
+`relation`), the `GET /api/v1/deployments` endpoint (Deployment
+History page), and the PAT endpoints (Profile page).
 
 ## htmx Integration
 
@@ -94,8 +96,8 @@ The app grid with search and tag filter. This is the existing dashboard
 content minus the user identity header and API keys section. The gear
 icon on each card opens the per-app management sidebar (phase 2-11).
 The gear icon is only rendered for users with collaborator+ access
-to the app (using the `relation` field from the list API, added in
-phase 2-8).
+to the app (using the per-app `relation` field from
+`GET /api/v1/apps`, added in phase 2-8).
 
 ```html
 <a href="/app/{{.Name}}/" class="app-card">
@@ -135,8 +137,10 @@ A cross-app timeline of all deployments the user has visibility into
 ```html
 <div class="page-header">
     <h1>Deployment History</h1>
-    <input type="search" name="search" placeholder="Search deployments..."
-           class="search-input">
+    <form method="GET" action="/deployments" class="search-form">
+        <input type="search" name="search" placeholder="Search deployments..."
+               class="search-input" value="{{.Search}}">
+    </form>
 </div>
 <table class="data-table">
     <thead>
@@ -163,7 +167,11 @@ A cross-app timeline of all deployments the user has visibility into
 {{template "pagination" .Pagination}}
 ```
 
-Sorted by deployment time, most recent first. Paginated.
+Sorted by deployment time, most recent first. Paginated. The
+`.Pagination` struct carries `Page`, `TotalPages`, and `Search`
+(to preserve the search term across page links). The pagination
+partial renders prev/next links as plain `<a>` tags with query
+parameters (e.g., `/deployments?page=2&search=...`).
 
 ## API Keys Page (`/api-keys`)
 
@@ -178,7 +186,10 @@ the key.
 
 **Redirect target change:** The credential save form currently
 redirects to `/?credential_saved=1`. The htmx approach replaces the
-full-page redirect with an inline fragment swap:
+full-page redirect with a fire-and-reload pattern: `hx-swap="none"`
+suppresses response processing, and `hx-on::after-request` reloads
+the page on success. The credential enrollment endpoint gains
+form-encoded body support in phase 2-8:
 
 ```html
 <div class="page-header">
@@ -195,7 +206,7 @@ full-page redirect with an inline fragment swap:
           hx-post="/api/v1/users/me/credentials/{{.ID}}"
           hx-swap="none"
           hx-on::after-request="if(event.detail.successful) location.reload()">
-        <input type="password" name="key" placeholder="Enter API key" required>
+        <input type="password" name="api_key" placeholder="Enter API key" required>
         <button type="submit" class="btn btn-sm">Save</button>
     </form>
 </div>
