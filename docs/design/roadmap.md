@@ -35,10 +35,11 @@ required to call the product useful. v2 adds single-node production
 completeness (CLI, scale-to-zero, pre-warming, build pipeline
 modernization with pak, a content-addressable package store, board
 storage via PostgreSQL + PostgREST + vault Identity OIDC, cold-start
-loading page). v3 adds
-the lightweight process backend plus deferred single-node features (data
-mounts, Docker daemon hardening, multiple execution environment images, UI
-branding). v4 adds Kubernetes for multi-node scaling.
+loading page). v3 adds a pre-fork worker model for the Docker backend (per-user forked
+processes with CoW memory sharing and post-fork sandboxing), the
+lightweight process backend, and deferred single-node features (data
+mounts, Docker daemon hardening, multiple execution environment images,
+UI branding). v4 adds Kubernetes for multi-node scaling.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
 interface (Docker vs. process vs. Kubernetes). This abstraction is worth its
@@ -675,6 +676,21 @@ features deferred from v2: data mounts, Docker daemon hardening, multiple
 execution environment images, and UI branding / customization.
 
 ---
+
+- **Pre-fork worker model.** An enhancement to the Docker backend's
+  multi-session mode. Instead of multiplexing sessions onto a shared R
+  process (zero inter-session isolation), each user gets their own
+  forked R process inside the container. A template (zygote) process
+  pre-loads all packages, then `fork()`'s per user — children inherit
+  loaded packages via copy-on-write (near-zero memory overhead for
+  read-only package code). Each child applies post-fork sandboxing:
+  `unshare(CLONE_NEWUSER | CLONE_NEWNS)` for a private mount namespace
+  (private `/tmp`), seccomp-bpf filtering, capability dropping, and
+  per-process resource limits via `setrlimit()`. Requires the same
+  custom seccomp profile as the process backend (allowing
+  `CLONE_NEWUSER`). Prior art: Rserve, RestRserve, and OpenCPU all use
+  this pre-fork pattern in production. See [v3 draft](v3/draft.md) for
+  the full design, package compatibility analysis, and open questions.
 
 - **Process backend implementation.** Implement the `Backend` interface
   using bubblewrap (`bwrap`) for process sandboxing. Workers are spawned
