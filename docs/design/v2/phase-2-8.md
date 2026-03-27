@@ -326,6 +326,24 @@ The following existing endpoints need stricter authorization:
 | `POST /api/v1/apps/{id}/refresh` | any access | collaborator+ (`CanDeploy`) |
 | `POST /api/v1/apps/{id}/refresh/rollback` | any access | collaborator+ (`CanDeploy`) |
 
+#### Refresh Pinned Guard
+
+`POST /api/v1/apps/{id}/refresh` and
+`POST /api/v1/apps/{id}/refresh/rollback` check the active bundle's
+`pinned` flag before proceeding. If the active bundle is pinned, both
+endpoints return **409 Conflict**:
+
+```json
+{
+  "error": "conflict",
+  "message": "App was deployed with pinned dependencies. Redeploy to update."
+}
+```
+
+This is a server-side guard — the `pinned` column on bundles (added in
+this phase) is the source of truth. Clients (CLI, UI) can rely on the
+409 rather than checking client-side.
+
 #### App Rename
 
 `PATCH /api/v1/apps/{id}` with `name` field -- owner+ (`CanDelete`).
@@ -428,6 +446,39 @@ Response:
 }
 ```
 
+#### User Profile API
+
+`GET /api/v1/users/me` -- authenticated (session or PAT).
+
+Returns the caller's own profile. Used by the CLI's `by login` to
+verify a token and display the user's identity, and available for
+any client that needs a "whoami" check.
+
+Response:
+
+```json
+{
+  "sub": "alice@company.com",
+  "email": "alice@company.com",
+  "name": "Alice",
+  "role": "publisher"
+}
+```
+
+The response shape matches the existing `UserRow` fields. This is a
+thin wrapper: extract the caller from context, look up their user row,
+return it.
+
+#### App Rename Support
+
+`PATCH /api/v1/apps/{id}` is extended to accept a `name` field.
+Renaming changes the app's URL (`/app/{name}/`), so the endpoint
+validates the new name (same rules as `CreateApp`: lowercase
+alphanumeric + hyphens, unique among live apps) and returns 409
+Conflict if the name is taken.
+
+Requires collaborator+ (`CanUpdateConfig`), same as other PATCH fields.
+
 #### Form-Encoded PATCH
 
 `PATCH /api/v1/apps/{id}` is extended to accept
@@ -519,6 +570,7 @@ owner+. Hard delete (purge) requires admin.
 | `POST /api/v1/apps/{id}/refresh/rollback` | collaborator+ (`CanDeploy`) |
 | `GET /api/v1/deployments` | collaborator+ (per-app filtered) |
 | `GET /api/v1/apps/{id}/sessions` | collaborator+ |
+| `GET /api/v1/users/me` | any authenticated user |
 
 ---
 
@@ -550,14 +602,20 @@ owner+. Hard delete (purge) requires admin.
     form-encoded bodies, returns HTML fragments for htmx requests.
 13. **Collaborator display names** -- `ListAppAccessWithNames()` DB
     method joining `app_access` with `users`.
-14. **App rename** -- add `name` field to `PATCH /api/v1/apps/{id}`
+14. **User profile endpoint** -- `GET /api/v1/users/me` returning the
+    caller's own profile (sub, email, name, role). Used by the CLI's
+    `by login` for token verification.
+15. **App rename** -- add `name` field to `PATCH /api/v1/apps/{id}`
     with owner+ permission check and name validation/conflict handling.
-15. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
+16. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
+    `POST /apps/{id}/refresh/rollback` return 409 when the active
+    bundle is pinned.
+17. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
     the runtime API and logs tab.
-16. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
+18. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
     `stream` query parameter (default `true`); `stream=false` returns
     historical snapshot only.
-17. **htmx event triggers** -- action endpoints return `HX-Trigger`
+19. **htmx event triggers** -- action endpoints return `HX-Trigger`
     response headers for htmx requests, enabling UI fragment re-fetch
     without HTML rendering in the API layer.
 

@@ -37,7 +37,9 @@ A convenience command that lowers the barrier for first-time users:
 2. Open the browser to `{server}/profile#tokens` (the PAT section on
    the Profile page, created in phase 2-10).
 3. Prompt the user to paste the token.
-4. Store credentials in `~/.config/by/config.json` (XDG-compliant).
+4. Verify the token by calling `GET /api/v1/users/me` (added in
+   phase 2-8). If the call fails, report the error and do not store.
+5. Store credentials in `~/.config/by/config.json` (XDG-compliant).
 
 ```
 $ by login
@@ -172,7 +174,46 @@ detection entirely.
    types. Write `manifest.json` into the bundle directory.
 3. Compute file checksums for the `files` section.
 4. Create tar.gz archive of the directory.
-5. `POST /api/v1/apps/{name}/bundles` with the archive.
+5. Ensure the app exists on the server:
+   - `GET /api/v1/apps/{name}` to check.
+   - If 404, `POST /api/v1/apps` to create it. The app name defaults to
+     the directory basename (overridable with `--name`). New apps start
+     with `access_type=acl`, default resource limits, no pre-warming.
+6. `POST /api/v1/apps/{id}/bundles` with the archive.
+
+### Post-Upload Behavior
+
+The upload returns `202 Accepted` with `{"bundle_id": "...", "task_id": "..."}`.
+By default, the CLI prints a summary and exits immediately:
+
+```
+$ by deploy ./myapp/
+Uploading bundle... done.
+  App:     myapp
+  Bundle:  01ABC... (building)
+  Task:    01DEF...
+  URL:     https://blockyard.example.com/app/myapp/
+```
+
+With `--wait`, the CLI blocks and streams the server-side build log by
+polling `GET /api/v1/tasks/{taskID}/logs` (using the `first` cursor
+parameter for incremental output). Exits 0 on success, non-zero on
+build failure:
+
+```
+$ by deploy ./myapp/ --wait
+Uploading bundle... done.
+Building...
+  Restoring packages from store...
+  Installing shiny 1.9.1 [cached]
+  Installing ggplot2 3.5.0 [cached]
+  Build complete.
+Deployed myapp (bundle 01ABC...).
+```
+
+In `--json` mode, the output is a single JSON object. Without `--wait`,
+it includes `"status": "building"`. With `--wait`, it includes the
+terminal status (`"status": "ready"` or `"status": "failed"`).
 
 ### Manifest Generation
 
@@ -180,7 +221,7 @@ The CLI uses `internal/manifest/` (from phase 2-5) for all manifest work:
 
 ```go
 // Case 1a: manifest.json exists
-m, err := manifest.ReadFile("manifest.json")
+m, err := manifest.Read("manifest.json")
 m.Validate()
 
 // Case 1b: renv.lock exists
@@ -255,7 +296,7 @@ by init <path> [--pin]                    Generate manifest.json without deployi
 ### App Lifecycle
 
 ```
-by deploy <path> [--name NAME] [--pin] [--yes]  Prepare bundle, generate manifest, upload
+by deploy <path> [--name NAME] [--pin] [--yes] [--wait]  Deploy bundle (--wait: stream build logs)
 by list                                   List apps (status, active bundle, owner)
 by get <app> [--runtime]                  App details (config, active bundle, status)
 by enable <app>                           Allow traffic (cold-start, pre-warming)
