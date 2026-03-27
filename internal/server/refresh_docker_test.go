@@ -106,7 +106,7 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 		t.Fatal(err)
 	}
 	bundleID := uuid.New().String()[:8]
-	if _, err := srv.DB.CreateBundle(bundleID, app.ID); err != nil {
+	if _, err := srv.DB.CreateBundle(bundleID, app.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
 

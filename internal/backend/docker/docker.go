@@ -3,6 +3,7 @@ package docker
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -864,6 +865,58 @@ func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResou
 	})
 
 	return resources, nil
+}
+
+func (d *DockerBackend) ContainerStats(ctx context.Context, containerID string) (*backend.ContainerStatsResult, error) {
+	resp, err := d.client.ContainerStatsOneShot(ctx, containerID)
+	if err != nil {
+		return nil, fmt.Errorf("container stats: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Docker stats API returns a JSON stream; read one frame.
+	var statsJSON struct {
+		CPUStats struct {
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
+			SystemCPUUsage uint64 `json:"system_cpu_usage"`
+			OnlineCPUs     uint64 `json:"online_cpus"`
+		} `json:"cpu_stats"`
+		PreCPUStats struct {
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
+			SystemCPUUsage uint64 `json:"system_cpu_usage"`
+		} `json:"precpu_stats"`
+		MemoryStats struct {
+			Usage uint64 `json:"usage"`
+			Limit uint64 `json:"limit"`
+		} `json:"memory_stats"`
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read stats: %w", err)
+	}
+
+	if err := json.Unmarshal(data, &statsJSON); err != nil {
+		return nil, fmt.Errorf("decode stats: %w", err)
+	}
+
+	// Calculate CPU percentage
+	cpuDelta := float64(statsJSON.CPUStats.CPUUsage.TotalUsage - statsJSON.PreCPUStats.CPUUsage.TotalUsage)
+	sysDelta := float64(statsJSON.CPUStats.SystemCPUUsage - statsJSON.PreCPUStats.SystemCPUUsage)
+	cpuPercent := 0.0
+	if sysDelta > 0 && cpuDelta > 0 {
+		cpuPercent = (cpuDelta / sysDelta) * float64(statsJSON.CPUStats.OnlineCPUs) * 100.0
+	}
+
+	return &backend.ContainerStatsResult{
+		CPUPercent:       cpuPercent,
+		MemoryUsageBytes: statsJSON.MemoryStats.Usage,
+		MemoryLimitBytes: statsJSON.MemoryStats.Limit,
+	}, nil
 }
 
 func (d *DockerBackend) RemoveResource(ctx context.Context, r backend.ManagedResource) error {

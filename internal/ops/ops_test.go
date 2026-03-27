@@ -197,7 +197,7 @@ func TestStartupCleanupFailsStaleBuilds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := srv.DB.CreateBundle("bundle-1", app.ID)
+	bundle, err := srv.DB.CreateBundle("bundle-1", app.ID, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestGracefulShutdownFailsInProgressBuilds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := srv.DB.CreateBundle("bundle-1", app.ID)
+	bundle, err := srv.DB.CreateBundle("bundle-1", app.ID, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,10 +701,10 @@ func TestPurgeAppWithBundles(t *testing.T) {
 	}
 
 	// Create bundles.
-	srv.DB.CreateBundle("b-1", app.ID)
+	srv.DB.CreateBundle("b-1", app.ID, "", false)
 	srv.DB.UpdateBundleStatus("b-1", "ready")
 	srv.DB.SetActiveBundle(app.ID, "b-1")
-	srv.DB.CreateBundle("b-2", app.ID)
+	srv.DB.CreateBundle("b-2", app.ID, "", false)
 	srv.DB.UpdateBundleStatus("b-2", "ready")
 
 	PurgeApp(srv, app)

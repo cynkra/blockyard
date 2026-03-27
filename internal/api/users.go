@@ -145,9 +145,15 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 		var body struct {
 			APIKey string `json:"api_key"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid request body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			r.ParseForm()
+			body.APIKey = r.FormValue("api_key")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid request body")
+				return
+			}
 		}
 		if body.APIKey == "" {
 			badRequest(w, "api_key is required")
@@ -447,6 +453,10 @@ func RevokeToken(srv *server.Server) http.HandlerFunc {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionTokenRevoke, tokenID, nil))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

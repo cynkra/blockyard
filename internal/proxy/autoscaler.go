@@ -163,7 +163,7 @@ func preWarmApps(ctx context.Context, srv *server.Server) {
 		return
 	}
 	for _, app := range apps {
-		if srv.Workers.IsDraining(app.ID) {
+		if !app.Enabled || srv.Workers.IsDraining(app.ID) {
 			continue
 		}
 		ensurePreWarmed(ctx, srv, &app)

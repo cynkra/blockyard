@@ -185,6 +185,10 @@ func (b *MockBackend) ListManaged(_ context.Context) ([]backend.ManagedResource,
 	return result, nil
 }
 
+func (b *MockBackend) ContainerStats(_ context.Context, _ string) (*backend.ContainerStatsResult, error) {
+	return &backend.ContainerStatsResult{}, nil
+}
+
 func (b *MockBackend) RemoveResource(_ context.Context, r backend.ManagedResource) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -296,7 +296,7 @@ func TestMetricsCapacityDoesNotSpawn(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&created)
 	id := created["id"].(string)
 
-	srv.DB.CreateBundle("b-cap", id)
+	srv.DB.CreateBundle("b-cap", id, "", false)
 	srv.DB.UpdateBundleStatus("b-cap", "ready")
 	srv.DB.SetActiveBundle(id, "b-cap")
 

@@ -242,7 +242,7 @@ func TestCreateAndGetBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
 
-		b, err := db.CreateBundle("b-1", app.ID)
+		b, err := db.CreateBundle("b-1", app.ID, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -267,8 +267,8 @@ func TestListBundlesByApp(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
 
-		db.CreateBundle("b-1", app.ID)
-		db.CreateBundle("b-2", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
+		db.CreateBundle("b-2", app.ID, "", false)
 
 		bundles, err := db.ListBundlesByApp(app.ID)
 		if err != nil {
@@ -283,7 +283,7 @@ func TestListBundlesByApp(t *testing.T) {
 func TestUpdateBundleStatus(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		if err := db.UpdateBundleStatus("b-1", "building"); err != nil {
 			t.Fatal(err)
@@ -299,7 +299,7 @@ func TestUpdateBundleStatus(t *testing.T) {
 func TestSetActiveBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		if err := db.SetActiveBundle(app.ID, "b-1"); err != nil {
 			t.Fatal(err)
@@ -315,7 +315,7 @@ func TestSetActiveBundle(t *testing.T) {
 func TestDeleteBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		deleted, err := db.DeleteBundle("b-1")
 		if err != nil {
@@ -375,7 +375,7 @@ func TestUpdateAppNotFound(t *testing.T) {
 func TestClearActiveBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 		db.SetActiveBundle(app.ID, "b-1")
 
 		// Verify it's set
@@ -1058,7 +1058,7 @@ func TestRemoveAppTagNonexistent(t *testing.T) {
 func TestActivateBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		if err := db.ActivateBundle(app.ID, "b-1"); err != nil {
 			t.Fatal(err)
@@ -1115,7 +1115,7 @@ func TestFailStaleBuildsMultiple(t *testing.T) {
 			"sb2", app.ID,
 		)
 		// One bundle in "ready" state — should not be affected.
-		db.CreateBundle("sb3", app.ID)
+		db.CreateBundle("sb3", app.ID, "", false)
 		db.UpdateBundleStatus("sb3", "ready")
 
 		n, err := db.FailStaleBuilds()
@@ -1259,7 +1259,7 @@ func TestUpdatePATLastUsed(t *testing.T) {
 
 func TestCreateBundleForeignKeyViolation(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
-		_, err := db.CreateBundle("b-orphan", "nonexistent-app-id")
+		_, err := db.CreateBundle("b-orphan", "nonexistent-app-id", "", false)
 		if err == nil {
 			t.Error("expected error for foreign key violation")
 		}

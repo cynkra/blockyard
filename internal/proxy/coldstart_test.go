@@ -60,7 +60,7 @@ func createTestApp(t *testing.T, srv *server.Server, name string, withBundle boo
 	}
 	if withBundle {
 		bundleID := "bundle-" + app.ID
-		_, err := srv.DB.CreateBundle(bundleID, app.ID)
+		_, err := srv.DB.CreateBundle(bundleID, app.ID, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}

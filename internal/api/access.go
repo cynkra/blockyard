@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -42,9 +43,17 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		}
 
 		var body grantRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid request body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			r.ParseForm()
+			body.Principal = r.FormValue("principal")
+			body.Kind = r.FormValue("kind")
+			body.Role = r.FormValue("role")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid request body")
+				return
+			}
 		}
 
 		if body.Kind != "user" {
@@ -79,6 +88,11 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 				map[string]any{"principal": body.Principal, "role": body.Role}))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", "accessGranted")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -152,6 +166,10 @@ func RevokeAccess(srv *server.Server) http.HandlerFunc {
 				map[string]any{"principal": principal}))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

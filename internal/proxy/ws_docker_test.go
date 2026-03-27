@@ -213,7 +213,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 		t.Fatal(err)
 	}
 	bundleID := uuid.New().String()[:8]
-	if _, err := database.CreateBundle(bundleID, app.ID); err != nil {
+	if _, err := database.CreateBundle(bundleID, app.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.UpdateBundleStatus(bundleID, "ready"); err != nil {

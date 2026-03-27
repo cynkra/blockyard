@@ -13,6 +13,7 @@ import (
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/bundle"
+	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
@@ -75,7 +76,17 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 		}
 
 		// Insert bundle row (status = pending)
-		if _, err := srv.DB.CreateBundle(bundleID, app.ID); err != nil {
+		// Determine if bundle has pinned dependencies by checking the manifest.
+		bundlePinned := false
+		manifestPath := filepath.Join(paths.Unpacked, "manifest.json")
+		if m, mErr := manifest.Read(manifestPath); mErr == nil {
+			bundlePinned = m.IsPinned()
+		}
+		deployedBy := ""
+		if caller != nil {
+			deployedBy = caller.Sub
+		}
+		if _, err := srv.DB.CreateBundle(bundleID, app.ID, deployedBy, bundlePinned); err != nil {
 			bundle.DeleteFiles(paths)
 			serverError(w, "create bundle row: "+err.Error())
 			return
@@ -132,8 +143,14 @@ func ListBundles(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 		appID := chi.URLParam(r, "id")
 
-		app, _, ok := resolveAppRelation(srv, w, caller, appID)
+		app, relation, ok := resolveAppRelation(srv, w, caller, appID)
 		if !ok {
+			return
+		}
+
+		// RBAC: collaborator+ required (tightened from "any access").
+		if !relation.CanDeploy() {
+			notFound(w, "app not found")
 			return
 		}
 
@@ -144,6 +161,6 @@ func ListBundles(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(bundles)
+		json.NewEncoder(w).Encode(map[string]any{"bundles": bundles})
 	}
 }

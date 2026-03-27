@@ -218,7 +218,7 @@ func TestEnforceRetention_DeletesOldest(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		id := fmt.Sprintf("bundle-%d", i)
 		ids[i] = id
-		if _, err := database.CreateBundle(id, app.ID); err != nil {
+		if _, err := database.CreateBundle(id, app.ID, "", false); err != nil {
 			t.Fatal(err)
 		}
 		// Manually set uploaded_at so newest-first ordering is clear.
@@ -268,7 +268,7 @@ func TestEnforceRetention_ActiveBundlePreserved(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("bundle-%d", i)
 		ids[i] = id
-		if _, err := database.CreateBundle(id, app.ID); err != nil {
+		if _, err := database.CreateBundle(id, app.ID, "", false); err != nil {
 			t.Fatal(err)
 		}
 		ts := time.Date(2025, 1, 1, 0, i, 0, 0, time.UTC).Format(time.RFC3339)
@@ -312,7 +312,7 @@ func TestEnforceRetention_UnderLimit(t *testing.T) {
 	// Create 2 bundles with retention=5 — nothing should be deleted.
 	for i := 0; i < 2; i++ {
 		id := fmt.Sprintf("bundle-%d", i)
-		if _, err := database.CreateBundle(id, app.ID); err != nil {
+		if _, err := database.CreateBundle(id, app.ID, "", false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -360,7 +360,7 @@ func TestRunRestore_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.CreateBundle("b-1", app.ID); err != nil {
+	if _, err := database.CreateBundle("b-1", app.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -421,7 +421,7 @@ func TestRunRestore_BuildFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.CreateBundle("b-1", app.ID); err != nil {
+	if _, err := database.CreateBundle("b-1", app.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
 

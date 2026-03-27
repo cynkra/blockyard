@@ -258,10 +258,12 @@ func TestListBundles(t *testing.T) {
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/bundles", nil)
 	resp, _ := http.DefaultClient.Do(req)
 
-	var bundles []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&bundles)
-	if len(bundles) != 2 {
-		t.Errorf("expected 2 bundles, got %d", len(bundles))
+	var envelope struct {
+		Bundles []map[string]interface{} `json:"bundles"`
+	}
+	json.NewDecoder(resp.Body).Decode(&envelope)
+	if len(envelope.Bundles) != 2 {
+		t.Errorf("expected 2 bundles, got %d", len(envelope.Bundles))
 	}
 }
 
@@ -317,10 +319,12 @@ func TestListApps(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
-	var apps []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&apps)
-	if len(apps) != 2 {
-		t.Errorf("expected 2 apps, got %d", len(apps))
+	var envelope struct {
+		Apps []map[string]interface{} `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&envelope)
+	if len(envelope.Apps) != 2 {
+		t.Errorf("expected 2 apps, got %d", len(envelope.Apps))
 	}
 }
 
@@ -423,19 +427,25 @@ func TestDeleteApp(t *testing.T) {
 
 // --- App lifecycle tests ---
 
-func TestStartAppWithoutBundleReturnsConflict(t *testing.T) {
+func TestEnableAppWithoutBundle(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/enable", nil)
 	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("expected 409, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["enabled"] != true {
+		t.Errorf("expected enabled=true, got %v", body["enabled"])
 	}
 }
 
-func TestStartAndStopApp(t *testing.T) {
+func TestEnableAndDisableApp(t *testing.T) {
 	srv, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
@@ -448,80 +458,69 @@ func TestStartAndStopApp(t *testing.T) {
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
-	// Start
-	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	// Enable
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/enable", nil)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("start: expected 200, got %d: %s", resp.StatusCode, b)
+		t.Fatalf("enable: expected 200, got %d: %s", resp.StatusCode, b)
 	}
-	var startBody map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&startBody)
-	if startBody["status"] != "running" {
-		t.Errorf("expected status=running, got %v", startBody["status"])
-	}
-	if startBody["worker_id"] == "" {
-		t.Error("expected non-empty worker_id")
+	var enableBody map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&enableBody)
+	if enableBody["enabled"] != true {
+		t.Errorf("expected enabled=true, got %v", enableBody["enabled"])
 	}
 
-	if srv.Workers.Count() != 1 {
-		t.Errorf("expected 1 worker, got %d", srv.Workers.Count())
-	}
-
-	// Verify app status is "running"
+	// Verify app is enabled via GET
 	req = authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
 	resp, _ = http.DefaultClient.Do(req)
 	var appBody map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&appBody)
-	if appBody["status"] != "running" {
-		t.Errorf("expected app status=running, got %v", appBody["status"])
+	if appBody["enabled"] != true {
+		t.Errorf("expected app enabled=true, got %v", appBody["enabled"])
 	}
 
-	// Start again — should be no-op, return same worker
-	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	// Enable again — should be idempotent
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/enable", nil)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 200 {
-		t.Errorf("expected 200 on second start, got %d", resp.StatusCode)
-	}
-	if srv.Workers.Count() != 1 {
-		t.Errorf("expected still 1 worker, got %d", srv.Workers.Count())
+		t.Errorf("expected 200 on second enable, got %d", resp.StatusCode)
 	}
 
-	// Stop — returns 202 with task_id for async drain
-	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+	// Simulate a running worker so disable has something to drain.
+	srv.Workers.Set("test-worker", server.ActiveWorker{AppID: id})
+
+	// Disable
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/disable", nil)
 	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != 202 {
-		t.Errorf("expected 202, got %d", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("disable: expected 200, got %d: %s", resp.StatusCode, b)
 	}
-	var stopBody map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&stopBody)
-	if stopBody["task_id"] == nil || stopBody["task_id"] == "" {
-		t.Error("expected non-empty task_id")
-	}
-	if stopBody["worker_count"] != float64(1) {
-		t.Errorf("expected worker_count=1, got %v", stopBody["worker_count"])
+	var disableBody map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&disableBody)
+	if disableBody["enabled"] != false {
+		t.Errorf("expected enabled=false, got %v", disableBody["enabled"])
 	}
 
-	// Wait for async drain to complete.
-	taskID := stopBody["task_id"].(string)
+	// Wait for async worker eviction.
 	for i := 0; i < 50; i++ {
-		st, ok := srv.Tasks.Status(taskID)
-		if ok && st != task.Running {
+		if srv.Workers.Count() == 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	if srv.Workers.Count() != 0 {
-		t.Errorf("expected 0 workers, got %d", srv.Workers.Count())
+		t.Errorf("expected 0 workers after disable, got %d", srv.Workers.Count())
 	}
 
-	// Verify app status is "stopped"
+	// Verify app is disabled via GET
 	req = authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
 	resp, _ = http.DefaultClient.Do(req)
 	json.NewDecoder(resp.Body).Decode(&appBody)
-	if appBody["status"] != "stopped" {
-		t.Errorf("expected app status=stopped, got %v", appBody["status"])
+	if appBody["enabled"] != false {
+		t.Errorf("expected app enabled=false, got %v", appBody["enabled"])
 	}
 }
 
@@ -530,23 +529,14 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	// Upload bundle and wait for restore
-	req, _ := http.NewRequest("POST",
-		ts.URL+"/api/v1/apps/"+id+"/bundles",
-		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer "+testPAT)
-	http.DefaultClient.Do(req)
-	time.Sleep(200 * time.Millisecond)
-
-	// Start
-	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
-	http.DefaultClient.Do(req)
+	// Simulate a running worker for this app.
+	srv.Workers.Set("test-worker", server.ActiveWorker{AppID: id})
 	if srv.Workers.Count() != 1 {
 		t.Fatalf("expected 1 worker, got %d", srv.Workers.Count())
 	}
 
 	// Delete
-	req = authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
@@ -556,7 +546,7 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 	}
 }
 
-func TestStartAtMaxWorkersReturns503(t *testing.T) {
+func TestEnableAppSucceedsRegardlessOfWorkerLimit(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
@@ -581,15 +571,17 @@ func TestStartAtMaxWorkersReturns503(t *testing.T) {
 	created := createApp(t, ts2, "my-app")
 	id := created["id"].(string)
 
-	// Set an active bundle directly to bypass the upload flow
-	srv.DB.CreateBundle("b-1", id)
-	srv.DB.UpdateBundleStatus("b-1", "ready")
-	srv.DB.SetActiveBundle(id, "b-1")
-
-	req := authReq("POST", ts2.URL+"/api/v1/apps/"+id+"/start", nil)
+	// Enable just sets the flag — no worker spawning, so max_workers doesn't matter.
+	req := authReq("POST", ts2.URL+"/api/v1/apps/"+id+"/enable", nil)
 	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["enabled"] != true {
+		t.Errorf("expected enabled=true, got %v", body["enabled"])
 	}
 }
 
@@ -910,11 +902,11 @@ func TestDeleteAppNonexistent(t *testing.T) {
 	}
 }
 
-// --- StopApp error path tests ---
+// --- DisableApp error path tests ---
 
-func TestStopAppNonexistent(t *testing.T) {
+func TestDisableAppNonexistent(t *testing.T) {
 	_, ts := testServer(t)
-	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/stop", nil)
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/disable", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -924,23 +916,24 @@ func TestStopAppNonexistent(t *testing.T) {
 	}
 }
 
-func TestStopAppNoRunningWorkers(t *testing.T) {
+func TestDisableAppNoRunningWorkers(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/disable", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 	var body map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body["stopped_workers"] != float64(0) {
-		t.Errorf("expected stopped_workers=0, got %v", body["stopped_workers"])
+	if body["enabled"] != false {
+		t.Errorf("expected enabled=false, got %v", body["enabled"])
 	}
 }
 
@@ -1063,9 +1056,9 @@ func TestListBundlesNonexistentApp(t *testing.T) {
 	}
 }
 
-func TestStartAppNonexistent(t *testing.T) {
+func TestEnableAppNonexistent(t *testing.T) {
 	_, ts := testServer(t)
-	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/start", nil)
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/enable", nil)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
@@ -1416,9 +1409,11 @@ func TestDeleteAppWithBundles(t *testing.T) {
 	// Verify bundles exist
 	req = authReq("GET", ts.URL+"/api/v1/apps/"+id+"/bundles", nil)
 	resp, _ = http.DefaultClient.Do(req)
-	var bundles []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&bundles)
-	if len(bundles) == 0 {
+	var bundleEnvelope struct {
+		Bundles []map[string]interface{} `json:"bundles"`
+	}
+	json.NewDecoder(resp.Body).Decode(&bundleEnvelope)
+	if len(bundleEnvelope.Bundles) == 0 {
 		t.Fatal("expected at least 1 bundle before delete")
 	}
 
@@ -1441,37 +1436,38 @@ func TestDeleteAppWithBundles(t *testing.T) {
 	}
 }
 
-// --- StopApp already stopped path ---
+// --- DisableApp already disabled path ---
 
-func TestStopAppAlreadyStopped(t *testing.T) {
+func TestDisableAppAlreadyDisabled(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	// Stop an app that was never started — should return 200 with stopped_workers=0
-	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+	// Disable an app that was never enabled — should return 200 with enabled=false
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/disable", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 	var body map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body["stopped_workers"] != float64(0) {
-		t.Errorf("expected stopped_workers=0, got %v", body["stopped_workers"])
+	if body["enabled"] != false {
+		t.Errorf("expected enabled=false, got %v", body["enabled"])
 	}
 
-	// Call stop again — same result
-	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/stop", nil)
+	// Call disable again — idempotent
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/disable", nil)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 on second stop, got %d", resp.StatusCode)
+		t.Errorf("expected 200 on second disable, got %d", resp.StatusCode)
 	}
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body["stopped_workers"] != float64(0) {
-		t.Errorf("expected stopped_workers=0 on second stop, got %v", body["stopped_workers"])
+	if body["enabled"] != false {
+		t.Errorf("expected enabled=false on second disable, got %v", body["enabled"])
 	}
 }
 
@@ -1521,32 +1517,29 @@ func testServerWithBackend(t *testing.T, be backend.Backend) (*server.Server, *h
 	return srv, ts
 }
 
-func TestStartAppSpawnError(t *testing.T) {
+func TestEnableAppSetsEnabledFlag(t *testing.T) {
 	fb := &faultyBackend{
 		MockBackend: mock.New(),
 		spawnErr:    fmt.Errorf("container runtime unavailable"),
 	}
-	srv, ts := testServerWithBackend(t, fb)
+	_, ts := testServerWithBackend(t, fb)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	// Set an active bundle directly to bypass the upload flow.
-	srv.DB.CreateBundle("b-1", id)
-	srv.DB.UpdateBundleStatus("b-1", "ready")
-	srv.DB.SetActiveBundle(id, "b-1")
-
-	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	// Enable just toggles the flag — no worker spawning, so backend errors don't matter.
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/enable", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on spawn error, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
-	var body map[string]string
+	var body map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body["error"] != "internal_error" {
-		t.Errorf("expected error=internal_error, got %q", body["error"])
+	if body["enabled"] != true {
+		t.Errorf("expected enabled=true, got %v", body["enabled"])
 	}
 }
 
@@ -1693,19 +1686,13 @@ func TestDeleteAppByName(t *testing.T) {
 	}
 }
 
-// --- StartApp by name ---
+// --- EnableApp by name ---
 
-func TestStartAppByName(t *testing.T) {
-	srv, ts := testServer(t)
-	created := createApp(t, ts, "start-name")
-	id := created["id"].(string)
+func TestEnableAppByName(t *testing.T) {
+	_, ts := testServer(t)
+	createApp(t, ts, "enable-name")
 
-	// Set an active bundle directly.
-	srv.DB.CreateBundle("b-name", id)
-	srv.DB.UpdateBundleStatus("b-name", "ready")
-	srv.DB.SetActiveBundle(id, "b-name")
-
-	req := authReq("POST", ts.URL+"/api/v1/apps/start-name/start", nil)
+	req := authReq("POST", ts.URL+"/api/v1/apps/enable-name/enable", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1716,24 +1703,25 @@ func TestStartAppByName(t *testing.T) {
 	}
 	var body map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&body)
-	if body["status"] != "running" {
-		t.Errorf("expected status=running, got %v", body["status"])
+	if body["enabled"] != true {
+		t.Errorf("expected enabled=true, got %v", body["enabled"])
 	}
 }
 
-// --- StopApp by name ---
+// --- DisableApp by name ---
 
-func TestStopAppByName(t *testing.T) {
+func TestDisableAppByName(t *testing.T) {
 	_, ts := testServer(t)
-	createApp(t, ts, "stop-name")
+	createApp(t, ts, "disable-name")
 
-	req := authReq("POST", ts.URL+"/api/v1/apps/stop-name/stop", nil)
+	req := authReq("POST", ts.URL+"/api/v1/apps/disable-name/disable", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 }
 
@@ -1945,11 +1933,11 @@ func TestRollbackAppValidBundle(t *testing.T) {
 	id := created["id"].(string)
 
 	// Create two ready bundles.
-	srv.DB.CreateBundle("b-1", id)
+	srv.DB.CreateBundle("b-1", id, "", false)
 	srv.DB.UpdateBundleStatus("b-1", "ready")
 	srv.DB.SetActiveBundle(id, "b-1")
 
-	srv.DB.CreateBundle("b-2", id)
+	srv.DB.CreateBundle("b-2", id, "", false)
 	srv.DB.UpdateBundleStatus("b-2", "ready")
 
 	// Rollback to b-2.
@@ -1988,7 +1976,7 @@ func TestRollbackToBundleOfDifferentApp(t *testing.T) {
 	app2 := createApp(t, ts, "app-two")
 	id2 := app2["id"].(string)
 
-	srv.DB.CreateBundle("b-other", id2)
+	srv.DB.CreateBundle("b-other", id2, "", false)
 	srv.DB.UpdateBundleStatus("b-other", "ready")
 
 	body := `{"bundle_id":"b-other"}`
@@ -2004,7 +1992,7 @@ func TestRollbackToFailedBundle(t *testing.T) {
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	srv.DB.CreateBundle("b-fail", id)
+	srv.DB.CreateBundle("b-fail", id, "", false)
 	srv.DB.UpdateBundleStatus("b-fail", "failed")
 
 	body := `{"bundle_id":"b-fail"}`
@@ -2020,7 +2008,7 @@ func TestRollbackToAlreadyActiveBundle(t *testing.T) {
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	srv.DB.CreateBundle("b-1", id)
+	srv.DB.CreateBundle("b-1", id, "", false)
 	srv.DB.UpdateBundleStatus("b-1", "ready")
 	srv.DB.SetActiveBundle(id, "b-1")
 
@@ -2050,28 +2038,24 @@ func TestRollbackStopsRunningWorkers(t *testing.T) {
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
-	// Upload bundle and wait for restore.
-	req, _ := http.NewRequest("POST",
-		ts.URL+"/api/v1/apps/"+id+"/bundles",
-		bytes.NewReader(testutil.MakeBundle(t)))
-	req.Header.Set("Authorization", "Bearer "+testPAT)
-	http.DefaultClient.Do(req)
-	time.Sleep(200 * time.Millisecond)
+	// Create an active bundle and a second ready bundle.
+	srv.DB.CreateBundle("b-1", id, "", false)
+	srv.DB.UpdateBundleStatus("b-1", "ready")
+	srv.DB.SetActiveBundle(id, "b-1")
 
-	// Start app.
-	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/start", nil)
-	http.DefaultClient.Do(req)
+	// Simulate a running worker for this app.
+	srv.Workers.Set("test-worker", server.ActiveWorker{AppID: id, BundleID: "b-1"})
 	if srv.Workers.Count() != 1 {
 		t.Fatalf("expected 1 worker, got %d", srv.Workers.Count())
 	}
 
 	// Create a second ready bundle.
-	srv.DB.CreateBundle("b-rollback", id)
+	srv.DB.CreateBundle("b-rollback", id, "", false)
 	srv.DB.UpdateBundleStatus("b-rollback", "ready")
 
 	// Rollback to the new bundle.
 	body := `{"bundle_id":"b-rollback"}`
-	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
@@ -2284,10 +2268,10 @@ func TestRollbackWithoutDeployPermission(t *testing.T) {
 	// Admin creates app and bundles.
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
-	srv.DB.CreateBundle("b-1", id)
+	srv.DB.CreateBundle("b-1", id, "", false)
 	srv.DB.UpdateBundleStatus("b-1", "ready")
 	srv.DB.SetActiveBundle(id, "b-1")
-	srv.DB.CreateBundle("b-2", id)
+	srv.DB.CreateBundle("b-2", id, "", false)
 	srv.DB.UpdateBundleStatus("b-2", "ready")
 
 	// Viewer tries to rollback → 404 (permission denied, masked as not found).
@@ -2537,10 +2521,10 @@ func TestRollbackAppAuditLog(t *testing.T) {
 	id := created["id"].(string)
 
 	// Create two ready bundles and activate the first.
-	srv.DB.CreateBundle("b-1", id)
+	srv.DB.CreateBundle("b-1", id, "", false)
 	srv.DB.UpdateBundleStatus("b-1", "ready")
 	srv.DB.SetActiveBundle(id, "b-1")
-	srv.DB.CreateBundle("b-2", id)
+	srv.DB.CreateBundle("b-2", id, "", false)
 	srv.DB.UpdateBundleStatus("b-2", "ready")
 
 	// Rollback to b-2.
@@ -2647,7 +2631,7 @@ func TestRollbackAppPendingBundle(t *testing.T) {
 	id := created["id"].(string)
 
 	// Create a pending bundle (default status).
-	srv.DB.CreateBundle("b-pending", id)
+	srv.DB.CreateBundle("b-pending", id, "", false)
 
 	body := `{"bundle_id":"b-pending"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))

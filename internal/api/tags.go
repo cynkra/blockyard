@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -119,15 +120,21 @@ func AddAppTag(srv *server.Server) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if !relation.CanDeploy() {
+		if !relation.CanUpdateConfig() {
 			notFound(w, "app not found")
 			return
 		}
 
 		var body addAppTagRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid JSON body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			r.ParseForm()
+			body.TagID = r.FormValue("tag_id")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid JSON body")
+				return
+			}
 		}
 		if body.TagID == "" {
 			badRequest(w, "tag_id is required")
@@ -150,6 +157,11 @@ func AddAppTag(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", "tagAdded")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -164,7 +176,7 @@ func RemoveAppTag(srv *server.Server) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if !relation.CanDeploy() {
+		if !relation.CanUpdateConfig() {
 			notFound(w, "app not found")
 			return
 		}
@@ -180,6 +192,11 @@ func RemoveAppTag(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", "tagRemoved")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

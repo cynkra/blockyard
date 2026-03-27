@@ -45,6 +45,24 @@ const (
 	RelationAdmin                                  // System admin
 )
 
+// String returns the lowercase name of the app relation.
+func (r AppRelation) String() string {
+	switch r {
+	case RelationAdmin:
+		return "admin"
+	case RelationOwner:
+		return "owner"
+	case RelationContentCollaborator:
+		return "collaborator"
+	case RelationContentViewer:
+		return "viewer"
+	case RelationAnonymous:
+		return "anonymous"
+	default:
+		return "none"
+	}
+}
+
 // CanViewDetails reports whether this relation allows viewing app details.
 func (r AppRelation) CanViewDetails() bool {
 	return r > RelationNone

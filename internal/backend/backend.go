@@ -29,6 +29,17 @@ type Backend interface {
 
 	// RemoveResource removes an orphaned resource.
 	RemoveResource(ctx context.Context, r ManagedResource) error
+
+	// ContainerStats returns a point-in-time resource usage snapshot
+	// for a container. Returns nil stats if the container is not found.
+	ContainerStats(ctx context.Context, containerID string) (*ContainerStatsResult, error)
+}
+
+// ContainerStatsResult holds point-in-time resource usage for a container.
+type ContainerStatsResult struct {
+	CPUPercent       float64
+	MemoryUsageBytes uint64
+	MemoryLimitBytes uint64
 }
 
 type WorkerSpec struct {

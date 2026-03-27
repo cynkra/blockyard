@@ -30,7 +30,10 @@ func (b *stubBackend) HealthCheck(context.Context, string) bool                 
 func (b *stubBackend) Logs(context.Context, string) (backend.LogStream, error)     { return backend.LogStream{}, nil }
 func (b *stubBackend) Addr(context.Context, string) (string, error)                { return "", nil }
 func (b *stubBackend) ListManaged(context.Context) ([]backend.ManagedResource, error) { return nil, nil }
-func (b *stubBackend) RemoveResource(context.Context, backend.ManagedResource) error  { return nil }
+func (b *stubBackend) RemoveResource(context.Context, backend.ManagedResource) error { return nil }
+func (b *stubBackend) ContainerStats(context.Context, string) (*backend.ContainerStatsResult, error) {
+	return &backend.ContainerStatsResult{}, nil
+}
 
 // --- EnsureInstalled tests ---
 

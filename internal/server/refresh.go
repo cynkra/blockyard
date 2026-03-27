@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -189,6 +190,7 @@ func (srv *Server) drainAndReplace(
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{
 		AppID: app.ID, BundleID: *app.ActiveBundle,
+		StartedAt:   time.Now(),
 		CancelToken: cancelToken,
 	})
 	srv.Registry.Set(newWorkerID, addr)
