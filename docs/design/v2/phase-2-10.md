@@ -1,418 +1,748 @@
-# Phase 2-10: CLI
+# Phase 2-10: Per-App Management Sidebar
 
-Design for the CLI binary (`cmd/by/`). Final phase — built last to
-target the stable v2 API surface. The deploy command is the primary new
-complexity; all other subcommands are thin REST API wrappers.
+Adds the per-app management sidebar to the multi-page UI established
+in phase 2-9. The sidebar provides six tabs (Overview, Settings,
+Runtime, Bundles, Collaborators, Logs) for managing individual apps
+without leaving the dashboard. All content is loaded via htmx fragment
+routes.
 
-See [dep-mgmt.md](../dep-mgmt.md) for the architectural overview that
-drives the deploy flow.
+Depends on phase 2-8 (backend prerequisites + CLI) and phase 2-9
+(multi-page navigation + htmx).
 
-## Prerequisites from Earlier Phases
+## Backend Prerequisites
 
-- **Phase 2-5** — `internal/manifest/` types, `FromRenvLock()` and
-  `FromDescription()` conversion functions, manifest validation. The CLI
-  imports these to generate manifests during `by deploy`.
-- **Phase 2-6** — store-aware builds on the server. No direct CLI
-  dependency, but deploy benefits from fast builds.
-- **Phase 2-7** — `POST /api/v1/packages` and refresh API. The CLI
-  wraps the refresh endpoint as `by refresh`.
+This phase requires two pieces of backend work that were deferred from
+phase 2-8 because only the sidebar UI consumes them:
 
-## Authentication
+- **Form-encoded PATCH support** -- `PATCH /api/v1/apps/{id}` must
+  accept `application/x-www-form-urlencoded` in addition to JSON. For
+  htmx requests (detected via `HX-Request` header), the response is an
+  HTML fragment instead of JSON. For non-htmx requests, unchanged.
+- **Collaborator display names** -- `ListAppAccessWithNames(appID)`
+  DB method joining `app_access` with `users` to get display names for
+  the Collaborators tab.
 
-`BLOCKYARD_TOKEN` environment variable (a PAT). `BLOCKYARD_URL`
-environment variable (e.g., `https://blockyard.example.com`).
+## Fragment Route Infrastructure
 
-### `by login`
+### Template Parsing
 
-A convenience command that lowers the barrier for first-time users:
-
-1. Prompt for the server URL (or accept `--server URL`).
-2. Open the browser to the web UI's PAT creation page.
-3. Prompt the user to paste the token.
-4. Store credentials in `~/.config/by/config.json` (XDG-compliant).
-
-```
-$ by login
-Server URL: https://blockyard.example.com
-Opening browser to create a token...
-Paste your token: ****
-Logged in to blockyard.example.com as alice.
-```
-
-The env vars `BLOCKYARD_TOKEN` and `BLOCKYARD_URL` always take precedence
-over the stored config — CI pipelines use env vars, interactive users use
-`by login`. The config file stores a single server entry; multi-server
-profiles are a future extension if demand arises.
-
-## Output Format
-
-All commands default to human-readable output (tables, formatted text).
-A global `--json` flag switches to machine-readable JSON output — useful
-for scripting and CI pipelines.
-
-For thin API wrappers, `--json` passes through the API response body
-directly. For commands with client-side logic (deploy, refresh), `--json`
-emits a structured JSON object on completion instead of streaming
-progress text.
-
-## Deploy Flow
-
-The `by deploy` command prepares a bundle and uploads it. From the user's
-perspective, two choices exist: deploy with pinned dependencies
-(reproducible) or unpinned dependencies (convenient). Pinning requires
-R + renv on the client. Unpinned deploys need no R on the client at all.
-
-Deploy is focused on getting code running — bundle prep, manifest
-generation, upload. Resource configuration, access control, and metadata
-are managed via separate commands after deployment.
-
-### Input Cases
-
-```
-by deploy ./myapp/
-
-  Pinned mode (manifest.json in bundle):
-  ───────────────────────────────────────
-  1a. manifest.json already exists
-      → validate, include in bundle. Pure Go, no R needed.
-
-  1b. renv.lock already exists
-      → manifest.FromRenvLock(): parse JSON, copy package records
-        into manifest, add metadata. Pure Go, no R needed.
-
-  1c. No lockfile, user wants pinned deps (--pin flag or prompt)
-      → R + renv required on client
-      → renv::dependencies() + renv::snapshot()
-      → parse generated renv.lock → manifest.FromRenvLock()
-      → clean up renv artifacts
-
-  Unpinned mode (manifest without packages):
-  ────────────────────────────────────────
-  2a. DESCRIPTION already exists
-      → manifest.FromDescription(): JSON-ify DCF fields, add metadata
-        + file checksums, add repositories from renv/PPM config or
-        --repositories flag.
-      → Pure Go, no R needed.
-
-  2b. No DESCRIPTION (bare scripts only)
-      → upload as-is. No manifest generated.
-      → server scans via pkgdepends::scan_deps(), generates
-        DESCRIPTION, then builds unpinned manifest.
-```
-
-### Priority
-
-`manifest.json` > `renv.lock` > `DESCRIPTION` > bare scripts. The CLI
-uses the highest-priority file and warns if lower-priority files are
-also present (e.g., "Using manifest.json; ignoring renv.lock").
-
-The default when neither pinned manifest nor lockfile is present:
-if a DESCRIPTION exists, build an unpinned manifest and deploy (2a).
-If only scripts exist, upload them and let the server scan (2b).
-
-### Deploy Confirmation
-
-On the first deploy of a given path (no manifest.json present yet), the
-CLI shows detected settings and asks for confirmation before uploading:
-
-```
-$ by deploy ./myapp/
-Detected:
-  Name:       myapp
-  Mode:       shiny (entrypoint: app.R)
-  Deps:       pinned (renv.lock found)
-  Repository: https://p3m.dev/cran/2026-03-18
-
-Deploy? [Y/n]
-```
-
-The `--yes` / `-y` flag skips the prompt for CI and scripting use.
-Subsequent deploys of the same path (manifest.json already present)
-skip the prompt automatically — the manifest is the source of truth.
-
-### `by init`
-
-Generate a manifest without deploying. Useful for inspecting or editing
-the manifest before shipping, and for version-controlling the manifest
-alongside application code.
-
-```
-$ by init ./myapp/ [--pin]
-Detected:
-  Name:       myapp
-  Mode:       shiny (entrypoint: app.R)
-  Deps:       pinned (renv.lock found)
-  Repository: https://p3m.dev/cran/2026-03-18
-
-Wrote manifest.json
-```
-
-Follows the same detection logic and input cases as `by deploy`. The
-`--pin` flag triggers renv snapshot just like in deploy. After `init`,
-`by deploy` picks up the existing manifest.json (case 1a) and skips
-detection entirely.
-
-### Bundle Preparation
-
-1. Detect app mode and entrypoint (`app.R` → shiny, `server.R`/`ui.R`
-   → shiny, etc.).
-2. Generate manifest (per input case above) using `internal/manifest/`
-   types. Write `manifest.json` into the bundle directory.
-3. Compute file checksums for the `files` section.
-4. Create tar.gz archive of the directory.
-5. `POST /api/v1/apps/{name}/bundles` with the archive.
-
-### Manifest Generation
-
-The CLI uses `internal/manifest/` (from phase 2-5) for all manifest work:
+Fragment templates are parsed *without* `base.html`. The `UI` struct
+is extended with a second template map:
 
 ```go
-// Case 1a: manifest.json exists
-m, err := manifest.ReadFile("manifest.json")
-m.Validate()
-
-// Case 1b: renv.lock exists
-m, err := manifest.FromRenvLock("renv.lock", meta, files)
-
-// Case 1c: --pin (requires R + renv)
-// Shell out to Rscript, then:
-m, err := manifest.FromRenvLock("renv.lock", meta, files)
-// Clean up generated renv artifacts
-
-// Case 2a: DESCRIPTION exists
-m, err := manifest.FromDescription("DESCRIPTION", meta, files, repos)
-
-// Case 2b: bare scripts → no manifest generated, upload as-is
+type UI struct {
+    pages     map[string]*template.Template  // parsed with base.html
+    fragments map[string]*template.Template  // parsed standalone
+    static    http.Handler
+}
 ```
 
-### renv Invocation (Pinning Only)
+Fragment handlers call `ui.fragments[name].Execute(w, data)` directly --
+no `ExecuteTemplate` with a named block.
 
-The CLI only shells out to R for `--pin` (case 1c). Following
-rsconnect's pattern (`snapshotRenvDependencies()`):
+### App Name -> ID Resolution
 
-```r
-options(renv.consent = TRUE)
-deps <- renv::dependencies(".", quiet = TRUE, progress = FALSE)
-renv::snapshot(".", packages = deps$Package, prompt = FALSE)
+Fragment routes use `{name}` in URLs for user-friendly paths. The
+handler resolves the name to an app ID using the existing `resolveApp()`
+helper (tries UUID first, then name lookup). The helper is extracted
+from `internal/api/` to a shared location (`internal/server/` or
+`internal/db/`) so both API and UI handlers can use it.
+
+With soft-delete, the name lookup uses the partial unique index on
+live apps, so a soft-deleted "foo" does not conflict with a new "foo".
+
+### Auth Middleware
+
+Fragment routes use the same `auth.AppAuthMiddleware` as the UI pages
+(soft auth), but each handler explicitly checks the caller's
+`AppRelation` via `resolveAppRelation`. If the caller is nil
+(unauthenticated) or has insufficient access, the handler returns 404
+(consistent with the API convention of not leaking app existence).
+
+For htmx requests, 404 results in an empty swap -- the sidebar shows
+nothing. Since the gear icon is already hidden for unauthorized users,
+this is a rare edge case (direct URL access or revoked access).
+
+## RBAC for Tabs
+
+| UI Element | Visible to |
+|------------|-----------|
+| Gear icon on app card | collaborator+ |
+| Overview tab | collaborator+ |
+| Settings tab | collaborator+ (editable for `CanUpdateConfig`) |
+| Runtime tab | collaborator+ |
+| Bundles tab | collaborator+ |
+| Collaborators tab | **owner+ only** (`CanManageACL`) |
+| Logs tab | collaborator+ |
+
+The Collaborators tab is further restricted to owners and admins
+because it exposes user identities and session activity.
+
+### Template-Level Enforcement
+
+The gear icon is conditionally rendered:
+
+```html
+{{if .CanManage}}
+<button class="app-card-gear"
+        hx-get="/ui/apps/{{.Name}}/sidebar"
+        hx-target="#sidebar"
+        hx-swap="innerHTML"
+        aria-label="Manage {{.Name}}"
+        onclick="event.preventDefault()">&#9881;</button>
+{{end}}
 ```
 
-Run via `Rscript -e`. Read resulting `renv.lock`, convert to manifest
-(pure Go), then clean up (`renv.lock`, `renv/` directory) unless they
-pre-existed.
+The `CanManage` flag is true when the caller's `AppRelation >=
+ContentCollaborator`.
 
-### Repository URL Handling
+The Collaborators tab button is conditionally rendered:
 
-The `--repositories` flag allows specifying repository URLs on the
-command line. When absent, the CLI reads repository configuration from:
-
-1. `renv.lock` → `R.Repositories` (case 1b)
-2. `renv::config$repos()` (case 1c, captured during snapshot)
-3. A default (e.g., latest PPM) when nothing else is available
-
-Repository URLs in the manifest are platform-neutral — no PPM platform
-segments. The server adds its own platform segment at resolve time.
-
-### renv Availability
-
-renv is not part of base R. The CLI only needs R + renv for `--pin`:
-
-| State | Behavior | Mode |
-|---|---|---|
-| `manifest.json` with `packages` exists | Use as-is. Pure Go. | pinned |
-| `renv.lock` exists | Convert to manifest. Pure Go. | pinned |
-| `--pin`, R + renv available | Snapshot → lockfile → manifest. | pinned |
-| `--pin`, no R/renv | Error: "pinning requires R + renv." | — |
-| `DESCRIPTION` exists | Build unpinned manifest. Pure Go. | unpinned |
-| Bare scripts only | Upload as-is. Server scans. | unpinned |
-
-R is only required on the client for pinning without a lockfile.
-All other paths are pure Go or need no client-side processing at all.
-
-## Subcommands
-
-All commands accept `<app>` as either the unique app name or UUID.
-Common aliases are supported: `ls` → `list`, `rm` → `remove`/`delete`.
-
-### Setup
-
-```
-by login [--server URL]                   Store credentials interactively
-by init <path> [--pin]                    Generate manifest.json without deploying
+```html
+{{if .CanManageACL}}
+<button class="tab"
+        hx-get="/ui/apps/{{.App.Name}}/tab/collaborators"
+        hx-target="#tab-content">Collaborators</button>
+{{end}}
 ```
 
-### App Lifecycle
+### Server-Level Enforcement
 
-```
-by deploy <path> [--name NAME] [--pin] [--yes]  Prepare bundle, generate manifest, upload
-by list                                   List apps (status, active bundle, owner)
-by get <app>                              App details (config, active bundle, status)
-by enable <app>                           Allow traffic (cold-start, pre-warming)
-by disable <app>                          Block new traffic, drain existing sessions
-by delete <app> [--purge]                 Soft-delete (--purge: admin-only hard delete)
-by restore <app>                          Restore a soft-deleted app
-```
+All fragment routes enforce RBAC at the handler level, not just the
+template level. A direct request to a tab endpoint from a viewer
+returns 404. The Collaborators tab endpoint checks `CanManageACL()`.
 
-#### Enable / Disable
+## Sidebar Structure
 
-Replace the previous start/stop commands with proper state management.
-`disable` sets an `enabled` flag to false on the app, which:
+### Header
 
-- Prevents the proxy from cold-starting new workers
-- Prevents the autoscaler from pre-warming
-- Lets existing sessions drain naturally
-- Returns 503 for new requests
+App name as the title. An external-link icon opens `/app/{name}/`
+in a new tab. A close button dismisses the sidebar.
 
-`enable` re-enables the app, allowing cold-start and pre-warming to
-resume normally.
-
-**Requires new server-side work:** a migration adding
-`enabled INTEGER NOT NULL DEFAULT 1` to the `apps` table, plus checks
-in the proxy cold-start path and autoscaler pre-warming loop.
-
-### Bundles & Rollback
-
-```
-by bundles <app>                          List bundles (id, status, upload time)
-by rollback <app> <bundle-id>             Roll back to a previous bundle
+```html
+<div class="sidebar-header">
+    <h2>{{.App.Name}}</h2>
+    <a href="/app/{{.App.Name}}/" target="_blank" title="Open app">&#8599;</a>
+    <button onclick="closeSidebar()" aria-label="Close">&#10005;</button>
+</div>
 ```
 
-### Configuration
+### Tabs
 
-```
-by scale <app> [flags]                    Resource tuning
-    --memory TEXT                            Memory limit (e.g., "2g")
-    --cpu FLOAT                              CPU limit
-    --max-workers INT                        Max workers per app
-    --max-sessions INT                       Max sessions per worker
-    --pre-warm INT                           Pre-warmed standby workers
-
-by update <app> [flags]                   App metadata
-    --title TEXT                             Display title
-    --description TEXT                       Description
-
-by rename <app> <new-name>                Change app name (changes URL)
-```
-
-### Access Control
-
-```
-by access <app> show                      Show access type + ACL entries
-by access <app> set-type <type>           Set access mode (acl|logged_in|public)
-by access <app> grant <user> --role ROLE  Add ACL entry (viewer|collaborator)
-by access <app> revoke <user>             Remove ACL entry
-```
-
-### Tags
-
-```
-by tags list                              List all tags (global pool)
-by tags create <tag>                      Create tag (admin only)
-by tags delete <tag>                      Delete tag (admin only, cascades)
-
-by tags <app> list                        List tags on an app
-by tags <app> add <tag>                   Attach tag to app
-by tags <app> remove <tag>               Detach tag from app
+```html
+<nav class="sidebar-tabs">
+    <button class="tab active"
+            hx-get="/ui/apps/{{.App.Name}}/tab/overview"
+            hx-target="#tab-content">Overview</button>
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+            hx-target="#tab-content">Settings</button>
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/runtime"
+            hx-target="#tab-content">Runtime</button>
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
+            hx-target="#tab-content">Bundles</button>
+    {{if .CanManageACL}}
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/collaborators"
+            hx-target="#tab-content">Collaborators</button>
+    {{end}}
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/logs"
+            hx-target="#tab-content">Logs</button>
+</nav>
+<div id="tab-content"></div>
 ```
 
-### Dependencies
+Active tab state is managed with `hx-on::after-request` toggling an
+`active` class. No client-side router.
 
-```
-by refresh <app> [--rollback]             Refresh unpinned dependencies
-```
+## Field Editing UX
 
-### Logs
+All editable fields across tabs follow a consistent pattern:
 
-```
-by logs <app> [--follow]                  Tail app logs
-```
+**Text inputs and textareas** -- fields are directly editable. A small
+save button appears next to the field when the current value differs
+from the saved value. Clicking save submits via `hx-patch` and shows
+inline feedback.
 
-### User Management (Admin)
+**Dropdowns / selects** -- save automatically on `change` via
+`hx-patch`, with the same inline feedback.
 
-```
-by users list                             List users
-by users update <sub> [flags]             Update user role/active status
-    --role ROLE                              Set role (admin|publisher|viewer)
-    --active BOOL                            Enable/disable user account
-```
+**Inline validation** -- on save, the server returns either:
+- **200** with a success indicator fragment.
+- **422** with an error fragment that swaps into a `<span class="field-error">`
+  below the field.
 
-## Command Details
+The `hx-patch` attributes target `PATCH /api/v1/apps/{id}` (this phase
+adds form-encoded + htmx fragment response support to this endpoint).
 
-### deploy
-
-The primary value over raw `curl`. Handles manifest generation from
-multiple input types (renv.lock, DESCRIPTION, bare scripts), bundle
-preparation (tar.gz), and upload.
-
-Sensible defaults: newly deployed apps start with restrictive settings
-(access_type=acl, no pre-warming, default resource limits). Users
-configure access, scaling, and metadata via separate commands after
-the initial deploy.
-
-### refresh
-
-Wraps `POST /api/v1/apps/{id}/refresh`. Only available for unpinned
-deployments:
-
-```
-$ by refresh my-app
-Refreshing dependencies for my-app...
-  Remotes updated: blockr-org/blockr (abc123 → def456)
-  CRAN packages: unchanged (dated repo 2026-03-18)
-  Worker swap: in progress...
-Done.
-
-$ by refresh my-pinned-app
-Error: my-pinned-app was deployed with pinned dependencies.
-Redeploy to update.
-
-$ by refresh my-app --rollback
-Rolling back dependencies for my-app...
-  Restored previous lockfile
-  Worker swap: in progress...
-Done.
-
-$ by refresh my-app --rollback
-Error: no previous lockfile to roll back to.
+```html
+<!-- Example: text field with per-field save -->
+<div class="field-group">
+    <label for="title">Title</label>
+    <div class="field-row">
+        <input type="text" id="title" name="title" value="{{.App.Title}}"
+               data-original="{{.App.Title}}"
+               oninput="toggleSaveBtn(this)">
+        <button class="field-save hidden"
+                hx-patch="/api/v1/apps/{{.App.ID}}"
+                hx-include="[name='title']"
+                hx-target="next .field-feedback"
+                hx-swap="innerHTML">&#10003;</button>
+        <span class="field-feedback"></span>
+    </div>
+</div>
 ```
 
-The `--rollback` flag wraps `POST /api/v1/apps/{id}/refresh/rollback`
-from phase 2-7. It restores the previous pak lockfile and reassembles
-worker libraries from it. Only one level of rollback is supported —
-the store retains old package versions (append-only), so rollback is
-instant.
+## Tab Content
 
-## Error Handling
+### Overview Tab
 
-- Print the `message` field from error responses, not raw JSON.
-- Non-zero exit codes on failure.
-- `--json` mode: errors are JSON objects with `error` and `message`
-  fields, still with non-zero exit codes.
-- `by refresh` on a pinned app: clear error explaining why.
-- `by deploy --pin` without R/renv: clear error with install guidance.
-- `by delete --purge` on a non-deleted app: error requiring soft-delete
-  first.
+**Endpoint:** `GET /ui/apps/{name}/tab/overview`
+
+The default tab shown when the sidebar opens. Provides at-a-glance
+status for the app.
+
+| Section | Content | Data source |
+|---------|---------|-------------|
+| Status | Running / stopped / failed, last deployed timestamp | App status + `bundles.deployed_at` |
+| Workers | Active worker count, active session count | Worker map + `sessions` table |
+| Activity | Total sessions, last 7 days, unique visitors | Derived from `sessions` table |
+| Bundle | Current bundle ID (truncated), build status | `apps.active_bundle` + `bundles` |
+
+```html
+<div class="overview-grid">
+    <div class="overview-card">
+        <h3>Status</h3>
+        <span class="status-badge status-{{.Status}}">{{.Status}}</span>
+        <p class="overview-meta">Last deployed {{.LastDeployed | timeAgo}}</p>
+    </div>
+    <div class="overview-card">
+        <h3>Workers</h3>
+        <p class="overview-stat">{{.ActiveWorkers}} active</p>
+        <p class="overview-meta">{{.ActiveSessions}} sessions</p>
+    </div>
+    <div class="overview-card">
+        <h3>Activity</h3>
+        <p class="overview-stat">{{.TotalViews}} total views</p>
+        <p class="overview-meta">{{.RecentViews}} last 7 days</p>
+    </div>
+    <div class="overview-card">
+        <h3>Bundle</h3>
+        <p class="overview-stat">{{.ActiveBundle.ID | truncate}}</p>
+        <span class="status-badge status-{{.ActiveBundle.Status}}">{{.ActiveBundle.Status}}</span>
+    </div>
+</div>
+```
+
+Overview cards link to their respective tabs where relevant.
+
+### Settings Tab
+
+**Endpoint:** `GET /ui/apps/{name}/tab/settings`
+
+App metadata and resource configuration with per-field save.
+
+**Metadata fields:**
+
+| Field | Input Type | API Field |
+|-------|-----------|-----------|
+| Title | text | `title` |
+| Description | textarea | `description` |
+| Tags | tag chips with add/remove | `POST/DELETE /api/v1/apps/{id}/tags` |
+
+**Resource configuration fields:**
+
+| Field | Input Type | API Field |
+|-------|-----------|-----------|
+| Memory limit | number + unit dropdown (MB / GB) | `memory_limit` |
+| CPU limit | number (`step="0.25"`) | `cpu_limit` |
+| Max workers | number | `max_workers_per_app` |
+| Max sessions per worker | number | `max_sessions_per_worker` |
+| Pre-warmed seats | number | `pre_warmed_seats` |
+
+**Start / Stop controls:**
+
+```html
+<div class="app-controls">
+    {{if eq .Status "running"}}
+    <button class="btn" hx-post="/api/v1/apps/{{.App.ID}}/stop">Stop</button>
+    {{else}}
+    <button class="btn btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/start">Start</button>
+    {{end}}
+</div>
+```
+
+**Soft-delete** at the bottom:
+
+```html
+<div class="danger-zone">
+    <button class="btn btn-danger"
+            hx-delete="/api/v1/apps/{{.App.ID}}"
+            hx-confirm="Delete {{.App.Name}}? This can be undone within 30 days."
+            hx-on::after-request="if(event.detail.successful) closeSidebar(); location.reload()">
+        Delete app
+    </button>
+</div>
+```
+
+### Runtime Tab
+
+**Endpoint:** `GET /ui/apps/{name}/tab/runtime`
+
+Live operational data. Shows active workers with container stats
+(CPU, memory) and session-to-user mapping. Data comes from
+`GET /api/v1/apps/{id}/runtime` (added in phase 2-8).
+
+```html
+<div class="runtime-view">
+    {{if .Workers}}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Worker</th>
+                <th>Status</th>
+                <th>CPU</th>
+                <th>Memory</th>
+                <th>Sessions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Workers}}
+            <tr>
+                <td class="monospace">{{.ID | truncate}}</td>
+                <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
+                <td>{{.Stats.CPUPercent | printf "%.1f"}}%</td>
+                <td>{{.Stats.MemoryUsageBytes | humanBytes}} / {{.Stats.MemoryLimitBytes | humanBytes}}</td>
+                <td>{{len .Sessions}}</td>
+            </tr>
+            {{if .Sessions}}
+            <tr class="worker-sessions-row">
+                <td colspan="5">
+                    <div class="worker-sessions">
+                        {{range .Sessions}}
+                        <span class="session-chip">
+                            {{.UserDisplayName}} ({{.StartedAt | timeAgo}})
+                        </span>
+                        {{end}}
+                    </div>
+                </td>
+            </tr>
+            {{end}}
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="empty-state">No active workers.</p>
+    {{end}}
+
+    <div class="runtime-summary">
+        <p>{{.ActiveSessions}} active sessions, {{.UniqueVisitors}} unique visitors</p>
+        <p>{{.TotalViews}} total views, {{.RecentViews}} last 7 days</p>
+    </div>
+</div>
+```
+
+### Bundles Tab
+
+**Endpoint:** `GET /ui/apps/{name}/tab/bundles`
+
+Lists bundles from `GET /api/v1/apps/{id}/bundles`, most recent first.
+Each bundle shows ID (truncated), created timestamp, status, and
+active indicator.
+
+Non-active ready bundles have a rollback button:
+
+```html
+<button class="btn btn-sm"
+        hx-post="/api/v1/apps/{{$.App.ID}}/rollback"
+        hx-vals='{"bundle_id": "{{.ID}}"}'
+        hx-confirm="Roll back to bundle {{.ID | truncate}}?"
+        hx-target="#tab-content"
+        hx-swap="innerHTML">Rollback</button>
+```
+
+**Dependency refresh** (shown only for unpinned deployments):
+
+```html
+{{if not .App.IsPinned}}
+<div class="refresh-section">
+    <button class="btn"
+            hx-post="/api/v1/apps/{{.App.ID}}/refresh"
+            hx-target="#refresh-status">Refresh dependencies</button>
+    <div id="refresh-status"></div>
+</div>
+{{end}}
+```
+
+### Collaborators Tab
+
+**Endpoint:** `GET /ui/apps/{name}/tab/collaborators`
+
+**Visible to owner+ only.** Manages app visibility and per-user access
+control.
+
+The collaborators list uses `ListAppAccessWithNames()` (added in this
+phase) to join `app_access` with the `users` table for human-readable
+display names. If a granted principal has never logged in, the raw
+principal (OIDC subject) is shown instead.
+
+**Visibility / access type:**
+
+```html
+<div class="field-group">
+    <label for="access-type">Access type</label>
+    <p class="field-description">Controls who can access this app.</p>
+    <div class="field-row">
+        <select id="access-type" name="access_type"
+                hx-patch="/api/v1/apps/{{.App.ID}}"
+                hx-trigger="change"
+                hx-target="next .field-feedback"
+                hx-swap="innerHTML">
+            <option value="public" {{if eq .App.AccessType "public"}}selected{{end}}>Public</option>
+            <option value="logged_in" {{if eq .App.AccessType "logged_in"}}selected{{end}}>Logged in</option>
+            <option value="acl" {{if eq .App.AccessType "acl"}}selected{{end}}>ACL</option>
+        </select>
+        <span class="field-feedback"></span>
+    </div>
+</div>
+```
+
+**ACL management** (shown when access_type = "acl"):
+
+```html
+{{if eq .App.AccessType "acl"}}
+<div class="acl-section">
+    <h3>Access grants</h3>
+    <table class="acl-table">
+        <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
+        <tbody>
+        {{range .Grants}}
+        <tr>
+            <td>{{if .UserName}}{{.UserName}}{{else}}{{.Principal}}{{end}}</td>
+            <td>{{.Role}}</td>
+            <td><button class="btn btn-sm btn-danger"
+                        hx-delete="/api/v1/apps/{{$.App.ID}}/access/user/{{.Principal}}"
+                        hx-target="closest tr"
+                        hx-swap="outerHTML swap:0.2s">Remove</button></td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    <form class="acl-add-form"
+          hx-post="/api/v1/apps/{{.App.ID}}/access"
+          hx-target=".acl-table tbody"
+          hx-swap="beforeend">
+        <input type="text" name="user" placeholder="Username or email" required>
+        <select name="role">
+            <option value="viewer">Viewer</option>
+            <option value="collaborator">Collaborator</option>
+        </select>
+        <button type="submit" class="btn btn-sm">Add</button>
+    </form>
+</div>
+{{end}}
+```
+
+### Logs Tab
+
+**Endpoint:** `GET /ui/apps/{name}/tab/logs`
+
+Logs are scoped to **workers**, not sessions. The tab shows active and
+recent workers for the app, each with a link to view that worker's log
+stream. This matches the underlying architecture: Docker containers
+produce a single stdout/stderr stream per worker, and
+`logstore.Subscribe(workerID)` is the read path.
+
+When `max_sessions_per_worker = 1`, worker logs are effectively
+per-session logs. For shared workers, log output from multiple
+sessions is interleaved -- the same trade-off Posit Connect makes.
+
+```html
+<div class="log-viewer">
+    <div class="worker-list">
+        <h3>Workers</h3>
+        <table class="session-table">
+            <thead>
+                <tr><th>Worker</th><th>Status</th><th>Sessions</th><th>Since</th></tr>
+            </thead>
+            <tbody>
+            {{range .Workers}}
+            <tr class="worker-entry {{if eq .Status "active"}}worker-active{{end}}"
+                hx-get="/ui/apps/{{$.App.Name}}/tab/logs/worker/{{.ID}}"
+                hx-target="#log-content">
+                <td class="monospace">{{.ID | truncate}}</td>
+                <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
+                <td>{{.SessionCount}}</td>
+                <td>{{.StartedAt | timeAgo}}</td>
+            </tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
+    <div id="log-content" class="log-content">
+        <p class="log-placeholder">Select a worker to view logs.</p>
+    </div>
+</div>
+```
+
+**Worker log view fragment** (`GET /ui/apps/{name}/tab/logs/worker/{wid}`):
+
+```html
+<div class="log-worker-view">
+    <div class="log-controls">
+        <span class="log-worker-label">Worker {{.WorkerID | truncate}}</span>
+        {{if .Active}}
+        <button id="log-toggle" onclick="toggleLogs('{{.WorkerID}}')">
+            Start streaming
+        </button>
+        {{end}}
+        <button onclick="clearLogs()">Clear</button>
+    </div>
+    <pre id="log-output" class="log-output">{{.HistoricalLogs}}</pre>
+</div>
+
+<script>
+let logController = null;
+
+function toggleLogs(workerId) {
+    if (logController) { stopLogs(); return; }
+    const btn = document.getElementById('log-toggle');
+    const output = document.getElementById('log-output');
+    logController = new AbortController();
+    btn.textContent = 'Stop streaming';
+
+    fetch('/api/v1/apps/{{.App.ID}}/logs?worker_id=' + workerId + '&stream=true', {
+        signal: logController.signal,
+        headers: { 'Accept': 'text/plain' }
+    }).then(resp => {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        function read() {
+            reader.read().then(({ done, value }) => {
+                if (done) { stopLogs(); return; }
+                output.textContent += decoder.decode(value);
+                output.scrollTop = output.scrollHeight;
+                read();
+            });
+        }
+        read();
+    }).catch(() => stopLogs());
+}
+
+function stopLogs() {
+    if (logController) { logController.abort(); logController = null; }
+    const btn = document.getElementById('log-toggle');
+    if (btn) btn.textContent = 'Start streaming';
+}
+
+function clearLogs() {
+    document.getElementById('log-output').textContent = '';
+}
+</script>
+```
+
+## htmx Error Handling
+
+When an htmx request fails, the following behavior applies:
+
+**Network errors / 5xx:** htmx fires `htmx:responseError`. A global
+handler shows a brief error message in the target:
+
+```js
+document.body.addEventListener('htmx:responseError', function(e) {
+    var target = e.detail.target;
+    if (target) {
+        target.innerHTML = '<p class="error-message">Something went wrong. Try again.</p>';
+    }
+});
+```
+
+**401 (session expired):** When auth middleware returns 401 for an
+htmx request (detected via `HX-Request` header), it sets
+`HX-Redirect: /login` in the response header. htmx automatically
+follows this and redirects the full page to login.
+
+**404 (app deleted, access revoked):** Returns empty content. The
+tab area shows nothing.
+
+**422 (validation error):** Returns an error fragment that swaps
+into the `field-error` span (see Field Editing UX).
+
+## Fragment Routes
+
+| Method | Path | Returns | Auth |
+|--------|------|---------|------|
+| GET | `/ui/apps/{name}/sidebar` | HTML fragment | collaborator+ |
+| GET | `/ui/apps/{name}/tab/overview` | HTML fragment | collaborator+ |
+| GET | `/ui/apps/{name}/tab/settings` | HTML fragment | collaborator+ |
+| GET | `/ui/apps/{name}/tab/runtime` | HTML fragment | collaborator+ |
+| GET | `/ui/apps/{name}/tab/bundles` | HTML fragment | collaborator+ |
+| GET | `/ui/apps/{name}/tab/collaborators` | HTML fragment | **owner+** |
+| GET | `/ui/apps/{name}/tab/logs` | HTML fragment | collaborator+ |
+| GET | `/ui/apps/{name}/tab/logs/worker/{wid}` | HTML fragment | collaborator+ |
+
+## Templates
+
+Fragment templates in `internal/ui/templates/`:
+
+```
+templates/
+├── sidebar.html           # sidebar shell: header, tabs, tab-content div
+├── tab_overview.html      # Overview tab partial
+├── tab_settings.html      # Settings tab partial
+├── tab_runtime.html       # Runtime tab partial (worker list + stats)
+├── tab_bundles.html       # Bundles tab partial
+├── tab_collaborators.html # Collaborators tab partial
+├── tab_logs.html          # Logs tab partial (worker list)
+├── tab_logs_worker.html   # Log viewer for a specific worker
+└── error_fragment.html    # Generic error message fragment
+```
+
+All parsed standalone (no `base.html` wrapper).
+
+## CSS Additions
+
+Sidebar-specific styles (added to existing `style.css`):
+
+- **`.sidebar-header`** -- flex row, app name + external link + close button.
+- **`.sidebar-tabs`** -- flex row of tab buttons, bottom border.
+- **`.tab.active`** -- bold, border-bottom highlight.
+- **`.overview-grid`** -- 2x2 grid of status cards.
+- **`.overview-card`** -- bordered card with heading, stat, and meta text.
+- **`.field-group`** -- label + field-row + optional error container.
+- **`.field-row`** -- flex row holding input + save button + feedback span.
+- **`.field-save`** -- small inline save button, hidden by default.
+- **`.field-feedback`** -- inline success/error indicator.
+- **`.field-error`** -- red text below field for validation messages.
+- **`.field-invalid`** -- red border on input with validation error.
+- **`.acl-table`** -- simple table for access grants.
+- **`.acl-add-form`** -- inline form row for adding grants.
+- **`.runtime-view`** -- container for runtime tab content.
+- **`.runtime-summary`** -- summary stats below worker table.
+- **`.worker-sessions`** -- inline session chips within worker row.
+- **`.session-chip`** -- small pill showing user + duration.
+- **`.log-viewer`** -- flex row: worker list on left, log content on right.
+- **`.worker-list`** -- scrollable list of workers.
+- **`.worker-entry`** -- clickable worker item.
+- **`.worker-active`** -- highlighted style for active workers.
+- **`.log-content`** -- flex column, `.log-output` has monospace font, dark
+  background, max-height with overflow scroll.
+- **`.danger-zone`** -- top border, red-tinted button.
+- **`.error-message`** -- red text for htmx error display.
+
+## Sidebar JS Additions
+
+Per-field save visibility and htmx error handling (added to the
+sidebar JS from phase 2-9):
+
+```js
+// Show/hide per-field save buttons when values change.
+function toggleSaveBtn(input) {
+    const saveBtn = input.closest('.field-row').querySelector('.field-save');
+    if (!saveBtn) return;
+    if (input.value !== input.dataset.original) {
+        saveBtn.classList.remove('hidden');
+    } else {
+        saveBtn.classList.add('hidden');
+    }
+}
+
+// Global htmx error handler.
+document.body.addEventListener('htmx:responseError', function(e) {
+    var target = e.detail.target;
+    if (target) {
+        target.innerHTML = '<p class="error-message">Something went wrong. Try again.</p>';
+    }
+});
+```
 
 ## Deliverables
 
-1. **Server-side: enable/disable** — migration adding `enabled` column,
-   proxy and autoscaler checks, API endpoints for enable/disable.
-2. **Server-side: hard delete** — API endpoint for permanent app removal
-   (admin only, requires prior soft-delete).
-3. **CLI binary** (`cmd/by/main.go`) — cobra-based subcommand structure
-   with global `--json` flag.
-4. **Login command** — interactive credential storage with browser-based
-   PAT creation flow.
-5. **Init command** — manifest generation without deploy, same detection
-   logic as deploy.
-6. **Deploy command** — manifest generation from all input types, bundle
-   preparation, upload, first-deploy confirmation prompt. The primary
-   complexity in the CLI.
-7. **Refresh command** — wraps the refresh API from phase 2-7.
-8. **Scale command** — resource and scaling configuration.
-9. **Access command** — ACL management with show/set-type/grant/revoke
-   subcommands.
-10. **Tags command** — global pool management + per-app tag operations.
-11. **CRUD commands** — thin API wrappers for list, get, enable, disable,
-    rollback, logs, bundles, delete, restore, update, rename, users.
-12. **Error formatting** — human-friendly error messages from API
-    responses, with JSON error output in `--json` mode.
+1. **Form-encoded PATCH** -- `UpdateApp` handler accepts both JSON
+   and form-encoded bodies, returns HTML fragments for htmx requests.
+2. **Collaborator display names** -- `ListAppAccessWithNames()` DB
+   method joining `app_access` with `users`.
+3. **Fragment route scaffolding** -- register `/ui/` routes, extract
+   `resolveApp()` to shared location, set up fragment template parsing.
+4. **Sidebar infrastructure** -- wire gear icon to fragment route,
+   sidebar shell endpoint (header + tabs + initial Overview load).
+5. **Overview tab** -- status, workers, activity, and bundle summary.
+6. **Settings tab** -- metadata editing (title, description, tags),
+   resource configuration (memory, CPU, workers, sessions, pre-warming),
+   per-field save with inline validation, start/stop, soft-delete.
+7. **Runtime tab** -- live worker table with CPU/memory stats,
+   session-to-user mapping, activity summary.
+8. **Bundles tab** -- bundle list, active indicator, rollback action,
+   dependency refresh (unpinned only).
+9. **Collaborators tab** -- access type dropdown, ACL grant/revoke
+   management with display names. Owner+ only.
+10. **Logs tab** -- worker-scoped log viewer with worker list,
+    historical log display, and live streaming for active workers.
+11. **htmx error handling** -- global error handler, 401 redirect via
+    `HX-Redirect`, 422 validation fragments, error fragment template.
+12. **CSS** -- sidebar tabs, overview grid, field editing, ACL table,
+    runtime view, log viewer, danger zone, error message styles.
+13. **Tests** -- fragment route tests, RBAC tests (viewer blocked,
+    collaborator allowed, owner-only for collaborators tab), sidebar
+    open/close behavior.
+
+## Implementation Steps
+
+### Step 1: Backend Prerequisites
+
+Add form-encoded PATCH support to `UpdateApp`. Implement
+`ListAppAccessWithNames()` DB method.
+
+### Step 2: Fragment Route Scaffolding
+
+Extract `resolveApp()` to shared location. Register `/ui/apps/{name}/`
+routes with auth middleware. Set up fragment template parsing in `UI`
+struct. Implement sidebar shell endpoint returning header + tabs.
+
+### Step 3: Overview Tab
+
+Implement overview tab partial. Wire to app data + session metrics
+from `GET /api/v1/apps/{id}/runtime`.
+
+### Step 4: Settings Tab
+
+Implement settings tab partial. Wire per-field save for title,
+description, resource config. Add tag management. Add start/stop
+controls. Add soft-delete button.
+
+### Step 5: Runtime Tab
+
+Implement runtime tab partial. Wire to
+`GET /api/v1/apps/{id}/runtime` for live worker data with CPU/memory
+stats and session-to-user mapping.
+
+### Step 6: Bundles Tab
+
+Implement bundles tab partial. List bundles with active indicator.
+Wire rollback button. Add refresh section for unpinned apps.
+
+### Step 7: Collaborators Tab
+
+Implement collaborators tab partial (owner+ only). Wire access type
+dropdown with auto-save. Add ACL grant list with display names,
+add/remove.
+
+### Step 8: Logs Tab
+
+Implement logs tab partial with worker list and drill-down. Wire
+worker log viewer with historical fetch and live streaming JS.
+
+### Step 9: htmx Error Handling + Polish
+
+Add global htmx error handler. Handle 401 via `HX-Redirect`. Add
+error fragment template. Verify all htmx interactions degrade
+gracefully on errors.
+
+### Step 10: Tests
+
+Fragment route tests for all tabs. RBAC tests verifying viewer cannot
+access sidebar or tabs. Owner-only test for collaborators tab.
+Integration tests for per-field save, rollback, start/stop via htmx.
