@@ -351,7 +351,6 @@ by update <app> [flags]                   App metadata
     --title TEXT                             Display title
     --description TEXT                       Description
 
-by rename <app> <new-name>                Change app name (changes URL)
 ```
 
 ### Access Control
@@ -483,7 +482,7 @@ instant.
 8. **Tags command** -- global pool management + per-app tag operations.
 9. **CRUD commands** -- thin API wrappers for list, get (with `--runtime`),
    enable, disable, rollback, logs, bundles, delete (with `--purge`),
-   restore, update, rename, users.
+   restore, update, users.
 10. **Error formatting** -- human-friendly error messages from API
     responses, with JSON error output in `--json` mode.
 
@@ -505,7 +504,7 @@ detection logic.
 ### Step 3: Thin Wrapper Commands
 
 Implement list, get (with `--runtime`), enable, disable, delete
-(with `--purge`), restore, bundles, rollback, scale, update, rename,
+(with `--purge`), restore, bundles, rollback, scale, update,
 access (show/set-type/grant/revoke), tags, refresh (with `--rollback`),
 logs (with `--follow`, `--worker`, default worker selection), users.
 

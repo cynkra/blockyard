@@ -112,7 +112,7 @@ to the app (using the per-app `relation` field from
             hx-target="#sidebar"
             hx-swap="innerHTML"
             aria-label="Manage {{.Name}}"
-            onclick="event.preventDefault()">&#9881;</button>
+            onclick="event.stopPropagation()">&#9881;</button>
     {{end}}
     <!-- existing card content -->
 </a>
@@ -431,6 +431,8 @@ Minimal vanilla JS for sidebar open/close (ready for phase 2-11):
 
 ```js
 function closeSidebar() {
+    // Phase 2-11 adds stopLogs(); guard avoids errors before that phase.
+    if (typeof stopLogs === 'function') stopLogs();
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('sidebar-overlay').classList.remove('open');
     document.getElementById('sidebar').innerHTML = '';

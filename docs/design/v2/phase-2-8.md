@@ -448,19 +448,6 @@ This is a server-side guard — the `pinned` column on bundles (added in
 this phase) is the source of truth. Clients (CLI, UI) can rely on the
 409 rather than checking client-side.
 
-#### App Rename
-
-`PATCH /api/v1/apps/{id}` with `name` field -- owner+ (`CanDelete`).
-
-Renaming changes the app's URL (`/app/{name}/`), so it requires owner+
-rather than collaborator+. The existing `validateAppName()` rules
-apply. Returns 409 if the new name conflicts with another live app.
-
-The `updateAppRequest` gains an optional `Name` field. The handler
-checks owner+ permission when `name` is present (same as `access_type`
-which checks `CanManageACL`). The DB layer adds `Name` to `AppUpdate`
-and includes it in the UPDATE query.
-
 #### Enable/Disable API
 
 ```
@@ -598,17 +585,6 @@ The response shape matches the existing `UserRow` fields. This is a
 thin wrapper: extract the caller from context, look up their user row,
 return it.
 
-#### App Rename Support
-
-`PATCH /api/v1/apps/{id}` is extended to accept a `name` field.
-Renaming changes the app's URL (`/app/{name}/`), so the endpoint
-validates the new name (same rules as `CreateApp`: lowercase
-alphanumeric + hyphens, unique among live apps) and returns 409
-Conflict if the name is taken.
-
-Requires owner+ (`CanDelete`), since renaming changes the app's URL.
-This is stricter than other PATCH fields (which are collaborator+).
-
 #### htmx-Aware Response Handling
 
 **`PATCH /api/v1/apps/{id}`** is extended to accept
@@ -714,7 +690,7 @@ owner+. Hard delete (purge) requires admin.
 |----------|------------------|
 | `GET /api/v1/apps/{id}` | any access (metadata only, no workers) |
 | `GET /api/v1/apps/{id}/runtime` | collaborator+ |
-| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`); `name` field requires owner+ (`CanDelete`) |
+| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`) |
 | `DELETE /api/v1/apps/{id}` | owner+ (`CanDelete`) |
 | `DELETE /api/v1/apps/{id}?purge=true` | admin only |
 | `GET /api/v1/apps/{id}/bundles` | collaborator+ (`CanDeploy`) |
@@ -793,17 +769,15 @@ owner+. Hard delete (purge) requires admin.
 15. **User profile endpoint** -- `GET /api/v1/users/me` returning the
     caller's own profile (sub, email, name, role). Used by the CLI's
     `by login` for token verification.
-16. **App rename** -- add `name` field to `PATCH /api/v1/apps/{id}`
-    with owner+ permission check and name validation/conflict handling.
-17. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
+15. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
     `POST /apps/{id}/refresh/rollback` return 409 when the active
     bundle is pinned.
-18. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
+16. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
     the runtime API and logs tab.
-19. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
+17. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
     `stream` query parameter (default `true`); `stream=false` returns
     historical snapshot only.
-20. **htmx event triggers** -- action endpoints return `HX-Trigger`
+18. **htmx event triggers** -- action endpoints return `HX-Trigger`
     response headers for htmx requests, enabling UI fragment re-fetch
     without HTML rendering in the API layer.
 
@@ -862,9 +836,8 @@ Add `resolveAppIncludeDeleted()` for restore-by-name support. Add
 htmx-aware response handling: form-encoded PATCH on `UpdateApp`
 (dual JSON + form encoding, fragment responses), 200-not-204 on
 DELETE endpoints for htmx callers, form-encoded credential enrollment.
-Add `name` to `AppUpdate` with owner+ permission check and conflict
-detection. Add `HX-Trigger` response headers to action endpoints for
-htmx requests. Implement `ListAppAccessWithNames()` DB method.
+Add `HX-Trigger` response headers to action endpoints for htmx
+requests. Implement `ListAppAccessWithNames()` DB method.
 
 ### Step 8: Tests
 

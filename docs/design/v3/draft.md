@@ -230,6 +230,19 @@ Documenting the Kata runtime swap, per-app runtime configuration, and
 verifying Shiny workload compatibility is a low-effort addition to the
 deployment guide.
 
+### App Rename
+
+Renaming an app changes its URL (`/app/{name}/`), which breaks active
+sessions, WebSocket connections, and path-scoped cookies. A safe
+implementation needs a drain-and-redirect mechanism similar to unpinned
+dependency updates: drain existing workers under the old name, redirect
+`/app/old-name/*` to `/app/new-name/*` for a grace period, and handle
+client-side URL invalidation (sidebar htmx attributes, bookmarks).
+
+Deferred from v2 (removed from phases 2-8 and 2-9) because the
+session/cookie breakage cannot be handled gracefully without the
+drain-redirect infrastructure.
+
 ### Dynamic Resource Limit Updates
 
 v2 enforces resource limits at container creation and validates inputs

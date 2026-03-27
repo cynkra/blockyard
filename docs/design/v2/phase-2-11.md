@@ -19,6 +19,10 @@ Fragment templates use the `fragments` map established in phase 2-10.
 Fragment handlers call `ui.fragments[name].Execute(w, data)` directly --
 no `ExecuteTemplate` with a named block.
 
+Phase 2-10 registers the `timeAgo` and `truncate` template functions.
+This phase adds `humanBytes` to the funcMap (used by the Runtime tab
+to format memory values).
+
 ### App Name -> ID Resolution
 
 Fragment routes use `{name}` in URLs for user-friendly paths. The
@@ -68,7 +72,7 @@ The gear icon is conditionally rendered:
         hx-target="#sidebar"
         hx-swap="innerHTML"
         aria-label="Manage {{.Name}}"
-        onclick="event.preventDefault()">&#9881;</button>
+        onclick="event.stopPropagation()">&#9881;</button>
 {{end}}
 ```
 
@@ -372,12 +376,16 @@ Non-active ready bundles have a rollback button:
 ```
 
 The rollback API returns JSON with `HX-Trigger: bundleRolledBack`.
-The bundles tab container listens and re-fetches:
+A wrapper div inside the bundles tab listens and re-fetches. Because
+this div lives inside `#tab-content`, switching to another tab removes
+the listener -- so the event only triggers a re-fetch while the
+bundles tab is active:
 
 ```html
-<div id="tab-content"
-     hx-trigger="bundleRolledBack from:body"
-     hx-get="/ui/apps/{{.App.Name}}/tab/bundles">
+<div class="bundles-view"
+     hx-trigger="bundleRolledBack from:body, refreshStarted from:body"
+     hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
+     hx-target="#tab-content">
 ```
 
 **Dependency refresh** (shown only for unpinned deployments, using
@@ -389,10 +397,6 @@ the `pinned` field on the active bundle from phase 2-8):
     <button class="btn"
             hx-post="/api/v1/apps/{{.App.ID}}/refresh"
             hx-swap="none">Refresh dependencies</button>
-    <div id="refresh-status"
-         hx-trigger="refreshStarted from:body"
-         hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
-         hx-target="#tab-content"></div>
 </div>
 {{end}}
 ```
@@ -420,7 +424,8 @@ principal (OIDC subject) is shown instead.
                 hx-patch="/api/v1/apps/{{.App.ID}}"
                 hx-trigger="change"
                 hx-target="next .field-feedback"
-                hx-swap="innerHTML">
+                hx-swap="innerHTML"
+                hx-on::after-request="if(event.detail.successful) htmx.ajax('GET', '/ui/apps/{{.App.Name}}/tab/collaborators', '#tab-content')">
             <option value="public" {{if eq .App.AccessType "public"}}selected{{end}}>Public</option>
             <option value="logged_in" {{if eq .App.AccessType "logged_in"}}selected{{end}}>Logged in</option>
             <option value="acl" {{if eq .App.AccessType "acl"}}selected{{end}}>ACL</option>
@@ -454,7 +459,8 @@ principal (OIDC subject) is shown instead.
     <form class="acl-add-form"
           hx-post="/api/v1/apps/{{.App.ID}}/access"
           hx-swap="none">
-        <input type="text" name="user" placeholder="Username or email" required>
+        <input type="hidden" name="kind" value="user">
+        <input type="text" name="principal" placeholder="Username or email" required>
         <select name="role">
             <option value="viewer">Viewer</option>
             <option value="collaborator">Collaborator</option>
@@ -684,6 +690,15 @@ function toggleSaveBtn(input) {
         saveBtn.classList.add('hidden');
     }
 }
+
+// Stop active log streams when switching tabs or closing sidebar.
+// The closeSidebar() function from phase 2-10 is extended to call
+// stopLogs() before clearing sidebar innerHTML.
+document.body.addEventListener('htmx:beforeSwap', function(e) {
+    if (e.detail.target.id === 'tab-content' && typeof stopLogs === 'function') {
+        stopLogs();
+    }
+});
 
 // Global htmx error handler.
 document.body.addEventListener('htmx:responseError', function(e) {
