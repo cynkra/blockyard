@@ -527,6 +527,25 @@ Response:
 }
 ```
 
+#### Per-App Tag Listing
+
+`GET /api/v1/apps/{id}/tags` -- any access.
+
+Returns the tags attached to an app. Completes the REST resource
+pattern alongside the existing `POST` (add) and `DELETE` (remove)
+endpoints. Used by the CLI's `by tags <app> list`.
+
+Response:
+
+```json
+{
+  "tags": [
+    {"id": "...", "name": "production"},
+    {"id": "...", "name": "shiny"}
+  ]
+}
+```
+
 #### Sessions API
 
 `GET /api/v1/apps/{id}/sessions` -- collaborator+.
@@ -587,7 +606,8 @@ validates the new name (same rules as `CreateApp`: lowercase
 alphanumeric + hyphens, unique among live apps) and returns 409
 Conflict if the name is taken.
 
-Requires collaborator+ (`CanUpdateConfig`), same as other PATCH fields.
+Requires owner+ (`CanDelete`), since renaming changes the app's URL.
+This is stricter than other PATCH fields (which are collaborator+).
 
 #### htmx-Aware Response Handling
 
@@ -621,6 +641,12 @@ an app by name or UUID and evaluate the caller's access level.
 Extract these to a shared location (`internal/db/` for `resolveApp`,
 `internal/server/` for `resolveAppRelation`) so UI fragment routes
 (phase 2-11) can reuse them without importing the API package.
+
+Add a `resolveAppIncludeDeleted()` variant that performs the same
+UUID-then-name lookup but without filtering out soft-deleted apps.
+The current `RestoreApp` handler uses `GetAppIncludeDeleted(id)` which
+only accepts UUIDs -- the CLI's `by restore <name>` needs name-based
+lookup for deleted apps.
 
 ### Database Operations
 
@@ -682,6 +708,7 @@ owner+. Hard delete (purge) requires admin.
 | `POST /api/v1/apps/{id}/enable` | collaborator+ (`CanStartStop`) |
 | `POST /api/v1/apps/{id}/disable` | collaborator+ (`CanStartStop`) |
 | `GET /api/v1/apps/{id}/logs` | collaborator+ (`CanDeploy`) |
+| `GET /api/v1/apps/{id}/tags` | any access |
 | `GET /api/v1/apps/{id}/access` | owner+ (`CanManageACL`) |
 | `POST /api/v1/apps/{id}/access` | owner+ (`CanManageACL`) |
 | `DELETE /api/v1/apps/{id}/access/...` | owner+ (`CanManageACL`) |
@@ -733,29 +760,35 @@ owner+. Hard delete (purge) requires admin.
    collaborator+ per-app filtering, and `deployed_by_name` from users
    table join.
 10. **Sessions API** -- `GET /api/v1/apps/{id}/sessions` with filtering.
-11. **Shared app resolution** -- extract `resolveApp()` and
+11. **Per-app tag listing** -- `GET /api/v1/apps/{id}/tags` returning
+    tags for a single app (completes the REST resource alongside POST
+    and DELETE).
+12. **Shared app resolution** -- extract `resolveApp()` and
     `resolveAppRelation()` to shared location for reuse by UI handlers.
-12. **htmx-aware responses** -- `PATCH /api/v1/apps/{id}` accepts
+    Add `resolveAppIncludeDeleted()` variant that handles UUID-or-name
+    lookup without filtering out soft-deleted apps (used by the restore
+    endpoint so the CLI can `by restore <name>`, not just UUID).
+13. **htmx-aware responses** -- `PATCH /api/v1/apps/{id}` accepts
     form-encoded bodies and returns HTML fragments for htmx requests.
     DELETE endpoints return 200 (not 204) for htmx requests so
     `outerHTML` swaps can remove rows. Credential enrollment endpoint
     accepts form-encoded bodies.
-13. **Collaborator display names** -- `ListAppAccessWithNames()` DB
+14. **Collaborator display names** -- `ListAppAccessWithNames()` DB
     method joining `app_access` with `users`.
-14. **User profile endpoint** -- `GET /api/v1/users/me` returning the
+15. **User profile endpoint** -- `GET /api/v1/users/me` returning the
     caller's own profile (sub, email, name, role). Used by the CLI's
     `by login` for token verification.
-15. **App rename** -- add `name` field to `PATCH /api/v1/apps/{id}`
+16. **App rename** -- add `name` field to `PATCH /api/v1/apps/{id}`
     with owner+ permission check and name validation/conflict handling.
-16. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
+17. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
     `POST /apps/{id}/refresh/rollback` return 409 when the active
     bundle is pinned.
-17. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
+18. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
     the runtime API and logs tab.
-18. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
+19. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
     `stream` query parameter (default `true`); `stream=false` returns
     historical snapshot only.
-19. **htmx event triggers** -- action endpoints return `HX-Trigger`
+20. **htmx event triggers** -- action endpoints return `HX-Trigger`
     response headers for htmx requests, enabling UI fragment re-fetch
     without HTML rendering in the API layer.
 
@@ -801,15 +834,17 @@ Remove `StartApp` and `StopApp` handlers. Add proxy cold-start check
 and autoscaler skip for disabled apps. Implement hard-delete endpoint
 with soft-delete precondition check.
 
-### Step 6: Deployments + Sessions API
+### Step 6: Deployments + Sessions + Tags API
 
 Implement `GET /api/v1/deployments` with collaborator+ per-app
-filtering. Implement `GET /api/v1/apps/{id}/sessions`.
+filtering. Implement `GET /api/v1/apps/{id}/sessions`. Implement
+`GET /api/v1/apps/{id}/tags` for per-app tag listing.
 
 ### Step 7: Shared Infrastructure
 
 Extract `resolveApp()` and `resolveAppRelation()` to shared location.
-Add htmx-aware response handling: form-encoded PATCH on `UpdateApp`
+Add `resolveAppIncludeDeleted()` for restore-by-name support. Add
+htmx-aware response handling: form-encoded PATCH on `UpdateApp`
 (dual JSON + form encoding, fragment responses), 200-not-204 on
 DELETE endpoints for htmx callers, form-encoded credential enrollment.
 Add `name` to `AppUpdate` with owner+ permission check and conflict

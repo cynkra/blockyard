@@ -196,9 +196,10 @@ Uploading bundle... done.
 ```
 
 With `--wait`, the CLI blocks and streams the server-side build log by
-polling `GET /api/v1/tasks/{taskID}/logs` (using the `first` cursor
-parameter for incremental output). Exits 0 on success, non-zero on
-build failure:
+connecting to `GET /api/v1/tasks/{taskID}/logs`, which returns an HTTP
+chunked stream (lines arrive as they are produced; the response closes
+when the task completes). Exits 0 on success, non-zero on build
+failure:
 
 ```
 $ by deploy ./myapp/ --wait
