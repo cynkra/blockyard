@@ -383,8 +383,18 @@ by refresh <app> [--rollback]             Refresh unpinned dependencies
 ### Logs
 
 ```
-by logs <app> [--follow]                  Tail app logs
+by logs <app> [--follow] [--worker WID]   Tail app logs
 ```
+
+When `--worker` is omitted, the CLI calls
+`GET /api/v1/apps/{id}/runtime` to list workers and selects the most
+recently started active worker. If no active workers exist, it falls
+back to the most recently ended worker (for historical logs). If
+multiple active workers exist, a note is printed:
+`Streaming worker w-abc1... (3 active workers, use --worker to select)`.
+
+`--follow` maps to `stream=true` (live streaming); without it,
+`stream=false` returns the historical snapshot and exits.
 
 ### User Management (Admin)
 
@@ -496,7 +506,7 @@ detection logic.
 Implement list, get (with `--runtime`), enable, disable, delete
 (with `--purge`), restore, bundles, rollback, scale, update, rename,
 access (show/set-type/grant/revoke), tags, refresh (with `--rollback`),
-logs (with `--follow`), users.
+logs (with `--follow`, `--worker`, default worker selection), users.
 
 ### Step 4: Tests
 

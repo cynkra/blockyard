@@ -230,12 +230,17 @@ viewers should only see app metadata.
   "enabled": true,
   "created_at": "...",
   "updated_at": "...",
-  "status": "running"
+  "status": "running",
+  "relation": "collaborator",
+  "tags": ["production", "shiny"]
 }
 ```
 
-The `workers` field is **removed** from this response. The `enabled`
-field is added. The `relation` field is added (see below).
+The `workers` field is **removed** from this response. The `enabled`,
+`relation`, and `tags` fields are added. `relation` indicates the
+caller's access level (same values as the list endpoint). `tags` is
+the app's tag names, fetched via `ListAppTags()` -- used by the CLI's
+`by tags <app> list` and the sidebar Settings tab.
 
 The `status` field is computed from the worker map:
 - `"running"` -- at least one non-draining worker exists.
@@ -275,7 +280,7 @@ Response (paginated envelope):
 
 ```json
 {
-  "items": [
+  "apps": [
     {
       "id": "...",
       "name": "my-app",
@@ -395,19 +400,25 @@ htmx listeners on the page re-fetch the relevant fragment in response.
 
 This avoids having every action endpoint render HTML. The UI fragment
 routes (phase 2-11) listen for the triggered events and re-fetch the
-affected tab content. The specific event names are defined when the
-fragment routes are registered.
+affected tab content. The event names used by phase 2-11's fragment
+listeners are:
 
-Endpoints where this applies: `POST .../enable`, `POST .../disable`,
-`POST .../rollback`, `POST .../access`, `POST .../refresh`.
+| Endpoint | `HX-Trigger` value |
+|----------|-------------------|
+| `POST .../enable` | `appEnabled` |
+| `POST .../disable` | `appDisabled` |
+| `POST .../rollback` | `bundleRolledBack` |
+| `POST .../access` | `accessGranted` |
+| `POST .../refresh` | `refreshStarted` |
 
 `POST .../rollback` and `POST .../access` also accept
 `application/x-www-form-urlencoded` in addition to JSON, because htmx
 sends form data by default (`hx-vals` on buttons, form fields on the
 ACL grant form).
-For `DELETE` actions (access revoke, app delete, token revoke) the
-existing 204 empty response works directly with htmx's
-`hx-swap="outerHTML"` to remove the target element.
+`DELETE` actions (access revoke, app delete, token revoke) return 200
+with an empty body for htmx requests (instead of the normal 204), as
+htmx ignores 204 responses. See **htmx-Aware Response Handling**
+below for details.
 
 #### RBAC Tightening
 
@@ -679,6 +690,20 @@ owner+. Hard delete (purge) requires admin.
 | `GET /api/v1/deployments` | collaborator+ (per-app filtered) |
 | `GET /api/v1/apps/{id}/sessions` | collaborator+ |
 | `GET /api/v1/users/me` | any authenticated user |
+| `GET /api/v1/users/me/tokens` | any authenticated user |
+| `POST /api/v1/users/me/tokens` | any authenticated user |
+| `DELETE /api/v1/users/me/tokens/{id}` | any authenticated user (own tokens only) |
+| `POST /api/v1/users/me/credentials/{service}` | any authenticated user |
+| `GET /api/v1/apps` | any authenticated user (results RBAC-filtered) |
+| `POST /api/v1/apps` | publisher+ (`CanCreateApp`) |
+| `POST /api/v1/apps/{id}/restore` | owner+ (`CanDelete`) |
+| `GET /api/v1/tags` | any authenticated user |
+| `POST /api/v1/tags` | admin only |
+| `DELETE /api/v1/tags/{id}` | admin only |
+| `POST /api/v1/apps/{id}/tags` | collaborator+ (`CanUpdateConfig`) |
+| `DELETE /api/v1/apps/{id}/tags/{id}` | collaborator+ (`CanUpdateConfig`) |
+| `GET /api/v1/users` | admin only |
+| `PATCH /api/v1/users/{sub}` | admin only |
 
 ---
 

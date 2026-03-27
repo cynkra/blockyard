@@ -467,8 +467,9 @@ principal (OIDC subject) is shown instead.
 
 The grant API returns JSON with `HX-Trigger: accessGranted`. The ACL
 section listens and re-fetches the collaborators tab to show the new
-row with a resolved display name. The delete endpoint returns 204
-(empty), so `hx-swap="outerHTML"` removes the row directly.
+row with a resolved display name. The delete endpoint returns 200
+with an empty body for htmx requests (per phase 2-8's htmx-aware
+response handling), so `hx-swap="outerHTML"` removes the row directly.
 
 ### Logs Tab
 
