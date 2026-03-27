@@ -166,12 +166,17 @@ Follows the same detection logic and input cases as `by deploy`. The
 `by deploy` picks up the existing manifest.json (case 1a) and skips
 detection entirely.
 
+Edge cases: if `manifest.json` already exists, `by init` validates it
+and exits (no overwrite). For bare scripts (case 2b), `by init` errors
+because manifest generation requires at least a DESCRIPTION or lockfile.
+
 ### Bundle Preparation
 
 1. Detect app mode and entrypoint (`app.R` -> shiny, `server.R`/`ui.R`
    -> shiny, etc.).
 2. Generate manifest (per input case above) using `internal/manifest/`
-   types. Write `manifest.json` into the bundle directory.
+   types. Write `manifest.json` into the source directory (same as
+   `by init`), so subsequent deploys find it and skip detection.
 3. Compute file checksums for the `files` section.
 4. Create tar.gz archive of the directory.
 5. Ensure the app exists on the server:
@@ -285,7 +290,7 @@ All other paths are pure Go or need no client-side processing at all.
 ## Subcommands
 
 All commands accept `<app>` as either the unique app name or UUID.
-Common aliases are supported: `ls` -> `list`, `rm` -> `remove`/`delete`.
+Common aliases are supported: `ls` -> `list`, `rm` -> `delete`.
 
 ### Setup
 
@@ -298,7 +303,7 @@ by init <path> [--pin]                    Generate manifest.json without deployi
 
 ```
 by deploy <path> [--name NAME] [--pin] [--yes] [--wait]  Deploy bundle (--wait: stream build logs)
-by list                                   List apps (status, active bundle, owner)
+by list [--deleted]                       List apps (--deleted: admin-only, show soft-deleted apps)
 by get <app> [--runtime]                  App details (config, active bundle, status)
 by enable <app>                           Allow traffic (cold-start, pre-warming)
 by disable <app>                          Block new traffic, drain existing sessions
@@ -361,6 +366,12 @@ by access <app> set-type <type>           Set access mode (acl|logged_in|public)
 by access <app> grant <user> --role ROLE  Add ACL entry (viewer|collaborator)
 by access <app> revoke <user>             Remove ACL entry
 ```
+
+All `by access` subcommands require owner+ access. `show` combines two
+API calls: `GET /api/v1/apps/{id}` for the access type and
+`GET /api/v1/apps/{id}/access` for the ACL entries. `set-type` uses
+`PATCH /api/v1/apps/{id}` (with the `access_type` field, which requires
+`CanManageACL`). `grant` and `revoke` use the access endpoints directly.
 
 ### Tags
 

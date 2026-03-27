@@ -690,7 +690,7 @@ owner+. Hard delete (purge) requires admin.
 |----------|------------------|
 | `GET /api/v1/apps/{id}` | any access (metadata only, no workers) |
 | `GET /api/v1/apps/{id}/runtime` | collaborator+ |
-| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`) |
+| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`); `access_type` field additionally requires owner+ (`CanManageACL`) |
 | `DELETE /api/v1/apps/{id}` | owner+ (`CanDelete`) |
 | `DELETE /api/v1/apps/{id}?purge=true` | admin only |
 | `GET /api/v1/apps/{id}/bundles` | collaborator+ (`CanDeploy`) |
@@ -769,15 +769,15 @@ owner+. Hard delete (purge) requires admin.
 15. **User profile endpoint** -- `GET /api/v1/users/me` returning the
     caller's own profile (sub, email, name, role). Used by the CLI's
     `by login` for token verification.
-15. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
+16. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
     `POST /apps/{id}/refresh/rollback` return 409 when the active
     bundle is pinned.
-16. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
+17. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
     the runtime API and logs tab.
-17. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
+18. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
     `stream` query parameter (default `true`); `stream=false` returns
     historical snapshot only.
-18. **htmx event triggers** -- action endpoints return `HX-Trigger`
+19. **htmx event triggers** -- action endpoints return `HX-Trigger`
     response headers for htmx requests, enabling UI fragment re-fetch
     without HTML rendering in the API layer.
 
