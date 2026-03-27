@@ -850,83 +850,107 @@ type PackageResponse struct {
 }
 ```
 
-### Phase 2-8: Backend Prerequisites + Multi-Page Navigation
+### Phase 2-8: Backend Prerequisites
 
-Backend changes (schema, APIs, RBAC) and navigation restructure.
-Converts the single-page dashboard into a multi-page layout with
-persistent left navigation, htmx fragment loading, and four pages
-(Apps, Deployment History, API Keys, Profile).
+Backend schema, APIs, RBAC changes, and shared infrastructure.
+Establishes the full server-side API surface that the CLI (phase 2-9),
+navigation UI (phase 2-10), and per-app sidebar (phase 2-11) consume.
 
 See [phase-2-8.md](phase-2-8.md) for the full implementation plan.
 
 **Deliverables:**
 
 1. **Database migration** — sessions table, bundle deployment tracking
-   columns (`deployed_by`, `deployed_at`).
+   columns (`deployed_by`, `deployed_at`, `pinned`), app `enabled`
+   column.
 2. **Session lifecycle** — create/end/crash tracking in the proxy and
    worker lifecycle code.
 3. **Backend interface** — `ContainerStats()` method for live
    CPU/memory data.
 4. **API split** — `GetApp` (metadata only, no workers) +
-   `GET /api/v1/apps/{id}/runtime` (collaborator+).
+   `GET /api/v1/apps/{id}/runtime` (collaborator+). Per-app `relation`
+   field in list response.
 5. **RBAC tightening** — `ListBundles`, `PostRefresh`,
    `PostRefreshRollback` require collaborator+.
 6. **New APIs** — `GET /api/v1/deployments`, `GET /api/v1/apps/{id}/sessions`.
-7. **Form-encoded PATCH** — `UpdateApp` accepts form-encoded bodies and
-   returns HTML fragments for htmx requests.
-8. **htmx integration** — vendored `htmx.min.js`, left navigation,
-   four pages.
-9. **Sidebar shell** — container, overlay, gear icon (collaborator+
-   conditional), open/close JS. Non-functional until phase 2-9.
+7. **App enable/disable** — endpoints toggle `enabled`; disabled apps
+   reject new sessions at the proxy.
+8. **Hard delete (purge)** — `DELETE /api/v1/apps/{id}?purge=true`
+   for permanent removal of soft-deleted apps.
+9. **Shared infrastructure** — `resolveApp()` extraction to shared
+   location, form-encoded PATCH on `UpdateApp` (htmx fragment
+   responses), `ListAppAccessWithNames()` DB method.
 
-### Phase 2-9: Per-App Management Sidebar
+### Phase 2-9: CLI
 
-Adds the per-app management sidebar with six tabs (Overview, Settings,
-Runtime, Bundles, Collaborators, Logs). All content loaded via htmx
-fragment routes. Depends on phase 2-8.
+The `by` CLI binary. A command-line client that wraps the server API
+surface. The deploy command is the primary new complexity; all other
+subcommands are thin REST API wrappers.
 
 See [phase-2-9.md](phase-2-9.md) for the full implementation plan.
 
 **Deliverables:**
 
-1. **Fragment route infrastructure** — template parsing, app name→ID
-   resolution, RBAC enforcement per tab.
-2. **Six sidebar tabs** — Overview (status/activity), Settings
-   (metadata + resource config + start/stop + delete), Runtime (live
-   worker stats + session-to-user mapping), Bundles (list + rollback +
-   refresh), Collaborators (owner+ only, ACL management with display
-   names), Logs (worker-scoped log viewer with streaming).
-3. **htmx error handling** — global error handler, 401 redirect,
-   422 validation fragments.
+1. **CLI binary** (`cmd/by/main.go`) — cobra-based subcommand structure
+   with login, deploy (manifest generation from renv.lock, DESCRIPTION,
+   bare scripts, `--pin`), refresh, init, and CRUD commands.
+2. **Deploy command** — manifest generation from all input types,
+   bundle preparation, upload, first-deploy confirmation prompt.
+3. **Thin wrappers** — list, get, enable, disable, rollback, logs,
+   bundles, scale, access, tags, refresh, users.
 
-### Phase 2-10: CLI Tool
+**Authentication:** `BLOCKYARD_TOKEN` environment variable (a PAT).
+`by login` provides interactive token creation; users can also create
+PATs via the web UI and export the env var.
 
-A dedicated Go binary (`cmd/by/`) for interacting with the server via
-the REST API. Built last to target the stable, final v2 API surface.
+### Phase 2-10: Multi-Page Navigation + htmx
 
-The deploy command is the primary complexity — it generates manifests
-from multiple input types (renv.lock, DESCRIPTION, bare scripts, `--pin`)
-using `internal/manifest/` types from phase 2-5. All other subcommands
-are thin REST API wrappers.
+Converts the single-page dashboard into a multi-page layout with
+persistent left navigation, htmx integration, and four distinct pages
+(Apps, Deployment History, API Keys, Profile with PAT management).
+Depends on phase 2-8 for the API endpoints consumed by the Deployment
+History and Profile pages.
 
-See [draft-2-10.md](draft-2-10.md) for the full CLI design including deploy
-flow, manifest generation, refresh command, and subcommand reference.
+See [phase-2-10.md](phase-2-10.md) for the full implementation plan.
 
 **Deliverables:**
 
-1. **CLI binary** (`cmd/by/main.go`) — cobra-based subcommand structure.
-2. **Deploy command** — manifest generation (consuming
-   `internal/manifest/` types), bundle preparation (tar.gz), upload.
-3. **Refresh command** — wraps `POST /api/v1/apps/{id}/refresh` from
-   phase 2-7. Only available for unpinned deployments.
-4. **CRUD commands** — thin API wrappers for list, get, start, stop,
-   rollback, logs, bundles, delete, restore, config, users.
-5. **Error formatting** — human-friendly error messages from API
-   responses. Non-zero exit codes on failure.
+1. **htmx integration** — vendored `htmx.min.js`, served as a static
+   asset alongside `style.css`.
+2. **Template infrastructure** — two-map architecture (`pages` vs
+   `fragments` in `UI` struct) used by this phase and phase 2-11.
+3. **Left navigation** — persistent sidebar with four links (Apps,
+   Deployment History, API Keys, Profile).
+4. **Four pages** — Apps (app grid + non-functional sidebar shell),
+   Deployment History (`GET /api/v1/deployments`), API Keys
+   (third-party credential management), Profile (user identity + PAT
+   management via `POST /ui/tokens` fragment endpoint).
+5. **Sidebar shell** — container, overlay, gear icon (collaborator+
+   conditional, using `relation` from list API), open/close JS.
+   Non-functional until phase 2-11.
 
-**Authentication:** `BLOCKYARD_TOKEN` environment variable (a PAT).
-No login command — users create PATs via the web UI and export the
-env var. A `by login` convenience command is a future addition.
+### Phase 2-11: Per-App Management Sidebar
+
+Adds the per-app management sidebar with six tabs (Overview, Settings,
+Runtime, Bundles, Collaborators, Logs). All content loaded via htmx
+fragment routes. Depends on phase 2-8 (backend) and phase 2-10
+(navigation + htmx).
+
+See [phase-2-11.md](phase-2-11.md) for the full implementation plan.
+
+**Deliverables:**
+
+1. **Fragment route infrastructure** — app name→ID resolution (using
+   shared `resolveApp()` from phase 2-8), RBAC enforcement per tab.
+2. **Six sidebar tabs** — Overview (status/activity), Settings
+   (metadata + resource config via form-encoded PATCH + start/stop +
+   delete), Runtime (live worker stats), Bundles (list + rollback +
+   refresh, using `pinned` field from phase 2-8), Collaborators
+   (owner+ only, ACL management with display names from
+   `ListAppAccessWithNames()`), Logs (worker-scoped log viewer with
+   streaming).
+3. **htmx error handling** — global error handler, 401 redirect,
+   422 validation fragments.
 
 ## Build Order and Dependency Graph
 
@@ -956,22 +980,28 @@ Phase 2-6: Package Store & Worker Library Assembly
 Phase 2-7: Runtime Package Assembly & Dependency Refresh
   └── depends on: phase 2-6 (package store, library assembly)
 
-Phase 2-8: Backend Prerequisites + Multi-Page Navigation
+Phase 2-8: Backend Prerequisites
   └── depends on: phases 2-2 (rollback, soft-delete),
-      2-3 (pre-warming config), 2-7 (refresh API)
+      2-3 (pre-warming config), 2-5 (manifest types), 2-7 (refresh API)
 
-Phase 2-9: Per-App Management Sidebar
-  └── depends on: phase 2-8 (backend + navigation)
+Phase 2-9: CLI
+  └── depends on: phase 2-8 (backend APIs),
+      2-5 (manifest types), 2-7 (refresh API)
 
-Phase 2-10: CLI Tool
-  └── depends on: all API-changing phases (2-2 through 2-7)
-  └── uses internal/manifest/ types from phase 2-5
-  └── built last to target final API surface
+Phase 2-10: Multi-Page Navigation + htmx
+  └── depends on: phase 2-8 (deployments API, PAT APIs)
+
+Phase 2-11: Per-App Management Sidebar
+  └── depends on: phase 2-8 (runtime API, form-encoded PATCH,
+      resolveApp, ListAppAccessWithNames, pinned field),
+      phase 2-10 (navigation, htmx, sidebar shell, template infra)
 ```
 
 Phases 2-3, 2-4, and 2-5 are independent of each other and can be
 developed in parallel after the foundation. Phases 2-5 → 2-6 → 2-7
-form a dependency chain. Phase 2-10 (CLI) is last.
+form a dependency chain. Phases 2-9 (CLI) and 2-10 (navigation) are
+independent of each other and can be developed in parallel after
+phase 2-8. Phase 2-11 (sidebar) is last.
 
 ## Test Strategy
 

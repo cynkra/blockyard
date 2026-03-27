@@ -1,9 +1,8 @@
-# Phase 2-8: Backend Prerequisites + CLI
+# Phase 2-8: Backend Prerequisites
 
-Backend schema, APIs, RBAC changes, and the `by` CLI binary.
-Establishes the full server-side API surface and a command-line client
-that wraps it. UI work (navigation, pages, sidebar) follows in phases
-2-9 and 2-10.
+Backend schema, APIs, RBAC changes, and shared infrastructure.
+Establishes the full server-side API surface that the CLI (phase 2-9),
+navigation UI (phase 2-10), and per-app sidebar (phase 2-11) consume.
 
 Depends on phases 2-2 (rollback, soft-delete), 2-3 (pre-warming config),
 2-5 (manifest types), and 2-7 (refresh API).
@@ -18,7 +17,7 @@ dashboard — this phase does not revisit it.
 ### Sessions Table
 
 A new `sessions` table tracks the full chain: **user -> app -> worker ->
-session -> logs**. This enables activity metrics (phase 2-10 Overview
+session -> logs**. This enables activity metrics (phase 2-11 Overview
 tab) and prepares for future per-session log filtering.
 
 ```sql
@@ -63,11 +62,13 @@ tokens at the R level) is deferred to a future phase.
 
 ### Bundle Schema Changes
 
-Add deployment tracking columns to the existing `bundles` table:
+Add deployment tracking and dependency mode columns to the existing
+`bundles` table:
 
 ```sql
 ALTER TABLE bundles ADD COLUMN deployed_by TEXT;
 ALTER TABLE bundles ADD COLUMN deployed_at TEXT;
+ALTER TABLE bundles ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
 ```
 
 - `deployed_by` -- user_sub of the person who triggered the deployment.
@@ -77,16 +78,40 @@ ALTER TABLE bundles ADD COLUMN deployed_at TEXT;
 - `deployed_at` -- timestamp of bundle activation (distinct from
   `uploaded_at` which records the upload time before build). Set in
   `ActivateBundle()` when the build completes.
+- `pinned` -- whether the bundle was deployed with pinned dependencies
+  (1) or unpinned (0). Set at bundle creation time based on whether the
+  manifest includes a `packages` section. This is static over the
+  bundle's lifetime. The app-level "is pinned" check (used by the UI's
+  refresh button and the CLI's `by refresh` error) is derived from the
+  active bundle's `pinned` value.
 
 **Migration:** For existing bundles with status "ready", set
 `deployed_at = uploaded_at` and `deployed_by` to the app owner.
-Bundles with status "pending" or "failed" get NULL for both.
+Bundles with status "pending" or "failed" get NULL for both. For
+`pinned`, set to 1 if the bundle has an `renv.lock` or a manifest
+with packages, 0 otherwise (default 0 is safe for existing bundles
+since the feature is new).
+
+**Row type update:** `BundleRow` gains the three new fields
+(`DeployedBy *string`, `DeployedAt *string`, `Pinned bool`). See
+**Bundle List Response** below for the updated API response shape.
 
 **Implementation detail:** `deployed_by` is stored on the bundle row
 at INSERT time (in `CreateBundle`), passed from `UploadBundle` which
-has access to `auth.CallerFromContext()`. `deployed_at` is set later
-by `ActivateBundle` when the restore completes. For rollbacks, both
-fields are set atomically in the rollback handler.
+has access to `auth.CallerFromContext()`. `CreateBundle` signature
+expands from `(id, appID)` to `(id, appID, deployedBy, pinned)`.
+`deployed_at` is set later by `ActivateBundle` when the restore
+completes. For rollbacks, both fields are set atomically in the
+rollback handler (overwriting the previous values — the bundle row
+records the most recent activation, not the original upload).
+`pinned` is set at INSERT time: after unpacking the archive but
+before `CreateBundle`, `UploadBundle` attempts to read the manifest
+from the unpacked directory via `resolveManifest()` (same resolution
+order as the restore: `manifest.json` → `renv.lock` → `DESCRIPTION`)
+and checks `m.IsPinned()`. This is a lightweight pre-check —
+the full manifest resolution and dependency build still happen in the
+async restore goroutine. If no manifest exists (bare scripts, case
+2b), `pinned` defaults to false.
 
 ### App Enable/Disable
 
@@ -96,12 +121,25 @@ New `enabled` column on the `apps` table:
 ALTER TABLE apps ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ```
 
+Enable/disable **replaces** the existing start/stop endpoints. With
+blockyard's cold-start architecture, there is no need for an
+imperative "start" -- workers spawn on demand or via pre-warming. The
+only lifecycle control needed is a declarative "should this app accept
+traffic?" switch.
+
 When `enabled = 0`:
 
 - Proxy does not cold-start new workers for the app.
 - Autoscaler does not pre-warm standby seats.
-- Existing sessions drain naturally (workers stay alive until idle).
 - New requests get 503 Service Unavailable.
+- All existing workers are marked as draining and evicted when their
+  sessions complete (reuses the existing `StopApp` drain logic
+  internally).
+
+When `enabled = 1` (re-enabling):
+
+- Cold-start resumes on incoming requests.
+- Autoscaler resumes pre-warming if `pre_warmed_seats > 0`.
 
 This is persistent state that survives server restarts. The proxy
 cold-start path (`proxy.go`, where a new worker is spawned on incoming
@@ -113,7 +151,9 @@ pre-warming loop (`ops/autoscale.go`) skips disabled apps.
 - `proxy.go` -- before cold-starting a worker, check `app.Enabled`.
   Return 503 if disabled.
 - `ops/autoscale.go` -- skip pre-warming for apps where `enabled = 0`.
-- `api/apps.go` -- new `EnableApp` and `DisableApp` handlers.
+- `api/apps.go` -- new `EnableApp` and `DisableApp` handlers. Remove
+  the existing `StartApp` and `StopApp` endpoints (the drain logic
+  moves into `DisableApp`).
 
 ### Hard Delete
 
@@ -152,7 +192,8 @@ srv.DB.CreateSession(sessionID, app.ID, workerID, callerSub)
 #### Session End
 
 When a session ends normally (idle timeout eviction in
-`ops/evict.go`, or explicit stop in `api/apps.go` StopApp):
+`ops/evict.go`, or disable-triggered drain in `api/apps.go`
+`DisableApp`):
 
 ```go
 db.EndSession(sessionID, "ended")
@@ -160,10 +201,14 @@ db.EndSession(sessionID, "ended")
 
 **Integration points:**
 - `ops/evict.go` -- when evicting a worker, end all its sessions.
-- `api/apps.go` StopApp -- when stopping an app, end all sessions
+- `api/apps.go` DisableApp -- when disabling an app, end all sessions
   for all workers of that app.
-- `session.Store` cleanup -- when the in-memory session store
-  expires an entry, end the corresponding DB session.
+- `session.Store` idle sweep -- a periodic goroutine in the ops layer
+  (alongside the health poller) calls `session.Store.SweepIdle()` and
+  then `db.EndSession()` for each swept session ID. The idle timeout
+  is derived from the proxy config (`SessionIdleTimeout`, defaulting
+  to `ws_cache_ttl`); the sweep interval matches the health check
+  interval.
 
 #### Session Crash
 
@@ -203,12 +248,83 @@ viewers should only see app metadata.
   "enabled": true,
   "created_at": "...",
   "updated_at": "...",
-  "status": "running"
+  "status": "running",
+  "relation": "collaborator",
+  "tags": ["production", "shiny"]
 }
 ```
 
-The `workers` field is **removed** from this response. The `enabled`
-field is added.
+The `workers` field is **removed** from this response. The `enabled`,
+`relation`, and `tags` fields are added. `relation` indicates the
+caller's access level (same values as the list endpoint). `tags` is
+the app's tag names, fetched via `ListAppTags()` -- used by the CLI's
+`by tags <app> list` and the sidebar Settings tab.
+
+The `status` field is computed from the worker map:
+- `"running"` -- at least one non-draining worker exists.
+- `"stopping"` -- all workers are draining (disable in progress).
+- `"stopped"` -- no workers exist for the app.
+
+**`GET /api/v1/apps`** -- list apps. Consolidates the current list
+endpoint with the catalog endpoint (`GET /api/v1/catalog`). The catalog
+endpoint is deprecated and will be removed in a future version.
+
+Query parameters:
+- `search` (string, optional -- case-insensitive match on name, title,
+  or description)
+- `tag` (string, optional -- filter by tag name)
+- `page` (int, default 1)
+- `per_page` (int, default 25, max 100)
+- `deleted` (bool, default false -- admin-only, returns soft-deleted
+  apps; mutually exclusive with search/tag/page)
+
+Access control: results are filtered to apps the caller can see
+(owned, granted via ACL, public, logged_in). Admins see all apps.
+Requires authentication (unauthenticated callers get 401; the
+landing page for public apps is handled by the UI handler calling
+the DB directly, as it does today).
+
+Each app in the response includes:
+
+- A `relation` field indicating the caller's access level (`"viewer"`,
+  `"collaborator"`, `"owner"`, `"admin"`). Computed in the same query
+  that evaluates access -- no N+1 lookups. Used by the UI to decide
+  whether to show the gear icon on each app card (phase 2-10).
+- A `tags` array of tag names, fetched via a single JOIN (replacing
+  the catalog's per-app `ListAppTags` calls).
+- The `enabled` field (added by this phase).
+
+Response (paginated envelope):
+
+```json
+{
+  "apps": [
+    {
+      "id": "...",
+      "name": "my-app",
+      "owner": "...",
+      "access_type": "acl",
+      "active_bundle": "...",
+      "title": "My App",
+      "description": "...",
+      "enabled": true,
+      "status": "running",
+      "relation": "collaborator",
+      "tags": ["production", "shiny"],
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "per_page": 25
+}
+```
+
+List items include the core display fields. Resource configuration
+fields (`max_workers_per_app`, `memory_limit`, `cpu_limit`, etc.)
+are omitted from list items -- use `GET /api/v1/apps/{id}` for the
+full app record.
 
 **`GET /api/v1/apps/{id}/runtime`** -- collaborator+ only. New
 endpoint returning live operational data:
@@ -220,6 +336,7 @@ endpoint returning live operational data:
       "id": "w-a3f2...",
       "bundle_id": "01ABC...",
       "status": "active",
+      "started_at": "2026-03-26T10:55:00Z",
       "idle_since": null,
       "stats": {
         "cpu_percent": 12.5,
@@ -261,6 +378,86 @@ Implemented in `backend/docker/` using the Docker SDK's
 `ContainerStats` API call. Returns a point-in-time snapshot (not a
 stream). The mock backend returns zero values.
 
+The runtime endpoint also needs worker start time. Extend
+`server.ActiveWorker` to include `StartedAt time.Time`. Set this in
+the proxy cold-start path when a new worker is spawned. The Logs tab
+(phase 2-11) uses worker start time to show "Since" in the worker
+list.
+
+Dead workers also need start time. Extend `logstore.logEntry` to
+include `startedAt time.Time`, set at `Create()` time (same moment
+the worker spawns). `WorkerIDsByApp()` returns a richer struct
+instead of bare strings:
+
+```go
+type WorkerInfo struct {
+    ID        string
+    StartedAt time.Time
+    EndedAt   time.Time // zero for active
+    Ended     bool
+}
+```
+
+This enables both the runtime API and the Logs tab to show timing
+for live workers (from `ActiveWorker.StartedAt`) and dead workers
+(from `logstore.WorkerInfo.StartedAt`).
+
+The workers list includes both **live workers** (from the in-memory
+`WorkerMap`) and **recently-dead workers** (from the logstore via
+`WorkerIDsByApp()`). Live workers have `status: "active"` and include
+`stats` and `sessions`. Dead workers have `status: "ended"` or
+`"crashed"`, include `ended_at`, and have null `stats` and empty
+`sessions`. Dead workers are included so the Logs tab (phase 2-11)
+can display them for historical log viewing.
+
+#### Logs Stream Parameter
+
+`GET /api/v1/apps/{id}/logs` gains an optional `stream` query
+parameter (default `true`). When `stream=false`, the endpoint writes
+the historical log snapshot and closes the response immediately
+without subscribing to live updates.
+
+Phase 2-11's Logs tab uses this to pre-fill historical logs in the
+worker log viewer fragment (`stream=false`), with live streaming
+handled separately via JS `fetch()` with `stream=true`.
+
+The handler is also relaxed to accept any `worker_id` that has data in
+the logstore, verifying app ownership via `logstore.WorkerIDsByApp()`
+instead of `srv.Workers.Get()`. This allows serving historical logs
+for dead workers that the Logs tab displays.
+
+#### htmx Content Negotiation
+
+The form-encoded PATCH (below) is one instance of a general pattern:
+when a request includes the `HX-Request` header, action endpoints
+return an `HX-Trigger` response header naming the event that occurred
+(e.g., `appStarted`, `accessGranted`) alongside the normal JSON body.
+htmx listeners on the page re-fetch the relevant fragment in response.
+
+This avoids having every action endpoint render HTML. The UI fragment
+routes (phase 2-11) listen for the triggered events and re-fetch the
+affected tab content. The event names used by phase 2-11's fragment
+listeners are:
+
+| Endpoint | `HX-Trigger` value |
+|----------|-------------------|
+| `POST .../enable` | `appEnabled` |
+| `POST .../disable` | `appDisabled` |
+| `POST .../rollback` | `bundleRolledBack` |
+| `POST .../access` | `accessGranted` |
+| `POST .../refresh` | `refreshStarted` |
+| `POST .../tags` | `tagAdded` |
+| `DELETE .../tags/{id}` | `tagRemoved` |
+
+`POST .../rollback`, `POST .../access`, and `POST .../tags` accept
+`application/x-www-form-urlencoded` in addition to JSON, because htmx
+sends form data by default (`hx-vals` on buttons, form fields on the
+ACL grant form).
+`DELETE` actions (access revoke, app delete, token revoke, tag remove)
+return 200 with an empty body for htmx requests (instead of the normal
+204), as htmx ignores 204 responses. See **htmx-Aware Response
+Handling** below for details.
+
 #### RBAC Tightening
 
 The following existing endpoints need stricter authorization:
@@ -271,6 +468,53 @@ The following existing endpoints need stricter authorization:
 | `POST /api/v1/apps/{id}/refresh` | any access | collaborator+ (`CanDeploy`) |
 | `POST /api/v1/apps/{id}/refresh/rollback` | any access | collaborator+ (`CanDeploy`) |
 
+#### Bundle List Response
+
+`GET /api/v1/apps/{id}/bundles` returns the updated bundle rows
+including the new columns. The active bundle is identified by
+matching against the app's `active_bundle` field.
+
+Response:
+
+```json
+{
+  "bundles": [
+    {
+      "id": "01ABC...",
+      "app_id": "...",
+      "status": "ready",
+      "uploaded_at": "2026-03-26T09:55:00Z",
+      "deployed_by": "alice@company.com",
+      "deployed_at": "2026-03-26T10:00:00Z",
+      "pinned": true
+    }
+  ]
+}
+```
+
+`deployed_by` and `deployed_at` may be null for bundles that never
+completed building (status "pending" or "failed"). `pinned` is always
+present (default false). The UI Bundles tab (phase 2-11) uses `pinned`
+on the active bundle to conditionally show the refresh button.
+
+#### Refresh Pinned Guard
+
+`POST /api/v1/apps/{id}/refresh` and
+`POST /api/v1/apps/{id}/refresh/rollback` check the active bundle's
+`pinned` flag before proceeding. If the active bundle is pinned, both
+endpoints return **409 Conflict**:
+
+```json
+{
+  "error": "conflict",
+  "message": "App was deployed with pinned dependencies. Redeploy to update."
+}
+```
+
+This is a server-side guard — the `pinned` column on bundles (added in
+this phase) is the source of truth. Clients (CLI, UI) can rely on the
+409 rather than checking client-side.
+
 #### Enable/Disable API
 
 ```
@@ -278,8 +522,14 @@ POST /api/v1/apps/{id}/enable   -- collaborator+ (CanStartStop)
 POST /api/v1/apps/{id}/disable  -- collaborator+ (CanStartStop)
 ```
 
+These replace the existing `POST /api/v1/apps/{id}/start` and
+`POST /api/v1/apps/{id}/stop` endpoints, which are removed.
+
 Both return the updated app metadata (same shape as `GET /api/v1/apps/{id}`).
-`enable` sets `enabled = 1`; `disable` sets `enabled = 0`.
+`enable` sets `enabled = 1`. `disable` sets `enabled = 0` and
+initiates active drain of all workers for the app (marks them as
+draining, evicts when sessions clear -- same logic as the old
+`StopApp`, moved here).
 
 #### Hard Delete API
 
@@ -298,9 +548,9 @@ Without `?purge`, behavior is unchanged (soft-delete, owner+).
 
 `GET /api/v1/deployments` -- collaborator+ per-app.
 
-Cross-app deployment listing. Queries bundles joined with apps.
-Results are filtered to apps where the caller has collaborator+
-access (viewers are excluded).
+Cross-app deployment listing. Queries bundles joined with apps and
+the users table (for display names). Results are filtered to apps
+where the caller has collaborator+ access (viewers are excluded).
 
 Query parameters:
 - `page` (int, default 1)
@@ -320,6 +570,7 @@ Response:
       "app_name": "my-app",
       "bundle_id": "01ABC...",
       "deployed_by": "alice@company.com",
+      "deployed_by_name": "Alice Chen",
       "deployed_at": "2026-03-26T10:00:00Z",
       "status": "ready"
     }
@@ -327,6 +578,25 @@ Response:
   "total": 42,
   "page": 1,
   "per_page": 25
+}
+```
+
+#### Per-App Tag Listing
+
+`GET /api/v1/apps/{id}/tags` -- any access.
+
+Returns the tags attached to an app. Completes the REST resource
+pattern alongside the existing `POST` (add) and `DELETE` (remove)
+endpoints. Used by the CLI's `by tags <app> list`.
+
+Response:
+
+```json
+{
+  "tags": [
+    {"id": "...", "name": "production"},
+    {"id": "...", "name": "shiny"}
+  ]
 }
 ```
 
@@ -359,6 +629,87 @@ Response:
 }
 ```
 
+#### User Profile API
+
+`GET /api/v1/users/me` -- authenticated (session or PAT).
+
+Returns the caller's own profile. Used by the CLI's `by login` to
+verify a token and display the user's identity, and available for
+any client that needs a "whoami" check.
+
+Response:
+
+```json
+{
+  "sub": "alice@company.com",
+  "email": "alice@company.com",
+  "name": "Alice",
+  "role": "publisher"
+}
+```
+
+The response shape matches the existing `UserRow` fields. This is a
+thin wrapper: extract the caller from context, look up their user row,
+return it.
+
+#### htmx-Aware Response Handling
+
+**`PATCH /api/v1/apps/{id}`** is extended to accept
+`application/x-www-form-urlencoded` in addition to JSON. When the
+request includes an `HX-Request` header (htmx), the handler adds an
+`HX-Trigger: appUpdated` response header alongside the normal JSON
+body; for validation errors it returns 422 with a plain-text error
+message. Phase 2-11 will refine the success response to return an
+HTML fragment once the sidebar templates exist. For non-htmx requests,
+behavior is unchanged.
+
+This dual-format support enables the per-app sidebar (phase 2-11) to
+use `hx-patch` for inline field editing without client-side JSON
+serialization.
+
+The PATCH body also gains `refresh_schedule` (string, optional) for
+setting or clearing the automatic dependency refresh cron expression.
+The handler validates the cron expression server-side (standard
+five-field format) and returns 422 for invalid expressions. An empty
+string clears the schedule. `AppUpdate` and `updateAppBody` are
+extended accordingly.
+
+**DELETE endpoints** (`DELETE /api/v1/users/me/tokens/{id}`,
+`DELETE /api/v1/apps/{id}/access/...`,
+`DELETE /api/v1/apps/{id}/tags/{id}`): when the request includes an
+`HX-Request` header, return 200 with empty body instead of 204. htmx
+ignores 204 responses (no swap is performed), so the UI's row-removal
+pattern (`hx-swap="outerHTML"`) requires a 200 response.
+
+**`POST /api/v1/apps/{id}/tags`**: accept
+`application/x-www-form-urlencoded` in addition to JSON. The Settings
+tab (phase 2-11) posts tag additions via an htmx form with a `tag_id`
+field.
+
+**`POST /api/v1/users/me/credentials/{service}`**: accept
+`application/x-www-form-urlencoded` in addition to JSON, same as the
+PATCH change above. The API Keys page (phase 2-10) posts credentials
+via an htmx form.
+
+### Shared App Resolution
+
+`resolveApp()` and `resolveAppRelation()` are currently in
+`internal/api/apps.go`. Both the API and UI handlers need to resolve
+an app by name or UUID and evaluate the caller's access level.
+
+Extract these to a shared location (`internal/db/` for `resolveApp`,
+`internal/server/` for `resolveAppRelation`) so UI fragment routes
+(phase 2-11) can reuse them without importing the API package.
+
+Add a `resolveAppIncludeDeleted()` variant that performs the same
+UUID-then-name lookup but without filtering out soft-deleted apps.
+The current `RestoreApp` handler uses `GetAppIncludeDeleted(id)` which
+only accepts UUIDs -- the CLI's `by restore <name>` needs name-based
+lookup for deleted apps. The hard-delete (purge) path also uses this
+variant: `DELETE /api/v1/apps/{id}?purge=true` targets a
+soft-deleted app, so the handler switches to `resolveAppIncludeDeleted()`
+when `purge=true`.
+
 ### Database Operations
 
 New DB methods:
@@ -376,8 +727,23 @@ CountSessions(appID string) (int, error)
 CountRecentSessions(appID string, since time.Time) (int, error)
 CountUniqueVisitors(appID string) (int, error)
 
-// Deployment tracking
+// Consolidated app listing (replaces ListCatalog)
+// Returns CatalogRow which extends AppRow with per-app Relation,
+// Tags, and Enabled. The relation is computed via a CASE expression
+// over the same access-control conditions used for filtering:
+//   admin caller  → "admin"
+//   apps.owner    → "owner"
+//   ACL collaborator → "collaborator"
+//   ACL viewer / logged_in / public → "viewer"
+// This avoids N+1 EvaluateAccess calls. Tags are aggregated via
+// GROUP_CONCAT (SQLite) / STRING_AGG (Postgres) in a subquery join.
+ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, error)
+
+// Deployment tracking (DeploymentRow includes deployed_by_name from users join)
 SetBundleDeployed(bundleID, deployedBy string) error
+// DeploymentListOpts includes CallerSub and CallerRole so the query
+// can filter to apps where the caller has collaborator+ access,
+// using the same access-control join pattern as ListCatalogWithRelation.
 ListDeployments(opts DeploymentListOpts) ([]DeploymentRow, int, error)
 
 // Enable/disable
@@ -387,6 +753,11 @@ SetAppEnabled(appID string, enabled bool) error
 PurgeApp(appID string) error
 // Deletes app + bundles + sessions + access grants + workers.
 // Caller must verify app is already soft-deleted.
+
+// Collaborator display names (for phase 2-11 Collaborators tab)
+ListAppAccessWithNames(appID string) ([]AccessGrantWithName, error)
+// Joins app_access with users table to get display names.
+// Falls back to raw principal (OIDC subject) when no user row exists.
 ```
 
 ### Authorization Model
@@ -405,7 +776,7 @@ owner+. Hard delete (purge) requires admin.
 |----------|------------------|
 | `GET /api/v1/apps/{id}` | any access (metadata only, no workers) |
 | `GET /api/v1/apps/{id}/runtime` | collaborator+ |
-| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`) |
+| `PATCH /api/v1/apps/{id}` | collaborator+ (`CanUpdateConfig`); `access_type` field additionally requires owner+ (`CanManageACL`) |
 | `DELETE /api/v1/apps/{id}` | owner+ (`CanDelete`) |
 | `DELETE /api/v1/apps/{id}?purge=true` | admin only |
 | `GET /api/v1/apps/{id}/bundles` | collaborator+ (`CanDeploy`) |
@@ -413,9 +784,8 @@ owner+. Hard delete (purge) requires admin.
 | `POST /api/v1/apps/{id}/rollback` | collaborator+ (`CanDeploy`) |
 | `POST /api/v1/apps/{id}/enable` | collaborator+ (`CanStartStop`) |
 | `POST /api/v1/apps/{id}/disable` | collaborator+ (`CanStartStop`) |
-| `POST /api/v1/apps/{id}/start` | collaborator+ (`CanStartStop`) |
-| `POST /api/v1/apps/{id}/stop` | collaborator+ (`CanStartStop`) |
 | `GET /api/v1/apps/{id}/logs` | collaborator+ (`CanDeploy`) |
+| `GET /api/v1/apps/{id}/tags` | any access |
 | `GET /api/v1/apps/{id}/access` | owner+ (`CanManageACL`) |
 | `POST /api/v1/apps/{id}/access` | owner+ (`CanManageACL`) |
 | `DELETE /api/v1/apps/{id}/access/...` | owner+ (`CanManageACL`) |
@@ -423,528 +793,152 @@ owner+. Hard delete (purge) requires admin.
 | `POST /api/v1/apps/{id}/refresh/rollback` | collaborator+ (`CanDeploy`) |
 | `GET /api/v1/deployments` | collaborator+ (per-app filtered) |
 | `GET /api/v1/apps/{id}/sessions` | collaborator+ |
-
----
-
-## CLI
-
-Design for the CLI binary (`cmd/by/`). The deploy command is the
-primary new complexity; all other subcommands are thin REST API
-wrappers.
-
-See [dep-mgmt.md](../dep-mgmt.md) for the architectural overview that
-drives the deploy flow.
-
-### Prerequisites from Earlier Phases
-
-- **Phase 2-5** -- `internal/manifest/` types, `FromRenvLock()` and
-  `FromDescription()` conversion functions, manifest validation. The CLI
-  imports these to generate manifests during `by deploy`.
-- **Phase 2-6** -- store-aware builds on the server. No direct CLI
-  dependency, but deploy benefits from fast builds.
-- **Phase 2-7** -- `POST /api/v1/packages` and refresh API. The CLI
-  wraps the refresh endpoint as `by refresh`.
-
-### Authentication
-
-`BLOCKYARD_TOKEN` environment variable (a PAT). `BLOCKYARD_URL`
-environment variable (e.g., `https://blockyard.example.com`).
-
-#### `by login`
-
-A convenience command that lowers the barrier for first-time users:
-
-1. Prompt for the server URL (or accept `--server URL`).
-2. Open the browser to `{server}/profile#tokens` (the PAT section on
-   the Profile page).
-3. Prompt the user to paste the token.
-4. Store credentials in `~/.config/by/config.json` (XDG-compliant).
-
-```
-$ by login
-Server URL: https://blockyard.example.com
-Opening browser to create a token...
-Paste your token: ****
-Logged in to blockyard.example.com as alice.
-```
-
-The env vars `BLOCKYARD_TOKEN` and `BLOCKYARD_URL` always take precedence
-over the stored config -- CI pipelines use env vars, interactive users use
-`by login`. The config file stores a single server entry; multi-server
-profiles are a future extension if demand arises.
-
-### Output Format
-
-All commands default to human-readable output (tables, formatted text).
-A global `--json` flag switches to machine-readable JSON output -- useful
-for scripting and CI pipelines.
-
-For thin API wrappers, `--json` passes through the API response body
-directly. For commands with client-side logic (deploy, refresh), `--json`
-emits a structured JSON object on completion instead of streaming
-progress text.
-
-### Deploy Flow
-
-The `by deploy` command prepares a bundle and uploads it. From the user's
-perspective, two choices exist: deploy with pinned dependencies
-(reproducible) or unpinned dependencies (convenient). Pinning requires
-R + renv on the client. Unpinned deploys need no R on the client at all.
-
-Deploy is focused on getting code running -- bundle prep, manifest
-generation, upload. Resource configuration, access control, and metadata
-are managed via separate commands after deployment.
-
-#### Input Cases
-
-```
-by deploy ./myapp/
-
-  Pinned mode (manifest.json in bundle):
-  ---
-  1a. manifest.json already exists
-      -> validate, include in bundle. Pure Go, no R needed.
-
-  1b. renv.lock already exists
-      -> manifest.FromRenvLock(): parse JSON, copy package records
-        into manifest, add metadata. Pure Go, no R needed.
-
-  1c. No lockfile, user wants pinned deps (--pin flag or prompt)
-      -> R + renv required on client
-      -> renv::dependencies() + renv::snapshot()
-      -> parse generated renv.lock -> manifest.FromRenvLock()
-      -> clean up renv artifacts
-
-  Unpinned mode (manifest without packages):
-  ---
-  2a. DESCRIPTION already exists
-      -> manifest.FromDescription(): JSON-ify DCF fields, add metadata
-        + file checksums, add repositories from renv/PPM config or
-        --repositories flag.
-      -> Pure Go, no R needed.
-
-  2b. No DESCRIPTION (bare scripts only)
-      -> upload as-is. No manifest generated.
-      -> server scans via pkgdepends::scan_deps(), generates
-        DESCRIPTION, then builds unpinned manifest.
-```
-
-#### Priority
-
-`manifest.json` > `renv.lock` > `DESCRIPTION` > bare scripts. The CLI
-uses the highest-priority file and warns if lower-priority files are
-also present (e.g., "Using manifest.json; ignoring renv.lock").
-
-The default when neither pinned manifest nor lockfile is present:
-if a DESCRIPTION exists, build an unpinned manifest and deploy (2a).
-If only scripts exist, upload them and let the server scan (2b).
-
-#### Deploy Confirmation
-
-On the first deploy of a given path (no manifest.json present yet), the
-CLI shows detected settings and asks for confirmation before uploading:
-
-```
-$ by deploy ./myapp/
-Detected:
-  Name:       myapp
-  Mode:       shiny (entrypoint: app.R)
-  Deps:       pinned (renv.lock found)
-  Repository: https://p3m.dev/cran/2026-03-18
-
-Deploy? [Y/n]
-```
-
-The `--yes` / `-y` flag skips the prompt for CI and scripting use.
-Subsequent deploys of the same path (manifest.json already present)
-skip the prompt automatically -- the manifest is the source of truth.
-
-#### `by init`
-
-Generate a manifest without deploying. Useful for inspecting or editing
-the manifest before shipping, and for version-controlling the manifest
-alongside application code.
-
-```
-$ by init ./myapp/ [--pin]
-Detected:
-  Name:       myapp
-  Mode:       shiny (entrypoint: app.R)
-  Deps:       pinned (renv.lock found)
-  Repository: https://p3m.dev/cran/2026-03-18
-
-Wrote manifest.json
-```
-
-Follows the same detection logic and input cases as `by deploy`. The
-`--pin` flag triggers renv snapshot just like in deploy. After `init`,
-`by deploy` picks up the existing manifest.json (case 1a) and skips
-detection entirely.
-
-#### Bundle Preparation
-
-1. Detect app mode and entrypoint (`app.R` -> shiny, `server.R`/`ui.R`
-   -> shiny, etc.).
-2. Generate manifest (per input case above) using `internal/manifest/`
-   types. Write `manifest.json` into the bundle directory.
-3. Compute file checksums for the `files` section.
-4. Create tar.gz archive of the directory.
-5. `POST /api/v1/apps/{name}/bundles` with the archive.
-
-#### Manifest Generation
-
-The CLI uses `internal/manifest/` (from phase 2-5) for all manifest work:
-
-```go
-// Case 1a: manifest.json exists
-m, err := manifest.ReadFile("manifest.json")
-m.Validate()
-
-// Case 1b: renv.lock exists
-m, err := manifest.FromRenvLock("renv.lock", meta, files)
-
-// Case 1c: --pin (requires R + renv)
-// Shell out to Rscript, then:
-m, err := manifest.FromRenvLock("renv.lock", meta, files)
-// Clean up generated renv artifacts
-
-// Case 2a: DESCRIPTION exists
-m, err := manifest.FromDescription("DESCRIPTION", meta, files, repos)
-
-// Case 2b: bare scripts -> no manifest generated, upload as-is
-```
-
-#### renv Invocation (Pinning Only)
-
-The CLI only shells out to R for `--pin` (case 1c). Following
-rsconnect's pattern (`snapshotRenvDependencies()`):
-
-```r
-options(renv.consent = TRUE)
-deps <- renv::dependencies(".", quiet = TRUE, progress = FALSE)
-renv::snapshot(".", packages = deps$Package, prompt = FALSE)
-```
-
-Run via `Rscript -e`. Read resulting `renv.lock`, convert to manifest
-(pure Go), then clean up (`renv.lock`, `renv/` directory) unless they
-pre-existed.
-
-#### Repository URL Handling
-
-The `--repositories` flag allows specifying repository URLs on the
-command line. When absent, the CLI reads repository configuration from:
-
-1. `renv.lock` -> `R.Repositories` (case 1b)
-2. `renv::config$repos()` (case 1c, captured during snapshot)
-3. A default (e.g., latest PPM) when nothing else is available
-
-Repository URLs in the manifest are platform-neutral -- no PPM platform
-segments. The server adds its own platform segment at resolve time.
-
-#### renv Availability
-
-renv is not part of base R. The CLI only needs R + renv for `--pin`:
-
-| State | Behavior | Mode |
-|---|---|---|
-| `manifest.json` with `packages` exists | Use as-is. Pure Go. | pinned |
-| `renv.lock` exists | Convert to manifest. Pure Go. | pinned |
-| `--pin`, R + renv available | Snapshot -> lockfile -> manifest. | pinned |
-| `--pin`, no R/renv | Error: "pinning requires R + renv." | -- |
-| `DESCRIPTION` exists | Build unpinned manifest. Pure Go. | unpinned |
-| Bare scripts only | Upload as-is. Server scans. | unpinned |
-
-R is only required on the client for pinning without a lockfile.
-All other paths are pure Go or need no client-side processing at all.
-
-### Subcommands
-
-All commands accept `<app>` as either the unique app name or UUID.
-Common aliases are supported: `ls` -> `list`, `rm` -> `remove`/`delete`.
-
-#### Setup
-
-```
-by login [--server URL]                   Store credentials interactively
-by init <path> [--pin]                    Generate manifest.json without deploying
-```
-
-#### App Lifecycle
-
-```
-by deploy <path> [--name NAME] [--pin] [--yes]  Prepare bundle, generate manifest, upload
-by list                                   List apps (status, active bundle, owner)
-by get <app> [--runtime]                  App details (config, active bundle, status)
-by enable <app>                           Allow traffic (cold-start, pre-warming)
-by disable <app>                          Block new traffic, drain existing sessions
-by delete <app> [--purge]                 Soft-delete (--purge: admin-only hard delete)
-by restore <app>                          Restore a soft-deleted app
-```
-
-#### `by get --runtime`
-
-By default, `by get` calls `GET /api/v1/apps/{id}` and shows app
-metadata (config, active bundle, status, enabled state). With `--runtime`,
-it also calls `GET /api/v1/apps/{id}/runtime` and appends live
-operational data: active workers with CPU/memory stats, session counts,
-and activity metrics.
-
-The `--runtime` call requires collaborator+ access. If the caller is a
-viewer, `--runtime` is silently skipped (metadata-only output).
-
-#### Enable / Disable
-
-Replace the previous start/stop commands with proper state management.
-`disable` sets `enabled` to false on the app, which:
-
-- Prevents the proxy from cold-starting new workers
-- Prevents the autoscaler from pre-warming
-- Lets existing sessions drain naturally
-- Returns 503 for new requests
-
-`enable` re-enables the app, allowing cold-start and pre-warming to
-resume normally.
-
-#### Bundles & Rollback
-
-```
-by bundles <app>                          List bundles (id, status, upload time)
-by rollback <app> <bundle-id>             Roll back to a previous bundle
-```
-
-#### Configuration
-
-```
-by scale <app> [flags]                    Resource tuning
-    --memory TEXT                            Memory limit (e.g., "2g")
-    --cpu FLOAT                              CPU limit
-    --max-workers INT                        Max workers per app
-    --max-sessions INT                       Max sessions per worker
-    --pre-warm INT                           Pre-warmed standby workers
-
-by update <app> [flags]                   App metadata
-    --title TEXT                             Display title
-    --description TEXT                       Description
-
-by rename <app> <new-name>                Change app name (changes URL)
-```
-
-#### Access Control
-
-```
-by access <app> show                      Show access type + ACL entries
-by access <app> set-type <type>           Set access mode (acl|logged_in|public)
-by access <app> grant <user> --role ROLE  Add ACL entry (viewer|collaborator)
-by access <app> revoke <user>             Remove ACL entry
-```
-
-#### Tags
-
-```
-by tags list                              List all tags (global pool)
-by tags create <tag>                      Create tag (admin only)
-by tags delete <tag>                      Delete tag (admin only, cascades)
-
-by tags <app> list                        List tags on an app
-by tags <app> add <tag>                   Attach tag to app
-by tags <app> remove <tag>               Detach tag from app
-```
-
-#### Dependencies
-
-```
-by refresh <app> [--rollback]             Refresh unpinned dependencies
-```
-
-#### Logs
-
-```
-by logs <app> [--follow]                  Tail app logs
-```
-
-#### User Management (Admin)
-
-```
-by users list                             List users
-by users update <sub> [flags]             Update user role/active status
-    --role ROLE                              Set role (admin|publisher|viewer)
-    --active BOOL                            Enable/disable user account
-```
-
-### Command Details
-
-#### deploy
-
-The primary value over raw `curl`. Handles manifest generation from
-multiple input types (renv.lock, DESCRIPTION, bare scripts), bundle
-preparation (tar.gz), and upload.
-
-Sensible defaults: newly deployed apps start with restrictive settings
-(access_type=acl, no pre-warming, default resource limits). Users
-configure access, scaling, and metadata via separate commands after
-the initial deploy.
-
-#### refresh
-
-Wraps `POST /api/v1/apps/{id}/refresh`. Only available for unpinned
-deployments:
-
-```
-$ by refresh my-app
-Refreshing dependencies for my-app...
-  Remotes updated: blockr-org/blockr (abc123 -> def456)
-  CRAN packages: unchanged (dated repo 2026-03-18)
-  Worker swap: in progress...
-Done.
-
-$ by refresh my-pinned-app
-Error: my-pinned-app was deployed with pinned dependencies.
-Redeploy to update.
-
-$ by refresh my-app --rollback
-Rolling back dependencies for my-app...
-  Restored previous lockfile
-  Worker swap: in progress...
-Done.
-
-$ by refresh my-app --rollback
-Error: no previous lockfile to roll back to.
-```
-
-The `--rollback` flag wraps `POST /api/v1/apps/{id}/refresh/rollback`
-from phase 2-7. It restores the previous pak lockfile and reassembles
-worker libraries from it. Only one level of rollback is supported --
-the store retains old package versions (append-only), so rollback is
-instant.
-
-### Error Handling
-
-- Print the `message` field from error responses, not raw JSON.
-- Non-zero exit codes on failure.
-- `--json` mode: errors are JSON objects with `error` and `message`
-  fields, still with non-zero exit codes.
-- `by refresh` on a pinned app: clear error explaining why.
-- `by deploy --pin` without R/renv: clear error with install guidance.
-- `by delete --purge` on a non-deleted app: error requiring soft-delete
-  first.
+| `GET /api/v1/users/me` | any authenticated user |
+| `GET /api/v1/users/me/tokens` | any authenticated user |
+| `POST /api/v1/users/me/tokens` | any authenticated user |
+| `DELETE /api/v1/users/me/tokens/{id}` | any authenticated user (own tokens only) |
+| `POST /api/v1/users/me/credentials/{service}` | any authenticated user |
+| `GET /api/v1/apps` | any authenticated user (results RBAC-filtered) |
+| `POST /api/v1/apps` | publisher+ (`CanCreateApp`) |
+| `POST /api/v1/apps/{id}/restore` | owner+ (`CanDelete`) |
+| `GET /api/v1/tags` | any authenticated user |
+| `POST /api/v1/tags` | admin only |
+| `DELETE /api/v1/tags/{id}` | admin only |
+| `POST /api/v1/apps/{id}/tags` | collaborator+ (`CanUpdateConfig`) |
+| `DELETE /api/v1/apps/{id}/tags/{id}` | collaborator+ (`CanUpdateConfig`) |
+| `GET /api/v1/users` | admin only |
+| `PATCH /api/v1/users/{sub}` | admin only |
 
 ---
 
 ## Deliverables
 
-**Backend:**
-
-1. **Database migration** -- sessions table, bundle schema additions,
-   `enabled` column, indexes.
+1. **Database migration** -- sessions table, bundle schema additions
+   (`deployed_by`, `deployed_at`, `pinned`), `enabled` column, indexes.
 2. **Session lifecycle** -- create/end/crash tracking in the proxy
    and worker lifecycle code.
 3. **Bundle deployment tracking** -- populate `deployed_by` at upload
-   time, `deployed_at` at activation time.
+   time, `deployed_at` at activation time, `pinned` at creation time.
 4. **Backend interface** -- add `ContainerStats()` method for live
    CPU/memory data.
 5. **API split** -- remove workers from `GetApp`, add
-   `GET /api/v1/apps/{id}/runtime` (collaborator+).
+   `GET /api/v1/apps/{id}/runtime` (collaborator+). Consolidate
+   `GET /api/v1/apps` with catalog: add `search`, `tag`, `page`,
+   `per_page` query params, per-app `relation` and `tags` in response,
+   paginated envelope. Deprecate `GET /api/v1/catalog`.
 6. **RBAC tightening** -- `ListBundles`, `PostRefresh`,
    `PostRefreshRollback` require collaborator+.
 7. **Enable/disable** -- `POST /apps/{id}/enable` and
-   `POST /apps/{id}/disable` endpoints, proxy and autoscaler checks.
+   `POST /apps/{id}/disable` endpoints (replacing start/stop), proxy
+   and autoscaler checks, disable triggers active worker drain.
 8. **Hard delete** -- `DELETE /apps/{id}?purge=true` endpoint
    (admin only, requires prior soft-delete).
-9. **Deployments API** -- `GET /api/v1/deployments` with pagination
-   and collaborator+ per-app filtering.
+9. **Deployments API** -- `GET /api/v1/deployments` with pagination,
+   collaborator+ per-app filtering, and `deployed_by_name` from users
+   table join.
 10. **Sessions API** -- `GET /api/v1/apps/{id}/sessions` with filtering.
-
-**CLI:**
-
-11. **CLI binary** (`cmd/by/main.go`) -- cobra-based subcommand structure
-    with global `--json` flag.
-12. **Login command** -- interactive credential storage with browser-based
-    PAT creation flow (opens `/profile#tokens`).
-13. **Init command** -- manifest generation without deploy, same detection
-    logic as deploy.
-14. **Deploy command** -- manifest generation from all input types, bundle
-    preparation, upload, first-deploy confirmation prompt. The primary
-    complexity in the CLI.
-15. **Refresh command** -- wraps the refresh API from phase 2-7.
-16. **Scale command** -- resource and scaling configuration.
-17. **Access command** -- ACL management with show/set-type/grant/revoke
-    subcommands.
-18. **Tags command** -- global pool management + per-app tag operations.
-19. **CRUD commands** -- thin API wrappers for list, get (with `--runtime`),
-    enable, disable, rollback, logs, bundles, delete (with `--purge`),
-    restore, update, rename, users.
-20. **Error formatting** -- human-friendly error messages from API
-    responses, with JSON error output in `--json` mode.
+11. **Per-app tag listing** -- `GET /api/v1/apps/{id}/tags` returning
+    tags for a single app (completes the REST resource alongside POST
+    and DELETE).
+12. **Shared app resolution** -- extract `resolveApp()` and
+    `resolveAppRelation()` to shared location for reuse by UI handlers.
+    Add `resolveAppIncludeDeleted()` variant that handles UUID-or-name
+    lookup without filtering out soft-deleted apps (used by the restore
+    endpoint so the CLI can `by restore <name>`, not just UUID).
+13. **htmx-aware responses** -- `PATCH /api/v1/apps/{id}` accepts
+    form-encoded bodies and returns HTML fragments for htmx requests.
+    DELETE endpoints return 200 (not 204) for htmx requests so
+    `outerHTML` swaps can remove rows. `POST .../rollback`,
+    `POST .../access`, and `POST .../tags` accept form-encoded bodies
+    (htmx sends form data by default). Credential enrollment endpoint
+    accepts form-encoded bodies.
+14. **Collaborator display names** -- `ListAppAccessWithNames()` DB
+    method joining `app_access` with `users`.
+15. **User profile endpoint** -- `GET /api/v1/users/me` returning the
+    caller's own profile (sub, email, name, role). Used by the CLI's
+    `by login` for token verification.
+16. **Refresh pinned guard** -- `POST /apps/{id}/refresh` and
+    `POST /apps/{id}/refresh/rollback` return 409 when the active
+    bundle is pinned.
+17. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
+    the runtime API and logs tab. Extend `logstore.logEntry` with
+    `startedAt` (set at `Create()` time) so dead workers also have
+    timing data. `WorkerIDsByApp()` returns `[]WorkerInfo` structs
+    instead of bare strings.
+18. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
+    `stream` query parameter (default `true`); `stream=false` returns
+    historical snapshot only.
+19. **htmx event triggers** -- action endpoints return `HX-Trigger`
+    response headers for htmx requests (including `tagAdded` /
+    `tagRemoved` for tag operations), enabling UI fragment re-fetch
+    without HTML rendering in the API layer.
 
 ## Implementation Steps
 
 ### Step 1: Database Migration
 
-Add sessions table, bundle columns, and `enabled` column. Write up/down
-migration for both SQLite and PostgreSQL.
+Add sessions table, bundle columns (`deployed_by`, `deployed_at`,
+`pinned`), and `enabled` column. Write up/down migration for both
+SQLite and PostgreSQL.
 
 ### Step 2: Session Lifecycle Tracking
 
 Instrument the proxy to create session records on assignment, end them
 on disconnect/eviction, and crash them on worker failure. Integration
 points: `proxy.go` (create), `ops/evict.go` (end), `api/apps.go`
-StopApp (end), `ops/health.go` (crash).
+DisableApp drain (end), `ops/health.go` (crash).
 
 ### Step 3: Bundle Deployment Tracking
 
-Store `deployed_by` at bundle INSERT time in `UploadBundle()` (caller
-available from context). Set `deployed_at` in `ActivateBundle()` when
-restore completes. Update rollback handler similarly. Run backfill
-migration for existing bundles.
+Store `deployed_by` and `pinned` at bundle INSERT time in
+`UploadBundle()` (caller available from context). Set `deployed_at`
+in `ActivateBundle()` when restore completes. Update rollback handler
+similarly. Run backfill migration for existing bundles.
 
 ### Step 4: Backend Interface + API Changes
 
 Add `ContainerStats()` to `Backend` interface. Implement in Docker
-backend. Add `GET /api/v1/apps/{id}/runtime` endpoint. Remove workers
-from `GetApp` response. Tighten RBAC on `ListBundles`, `PostRefresh`,
-`PostRefreshRollback`.
+backend. Extend `ActiveWorker` with `StartedAt`. Add
+`GET /api/v1/apps/{id}/runtime` endpoint. Remove workers from
+`GetApp` response. Consolidate `GET /api/v1/apps` with catalog:
+add search/tag/pagination query params, compute per-app `relation`
+and `tags` in a single query (replacing catalog's N+1 `ListAppTags`
+calls), return paginated envelope. Deprecate `GET /api/v1/catalog`.
+Tighten RBAC on `ListBundles`, `PostRefresh`, `PostRefreshRollback`.
+Add `stream` query parameter to `AppLogs`.
 
 ### Step 5: Enable/Disable + Hard Delete
 
-Implement enable/disable endpoints. Add proxy cold-start check and
-autoscaler skip for disabled apps. Implement hard-delete endpoint with
-soft-delete precondition check.
+Implement enable/disable endpoints, replacing the existing start/stop
+endpoints. Move the drain logic from `StopApp` into `DisableApp`.
+Remove `StartApp` and `StopApp` handlers. Add proxy cold-start check
+and autoscaler skip for disabled apps. Implement hard-delete endpoint
+with soft-delete precondition check.
 
-### Step 6: Deployments + Sessions API
+### Step 6: Deployments + Sessions + Tags API
 
 Implement `GET /api/v1/deployments` with collaborator+ per-app
-filtering. Implement `GET /api/v1/apps/{id}/sessions`.
+filtering. Implement `GET /api/v1/apps/{id}/sessions`. Implement
+`GET /api/v1/apps/{id}/tags` for per-app tag listing.
 
-### Step 7: Backend Tests
+### Step 7: Shared Infrastructure
+
+Extract `resolveApp()` and `resolveAppRelation()` to shared location.
+Add `resolveAppIncludeDeleted()` for restore-by-name support. Add
+htmx-aware response handling: form-encoded PATCH on `UpdateApp`
+(dual JSON + form encoding, fragment responses), 200-not-204 on
+DELETE endpoints for htmx callers, form-encoded bodies on
+`POST .../rollback`, `POST .../access`, `POST .../tags`, and
+credential enrollment. Add `HX-Trigger` response headers to action
+endpoints for htmx requests. Implement `ListAppAccessWithNames()`
+DB method.
+
+### Step 8: Tests
 
 Integration tests for session lifecycle (create -> end, create -> crash).
 API tests for runtime endpoint, deployments listing, session listing.
 RBAC tests verifying viewer cannot access runtime API, bundles listing,
 or refresh endpoints. Enable/disable behavior tests. Hard-delete
-precondition tests.
-
-### Step 8: CLI Scaffolding + Auth
-
-Set up cobra command tree in `cmd/by/`. Implement `--json` global flag.
-Implement `by login` with credential storage and browser open to
-`/profile#tokens`.
-
-### Step 9: Deploy + Init Commands
-
-Implement the deploy flow: mode detection, manifest generation from all
-input types (manifest.json, renv.lock, --pin, DESCRIPTION, bare scripts),
-bundle preparation, upload. Implement `by init` sharing the same
-detection logic.
-
-### Step 10: Thin Wrapper Commands
-
-Implement list, get (with `--runtime`), enable, disable, delete
-(with `--purge`), restore, bundles, rollback, scale, update, rename,
-access (show/set-type/grant/revoke), tags, refresh (with `--rollback`),
-logs (with `--follow`), users.
-
-### Step 11: CLI Tests
-
-Test deploy flow for all input cases. Test `--json` output. Test
-error formatting. Test credential storage and precedence (env vars
-override config file).
+precondition tests. htmx-aware response tests (form-encoded PATCH, form-encoded
+rollback/access/tags, DELETE 200-not-204, form-encoded credential
+enrollment). `ListAppAccessWithNames` tests.

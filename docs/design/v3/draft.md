@@ -43,6 +43,202 @@ straightforward — no special runners required.
 A JSON seccomp profile based on Docker's default, adding `CLONE_NEWUSER`
 to the allowlist. Shipped alongside the Docker Compose configuration.
 
+## Pre-Fork Worker Model
+
+An enhancement to the Docker backend's multi-session mode
+(`max_sessions_per_worker > 1`). Instead of multiplexing sessions onto a
+shared R process — where sessions share memory, global state, and have
+zero isolation from each other — each user gets their own R process
+inside the container, forked from a pre-loaded template.
+
+### Motivation
+
+The current multi-session model mirrors Posit Connect and ShinyProxy:
+multiple sessions share a single R process. This is memory-efficient
+but provides no isolation between users — one session can read another's
+reactive values, global variables, temp files, and environment
+variables. A crash in one session kills all co-tenants.
+
+The opposite extreme — one container per user — provides full isolation
+but carries ~500ms–1s startup overhead per user and significant memory
+duplication (each R process independently loads the same packages).
+
+The pre-fork model is a middle ground: the container boundary provides
+inter-app isolation (network, rootfs, resource ceiling), while per-user
+forked processes provide intra-app isolation (separate memory, crash
+isolation, filesystem separation) with copy-on-write memory sharing.
+
+### Mechanism
+
+**Template (zygote) process.** When a worker container starts, a
+template R process loads all packages required by the app — including
+Shiny and httpuv — but does **not** call `shiny::runApp()`. httpuv's
+libuv event loop is lazily initialized only when `startServer()` is
+called, so `library(shiny)` does not create background threads or open
+sockets. The template process is fork-safe at this point.
+
+**Fork per user.** When a new user session arrives, the template process
+is `fork()`'d. The child inherits all loaded packages via copy-on-write
+— zero additional memory for read-only pages (function definitions,
+bytecode, compiled shared libraries). The child then calls
+`shiny::runApp()` on its own port, creating a fresh libuv event loop
+and httpuv server. The server proxies traffic to each child's port.
+
+**Post-fork sandboxing.** After `fork()`, each child applies isolation
+before starting Shiny:
+
+1. `unshare(CLONE_NEWUSER | CLONE_NEWNS)` — creates a new user and
+   mount namespace. Requires the container to run with a custom seccomp
+   profile (same one the process backend needs) and `apparmor=unconfined`
+   on Ubuntu 23.10+ hosts.
+2. Mount a private tmpfs at `/tmp` — prevents cross-user temp file
+   access. R's `tempdir()` resolves to the private mount.
+3. `prctl(PR_SET_NO_NEW_PRIVS, 1)` + seccomp-bpf filter — restricts
+   available syscalls.
+4. `capset()` — drops all capabilities.
+5. `setrlimit()` — per-process resource limits: `RLIMIT_AS` (virtual
+   memory), `RLIMIT_CPU` (CPU time), `RLIMIT_NPROC` (fork limit).
+
+### Isolation Properties
+
+| Property | Mechanism | Strength |
+|---|---|---|
+| Memory | Separate R heaps (CoW from template) | Full — no cross-session state access |
+| Crash | Separate processes | Full — one child's crash doesn't affect others |
+| Filesystem | Private mount namespace, private `/tmp` | Full — each child has its own tmpfs |
+| Syscalls | Per-child seccomp-bpf filter | Full |
+| Capabilities | Per-child capability drop | Full |
+| Resources | `setrlimit()` per child; container cgroup as shared ceiling | Partial — `RLIMIT_AS` caps virtual memory per child, but no cgroup-level enforcement per child |
+| PID | Shared PID namespace within container | Weak — children can see each other via `/proc` and signal each other if same UID |
+| Network | Shared network namespace within container | None — children can connect to each other's ports on localhost |
+
+**Comparison with shared-process model:** every row except Network is a
+strict improvement. The shared-process model provides none of these
+isolation properties. The PID and Network gaps are residual — PID
+visibility is mitigatable by running children as different UIDs or
+restricting `/proc` access; the network gap is low-risk because all
+children run the same app code (the threat is data leakage between
+sessions, which is addressed by memory and filesystem isolation, not
+malicious code exploiting network access).
+
+### Memory Efficiency
+
+Copy-on-write sharing from `fork()` is the key to making per-user
+processes viable. The memory profile:
+
+- **Shared (zero cost per child):** compiled shared libraries (`.so`
+  files) are deduplicated by the kernel page cache automatically.
+  R-level package namespaces, function definitions, and bytecode are
+  shared via CoW from the template.
+- **Per-child overhead:** session-specific state (reactive values, user
+  data, plot objects), R garbage collector activity (triggers CoW page
+  duplication as pages are modified), and Shiny/httpuv event loop
+  structures.
+
+For typical Shiny apps, the bulk of memory is package code (read-only
+after loading), so CoW sharing is highly effective. Calling `gc()` in
+the template before forking minimizes GC-triggered page duplication in
+children.
+
+**Prior art:** Rserve, RestRserve, and OpenCPU all use this pattern in
+production. Rserve pre-loads packages in a parent process and forks per
+connection. OpenCPU runs on Apache prefork MPM with pre-loaded R
+packages shared via CoW.
+
+### Docker Configuration
+
+The container requires two non-default security options:
+
+**Custom seccomp profile.** Docker's default profile blocks
+`CLONE_NEWUSER` and `unshare`. The custom profile (same one shipped for
+the process backend) modifies the clone mask to remove the
+`CLONE_NEWUSER` bit and adds an unconditional allow for `unshare`.
+
+**AppArmor override (Ubuntu 23.10+ hosts only).** Ubuntu's default
+AppArmor policy blocks unprivileged user namespace creation
+independently of seccomp. Override with `apparmor=unconfined` or a
+custom AppArmor profile that includes the `userns,` rule.
+
+```
+docker run \
+  --security-opt seccomp=blockyard-seccomp.json \
+  --security-opt apparmor=unconfined \
+  ghcr.io/cynkra/blockyard:latest
+```
+
+No `--privileged`, no `--cap-add SYS_ADMIN`, no Docker socket
+differences from the standard Docker backend deployment.
+
+### Package Compatibility
+
+Packages fall into three categories for fork safety:
+
+**Safe to pre-load** (the typical Shiny stack): shiny, httpuv, ggplot2,
+dplyr, tidyr, DT, plotly, leaflet, htmlwidgets, and most pure-R
+packages. These do not spawn threads or open connections at load time.
+
+**Dangerous to pre-load** (spawn threads at load time):
+
+| Package | Issue | Mitigation |
+|---|---|---|
+| data.table | Initializes OpenMP thread state | Built-in: auto-drops to 1 thread in forked children |
+| arrow | Starts CPU and I/O thread pools | Do not pre-load; load in each child |
+| torch | Initializes LibTorch runtime | Do not pre-load; load in each child |
+| rJava | Starts JVM | Completely fork-incompatible; load in each child |
+| reticulate | Python initialization | Do not pre-load if Python is initialized |
+
+**Safe to pre-load, dangerous if used before fork:** DBI, RPostgres,
+RSQLite, httr, httr2, curl. These only create connections on explicit
+use (`dbConnect()`, `GET()`), not at `library()` time. Pre-loading is
+safe; opening connections before forking is not.
+
+**Environment variable hardening:** set `OMP_NUM_THREADS=1` and
+`MKL_NUM_THREADS=1` in the template process before forking to prevent
+multi-threaded BLAS deadlocks in children.
+
+### Additional Caveats
+
+- **RNG seeding.** Forked children inherit the parent's RNG state. Each
+  child must re-seed independently — e.g., `set.seed()` incorporating
+  the PID, or `RNGkind("L'Ecuyer-CMRG")` for statistically independent
+  streams.
+- **GC-driven CoW growth.** R's garbage collector modifies pages
+  (reference counts, free lists), triggering copy-on-write duplication.
+  Memory per child grows over time as GC runs. This is the same
+  tradeoff Rserve and OpenCPU make. Calling `gc()` in the template
+  before forking reduces the initial duplication surface.
+- **`tempdir()` inheritance.** Parent and children share the same
+  `tempdir()` path by default. The private mount namespace (step 2 of
+  post-fork sandboxing) addresses this — each child's `/tmp` is
+  independent.
+
+### Open Questions
+
+1. **Template process management.** The template process runs inside the
+   container but is not itself a Shiny server. The blockyard server
+   needs a mechanism to signal "fork a new child on port N" — likely
+   via `docker exec` into the running container, or a lightweight
+   control socket in the template process. The `docker exec` approach
+   avoids an in-container agent; the control socket approach avoids
+   per-user Docker API calls.
+
+2. **Port allocation.** Each forked child listens on its own port inside
+   the container. The server allocates ports from a range and proxies
+   to `container_ip:port`. Port exhaustion is bounded by
+   `max_sessions_per_worker`.
+
+3. **Child lifecycle.** When a user disconnects, the forked child should
+   exit (after the WebSocket cache TTL grace period). The template
+   process or a reaper must detect and clean up exited children.
+   `waitpid()` with `WNOHANG` or `SIGCHLD` handling in the template.
+
+4. **Interaction with scale-to-zero.** When all children exit, the
+   container has only the idle template process. The server can either
+   keep the container alive (warm template, instant fork on next user)
+   or stop it (full scale-to-zero, cold start on next user).
+   Keeping it alive is the natural default — the template's memory
+   footprint is the cost of one R process.
+
 ## Deferred Single-Node Features
 
 ### Data Mounts
@@ -229,6 +425,19 @@ server from selecting an unrecognized or weaker runtime.
 Documenting the Kata runtime swap, per-app runtime configuration, and
 verifying Shiny workload compatibility is a low-effort addition to the
 deployment guide.
+
+### App Rename
+
+Renaming an app changes its URL (`/app/{name}/`), which breaks active
+sessions, WebSocket connections, and path-scoped cookies. A safe
+implementation needs a drain-and-redirect mechanism similar to unpinned
+dependency updates: drain existing workers under the old name, redirect
+`/app/old-name/*` to `/app/new-name/*` for a grace period, and handle
+client-side URL invalidation (sidebar htmx attributes, bookmarks).
+
+Deferred from v2 (removed from phases 2-8 and 2-9) because the
+session/cookie breakage cannot be handled gracefully without the
+drain-redirect infrastructure.
 
 ### Dynamic Resource Limit Updates
 

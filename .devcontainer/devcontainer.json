@@ -1,5 +1,5 @@
 {
-  "name": "blockyard (Go)",
+  "name": "blockyard",
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
   "remoteUser": "dev",
@@ -10,5 +10,6 @@
     "gitconfig": "ln -sf /workspace/.devcontainer/.gitconfig /home/dev/.gitconfig",
     "gitexclude": "mkdir -p /workspace/.git/info && ln -sfn ../../.devcontainer/.gitignore /workspace/.git/info/exclude",
     "ssh": "ln -sf /workspace/.devcontainer/.ssh /home/dev/.ssh && chmod 700 /home/dev/.ssh && find /home/dev/.ssh -type f ! -name '*.pub' ! -name known_hosts ! -name config -exec chmod 600 {} +"
-  }
+  },
+  "overrideCommand": true
 }
