@@ -298,7 +298,7 @@ by init <path> [--pin]                    Generate manifest.json without deployi
 
 ```
 by deploy <path> [--name NAME] [--pin] [--yes] [--wait]  Deploy bundle (--wait: stream build logs)
-by list                                   List apps (status, active bundle, owner)
+by list [--deleted]                       List apps (--deleted: admin-only, show soft-deleted)
 by get <app> [--runtime]                  App details (config, active bundle, status)
 by enable <app>                           Allow traffic (cold-start, pre-warming)
 by disable <app>                          Block new traffic, drain existing sessions
