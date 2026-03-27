@@ -19,12 +19,30 @@ drives the deploy flow.
 
 ## Authentication
 
-`BLOCKYARD_TOKEN` environment variable (a PAT). No login command — users
-create PATs via the web UI and export the env var. A `by login`
-convenience command is a future addition.
+`BLOCKYARD_TOKEN` environment variable (a PAT). `BLOCKYARD_URL`
+environment variable (e.g., `https://blockyard.example.com`).
 
-`BLOCKYARD_URL` environment variable (e.g.,
-`https://blockyard.example.com`).
+### `by login`
+
+A convenience command that lowers the barrier for first-time users:
+
+1. Prompt for the server URL (or accept `--server URL`).
+2. Open the browser to the web UI's PAT creation page.
+3. Prompt the user to paste the token.
+4. Store credentials in `~/.config/by/config.json` (XDG-compliant).
+
+```
+$ by login
+Server URL: https://blockyard.example.com
+Opening browser to create a token...
+Paste your token: ****
+Logged in to blockyard.example.com as alice.
+```
+
+The env vars `BLOCKYARD_TOKEN` and `BLOCKYARD_URL` always take precedence
+over the stored config — CI pipelines use env vars, interactive users use
+`by login`. The config file stores a single server entry; multi-server
+profiles are a future extension if demand arises.
 
 ## Output Format
 
@@ -91,6 +109,48 @@ also present (e.g., "Using manifest.json; ignoring renv.lock").
 The default when neither pinned manifest nor lockfile is present:
 if a DESCRIPTION exists, build an unpinned manifest and deploy (2a).
 If only scripts exist, upload them and let the server scan (2b).
+
+### Deploy Confirmation
+
+On the first deploy of a given path (no manifest.json present yet), the
+CLI shows detected settings and asks for confirmation before uploading:
+
+```
+$ by deploy ./myapp/
+Detected:
+  Name:       myapp
+  Mode:       shiny (entrypoint: app.R)
+  Deps:       pinned (renv.lock found)
+  Repository: https://p3m.dev/cran/2026-03-18
+
+Deploy? [Y/n]
+```
+
+The `--yes` / `-y` flag skips the prompt for CI and scripting use.
+Subsequent deploys of the same path (manifest.json already present)
+skip the prompt automatically — the manifest is the source of truth.
+
+### `by init`
+
+Generate a manifest without deploying. Useful for inspecting or editing
+the manifest before shipping, and for version-controlling the manifest
+alongside application code.
+
+```
+$ by init ./myapp/ [--pin]
+Detected:
+  Name:       myapp
+  Mode:       shiny (entrypoint: app.R)
+  Deps:       pinned (renv.lock found)
+  Repository: https://p3m.dev/cran/2026-03-18
+
+Wrote manifest.json
+```
+
+Follows the same detection logic and input cases as `by deploy`. The
+`--pin` flag triggers renv snapshot just like in deploy. After `init`,
+`by deploy` picks up the existing manifest.json (case 1a) and skips
+detection entirely.
 
 ### Bundle Preparation
 
@@ -173,10 +233,17 @@ All other paths are pure Go or need no client-side processing at all.
 All commands accept `<app>` as either the unique app name or UUID.
 Common aliases are supported: `ls` → `list`, `rm` → `remove`/`delete`.
 
+### Setup
+
+```
+by login [--server URL]                   Store credentials interactively
+by init <path> [--pin]                    Generate manifest.json without deploying
+```
+
 ### App Lifecycle
 
 ```
-by deploy <path> [--name NAME] [--pin]   Prepare bundle, generate manifest, upload
+by deploy <path> [--name NAME] [--pin] [--yes]  Prepare bundle, generate manifest, upload
 by list                                   List apps (status, active bundle, owner)
 by get <app>                              App details (config, active bundle, status)
 by enable <app>                           Allow traffic (cold-start, pre-warming)
@@ -333,14 +400,19 @@ instant.
    (admin only, requires prior soft-delete).
 3. **CLI binary** (`cmd/by/main.go`) — cobra-based subcommand structure
    with global `--json` flag.
-4. **Deploy command** — manifest generation from all input types, bundle
-   preparation, upload. The primary complexity in the CLI.
-5. **Refresh command** — wraps the refresh API from phase 2-7.
-6. **Scale command** — resource and scaling configuration.
-7. **Access command** — ACL management with show/set-type/grant/revoke
+4. **Login command** — interactive credential storage with browser-based
+   PAT creation flow.
+5. **Init command** — manifest generation without deploy, same detection
+   logic as deploy.
+6. **Deploy command** — manifest generation from all input types, bundle
+   preparation, upload, first-deploy confirmation prompt. The primary
+   complexity in the CLI.
+7. **Refresh command** — wraps the refresh API from phase 2-7.
+8. **Scale command** — resource and scaling configuration.
+9. **Access command** — ACL management with show/set-type/grant/revoke
    subcommands.
-8. **Tags command** — global pool management + per-app tag operations.
-9. **CRUD commands** — thin API wrappers for list, get, enable, disable,
-   rollback, logs, bundles, delete, restore, update, rename, users.
-10. **Error formatting** — human-friendly error messages from API
+10. **Tags command** — global pool management + per-app tag operations.
+11. **CRUD commands** — thin API wrappers for list, get, enable, disable,
+    rollback, logs, bundles, delete, restore, update, rename, users.
+12. **Error formatting** — human-friendly error messages from API
     responses, with JSON error output in `--json` mode.
