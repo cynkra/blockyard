@@ -4,10 +4,19 @@ Converts the single-page dashboard into a multi-page layout with
 persistent left navigation, htmx integration, and four distinct pages:
 Apps, Deployment History, API Keys, and Profile (with PAT management).
 
-Depends on phase 2-8 (backend prerequisites) for the consolidated
-`GET /api/v1/apps` endpoint (search, tags, pagination, per-app
-`relation`), the `GET /api/v1/deployments` endpoint (Deployment
-History page), and the PAT endpoints (Profile page).
+Depends on phase 2-8 (backend prerequisites) for:
+- `ListCatalogWithRelation()` DB method (Apps page -- search, tags,
+  pagination, per-app `relation` for gear icon conditionality).
+- `ListDeployments()` DB method and bundle schema additions
+  (`deployed_by`, `deployed_at`) for the Deployment History page.
+- Form-encoded body support on `POST /api/v1/users/me/credentials/{service}`
+  (API Keys page htmx form).
+- htmx-aware DELETE responses (200 instead of 204) on
+  `DELETE /api/v1/users/me/tokens/{id}` (PAT revoke row removal).
+
+UI page handlers call DB methods and server state directly (same
+process) rather than making HTTP calls to the API endpoints. The API
+endpoints serve the CLI and external clients.
 
 ## htmx Integration
 
@@ -53,6 +62,24 @@ The template function map extends the existing `deref` with:
 - `truncate` -- truncates a string to 8 characters with ellipsis (for bundle IDs).
 - `add` / `subtract` -- integer arithmetic for pagination links.
 
+### Shared Layout Data
+
+Every page template receives a common set of layout fields via an
+embedded struct:
+
+```go
+type layoutData struct {
+    ActivePage     string // "apps", "deployments", "api-keys", "profile"; empty for landing
+    OpenbaoEnabled bool   // controls API Keys nav link visibility
+    Version        string // build-time version string (from srv.Version)
+}
+```
+
+Each page-specific data struct (`appsData`, `deploymentsData`, etc.)
+embeds `layoutData`. The `Version` field is populated from
+`srv.Version` (set via `-ldflags` at build time, same value reported
+by `/healthz`).
+
 ## Navigation Restructure
 
 The current single-page dashboard (app grid + user info + API keys) is
@@ -72,9 +99,15 @@ split into four pages with a persistent left navigation sidebar.
 +---------------------+----------------------------------+
 ```
 
-The left nav is a fixed-width column (~180px) present on all pages.
-It shows the blockyard logo/name at the top, navigation links with
-active state highlighting, and the version number at the bottom.
+The left nav is a fixed-width column (~180px) present on all
+authenticated pages. It shows the blockyard logo/name at the top,
+navigation links with active state highlighting, and the version
+number at the bottom.
+
+**Landing page exclusion:** `base.html` conditionally renders the nav
+and page-layout wrapper only when `ActivePage` is non-empty. The
+landing page passes an empty `ActivePage`, so it retains its existing
+full-width centered layout with no nav.
 
 **API Keys nav link conditionality:** The API Keys link is only shown
 when OpenBao is configured. Every page template receives an
@@ -102,7 +135,10 @@ content minus the user identity header and API keys section. The gear
 icon on each card opens the per-app management sidebar (phase 2-11).
 The gear icon is only rendered for users with collaborator+ access
 to the app (using the per-app `relation` field from
-`GET /api/v1/apps`, added in phase 2-8).
+`ListCatalogWithRelation()`, added in phase 2-8). The handler maps
+`relation` to a `CanManage` boolean (true for collaborator, owner,
+admin). The `status` field (running/stopped) is computed from
+`srv.Workers` per app, same as the existing dashboard.
 
 ```html
 <a href="/app/{{.Name}}/" class="app-card">
@@ -119,7 +155,10 @@ to the app (using the per-app `relation` field from
 ```
 
 The sidebar container is added to the page but is non-functional until
-phase 2-11 registers the fragment routes:
+phase 2-11 registers the fragment routes. A placeholder route
+(`GET /ui/apps/{name}/sidebar`) is registered in this phase returning
+an empty `200` response so that gear icon clicks don't produce console
+errors; phase 2-11 replaces it with the real sidebar content.
 
 ```html
 <aside id="sidebar" class="sidebar"></aside>
@@ -143,10 +182,11 @@ A cross-app timeline of all deployments the user has visibility into
 <div class="page-header">
     <h1>Deployment History</h1>
     <form method="GET" action="/deployments" class="search-form">
-        <input type="search" name="search" placeholder="Search deployments..."
+        <input type="search" name="search" placeholder="Search by app name..."
                class="search-input" value="{{.Search}}">
     </form>
 </div>
+{{if .Deployments}}
 <table class="data-table">
     <thead>
         <tr>
@@ -170,6 +210,9 @@ A cross-app timeline of all deployments the user has visibility into
     </tbody>
 </table>
 {{template "pagination" .Pagination}}
+{{else}}
+<p class="empty-state">No deployments found.</p>
+{{end}}
 ```
 
 Sorted by deployment time, most recent first. Paginated. The
@@ -334,6 +377,23 @@ Full-page routes, all requiring authentication (session cookie):
 | GET | `/api-keys` | Full page | required (redirect to `/` if Openbao not configured) |
 | GET | `/profile` | Full page | required |
 | POST | `/ui/tokens` | HTML fragment | required |
+| GET | `/ui/apps/{name}/sidebar` | HTML fragment | required (placeholder -- returns empty 200) |
+
+**Auth enforcement:** All UI routes share the existing soft-auth
+middleware (`AppAuthMiddleware`). Page handlers for `/deployments`,
+`/api-keys`, `/profile`, and `POST /ui/tokens` check for an
+authenticated user via `auth.UserFromContext(r.Context())`. If not
+authenticated, GET handlers redirect to `/login?return_url=<path>`;
+`POST /ui/tokens` returns 401 (htmx surfaces this via its error
+event).
+
+**PAT creation errors:** On failure (e.g., empty name after trimming,
+server error), `POST /ui/tokens` returns a 200 with an error fragment
+swapped into `#pat-result` so the user sees inline feedback:
+
+```html
+<p class="pat-error">{{.Error}}</p>
+```
 
 ## Templates
 
@@ -359,11 +419,11 @@ it to a shared partial.
 {{if gt .TotalPages 1}}
 <nav class="pagination">
     {{if gt .Page 1}}
-    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{.Search}}{{end}}" class="btn btn-sm">&laquo; Prev</a>
+    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}" class="btn btn-sm">&laquo; Prev</a>
     {{end}}
     <span class="pagination-info">Page {{.Page}} of {{.TotalPages}}</span>
     {{if lt .Page .TotalPages}}
-    <a href="?page={{add .Page 1}}{{if .Search}}&search={{.Search}}{{end}}" class="btn btn-sm">Next &raquo;</a>
+    <a href="?page={{add .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}" class="btn btn-sm">Next &raquo;</a>
     {{end}}
 </nav>
 {{end}}
@@ -375,7 +435,11 @@ existing `deref` in the template function map.
 
 Page templates (`apps.html`, `deployments.html`, `api_keys.html`,
 `profile.html`) extend `base.html` which provides the left nav and
-common layout. They are stored in `ui.pages` and parsed with `base.html`.
+common layout. They are stored in `ui.pages` and parsed with
+`base.html`. `landing.html` is also in `ui.pages` and parsed with
+`base.html`, but its empty `ActivePage` triggers the conditional in
+`base.html` that omits the nav (see Navigation Restructure above).
+`dashboard.html` is removed.
 
 The `pat_created.html` fragment is stored in `ui.fragments` and parsed
 standalone (no base wrapper). Phase 2-11 adds many more fragment
@@ -424,6 +488,7 @@ Key new styles (added to existing `style.css`):
 
 **Utility:**
 - **`.btn-danger`** -- red background, white text.
+- **`.pat-error`** -- red text for inline PAT creation errors.
 
 ## Sidebar JS
 
@@ -477,8 +542,10 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
 ### Step 1: htmx + Template Infrastructure + Left Navigation
 
 Vendor htmx.min.js. Set up `pages`/`fragments` template maps in `UI`
-struct. Modify `base.html` to include left nav and htmx script tag.
-Add `OpenbaoEnabled` flag to layout data. Add left nav CSS.
+struct. Define shared `layoutData` struct (embedded by all page data
+structs). Modify `base.html` to include left nav (conditional on
+`ActivePage`), htmx script tag, and page-layout wrapper. Remove
+`dashboard.html`. Add left nav CSS.
 
 ### Step 2: Apps Page
 
@@ -488,9 +555,9 @@ collaborator+ access. Add sidebar shell container (non-functional).
 
 ### Step 3: Deployment History Page
 
-Build the deployment history table consuming
-`GET /api/v1/deployments`. Search, pagination, collaborator+
-visibility.
+Build the deployment history table consuming `ListDeployments()`.
+Search (by app name), pagination, empty state, collaborator+
+visibility. Auth redirect for unauthenticated users.
 
 ### Step 4: API Keys Page
 
@@ -509,9 +576,10 @@ anchor on the PAT section.
 ### Step 6: Sidebar Shell + CSS
 
 Add sidebar container and overlay to apps page. Wire gear icon
-(collaborator+ conditional) to open sidebar. Add sidebar open/close
-JS and CSS transitions. Non-functional until phase 2-11 registers
-fragment routes.
+(collaborator+ conditional) to open sidebar. Register placeholder
+`GET /ui/apps/{name}/sidebar` route (empty 200). Add sidebar
+open/close JS and CSS transitions. Phase 2-11 replaces the
+placeholder with real sidebar content.
 
 ### Step 7: Tests
 
