@@ -1418,17 +1418,17 @@ func (db *DB) ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, 
 	if params.CallerRole == "admin" {
 		relationExpr = "'admin'"
 	} else if params.CallerSub != "" {
-		relationExpr = fmt.Sprintf(`CASE
-			WHEN apps.owner = %s THEN 'owner'
+		relationExpr = `CASE
+			WHEN apps.owner = ? THEN 'owner'
 			WHEN EXISTS (
 				SELECT 1 FROM app_access
 				WHERE app_access.app_id = apps.id
 				AND app_access.kind = 'user'
-				AND app_access.principal = %s
+				AND app_access.principal = ?
 				AND app_access.role = 'collaborator'
 			) THEN 'collaborator'
 			ELSE 'viewer'
-		END`, db.placeholderAt(len(args)+1), db.placeholderAt(len(args)+2))
+		END`
 		args = append(args, params.CallerSub, params.CallerSub)
 	}
 
@@ -1468,15 +1468,6 @@ func (db *DB) ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, 
 		return nil, 0, err
 	}
 	return rows, total, nil
-}
-
-// placeholderAt returns the positional placeholder for the nth argument.
-// For SQLite this is always ?, for Postgres it's $n.
-func (db *DB) placeholderAt(n int) string {
-	if db.dialect == DialectPostgres {
-		return fmt.Sprintf("$%d", n)
-	}
-	return "?"
 }
 
 // --- Collaborator display names ---
