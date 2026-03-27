@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,9 +74,14 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
+	// Track background restore goroutines so cleanup waits for them.
+	var wg sync.WaitGroup
+	srv.RestoreWG = &wg
 	handler := api.NewRouter(srv)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
+	// Wait for restore goroutines before DB/TempDir cleanup (LIFO order).
+	t.Cleanup(wg.Wait)
 
 	return srv, ts
 }
