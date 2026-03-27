@@ -112,30 +112,40 @@ in a new tab. A close button dismisses the sidebar.
 <nav class="sidebar-tabs">
     <button class="tab active"
             hx-get="/ui/apps/{{.App.Name}}/tab/overview"
-            hx-target="#tab-content">Overview</button>
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Overview</button>
     <button class="tab"
             hx-get="/ui/apps/{{.App.Name}}/tab/settings"
-            hx-target="#tab-content">Settings</button>
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Settings</button>
     <button class="tab"
             hx-get="/ui/apps/{{.App.Name}}/tab/runtime"
-            hx-target="#tab-content">Runtime</button>
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Runtime</button>
     <button class="tab"
             hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
-            hx-target="#tab-content">Bundles</button>
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Bundles</button>
     {{if .CanManageACL}}
     <button class="tab"
             hx-get="/ui/apps/{{.App.Name}}/tab/collaborators"
-            hx-target="#tab-content">Collaborators</button>
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Collaborators</button>
     {{end}}
     <button class="tab"
             hx-get="/ui/apps/{{.App.Name}}/tab/logs"
-            hx-target="#tab-content">Logs</button>
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Logs</button>
 </nav>
 <div id="tab-content"></div>
 ```
 
 Active tab state is managed with `hx-on::after-request` toggling an
-`active` class. No client-side router.
+`active` class via `setActiveTab()`. No client-side router.
+
+**Overview auto-load:** The sidebar shell endpoint (`GET /ui/apps/{name}/sidebar`)
+returns the header, tabs, and the Overview tab content pre-rendered
+inline in `#tab-content`. This avoids a second request on sidebar open.
 
 ## Field Editing UX
 
@@ -243,28 +253,35 @@ App metadata and resource configuration with per-field save.
 | Max sessions per worker | number | `max_sessions_per_worker` |
 | Pre-warmed seats | number | `pre_warmed_seats` |
 
-**Start / Stop controls:**
+**Enable / Disable toggle:**
+
+Enable/disable replaces the old start/stop controls. `enabled` is
+persistent (survives restarts). Disabling triggers active worker drain;
+enabling allows cold-start and pre-warming to resume.
 
 ```html
 <div class="app-controls"
-     hx-trigger="appStarted from:body, appStopped from:body"
+     hx-trigger="appEnabled from:body, appDisabled from:body"
      hx-get="/ui/apps/{{.App.Name}}/tab/settings"
      hx-target="#tab-content">
-    {{if eq .Status "running"}}
-    <button class="btn" hx-post="/api/v1/apps/{{.App.ID}}/stop"
-            hx-swap="none">Stop</button>
+    {{if eq .Status "stopping"}}
+    <span class="status-badge status-stopping">Disabling...</span>
+    {{else if .App.Enabled}}
+    <button class="btn" hx-post="/api/v1/apps/{{.App.ID}}/disable"
+            hx-swap="none">Disable</button>
+    <span class="status-badge status-{{.Status}}">{{.Status}}</span>
     {{else}}
-    <button class="btn btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/start"
-            hx-swap="none">Start</button>
+    <button class="btn btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/enable"
+            hx-swap="none">Enable</button>
+    <span class="status-badge status-disabled">Disabled</span>
     {{end}}
 </div>
 ```
 
 The API endpoints return JSON as usual. When the `HX-Request` header
-is present, they add an `HX-Trigger` response header (e.g.,
-`appStarted` or `appStopped`). The `hx-trigger` listener on the
-controls container re-fetches the settings tab to reflect the new
-state.
+is present, they add an `HX-Trigger` response header (`appEnabled` or
+`appDisabled`). The `hx-trigger` listener on the controls container
+re-fetches the settings tab to reflect the new state.
 
 **Soft-delete** at the bottom:
 
@@ -639,6 +656,8 @@ Sidebar-specific styles (added to existing `style.css`):
 - **`.log-content`** -- flex column, `.log-output` has monospace font, dark
   background, max-height with overflow scroll.
 - **`.danger-zone`** -- top border, red-tinted button.
+- **`.status-stopping`** -- amber/yellow badge for draining state.
+- **`.status-disabled`** -- grey badge for disabled apps.
 - **`.error-message`** -- red text for htmx error display.
 
 ## Sidebar JS Additions
@@ -647,6 +666,13 @@ Per-field save visibility and htmx error handling (added to the
 sidebar JS from phase 2-10):
 
 ```js
+// Toggle active tab highlight.
+function setActiveTab(btn) {
+    btn.closest('.sidebar-tabs').querySelectorAll('.tab').forEach(
+        t => t.classList.remove('active'));
+    btn.classList.add('active');
+}
+
 // Show/hide per-field save buttons when values change.
 function toggleSaveBtn(input) {
     const saveBtn = input.closest('.field-row').querySelector('.field-save');
@@ -676,7 +702,7 @@ document.body.addEventListener('htmx:responseError', function(e) {
 3. **Overview tab** -- status, workers, activity, and bundle summary.
 4. **Settings tab** -- metadata editing (title, description, tags),
    resource configuration (memory, CPU, workers, sessions, pre-warming),
-   per-field save with inline validation, start/stop, soft-delete.
+   per-field save with inline validation, enable/disable, soft-delete.
 5. **Runtime tab** -- live worker table with CPU/memory stats,
    session-to-user mapping, activity summary.
 6. **Bundles tab** -- bundle list, active indicator, rollback action,
@@ -712,7 +738,7 @@ from `GET /api/v1/apps/{id}/runtime`.
 
 Implement settings tab partial. Wire per-field save for title,
 description, resource config (using form-encoded PATCH from phase 2-8).
-Add tag management. Add start/stop controls. Add soft-delete button.
+Add tag management. Add enable/disable controls. Add soft-delete button.
 
 ### Step 4: Runtime Tab
 
@@ -747,4 +773,4 @@ gracefully on errors.
 
 Fragment route tests for all tabs. RBAC tests verifying viewer cannot
 access sidebar or tabs. Owner-only test for collaborators tab.
-Integration tests for per-field save, rollback, start/stop via htmx.
+Integration tests for per-field save, rollback, enable/disable via htmx.

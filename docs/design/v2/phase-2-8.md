@@ -107,12 +107,25 @@ New `enabled` column on the `apps` table:
 ALTER TABLE apps ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ```
 
+Enable/disable **replaces** the existing start/stop endpoints. With
+blockyard's cold-start architecture, there is no need for an
+imperative "start" -- workers spawn on demand or via pre-warming. The
+only lifecycle control needed is a declarative "should this app accept
+traffic?" switch.
+
 When `enabled = 0`:
 
 - Proxy does not cold-start new workers for the app.
 - Autoscaler does not pre-warm standby seats.
-- Existing sessions drain naturally (workers stay alive until idle).
 - New requests get 503 Service Unavailable.
+- All existing workers are marked as draining and evicted when their
+  sessions complete (reuses the existing `StopApp` drain logic
+  internally).
+
+When `enabled = 1` (re-enabling):
+
+- Cold-start resumes on incoming requests.
+- Autoscaler resumes pre-warming if `pre_warmed_seats > 0`.
 
 This is persistent state that survives server restarts. The proxy
 cold-start path (`proxy.go`, where a new worker is spawned on incoming
@@ -124,7 +137,9 @@ pre-warming loop (`ops/autoscale.go`) skips disabled apps.
 - `proxy.go` -- before cold-starting a worker, check `app.Enabled`.
   Return 503 if disabled.
 - `ops/autoscale.go` -- skip pre-warming for apps where `enabled = 0`.
-- `api/apps.go` -- new `EnableApp` and `DisableApp` handlers.
+- `api/apps.go` -- new `EnableApp` and `DisableApp` handlers. Remove
+  the existing `StartApp` and `StopApp` endpoints (the drain logic
+  moves into `DisableApp`).
 
 ### Hard Delete
 
@@ -163,7 +178,8 @@ srv.DB.CreateSession(sessionID, app.ID, workerID, callerSub)
 #### Session End
 
 When a session ends normally (idle timeout eviction in
-`ops/evict.go`, or explicit stop in `api/apps.go` StopApp):
+`ops/evict.go`, or disable-triggered drain in `api/apps.go`
+`DisableApp`):
 
 ```go
 db.EndSession(sessionID, "ended")
@@ -171,7 +187,7 @@ db.EndSession(sessionID, "ended")
 
 **Integration points:**
 - `ops/evict.go` -- when evicting a worker, end all its sessions.
-- `api/apps.go` StopApp -- when stopping an app, end all sessions
+- `api/apps.go` DisableApp -- when disabling an app, end all sessions
   for all workers of that app.
 - `session.Store` cleanup -- when the in-memory session store
   expires an entry, end the corresponding DB session.
@@ -220,6 +236,11 @@ viewers should only see app metadata.
 
 The `workers` field is **removed** from this response. The `enabled`
 field is added. The `relation` field is added (see below).
+
+The `status` field is computed from the worker map:
+- `"running"` -- at least one non-draining worker exists.
+- `"stopping"` -- all workers are draining (disable in progress).
+- `"stopped"` -- no workers exist for the app.
 
 **`GET /api/v1/apps`** -- list apps. Consolidates the current list
 endpoint with the catalog endpoint (`GET /api/v1/catalog`). The catalog
@@ -336,9 +357,17 @@ stream). The mock backend returns zero values.
 
 The runtime endpoint also needs worker start time. Extend
 `server.ActiveWorker` to include `StartedAt time.Time`. Set this in
-`StartApp()` and in the proxy cold-start path when a new worker is
-spawned. The Logs tab (phase 2-11) uses worker start time to show
-"Since" in the worker list.
+the proxy cold-start path when a new worker is spawned. The Logs tab
+(phase 2-11) uses worker start time to show "Since" in the worker
+list.
+
+The workers list includes both **live workers** (from the in-memory
+`WorkerMap`) and **recently-dead workers** (from the logstore via
+`WorkerIDsByApp()`). Live workers have `status: "active"` and include
+`stats` and `sessions`. Dead workers have `status: "ended"` or
+`"crashed"`, include `ended_at`, and have null `stats` and empty
+`sessions`. Dead workers are included so the Logs tab (phase 2-11)
+can display them for historical log viewing.
 
 #### Logs Stream Parameter
 
@@ -350,6 +379,11 @@ without subscribing to live updates.
 Phase 2-11's Logs tab uses this to pre-fill historical logs in the
 worker log viewer fragment (`stream=false`), with live streaming
 handled separately via JS `fetch()` with `stream=true`.
+
+The handler is also relaxed to accept any `worker_id` that has data in
+the logstore, verifying app ownership via `logstore.WorkerIDsByApp()`
+instead of `srv.Workers.Get()`. This allows serving historical logs
+for dead workers that the Logs tab displays.
 
 #### htmx Content Negotiation
 
@@ -364,8 +398,13 @@ routes (phase 2-11) listen for the triggered events and re-fetch the
 affected tab content. The specific event names are defined when the
 fragment routes are registered.
 
-Endpoints where this applies: `POST .../start`, `POST .../stop`,
+Endpoints where this applies: `POST .../enable`, `POST .../disable`,
 `POST .../rollback`, `POST .../access`, `POST .../refresh`.
+
+`POST .../rollback` and `POST .../access` also accept
+`application/x-www-form-urlencoded` in addition to JSON, because htmx
+sends form data by default (`hx-vals` on buttons, form fields on the
+ACL grant form).
 For `DELETE` actions (access revoke, app delete, token revoke) the
 existing 204 empty response works directly with htmx's
 `hx-swap="outerHTML"` to remove the target element.
@@ -418,8 +457,14 @@ POST /api/v1/apps/{id}/enable   -- collaborator+ (CanStartStop)
 POST /api/v1/apps/{id}/disable  -- collaborator+ (CanStartStop)
 ```
 
+These replace the existing `POST /api/v1/apps/{id}/start` and
+`POST /api/v1/apps/{id}/stop` endpoints, which are removed.
+
 Both return the updated app metadata (same shape as `GET /api/v1/apps/{id}`).
-`enable` sets `enabled = 1`; `disable` sets `enabled = 0`.
+`enable` sets `enabled = 1`. `disable` sets `enabled = 0` and
+initiates active drain of all workers for the app (marks them as
+draining, evicts when sessions clear -- same logic as the old
+`StopApp`, moved here).
 
 #### Hard Delete API
 
@@ -625,8 +670,6 @@ owner+. Hard delete (purge) requires admin.
 | `POST /api/v1/apps/{id}/rollback` | collaborator+ (`CanDeploy`) |
 | `POST /api/v1/apps/{id}/enable` | collaborator+ (`CanStartStop`) |
 | `POST /api/v1/apps/{id}/disable` | collaborator+ (`CanStartStop`) |
-| `POST /api/v1/apps/{id}/start` | collaborator+ (`CanStartStop`) |
-| `POST /api/v1/apps/{id}/stop` | collaborator+ (`CanStartStop`) |
 | `GET /api/v1/apps/{id}/logs` | collaborator+ (`CanDeploy`) |
 | `GET /api/v1/apps/{id}/access` | owner+ (`CanManageACL`) |
 | `POST /api/v1/apps/{id}/access` | owner+ (`CanManageACL`) |
@@ -657,7 +700,8 @@ owner+. Hard delete (purge) requires admin.
 6. **RBAC tightening** -- `ListBundles`, `PostRefresh`,
    `PostRefreshRollback` require collaborator+.
 7. **Enable/disable** -- `POST /apps/{id}/enable` and
-   `POST /apps/{id}/disable` endpoints, proxy and autoscaler checks.
+   `POST /apps/{id}/disable` endpoints (replacing start/stop), proxy
+   and autoscaler checks, disable triggers active worker drain.
 8. **Hard delete** -- `DELETE /apps/{id}?purge=true` endpoint
    (admin only, requires prior soft-delete).
 9. **Deployments API** -- `GET /api/v1/deployments` with pagination,
@@ -703,7 +747,7 @@ SQLite and PostgreSQL.
 Instrument the proxy to create session records on assignment, end them
 on disconnect/eviction, and crash them on worker failure. Integration
 points: `proxy.go` (create), `ops/evict.go` (end), `api/apps.go`
-StopApp (end), `ops/health.go` (crash).
+DisableApp drain (end), `ops/health.go` (crash).
 
 ### Step 3: Bundle Deployment Tracking
 
@@ -726,9 +770,11 @@ Add `stream` query parameter to `AppLogs`.
 
 ### Step 5: Enable/Disable + Hard Delete
 
-Implement enable/disable endpoints. Add proxy cold-start check and
-autoscaler skip for disabled apps. Implement hard-delete endpoint with
-soft-delete precondition check.
+Implement enable/disable endpoints, replacing the existing start/stop
+endpoints. Move the drain logic from `StopApp` into `DisableApp`.
+Remove `StartApp` and `StopApp` handlers. Add proxy cold-start check
+and autoscaler skip for disabled apps. Implement hard-delete endpoint
+with soft-delete precondition check.
 
 ### Step 6: Deployments + Sessions API
 
