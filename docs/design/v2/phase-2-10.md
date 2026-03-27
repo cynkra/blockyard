@@ -48,6 +48,11 @@ more in phase 2-11) are parsed standalone and stored in `fragments`.
 Page handlers call `ui.pages[name].ExecuteTemplate(w, "base", data)`.
 Fragment handlers call `ui.fragments[name].Execute(w, data)`.
 
+The template function map extends the existing `deref` with:
+- `timeAgo` -- formats a timestamp as relative time (e.g., "2 hours ago").
+- `truncate` -- truncates a string to 8 characters with ellipsis (for bundle IDs).
+- `add` / `subtract` -- integer arithmetic for pagination links.
+
 ## Navigation Restructure
 
 The current single-page dashboard (app grid + user info + API keys) is
@@ -132,7 +137,7 @@ A cross-app timeline of all deployments the user has visibility into
 | Bundle | Bundle ID (truncated) |
 | Deployed by | User who triggered the deployment |
 | Deployed | Relative timestamp (e.g., "2 hours ago") |
-| Status | Badge: success / building / failed |
+| Status | Badge: ready / building / failed |
 
 ```html
 <div class="page-header">
@@ -268,7 +273,7 @@ to direct users here for token creation.
           hx-post="/ui/tokens"
           hx-target="#pat-result"
           hx-swap="innerHTML">
-        <input type="text" name="label" placeholder="Token label (e.g., CI deploy)" required>
+        <input type="text" name="name" placeholder="Token name (e.g., CI deploy)" required>
         <button type="submit" class="btn">Create token</button>
     </form>
     <div id="pat-result"></div>
@@ -276,17 +281,17 @@ to direct users here for token creation.
     {{if .Tokens}}
     <table class="data-table">
         <thead>
-            <tr><th>Label</th><th>Created</th><th>Last used</th><th></th></tr>
+            <tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr>
         </thead>
         <tbody>
         {{range .Tokens}}
             <tr>
-                <td>{{.Label}}</td>
+                <td>{{.Name}}</td>
                 <td>{{.CreatedAt | timeAgo}}</td>
                 <td>{{if .LastUsedAt}}{{.LastUsedAt | timeAgo}}{{else}}Never{{end}}</td>
                 <td><button class="btn btn-sm btn-danger"
                             hx-delete="/api/v1/users/me/tokens/{{.ID}}"
-                            hx-confirm="Revoke token '{{.Label}}'? This cannot be undone."
+                            hx-confirm="Revoke token '{{.Name}}'? This cannot be undone."
                             hx-target="closest tr"
                             hx-swap="outerHTML swap:0.2s">Revoke</button></td>
             </tr>
@@ -302,7 +307,10 @@ to direct users here for token creation.
 **Token creation fragment** (`POST /ui/tokens`):
 
 A UI-specific endpoint that wraps the existing token creation logic
-and returns an HTML fragment (stored in `ui.fragments["pat_created"]`):
+and returns an HTML fragment (stored in `ui.fragments["pat_created"]`).
+Tokens created via the UI default to 90-day expiration (no expiration
+selector in the form -- keep the UI simple; users who need custom
+expiration can use the API directly).
 
 ```html
 <div class="pat-created">
@@ -336,11 +344,34 @@ templates/
 ├── base.html              # (existing -- modified: add left nav, htmx script tag)
 ├── landing.html           # (existing)
 ├── apps.html              # Apps page (replaces dashboard.html -- app grid, sidebar container)
-├── deployments.html       # Deployment history page
+├── deployments.html       # Deployment history page (includes pagination partial)
 ├── api_keys.html          # API keys page (credential management)
 ├── profile.html           # Profile page (identity, PATs)
 └── pat_created.html       # One-time token display fragment
 ```
+
+The pagination partial is defined inside `deployments.html` (it is the only
+paginated page in this phase). If other pages gain pagination later, extract
+it to a shared partial.
+
+```html
+{{define "pagination"}}
+{{if gt .TotalPages 1}}
+<nav class="pagination">
+    {{if gt .Page 1}}
+    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{.Search}}{{end}}" class="btn btn-sm">&laquo; Prev</a>
+    {{end}}
+    <span class="pagination-info">Page {{.Page}} of {{.TotalPages}}</span>
+    {{if lt .Page .TotalPages}}
+    <a href="?page={{add .Page 1}}{{if .Search}}&search={{.Search}}{{end}}" class="btn btn-sm">Next &raquo;</a>
+    {{end}}
+</nav>
+{{end}}
+{{end}}
+```
+
+The `add` and `subtract` template functions are registered alongside the
+existing `deref` in the template function map.
 
 Page templates (`apps.html`, `deployments.html`, `api_keys.html`,
 `profile.html`) extend `base.html` which provides the left nav and
@@ -386,6 +417,10 @@ Key new styles (added to existing `style.css`):
 - **`.sidebar-overlay`** -- fixed full-screen, semi-transparent backdrop,
   hidden by default, shown when sidebar is open.
 - **`.app-card-gear`** -- gear icon positioning in app card.
+
+**Pagination:**
+- **`.pagination`** -- flex row, centered, gap between items.
+- **`.pagination-info`** -- muted text showing current page.
 
 **Utility:**
 - **`.btn-danger`** -- red background, white text.

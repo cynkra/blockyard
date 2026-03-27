@@ -665,8 +665,23 @@ CountSessions(appID string) (int, error)
 CountRecentSessions(appID string, since time.Time) (int, error)
 CountUniqueVisitors(appID string) (int, error)
 
+// Consolidated app listing (replaces ListCatalog)
+// Returns CatalogRow which extends AppRow with per-app Relation,
+// Tags, and Enabled. The relation is computed via a CASE expression
+// over the same access-control conditions used for filtering:
+//   admin caller  → "admin"
+//   apps.owner    → "owner"
+//   ACL collaborator → "collaborator"
+//   ACL viewer / logged_in / public → "viewer"
+// This avoids N+1 EvaluateAccess calls. Tags are aggregated via
+// GROUP_CONCAT (SQLite) / STRING_AGG (Postgres) in a subquery join.
+ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, error)
+
 // Deployment tracking (DeploymentRow includes deployed_by_name from users join)
 SetBundleDeployed(bundleID, deployedBy string) error
+// DeploymentListOpts includes CallerSub and CallerRole so the query
+// can filter to apps where the caller has collaborator+ access,
+// using the same access-control join pattern as ListCatalogWithRelation.
 ListDeployments(opts DeploymentListOpts) ([]DeploymentRow, int, error)
 
 // Enable/disable
