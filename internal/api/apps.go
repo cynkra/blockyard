@@ -469,7 +469,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		var body rollbackRequest
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			r.ParseForm()
+			_ = r.ParseForm()
 			body.BundleID = r.FormValue("bundle_id")
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

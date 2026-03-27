@@ -1364,11 +1364,6 @@ func (db *DB) ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, 
 	conditions := []string{"apps.deleted_at IS NULL"}
 	var args []any
 
-	// Admin sees deleted apps when explicitly requested
-	if params.CallerRole == "admin" && params.Tag == "" && params.Search == "" {
-		// Check if we should return deleted apps — handled by caller
-	}
-
 	// Access control filter
 	if params.CallerRole == "admin" {
 		// Admin sees everything

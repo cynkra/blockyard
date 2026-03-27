@@ -128,7 +128,7 @@ func AddAppTag(srv *server.Server) http.HandlerFunc {
 		var body addAppTagRequest
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			r.ParseForm()
+			_ = r.ParseForm()
 			body.TagID = r.FormValue("tag_id")
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

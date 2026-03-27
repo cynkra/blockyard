@@ -45,7 +45,7 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		var body grantRequest
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			r.ParseForm()
+			_ = r.ParseForm()
 			body.Principal = r.FormValue("principal")
 			body.Kind = r.FormValue("kind")
 			body.Role = r.FormValue("role")

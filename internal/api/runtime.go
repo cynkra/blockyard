@@ -474,7 +474,7 @@ func HardDeleteApp(srv *server.Server, purge bool, w http.ResponseWriter, r *htt
 
 	// Clean up files.
 	appDir := filepath.Join(srv.Config.Storage.BundleServerPath, app.ID)
-	os.RemoveAll(appDir)
+	_ = os.RemoveAll(appDir)
 
 	slog.Info("purged app", "app_id", app.ID, "name", app.Name, "caller", caller.Sub)
 
