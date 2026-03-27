@@ -98,10 +98,20 @@ since the feature is new).
 
 **Implementation detail:** `deployed_by` is stored on the bundle row
 at INSERT time (in `CreateBundle`), passed from `UploadBundle` which
-has access to `auth.CallerFromContext()`. `deployed_at` is set later
-by `ActivateBundle` when the restore completes. For rollbacks, both
-fields are set atomically in the rollback handler. `pinned` is set
-at INSERT time based on the uploaded manifest.
+has access to `auth.CallerFromContext()`. `CreateBundle` signature
+expands from `(id, appID)` to `(id, appID, deployedBy, pinned)`.
+`deployed_at` is set later by `ActivateBundle` when the restore
+completes. For rollbacks, both fields are set atomically in the
+rollback handler (overwriting the previous values — the bundle row
+records the most recent activation, not the original upload).
+`pinned` is set at INSERT time: after unpacking the archive but
+before `CreateBundle`, `UploadBundle` attempts to read the manifest
+from the unpacked directory via `resolveManifest()` (same resolution
+order as the restore: `manifest.json` → `renv.lock` → `DESCRIPTION`)
+and checks `m.IsPinned()`. This is a lightweight pre-check —
+the full manifest resolution and dependency build still happen in the
+async restore goroutine. If no manifest exists (bare scripts, case
+2b), `pinned` defaults to false.
 
 ### App Enable/Disable
 
@@ -193,8 +203,12 @@ db.EndSession(sessionID, "ended")
 - `ops/evict.go` -- when evicting a worker, end all its sessions.
 - `api/apps.go` DisableApp -- when disabling an app, end all sessions
   for all workers of that app.
-- `session.Store` cleanup -- when the in-memory session store
-  expires an entry, end the corresponding DB session.
+- `session.Store` idle sweep -- a periodic goroutine in the ops layer
+  (alongside the health poller) calls `session.Store.SweepIdle()` and
+  then `db.EndSession()` for each swept session ID. The idle timeout
+  is derived from the proxy config (`SessionIdleTimeout`, defaulting
+  to `ws_cache_ttl`); the sweep interval matches the health check
+  interval.
 
 #### Session Crash
 
@@ -642,9 +656,12 @@ return it.
 
 **`PATCH /api/v1/apps/{id}`** is extended to accept
 `application/x-www-form-urlencoded` in addition to JSON. When the
-request includes an `HX-Request` header (htmx), the response is an
-HTML fragment (success indicator or validation error) instead of JSON.
-For non-htmx requests, behavior is unchanged.
+request includes an `HX-Request` header (htmx), the handler adds an
+`HX-Trigger: appUpdated` response header alongside the normal JSON
+body; for validation errors it returns 422 with a plain-text error
+message. Phase 2-11 will refine the success response to return an
+HTML fragment once the sidebar templates exist. For non-htmx requests,
+behavior is unchanged.
 
 This dual-format support enables the per-app sidebar (phase 2-11) to
 use `hx-patch` for inline field editing without client-side JSON
@@ -831,8 +848,10 @@ owner+. Hard delete (purge) requires admin.
 13. **htmx-aware responses** -- `PATCH /api/v1/apps/{id}` accepts
     form-encoded bodies and returns HTML fragments for htmx requests.
     DELETE endpoints return 200 (not 204) for htmx requests so
-    `outerHTML` swaps can remove rows. Tag POST accepts form-encoded
-    bodies. Credential enrollment endpoint accepts form-encoded bodies.
+    `outerHTML` swaps can remove rows. `POST .../rollback`,
+    `POST .../access`, and `POST .../tags` accept form-encoded bodies
+    (htmx sends form data by default). Credential enrollment endpoint
+    accepts form-encoded bodies.
 14. **Collaborator display names** -- `ListAppAccessWithNames()` DB
     method joining `app_access` with `users`.
 15. **User profile endpoint** -- `GET /api/v1/users/me` returning the
@@ -908,9 +927,11 @@ Extract `resolveApp()` and `resolveAppRelation()` to shared location.
 Add `resolveAppIncludeDeleted()` for restore-by-name support. Add
 htmx-aware response handling: form-encoded PATCH on `UpdateApp`
 (dual JSON + form encoding, fragment responses), 200-not-204 on
-DELETE endpoints for htmx callers, form-encoded credential enrollment.
-Add `HX-Trigger` response headers to action endpoints for htmx
-requests. Implement `ListAppAccessWithNames()` DB method.
+DELETE endpoints for htmx callers, form-encoded bodies on
+`POST .../rollback`, `POST .../access`, `POST .../tags`, and
+credential enrollment. Add `HX-Trigger` response headers to action
+endpoints for htmx requests. Implement `ListAppAccessWithNames()`
+DB method.
 
 ### Step 8: Tests
 
@@ -918,6 +939,6 @@ Integration tests for session lifecycle (create -> end, create -> crash).
 API tests for runtime endpoint, deployments listing, session listing.
 RBAC tests verifying viewer cannot access runtime API, bundles listing,
 or refresh endpoints. Enable/disable behavior tests. Hard-delete
-precondition tests. htmx-aware response tests (form-encoded PATCH,
-DELETE 200-not-204, form-encoded credential enrollment).
-`ListAppAccessWithNames` tests.
+precondition tests. htmx-aware response tests (form-encoded PATCH, form-encoded
+rollback/access/tags, DELETE 200-not-204, form-encoded credential
+enrollment). `ListAppAccessWithNames` tests.

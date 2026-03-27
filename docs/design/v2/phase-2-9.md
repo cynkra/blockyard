@@ -456,11 +456,21 @@ $ by refresh my-app --rollback
 Error: no previous lockfile to roll back to.
 ```
 
+Both endpoints are async: the server returns `202 Accepted` with a
+`task_id`. The CLI connects to `GET /api/v1/tasks/{taskID}/logs` and
+streams output until the task completes (same mechanism as
+`by deploy --wait`, but always blocking -- refresh is typically an
+interactive operation where the result matters immediately). Exits 0
+on success, non-zero on failure. In `--json` mode, a single JSON
+object is emitted on completion.
+
 The `--rollback` flag wraps `POST /api/v1/apps/{id}/refresh/rollback`
 from phase 2-7. It restores the previous pak lockfile and reassembles
 worker libraries from it. Only one level of rollback is supported --
 the store retains old package versions (append-only), so rollback is
-instant.
+instant. The CLI uses the default rollback target (most recent refresh).
+Rolling back to the original build state is available via the API
+(`?target=build`) but not exposed in the CLI.
 
 ## Error Handling
 
