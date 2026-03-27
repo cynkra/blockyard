@@ -203,7 +203,7 @@ status for the app.
 |---------|---------|-------------|
 | Status | Running / stopped / failed, last deployed timestamp | App status + `bundles.deployed_at` |
 | Workers | Active worker count, active session count | Worker map + `sessions` table |
-| Activity | Total sessions, last 7 days, unique visitors | Derived from `sessions` table |
+| Activity | Total views, last 7 days | Derived from `sessions` table |
 | Bundle | Current bundle ID (truncated), build status | `apps.active_bundle` + `bundles` |
 
 ```html
@@ -247,6 +247,42 @@ App metadata and resource configuration with per-field save.
 | Description | textarea | `description` |
 | Tags | tag chips with add/remove | `POST/DELETE /api/v1/apps/{id}/tags` |
 
+**Tag editing:**
+
+Tags use a chip pattern with remove buttons and an inline add form.
+Existing tags are fetched from the app record (included in the
+fragment data). Adding/removing triggers a re-fetch via `HX-Trigger`.
+
+```html
+<div class="field-group"
+     hx-trigger="tagAdded from:body, tagRemoved from:body"
+     hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+     hx-target="#tab-content">
+    <label>Tags</label>
+    <div class="tag-chips">
+        {{range .Tags}}
+        <span class="tag-chip">
+            {{.Name}}
+            <button class="tag-remove"
+                    hx-delete="/api/v1/apps/{{$.App.ID}}/tags/{{.ID}}"
+                    hx-swap="none"
+                    aria-label="Remove tag {{.Name}}">&#10005;</button>
+        </span>
+        {{end}}
+    </div>
+    <form class="tag-add-form"
+          hx-post="/api/v1/apps/{{.App.ID}}/tags"
+          hx-swap="none">
+        <select name="tag_id">
+            {{range .AvailableTags}}
+            <option value="{{.ID}}">{{.Name}}</option>
+            {{end}}
+        </select>
+        <button type="submit" class="btn btn-sm">Add</button>
+    </form>
+</div>
+```
+
 **Resource configuration fields:**
 
 | Field | Input Type | API Field |
@@ -256,6 +292,32 @@ App metadata and resource configuration with per-field save.
 | Max workers | number | `max_workers_per_app` |
 | Max sessions per worker | number | `max_sessions_per_worker` |
 | Pre-warmed seats | number | `pre_warmed_seats` |
+| Refresh schedule | text (cron) | `refresh_schedule` |
+
+Refresh schedule is only shown when the active bundle is unpinned
+(same gate as the Bundles tab refresh button):
+
+```html
+{{if and .ActiveBundle (not .ActiveBundle.Pinned)}}
+<div class="field-group">
+    <label for="refresh-schedule">Refresh schedule</label>
+    <p class="field-description">Cron expression for automatic dependency refresh (e.g. <code>0 2 * * 1</code> = every Monday at 2 AM). Leave empty to disable.</p>
+    <div class="field-row">
+        <input type="text" id="refresh-schedule" name="refresh_schedule"
+               value="{{.App.RefreshSchedule}}"
+               data-original="{{.App.RefreshSchedule}}"
+               placeholder="0 2 * * *"
+               oninput="toggleSaveBtn(this)">
+        <button class="field-save hidden"
+                hx-patch="/api/v1/apps/{{.App.ID}}"
+                hx-include="[name='refresh_schedule']"
+                hx-target="next .field-feedback"
+                hx-swap="innerHTML">&#10003;</button>
+        <span class="field-feedback"></span>
+    </div>
+</div>
+{{end}}
+```
 
 **Enable / Disable toggle:**
 
@@ -308,8 +370,16 @@ Live operational data. Shows active workers with container stats
 (CPU, memory) and session-to-user mapping. Data comes from
 `GET /api/v1/apps/{id}/runtime` (added in phase 2-8).
 
+The runtime view is a point-in-time snapshot. A manual refresh
+button re-fetches the fragment to get updated stats:
+
 ```html
 <div class="runtime-view">
+    <div class="runtime-controls">
+        <button class="btn btn-sm"
+                hx-get="/ui/apps/{{.App.Name}}/tab/runtime"
+                hx-target="#tab-content">Refresh</button>
+    </div>
     {{if .Workers}}
     <table class="data-table">
         <thead>
@@ -439,7 +509,10 @@ principal (OIDC subject) is shown instead.
 
 ```html
 {{if eq .App.AccessType "acl"}}
-<div class="acl-section">
+<div class="acl-section"
+     hx-trigger="accessGranted from:body"
+     hx-get="/ui/apps/{{.App.Name}}/tab/collaborators"
+     hx-target="#tab-content">
     <h3>Access grants</h3>
     <table class="acl-table">
         <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
@@ -650,6 +723,11 @@ Sidebar-specific styles (added to existing `style.css`):
 - **`.field-feedback`** -- inline success/error indicator.
 - **`.field-error`** -- red text below field for validation messages.
 - **`.field-invalid`** -- red border on input with validation error.
+- **`.tag-chips`** -- flex-wrap container for tag chip elements.
+- **`.tag-chip`** -- inline pill with tag name + remove button.
+- **`.tag-remove`** -- small × button inside tag chip.
+- **`.tag-add-form`** -- inline form row for adding tags.
+- **`.runtime-controls`** -- right-aligned container for runtime tab actions.
 - **`.acl-table`** -- simple table for access grants.
 - **`.acl-add-form`** -- inline form row for adding grants.
 - **`.runtime-view`** -- container for runtime tab content.

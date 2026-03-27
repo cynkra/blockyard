@@ -92,6 +92,10 @@ Bundles with status "pending" or "failed" get NULL for both. For
 with packages, 0 otherwise (default 0 is safe for existing bundles
 since the feature is new).
 
+**Row type update:** `BundleRow` gains the three new fields
+(`DeployedBy *string`, `DeployedAt *string`, `Pinned bool`). See
+**Bundle List Response** below for the updated API response shape.
+
 **Implementation detail:** `deployed_by` is stored on the bundle row
 at INSERT time (in `CreateBundle`), passed from `UploadBundle` which
 has access to `auth.CallerFromContext()`. `deployed_at` is set later
@@ -366,6 +370,24 @@ the proxy cold-start path when a new worker is spawned. The Logs tab
 (phase 2-11) uses worker start time to show "Since" in the worker
 list.
 
+Dead workers also need start time. Extend `logstore.logEntry` to
+include `startedAt time.Time`, set at `Create()` time (same moment
+the worker spawns). `WorkerIDsByApp()` returns a richer struct
+instead of bare strings:
+
+```go
+type WorkerInfo struct {
+    ID        string
+    StartedAt time.Time
+    EndedAt   time.Time // zero for active
+    Ended     bool
+}
+```
+
+This enables both the runtime API and the Logs tab to show timing
+for live workers (from `ActiveWorker.StartedAt`) and dead workers
+(from `logstore.WorkerInfo.StartedAt`).
+
 The workers list includes both **live workers** (from the in-memory
 `WorkerMap`) and **recently-dead workers** (from the logstore via
 `WorkerIDsByApp()`). Live workers have `status: "active"` and include
@@ -410,15 +432,17 @@ listeners are:
 | `POST .../rollback` | `bundleRolledBack` |
 | `POST .../access` | `accessGranted` |
 | `POST .../refresh` | `refreshStarted` |
+| `POST .../tags` | `tagAdded` |
+| `DELETE .../tags/{id}` | `tagRemoved` |
 
-`POST .../rollback` and `POST .../access` also accept
+`POST .../rollback`, `POST .../access`, and `POST .../tags` accept
 `application/x-www-form-urlencoded` in addition to JSON, because htmx
 sends form data by default (`hx-vals` on buttons, form fields on the
 ACL grant form).
-`DELETE` actions (access revoke, app delete, token revoke) return 200
-with an empty body for htmx requests (instead of the normal 204), as
-htmx ignores 204 responses. See **htmx-Aware Response Handling**
-below for details.
+`DELETE` actions (access revoke, app delete, token revoke, tag remove)
+return 200 with an empty body for htmx requests (instead of the normal
+204), as htmx ignores 204 responses. See **htmx-Aware Response
+Handling** below for details.
 
 #### RBAC Tightening
 
@@ -626,11 +650,24 @@ This dual-format support enables the per-app sidebar (phase 2-11) to
 use `hx-patch` for inline field editing without client-side JSON
 serialization.
 
+The PATCH body also gains `refresh_schedule` (string, optional) for
+setting or clearing the automatic dependency refresh cron expression.
+The handler validates the cron expression server-side (standard
+five-field format) and returns 422 for invalid expressions. An empty
+string clears the schedule. `AppUpdate` and `updateAppBody` are
+extended accordingly.
+
 **DELETE endpoints** (`DELETE /api/v1/users/me/tokens/{id}`,
-`DELETE /api/v1/apps/{id}/access/...`): when the request includes an
+`DELETE /api/v1/apps/{id}/access/...`,
+`DELETE /api/v1/apps/{id}/tags/{id}`): when the request includes an
 `HX-Request` header, return 200 with empty body instead of 204. htmx
 ignores 204 responses (no swap is performed), so the UI's row-removal
 pattern (`hx-swap="outerHTML"`) requires a 200 response.
+
+**`POST /api/v1/apps/{id}/tags`**: accept
+`application/x-www-form-urlencoded` in addition to JSON. The Settings
+tab (phase 2-11) posts tag additions via an htmx form with a `tag_id`
+field.
 
 **`POST /api/v1/users/me/credentials/{service}`**: accept
 `application/x-www-form-urlencoded` in addition to JSON, same as the
@@ -794,8 +831,8 @@ owner+. Hard delete (purge) requires admin.
 13. **htmx-aware responses** -- `PATCH /api/v1/apps/{id}` accepts
     form-encoded bodies and returns HTML fragments for htmx requests.
     DELETE endpoints return 200 (not 204) for htmx requests so
-    `outerHTML` swaps can remove rows. Credential enrollment endpoint
-    accepts form-encoded bodies.
+    `outerHTML` swaps can remove rows. Tag POST accepts form-encoded
+    bodies. Credential enrollment endpoint accepts form-encoded bodies.
 14. **Collaborator display names** -- `ListAppAccessWithNames()` DB
     method joining `app_access` with `users`.
 15. **User profile endpoint** -- `GET /api/v1/users/me` returning the
@@ -805,12 +842,16 @@ owner+. Hard delete (purge) requires admin.
     `POST /apps/{id}/refresh/rollback` return 409 when the active
     bundle is pinned.
 17. **Worker metadata** -- extend `ActiveWorker` with `StartedAt` for
-    the runtime API and logs tab.
+    the runtime API and logs tab. Extend `logstore.logEntry` with
+    `startedAt` (set at `Create()` time) so dead workers also have
+    timing data. `WorkerIDsByApp()` returns `[]WorkerInfo` structs
+    instead of bare strings.
 18. **Logs stream parameter** -- `GET /api/v1/apps/{id}/logs` gains
     `stream` query parameter (default `true`); `stream=false` returns
     historical snapshot only.
 19. **htmx event triggers** -- action endpoints return `HX-Trigger`
-    response headers for htmx requests, enabling UI fragment re-fetch
+    response headers for htmx requests (including `tagAdded` /
+    `tagRemoved` for tag operations), enabling UI fragment re-fetch
     without HTML rendering in the API layer.
 
 ## Implementation Steps
