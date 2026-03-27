@@ -850,43 +850,56 @@ type PackageResponse struct {
 }
 ```
 
-### Phase 2-8: Web UI Expansion
+### Phase 2-8: Backend Prerequisites + Multi-Page Navigation
 
-Extends the v1 dashboard with per-app management and operational
-visibility. Server-rendered HTML, no JavaScript framework.
+Backend changes (schema, APIs, RBAC) and navigation restructure.
+Converts the single-page dashboard into a multi-page layout with
+persistent left navigation, htmx fragment loading, and four pages
+(Apps, Deployment History, API Keys, Profile).
+
+See [phase-2-8.md](phase-2-8.md) for the full implementation plan.
 
 **Deliverables:**
 
-1. **Per-app settings panel** — accessible from the dashboard via a
-   detail/edit link per app. Displays and allows editing of:
-   - Name, title, description
-   - Access type (acl / logged_in / public)
-   - ACL management (grant/revoke user access)
-   - Resource limits (memory, CPU)
-   - Worker scaling (max_workers_per_app, max_sessions_per_worker)
-   - Pre-warmed seats
-   - Tags
-   - Bundle list with rollback action
-   - Dependency refresh (unpinned apps only)
-   - Soft-delete (with confirmation)
+1. **Database migration** — sessions table, bundle deployment tracking
+   columns (`deployed_by`, `deployed_at`).
+2. **Session lifecycle** — create/end/crash tracking in the proxy and
+   worker lifecycle code.
+3. **Backend interface** — `ContainerStats()` method for live
+   CPU/memory data.
+4. **API split** — `GetApp` (metadata only, no workers) +
+   `GET /api/v1/apps/{id}/runtime` (collaborator+).
+5. **RBAC tightening** — `ListBundles`, `PostRefresh`,
+   `PostRefreshRollback` require collaborator+.
+6. **New APIs** — `GET /api/v1/deployments`, `GET /api/v1/apps/{id}/sessions`.
+7. **Form-encoded PATCH** — `UpdateApp` accepts form-encoded bodies and
+   returns HTML fragments for htmx requests.
+8. **htmx integration** — vendored `htmx.min.js`, left navigation,
+   four pages.
+9. **Sidebar shell** — container, overlay, gear icon (collaborator+
+   conditional), open/close JS. Non-functional until phase 2-9.
 
-   Uses existing API endpoints — the UI is a form that POSTs to
-   `PATCH /api/v1/apps/{id}`, `POST /api/v1/apps/{id}/rollback`,
-   `POST /api/v1/apps/{id}/refresh`, etc.
+### Phase 2-9: Per-App Management Sidebar
 
-2. **Content filtering** — add search/filter controls to the dashboard
-   app list. Filter by tag, search by name/title/description. Uses the
-   existing `ListCatalog` endpoint with query parameters.
+Adds the per-app management sidebar with six tabs (Overview, Settings,
+Runtime, Bundles, Collaborators, Logs). All content loaded via htmx
+fragment routes. Depends on phase 2-8.
 
-3. **Per-app log viewer** — accessible from the per-app settings panel.
-   Streams logs via `GET /api/v1/apps/{id}/logs` using chunked transfer
-   encoding. The UI uses `fetch()` with a `ReadableStream` reader to
-   append log lines to a `<pre>` element in real time. Historical logs
-   are loaded first, then live lines are appended.
+See [phase-2-9.md](phase-2-9.md) for the full implementation plan.
 
-No new navigation chrome (navbar, app switcher) — deferred to v3.
+**Deliverables:**
 
-### Phase 2-9: CLI Tool
+1. **Fragment route infrastructure** — template parsing, app name→ID
+   resolution, RBAC enforcement per tab.
+2. **Six sidebar tabs** — Overview (status/activity), Settings
+   (metadata + resource config + start/stop + delete), Runtime (live
+   worker stats + session-to-user mapping), Bundles (list + rollback +
+   refresh), Collaborators (owner+ only, ACL management with display
+   names), Logs (worker-scoped log viewer with streaming).
+3. **htmx error handling** — global error handler, 401 redirect,
+   422 validation fragments.
+
+### Phase 2-10: CLI Tool
 
 A dedicated Go binary (`cmd/by/`) for interacting with the server via
 the REST API. Built last to target the stable, final v2 API surface.
@@ -896,7 +909,7 @@ from multiple input types (renv.lock, DESCRIPTION, bare scripts, `--pin`)
 using `internal/manifest/` types from phase 2-5. All other subcommands
 are thin REST API wrappers.
 
-See [draft-2-9.md](draft-2-9.md) for the full CLI design including deploy
+See [draft-2-10.md](draft-2-10.md) for the full CLI design including deploy
 flow, manifest generation, refresh command, and subcommand reference.
 
 **Deliverables:**
@@ -943,11 +956,14 @@ Phase 2-6: Package Store & Worker Library Assembly
 Phase 2-7: Runtime Package Assembly & Dependency Refresh
   └── depends on: phase 2-6 (package store, library assembly)
 
-Phase 2-8: Web UI Expansion
-  └── depends on: phases 2-2 (rollback, soft-delete UI),
-      2-3 (pre-warming config), 2-7 (refresh UI)
+Phase 2-8: Backend Prerequisites + Multi-Page Navigation
+  └── depends on: phases 2-2 (rollback, soft-delete),
+      2-3 (pre-warming config), 2-7 (refresh API)
 
-Phase 2-9: CLI Tool
+Phase 2-9: Per-App Management Sidebar
+  └── depends on: phase 2-8 (backend + navigation)
+
+Phase 2-10: CLI Tool
   └── depends on: all API-changing phases (2-2 through 2-7)
   └── uses internal/manifest/ types from phase 2-5
   └── built last to target final API surface
@@ -955,7 +971,7 @@ Phase 2-9: CLI Tool
 
 Phases 2-3, 2-4, and 2-5 are independent of each other and can be
 developed in parallel after the foundation. Phases 2-5 → 2-6 → 2-7
-form a dependency chain. Phase 2-9 (CLI) is last.
+form a dependency chain. Phase 2-10 (CLI) is last.
 
 ## Test Strategy
 
