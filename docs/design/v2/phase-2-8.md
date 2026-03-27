@@ -430,6 +430,35 @@ The following existing endpoints need stricter authorization:
 | `POST /api/v1/apps/{id}/refresh` | any access | collaborator+ (`CanDeploy`) |
 | `POST /api/v1/apps/{id}/refresh/rollback` | any access | collaborator+ (`CanDeploy`) |
 
+#### Bundle List Response
+
+`GET /api/v1/apps/{id}/bundles` returns the updated bundle rows
+including the new columns. The active bundle is identified by
+matching against the app's `active_bundle` field.
+
+Response:
+
+```json
+{
+  "bundles": [
+    {
+      "id": "01ABC...",
+      "app_id": "...",
+      "status": "ready",
+      "uploaded_at": "2026-03-26T09:55:00Z",
+      "deployed_by": "alice@company.com",
+      "deployed_at": "2026-03-26T10:00:00Z",
+      "pinned": true
+    }
+  ]
+}
+```
+
+`deployed_by` and `deployed_at` may be null for bundles that never
+completed building (status "pending" or "failed"). `pinned` is always
+present (default false). The UI Bundles tab (phase 2-11) uses `pinned`
+on the active bundle to conditionally show the refresh button.
+
 #### Refresh Pinned Guard
 
 `POST /api/v1/apps/{id}/refresh` and
@@ -622,7 +651,10 @@ Add a `resolveAppIncludeDeleted()` variant that performs the same
 UUID-then-name lookup but without filtering out soft-deleted apps.
 The current `RestoreApp` handler uses `GetAppIncludeDeleted(id)` which
 only accepts UUIDs -- the CLI's `by restore <name>` needs name-based
-lookup for deleted apps.
+lookup for deleted apps. The hard-delete (purge) path also uses this
+variant: `DELETE /api/v1/apps/{id}?purge=true` targets a
+soft-deleted app, so the handler switches to `resolveAppIncludeDeleted()`
+when `purge=true`.
 
 ### Database Operations
 
