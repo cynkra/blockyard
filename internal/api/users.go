@@ -147,7 +147,7 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 		}
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			r.ParseForm()
+			_ = r.ParseForm()
 			body.APIKey = r.FormValue("api_key")
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
