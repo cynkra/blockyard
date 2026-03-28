@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 	byBin = filepath.Join(dir, "by")
 	args := []string{"build"}
 	if os.Getenv("GOCOVERDIR") != "" {
-		args = append(args, "-cover", "-coverpkg=./internal/...")
+		args = append(args, "-cover", "-coverpkg=github.com/cynkra/blockyard/internal/...")
 	}
 	args = append(args, "-o", byBin, ".")
 	build := exec.Command("go", args...)
