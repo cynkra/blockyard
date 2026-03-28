@@ -287,7 +287,9 @@ func (ui *UI) appsPage(srv *server.Server) http.HandlerFunc {
 			Apps:       entries,
 		}
 
-		ui.pages["apps.html"].ExecuteTemplate(w, "base", data)
+		if err := ui.pages["apps.html"].ExecuteTemplate(w, "base", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -302,10 +304,12 @@ func (ui *UI) renderLanding(w http.ResponseWriter, r *http.Request, srv *server.
 	}
 
 	entries := buildLandingEntries(apps, srv)
-	ui.pages["landing.html"].ExecuteTemplate(w, "base", landingData{
+	if err := ui.pages["landing.html"].ExecuteTemplate(w, "base", landingData{
 		layoutData: baseLayout(srv, ""),
 		PublicApps: entries,
-	})
+	}); err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+	}
 }
 
 func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
@@ -372,7 +376,9 @@ func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
 			},
 		}
 
-		ui.pages["deployments.html"].ExecuteTemplate(w, "base", data)
+		if err := ui.pages["deployments.html"].ExecuteTemplate(w, "base", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -395,7 +401,9 @@ func (ui *UI) apiKeysPage(srv *server.Server) http.HandlerFunc {
 			Services:   services,
 		}
 
-		ui.pages["api_keys.html"].ExecuteTemplate(w, "base", data)
+		if err := ui.pages["api_keys.html"].ExecuteTemplate(w, "base", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -448,7 +456,9 @@ func (ui *UI) profilePage(srv *server.Server) http.HandlerFunc {
 			Tokens: tokens,
 		}
 
-		ui.pages["profile.html"].ExecuteTemplate(w, "base", data)
+		if err := ui.pages["profile.html"].ExecuteTemplate(w, "base", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -490,7 +500,9 @@ func (ui *UI) createToken(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html")
-		ui.fragments["pat_created.html"].Execute(w, struct{ Token string }{Token: plaintext})
+		if err := ui.fragments["pat_created.html"].Execute(w, struct{ Token string }{Token: plaintext}); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
 	}
 }
 
