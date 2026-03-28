@@ -25,20 +25,9 @@ func PurgeApp(srv *server.Server, app *db.AppRow) {
 		bundle.DeleteFiles(paths)
 	}
 
-	if err := srv.DB.ClearActiveBundle(app.ID); err != nil {
-		slog.Warn("purge: clear active bundle failed",
-			"app_id", app.ID, "error", err)
-	}
-
-	for _, b := range bundles {
-		if _, err := srv.DB.DeleteBundle(b.ID); err != nil {
-			slog.Warn("purge: delete bundle row failed",
-				"bundle_id", b.ID, "app_id", app.ID, "error", err)
-		}
-	}
-
-	if err := srv.DB.HardDeleteApp(app.ID); err != nil {
-		slog.Warn("purge: delete app row failed",
+	// Delete all DB rows atomically (sessions, tags, access, bundles, app).
+	if err := srv.DB.PurgeApp(app.ID); err != nil {
+		slog.Warn("purge: delete app data failed",
 			"app_id", app.ID, "error", err)
 	}
 
