@@ -251,14 +251,14 @@ func TestAddSubtract(t *testing.T) {
 }
 
 func TestTimeAgoNil(t *testing.T) {
-	fn := funcMap["timeAgo"].(func(*string) string)
+	fn := funcMap["timeAgo"].(func(any) string)
 	if got := fn(nil); got != "" {
 		t.Errorf("timeAgo(nil) = %q, want empty", got)
 	}
 }
 
 func TestTimeAgoParseError(t *testing.T) {
-	fn := funcMap["timeAgo"].(func(*string) string)
+	fn := funcMap["timeAgo"].(func(any) string)
 	bad := "not-a-date"
 	if got := fn(&bad); got != bad {
 		t.Errorf("timeAgo(invalid) = %q, want %q (passthrough)", got, bad)
@@ -266,7 +266,7 @@ func TestTimeAgoParseError(t *testing.T) {
 }
 
 func TestTimeAgoSingularForms(t *testing.T) {
-	fn := funcMap["timeAgo"].(func(*string) string)
+	fn := funcMap["timeAgo"].(func(any) string)
 
 	cases := []struct {
 		offset time.Duration
@@ -1233,10 +1233,28 @@ func TestCreateTokenDBError(t *testing.T) {
 
 // --- Sidebar placeholder tests ---
 
-func TestSidebarPlaceholderReturns200(t *testing.T) {
+func TestSidebarReturns404ForNonExistentApp(t *testing.T) {
 	_, ts := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
 
-	resp, err := http.Get(ts.URL + "/ui/apps/test-app/sidebar")
+	resp, err := http.Get(ts.URL + "/ui/apps/no-such-app/sidebar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-existent app, got %d", resp.StatusCode)
+	}
+}
+
+func TestSidebarReturnsHTMLForOwner(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RolePublisher)
+	app, err := srv.DB.CreateApp("my-app", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/sidebar")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1246,8 +1264,443 @@ func TestSidebarPlaceholderReturns200(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	body := readBody(t, resp)
-	if body != "" {
-		t.Error("expected empty response from sidebar placeholder")
+	if !strings.Contains(body, "sidebar-header") {
+		t.Error("expected sidebar-header in response")
+	}
+	if !strings.Contains(body, "my-app") {
+		t.Error("expected app name in sidebar")
+	}
+	// Owner should see Collaborators tab.
+	if !strings.Contains(body, "Collaborators") {
+		t.Error("expected Collaborators tab for owner")
+	}
+}
+
+func TestSidebarReturnsHTMLForCollaborator(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "collab", auth.RoleViewer)
+	app, err := srv.DB.CreateApp("collab-app", "someone-else")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.DB.GrantAppAccess(app.ID, "collab", "user", "collaborator", "someone-else")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/sidebar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "sidebar-header") {
+		t.Error("expected sidebar-header")
+	}
+	// Collaborator should NOT see Collaborators tab (owner+ only).
+	if strings.Contains(body, "Collaborators") {
+		t.Error("collaborator should not see Collaborators tab")
+	}
+}
+
+func TestSidebarReturns404ForViewer(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "viewer", auth.RoleViewer)
+	app, err := srv.DB.CreateApp("viewer-app", "someone-else")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.DB.GrantAppAccess(app.ID, "viewer", "user", "viewer", "someone-else")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/sidebar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for viewer, got %d", resp.StatusCode)
+	}
+}
+
+func TestSidebarReturns404ForUnauthenticated(t *testing.T) {
+	srv, ts := newTestServer(t, oidcConfig())
+	srv.DB.CreateApp("unauth-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/unauth-app/sidebar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for unauthenticated, got %d", resp.StatusCode)
+	}
+}
+
+func TestSidebarPreRendersOverview(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("overview-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/overview-app/sidebar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "overview-grid") {
+		t.Error("expected pre-rendered overview content in sidebar")
+	}
+	if !strings.Contains(body, "tab-content") {
+		t.Error("expected tab-content container in sidebar")
+	}
+}
+
+// --- Tab endpoint tests ---
+
+func TestOverviewTabReturnsHTML(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("ov-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/ov-app/tab/overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "overview-grid") {
+		t.Error("expected overview-grid in response")
+	}
+	if !strings.Contains(body, "Status") {
+		t.Error("expected Status card in overview")
+	}
+}
+
+func TestSettingsTabReturnsHTML(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("set-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/set-app/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, `name="title"`) {
+		t.Error("expected title field in settings")
+	}
+	if !strings.Contains(body, `name="description"`) {
+		t.Error("expected description field in settings")
+	}
+	if !strings.Contains(body, `name="memory_limit"`) {
+		t.Error("expected memory_limit field in settings")
+	}
+	if !strings.Contains(body, "Disable") || !strings.Contains(body, "Delete app") {
+		t.Error("expected enable/disable and delete controls")
+	}
+}
+
+func TestSettingsTabShowsEnableForDisabledApp(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("dis-app", "owner")
+	srv.DB.SetAppEnabled(app.ID, false)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/dis-app/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "Enable") {
+		t.Error("expected Enable button for disabled app")
+	}
+	if !strings.Contains(body, "status-disabled") {
+		t.Error("expected disabled status badge")
+	}
+}
+
+func TestRuntimeTabReturnsHTML(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("rt-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/rt-app/tab/runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "runtime-view") {
+		t.Error("expected runtime-view in response")
+	}
+	if !strings.Contains(body, "No active workers") {
+		t.Error("expected empty state for runtime with no workers")
+	}
+}
+
+func TestBundlesTabReturnsHTML(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("bun-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/bun-app/tab/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "bundles-view") {
+		t.Error("expected bundles-view in response")
+	}
+	if !strings.Contains(body, "No bundles") {
+		t.Error("expected empty state for bundles")
+	}
+}
+
+func TestBundlesTabShowsBundles(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("bun2-app", "owner")
+
+	// Create a bundle.
+	bundleID := "bun-" + app.ID[:8]
+	srv.DB.CreateBundle(bundleID, app.ID, "owner", false)
+	srv.DB.UpdateBundleStatus(bundleID, "ready")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/bun2-app/tab/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "status-ready") {
+		t.Error("expected ready status badge for bundle")
+	}
+}
+
+func TestCollaboratorsTabReturns404ForNonOwner(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "collab", auth.RoleViewer)
+	app, _ := srv.DB.CreateApp("acl-app", "someone-else")
+	srv.DB.GrantAppAccess(app.ID, "collab", "user", "collaborator", "someone-else")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for collaborator on collaborators tab, got %d", resp.StatusCode)
+	}
+}
+
+func TestCollaboratorsTabReturnsHTMLForOwner(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RolePublisher)
+	app, _ := srv.DB.CreateApp("acl2-app", "owner")
+	srv.DB.GrantAppAccess(app.ID, "viewer1", "user", "viewer", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "collaborators-view") {
+		t.Error("expected collaborators-view in response")
+	}
+	if !strings.Contains(body, "access-type") {
+		t.Error("expected access type selector")
+	}
+	if !strings.Contains(body, "viewer1") {
+		t.Error("expected granted viewer in list")
+	}
+}
+
+func TestCollaboratorsTabReturnsHTMLForAdmin(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin", auth.RoleAdmin)
+	srv.DB.CreateApp("admin-acl-app", "someone-else")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/admin-acl-app/tab/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for admin, got %d", resp.StatusCode)
+	}
+}
+
+func TestLogsTabReturnsHTML(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("log-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/log-app/tab/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "log-viewer") {
+		t.Error("expected log-viewer in response")
+	}
+}
+
+func TestLogsWorkerTabReturns404ForMissingWorker(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("logw-app", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/logw-app/tab/logs/worker/nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Should still return 200 with empty logs (worker just has no log data).
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "log-worker-view") {
+		t.Error("expected log-worker-view in response")
+	}
+}
+
+// --- All tab endpoints return 404 for unauthenticated requests ---
+
+func TestAllTabEndpointsReturn404Unauthenticated(t *testing.T) {
+	srv, _ := newTestServer(t, oidcConfig())
+	srv.DB.CreateApp("unauth-tabs", "owner")
+
+	// Create a separate unauthenticated test server.
+	_, ts := newTestServer(t, oidcConfig())
+	ts2srv, _ := newTestServer(t, oidcConfig())
+	ts2srv.DB.CreateApp("unauth-tabs", "owner")
+
+	paths := []string{
+		"/ui/apps/unauth-tabs/sidebar",
+		"/ui/apps/unauth-tabs/tab/overview",
+		"/ui/apps/unauth-tabs/tab/settings",
+		"/ui/apps/unauth-tabs/tab/runtime",
+		"/ui/apps/unauth-tabs/tab/bundles",
+		"/ui/apps/unauth-tabs/tab/collaborators",
+		"/ui/apps/unauth-tabs/tab/logs",
+		"/ui/apps/unauth-tabs/tab/logs/worker/w1",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("expected 404 for unauthenticated %s, got %d", path, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// --- Template function tests ---
+
+func TestHumanBytes(t *testing.T) {
+	fn := funcMap["humanBytes"].(func(uint64) string)
+
+	cases := []struct {
+		input uint64
+		want  string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1048576, "1.0 MB"},
+		{536870912, "512.0 MB"},
+		{1073741824, "1.0 GB"},
+	}
+
+	for _, tc := range cases {
+		got := fn(tc.input)
+		if got != tc.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestDerefInt(t *testing.T) {
+	fn := funcMap["derefInt"].(func(*int) string)
+
+	if got := fn(nil); got != "" {
+		t.Errorf("derefInt(nil) = %q, want empty", got)
+	}
+	v := 42
+	if got := fn(&v); got != "42" {
+		t.Errorf("derefInt(&42) = %q, want '42'", got)
+	}
+}
+
+func TestDerefFloat(t *testing.T) {
+	fn := funcMap["derefFloat"].(func(*float64) string)
+
+	if got := fn(nil); got != "" {
+		t.Errorf("derefFloat(nil) = %q, want empty", got)
+	}
+	v := 2.5
+	if got := fn(&v); got != "2.5" {
+		t.Errorf("derefFloat(&2.5) = %q, want '2.5'", got)
+	}
+}
+
+func TestTimeAgoAcceptsBothStringTypes(t *testing.T) {
+	fn := funcMap["timeAgo"].(func(any) string)
+
+	// Test with string type (e.g. BundleRow.UploadedAt).
+	ts := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	got := fn(ts)
+	if got != "2 hours ago" {
+		t.Errorf("timeAgo(string) = %q, want '2 hours ago'", got)
+	}
+
+	// Test with *string type (e.g. BundleRow.DeployedAt).
+	got = fn(&ts)
+	if got != "2 hours ago" {
+		t.Errorf("timeAgo(*string) = %q, want '2 hours ago'", got)
+	}
+
+	// Test with nil.
+	got = fn((*string)(nil))
+	if got != "" {
+		t.Errorf("timeAgo(nil) = %q, want empty", got)
+	}
+
+	// Test with empty string.
+	got = fn("")
+	if got != "" {
+		t.Errorf(`timeAgo("") = %q, want empty`, got)
 	}
 }
 

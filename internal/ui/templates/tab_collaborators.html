@@ -1,0 +1,58 @@
+<div class="collaborators-view">
+    <div class="field-group">
+        <label for="access-type">Access type</label>
+        <p class="field-description">Controls who can access this app.</p>
+        <div class="field-row">
+            <select id="access-type" name="access_type"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-trigger="change"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML"
+                    hx-on::after-request="if(event.detail.successful) htmx.ajax('GET', '/ui/apps/{{.App.Name}}/tab/collaborators', '#tab-content')">
+                <option value="public" {{if eq .App.AccessType "public"}}selected{{end}}>Public</option>
+                <option value="logged_in" {{if eq .App.AccessType "logged_in"}}selected{{end}}>Logged in</option>
+                <option value="acl" {{if eq .App.AccessType "acl"}}selected{{end}}>ACL</option>
+            </select>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+
+    {{if eq .App.AccessType "acl"}}
+    <div class="acl-section"
+         hx-trigger="accessGranted from:body"
+         hx-get="/ui/apps/{{.App.Name}}/tab/collaborators"
+         hx-target="#tab-content">
+        <h3>Access grants</h3>
+        {{if .Grants}}
+        <table class="acl-table data-table">
+            <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
+            <tbody>
+            {{range .Grants}}
+            <tr>
+                <td>{{.DisplayName}}</td>
+                <td>{{.Role}}</td>
+                <td><button class="btn btn-sm btn-danger"
+                            hx-delete="/api/v1/apps/{{$.App.ID}}/access/user/{{.Principal}}"
+                            hx-target="closest tr"
+                            hx-swap="outerHTML swap:0.2s">Remove</button></td>
+            </tr>
+            {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <p class="empty-state">No access grants.</p>
+        {{end}}
+        <form class="acl-add-form"
+              hx-post="/api/v1/apps/{{.App.ID}}/access"
+              hx-swap="none">
+            <input type="hidden" name="kind" value="user">
+            <input type="text" name="principal" placeholder="Username or email" required>
+            <select name="role">
+                <option value="viewer">Viewer</option>
+                <option value="collaborator">Collaborator</option>
+            </select>
+            <button type="submit" class="btn btn-sm">Add</button>
+        </form>
+    </div>
+    {{end}}
+</div>

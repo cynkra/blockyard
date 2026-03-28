@@ -38,13 +38,37 @@ var funcMap = template.FuncMap{
 		}
 		return *s
 	},
-	"timeAgo": func(s *string) string {
-		if s == nil {
+	"derefInt": func(p *int) string {
+		if p == nil {
 			return ""
 		}
-		t, err := time.Parse(time.RFC3339, *s)
+		return strconv.Itoa(*p)
+	},
+	"derefFloat": func(p *float64) string {
+		if p == nil {
+			return ""
+		}
+		return strconv.FormatFloat(*p, 'f', -1, 64)
+	},
+	"timeAgo": func(v any) string {
+		var s string
+		switch val := v.(type) {
+		case *string:
+			if val == nil {
+				return ""
+			}
+			s = *val
+		case string:
+			if val == "" {
+				return ""
+			}
+			s = val
+		default:
+			return ""
+		}
+		t, err := time.Parse(time.RFC3339, s)
 		if err != nil {
-			return *s
+			return s
 		}
 		d := time.Since(t)
 		switch {
@@ -76,6 +100,23 @@ var funcMap = template.FuncMap{
 		}
 		return s[:8] + "..."
 	},
+	"humanBytes": func(b uint64) string {
+		const (
+			KB = 1024
+			MB = KB * 1024
+			GB = MB * 1024
+		)
+		switch {
+		case b >= GB:
+			return fmt.Sprintf("%.1f GB", float64(b)/float64(GB))
+		case b >= MB:
+			return fmt.Sprintf("%.1f MB", float64(b)/float64(MB))
+		case b >= KB:
+			return fmt.Sprintf("%.1f KB", float64(b)/float64(KB))
+		default:
+			return fmt.Sprintf("%d B", b)
+		}
+	},
 	"add": func(a, b int) int {
 		return a + b
 	},
@@ -97,7 +138,19 @@ func New() *UI {
 	}
 
 	fragments := make(map[string]*template.Template)
-	for _, name := range []string{"pat_created.html"} {
+	fragmentNames := []string{
+		"pat_created.html",
+		"sidebar.html",
+		"tab_overview.html",
+		"tab_settings.html",
+		"tab_runtime.html",
+		"tab_bundles.html",
+		"tab_collaborators.html",
+		"tab_logs.html",
+		"tab_logs_worker.html",
+		"error_fragment.html",
+	}
+	for _, name := range fragmentNames {
 		t := template.Must(
 			template.New(name).Funcs(funcMap).ParseFS(
 				content, "templates/"+name,
@@ -117,7 +170,17 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/api-keys", ui.apiKeysPage(srv))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
-	r.Get("/ui/apps/{name}/sidebar", ui.sidebarPlaceholder())
+
+	// Sidebar fragment routes (phase 2-11).
+	r.Get("/ui/apps/{name}/sidebar", ui.sidebarHandler(srv))
+	r.Get("/ui/apps/{name}/tab/overview", ui.overviewTab(srv))
+	r.Get("/ui/apps/{name}/tab/settings", ui.settingsTab(srv))
+	r.Get("/ui/apps/{name}/tab/runtime", ui.runtimeTab(srv))
+	r.Get("/ui/apps/{name}/tab/bundles", ui.bundlesTab(srv))
+	r.Get("/ui/apps/{name}/tab/collaborators", ui.collaboratorsTab(srv))
+	r.Get("/ui/apps/{name}/tab/logs", ui.logsTab(srv))
+	r.Get("/ui/apps/{name}/tab/logs/worker/{wid}", ui.logsWorkerTab(srv))
+
 	r.Handle("/static/*", ui.static)
 }
 
@@ -503,12 +566,6 @@ func (ui *UI) createToken(srv *server.Server) http.HandlerFunc {
 		if err := ui.fragments["pat_created.html"].Execute(w, struct{ Token string }{Token: plaintext}); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
-	}
-}
-
-func (ui *UI) sidebarPlaceholder() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
 	}
 }
 

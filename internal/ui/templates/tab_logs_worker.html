@@ -1,0 +1,52 @@
+<div class="log-worker-view">
+    <div class="log-controls">
+        <span class="log-worker-label monospace">Worker {{.WorkerID | truncate}}</span>
+        {{if .Active}}
+        <button id="log-toggle" onclick="toggleLogs('{{.WorkerID}}', '{{.AppID}}')">
+            Start streaming
+        </button>
+        {{end}}
+        <button onclick="clearLogs()">Clear</button>
+    </div>
+    <pre id="log-output" class="log-output">{{.HistoricalLogs}}</pre>
+</div>
+
+<script>
+var logController = null;
+
+function toggleLogs(workerId, appId) {
+    if (logController) { stopLogs(); return; }
+    var btn = document.getElementById('log-toggle');
+    var output = document.getElementById('log-output');
+    logController = new AbortController();
+    btn.textContent = 'Stop streaming';
+
+    fetch('/api/v1/apps/' + appId + '/logs?worker_id=' + workerId + '&stream=true', {
+        signal: logController.signal,
+        headers: { 'Accept': 'text/plain' }
+    }).then(function(resp) {
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        function read() {
+            reader.read().then(function(result) {
+                if (result.done) { stopLogs(); return; }
+                output.textContent += decoder.decode(result.value);
+                output.scrollTop = output.scrollHeight;
+                read();
+            });
+        }
+        read();
+    }).catch(function() { stopLogs(); });
+}
+
+function stopLogs() {
+    if (logController) { logController.abort(); logController = null; }
+    var btn = document.getElementById('log-toggle');
+    if (btn) btn.textContent = 'Start streaming';
+}
+
+function clearLogs() {
+    var el = document.getElementById('log-output');
+    if (el) el.textContent = '';
+}
+</script>

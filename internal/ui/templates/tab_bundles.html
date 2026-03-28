@@ -1,0 +1,50 @@
+<div class="bundles-view"
+     hx-trigger="bundleRolledBack from:body, refreshStarted from:body"
+     hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
+     hx-target="#tab-content">
+    {{if .Bundles}}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Bundle</th>
+                <th>Created</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Bundles}}
+        <tr>
+            <td class="monospace">
+                {{.ID | truncate}}
+                {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}
+                <span class="status-badge status-ready">active</span>
+                {{end}}
+            </td>
+            <td>{{.UploadedAt | timeAgo}}</td>
+            <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
+            <td>
+                {{if and (eq .Status "ready") (or (not $.ActiveBundle) (ne .ID $.ActiveBundle.ID))}}
+                <button class="btn btn-sm"
+                        hx-post="/api/v1/apps/{{$.App.ID}}/rollback"
+                        hx-vals='{"bundle_id": "{{.ID}}"}'
+                        hx-confirm="Roll back to bundle {{.ID | truncate}}?"
+                        hx-swap="none">Rollback</button>
+                {{end}}
+            </td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="empty-state">No bundles.</p>
+    {{end}}
+
+    {{if and .ActiveBundle (not .ActiveBundle.Pinned)}}
+    <div class="refresh-section">
+        <button class="btn"
+                hx-post="/api/v1/apps/{{.App.ID}}/refresh"
+                hx-swap="none">Refresh dependencies</button>
+    </div>
+    {{end}}
+</div>

@@ -1,0 +1,185 @@
+<div class="settings-view">
+    <h3>Metadata</h3>
+    <div class="field-group">
+        <label for="title">Title</label>
+        <div class="field-row">
+            <input type="text" id="title" name="title" value="{{deref .App.Title}}"
+                   data-original="{{deref .App.Title}}"
+                   oninput="toggleSaveBtn(this)">
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='title']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+    <div class="field-group">
+        <label for="description">Description</label>
+        <div class="field-row">
+            <textarea id="description" name="description"
+                      data-original="{{deref .App.Description}}"
+                      oninput="toggleSaveBtn(this)">{{deref .App.Description}}</textarea>
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='description']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+
+    <div class="field-group"
+         hx-trigger="tagAdded from:body, tagRemoved from:body"
+         hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+         hx-target="#tab-content">
+        <label>Tags</label>
+        <div class="tag-chips">
+            {{range .Tags}}
+            <span class="tag-chip">
+                {{.Name}}
+                <button class="tag-remove"
+                        hx-delete="/api/v1/apps/{{$.App.ID}}/tags/{{.ID}}"
+                        hx-swap="none"
+                        aria-label="Remove tag {{.Name}}">&#10005;</button>
+            </span>
+            {{end}}
+        </div>
+        {{if .AvailableTags}}
+        <form class="tag-add-form"
+              hx-post="/api/v1/apps/{{.App.ID}}/tags"
+              hx-swap="none">
+            <select name="tag_id">
+                {{range .AvailableTags}}
+                <option value="{{.ID}}">{{.Name}}</option>
+                {{end}}
+            </select>
+            <button type="submit" class="btn btn-sm">Add</button>
+        </form>
+        {{end}}
+    </div>
+
+    <h3>Resource Configuration</h3>
+    <div class="field-group">
+        <label for="memory-limit">Memory limit</label>
+        <div class="field-row">
+            <input type="text" id="memory-limit" name="memory_limit"
+                   value="{{deref .App.MemoryLimit}}"
+                   data-original="{{deref .App.MemoryLimit}}"
+                   oninput="toggleSaveBtn(this)">
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='memory_limit']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+    <div class="field-group">
+        <label for="cpu-limit">CPU limit</label>
+        <div class="field-row">
+            <input type="number" id="cpu-limit" name="cpu_limit"
+                   value="{{derefFloat .App.CPULimit}}" step="0.25"
+                   data-original="{{derefFloat .App.CPULimit}}"
+                   oninput="toggleSaveBtn(this)">
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='cpu_limit']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+    <div class="field-group">
+        <label for="max-workers">Max workers</label>
+        <div class="field-row">
+            <input type="number" id="max-workers" name="max_workers_per_app"
+                   value="{{derefInt .App.MaxWorkersPerApp}}"
+                   data-original="{{derefInt .App.MaxWorkersPerApp}}"
+                   oninput="toggleSaveBtn(this)">
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='max_workers_per_app']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+    <div class="field-group">
+        <label for="max-sessions">Max sessions per worker</label>
+        <div class="field-row">
+            <input type="number" id="max-sessions" name="max_sessions_per_worker"
+                   value="{{.App.MaxSessionsPerWorker}}"
+                   data-original="{{.App.MaxSessionsPerWorker}}"
+                   oninput="toggleSaveBtn(this)">
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='max_sessions_per_worker']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+    <div class="field-group">
+        <label for="pre-warmed-seats">Pre-warmed seats</label>
+        <div class="field-row">
+            <input type="number" id="pre-warmed-seats" name="pre_warmed_seats"
+                   value="{{.App.PreWarmedSeats}}"
+                   data-original="{{.App.PreWarmedSeats}}"
+                   oninput="toggleSaveBtn(this)">
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='pre_warmed_seats']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+
+    {{if and .ActiveBundle (not .ActiveBundle.Pinned)}}
+    <div class="field-group">
+        <label for="refresh-schedule">Refresh schedule</label>
+        <p class="field-description">Cron expression for automatic dependency refresh (e.g. <code>0 2 * * 1</code> = every Monday at 2 AM). Leave empty to disable.</p>
+        <div class="field-row">
+            <input type="text" id="refresh-schedule" name="refresh_schedule"
+                   value="{{.App.RefreshSchedule}}"
+                   data-original="{{.App.RefreshSchedule}}"
+                   placeholder="0 2 * * *"
+                   oninput="toggleSaveBtn(this)">
+            <button class="field-save hidden"
+                    hx-patch="/api/v1/apps/{{.App.ID}}"
+                    hx-include="[name='refresh_schedule']"
+                    hx-target="next .field-feedback"
+                    hx-swap="innerHTML">&#10003;</button>
+            <span class="field-feedback"></span>
+        </div>
+    </div>
+    {{end}}
+
+    <h3>App Controls</h3>
+    <div class="app-controls"
+         hx-trigger="appEnabled from:body, appDisabled from:body"
+         hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+         hx-target="#tab-content">
+        {{if eq .Status "stopping"}}
+        <span class="status-badge status-stopping">Disabling...</span>
+        {{else if .App.Enabled}}
+        <button class="btn" hx-post="/api/v1/apps/{{.App.ID}}/disable"
+                hx-swap="none">Disable</button>
+        <span class="status-badge status-{{.Status}}">{{.Status}}</span>
+        {{else}}
+        <button class="btn btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/enable"
+                hx-swap="none">Enable</button>
+        <span class="status-badge status-disabled">Disabled</span>
+        {{end}}
+    </div>
+
+    <div class="danger-zone">
+        <button class="btn btn-danger"
+                hx-delete="/api/v1/apps/{{.App.ID}}"
+                hx-confirm="Delete {{.App.Name}}? This can be undone within 30 days."
+                hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }">
+            Delete app
+        </button>
+    </div>
+</div>

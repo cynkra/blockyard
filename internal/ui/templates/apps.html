@@ -69,10 +69,39 @@ function closeSidebar() {
     document.getElementById('sidebar').innerHTML = '';
 }
 
+function setActiveTab(btn) {
+    btn.closest('.sidebar-tabs').querySelectorAll('.tab').forEach(
+        function(t) { t.classList.remove('active'); });
+    btn.classList.add('active');
+}
+
+function toggleSaveBtn(input) {
+    var saveBtn = input.closest('.field-row').querySelector('.field-save');
+    if (!saveBtn) return;
+    if (input.value !== input.dataset.original) {
+        saveBtn.classList.remove('hidden');
+    } else {
+        saveBtn.classList.add('hidden');
+    }
+}
+
 document.body.addEventListener('htmx:afterSwap', function(e) {
     if (e.detail.target.id === 'sidebar') {
         document.getElementById('sidebar').classList.add('open');
         document.getElementById('sidebar-overlay').classList.add('open');
+    }
+});
+
+document.body.addEventListener('htmx:beforeSwap', function(e) {
+    if (e.detail.target.id === 'tab-content' && typeof stopLogs === 'function') {
+        stopLogs();
+    }
+});
+
+document.body.addEventListener('htmx:responseError', function(e) {
+    var target = e.detail.target;
+    if (target) {
+        target.innerHTML = '<p class="error-message">Something went wrong. Try again.</p>';
     }
 });
 </script>
