@@ -240,8 +240,6 @@ func NewRouter(srv *server.Server) http.Handler {
 
 		r.Post("/apps/{id}/enable", EnableApp(srv))
 		r.Post("/apps/{id}/disable", DisableApp(srv))
-		r.Post("/apps/{id}/start", StartApp(srv))
-		r.Post("/apps/{id}/stop", StopApp(srv))
 		r.Get("/apps/{id}/logs", AppLogs(srv))
 
 		r.Get("/tasks/{taskID}", GetTaskStatus(srv))
