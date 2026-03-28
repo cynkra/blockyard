@@ -53,6 +53,17 @@ type runtimeResponse struct {
 }
 
 // GetAppRuntime returns live operational data for an app (collaborator+).
+//
+//	@Summary		Get app runtime
+//	@Description	Returns live workers, sessions, container stats, and activity metrics for an app.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	runtimeResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/runtime [get]
 func GetAppRuntime(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -193,6 +204,20 @@ type deploymentsResponse struct {
 }
 
 // ListDeployments returns GET /api/v1/deployments — cross-app deployment listing.
+//
+//	@Summary		List deployments
+//	@Description	List bundle deployments across all apps. Supports search, status filter, and pagination.
+//	@Tags			deployments
+//	@Produce		json
+//	@Param			search		query		string	false	"Search by app name"
+//	@Param			status		query		string	false	"Filter by status (e.g. ready, pending, failed)"
+//	@Param			page		query		int		false	"Page number"	default(1)
+//	@Param			per_page	query		int		false	"Items per page (1-100)"	default(25)
+//	@Success		200			{object}	deploymentsResponse
+//	@Failure		403			{object}	errorResponse
+//	@Failure		500			{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/deployments [get]
 func ListDeployments(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -233,6 +258,20 @@ func ListDeployments(srv *server.Server) http.HandlerFunc {
 // --- Sessions API ---
 
 // ListAppSessions returns GET /api/v1/apps/{id}/sessions — list sessions for an app.
+//
+//	@Summary		List app sessions
+//	@Description	List sessions for an app. Supports filtering by user and status.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id		path		string	true	"App ID (UUID) or name"
+//	@Param			user	query		string	false	"Filter by user sub"
+//	@Param			status	query		string	false	"Filter by status (active, ended)"
+//	@Param			limit	query		int		false	"Max results (1-200)"	default(50)
+//	@Success		200		{object}	sessionListResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/sessions [get]
 func ListAppSessions(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -273,6 +312,17 @@ func ListAppSessions(srv *server.Server) http.HandlerFunc {
 // --- Per-app tags listing ---
 
 // ListAppTags returns GET /api/v1/apps/{id}/tags — list tags for an app.
+//
+//	@Summary		List app tags
+//	@Description	List all tags attached to an app.
+//	@Tags			tags
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	appTagListResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/tags [get]
 func ListAppTags(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -304,6 +354,16 @@ func ListAppTags(srv *server.Server) http.HandlerFunc {
 // --- User profile API ---
 
 // GetCurrentUser returns GET /api/v1/users/me — caller's own profile.
+//
+//	@Summary		Get current user
+//	@Description	Returns the authenticated caller's profile (sub, email, name, role).
+//	@Tags			users
+//	@Produce		json
+//	@Success		200	{object}	currentUserResponse
+//	@Failure		401	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/me [get]
 func GetCurrentUser(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -341,6 +401,17 @@ func GetCurrentUser(srv *server.Server) http.HandlerFunc {
 // --- Enable/Disable API ---
 
 // EnableApp handles POST /api/v1/apps/{id}/enable.
+//
+//	@Summary		Enable app
+//	@Description	Enable an app, allowing it to accept traffic and start workers.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	appResponseV2JSON
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/enable [post]
 func EnableApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -376,6 +447,17 @@ func EnableApp(srv *server.Server) http.HandlerFunc {
 }
 
 // DisableApp handles POST /api/v1/apps/{id}/disable.
+//
+//	@Summary		Disable app
+//	@Description	Disable an app, draining active sessions and stopping all workers.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	appResponseV2JSON
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/disable [post]
 func DisableApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -591,6 +673,21 @@ type appListResponse struct {
 }
 
 // ListAppsV2 handles GET /api/v1/apps — consolidated with catalog, paginated.
+//
+//	@Summary		List apps
+//	@Description	List apps with RBAC filtering, search, tag filter, and pagination. Use ?deleted=true for soft-deleted apps (admin only).
+//	@Tags			apps
+//	@Produce		json
+//	@Param			search		query		string	false	"Search by name/title"
+//	@Param			tag			query		string	false	"Filter by tag name"
+//	@Param			deleted		query		bool	false	"Show soft-deleted apps (admin only)"
+//	@Param			page		query		int		false	"Page number"	default(1)
+//	@Param			per_page	query		int		false	"Items per page (1-100)"	default(25)
+//	@Success		200			{object}	appListResponse
+//	@Failure		403			{object}	errorResponse
+//	@Failure		500			{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps [get]
 func ListAppsV2(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())

@@ -168,6 +168,21 @@ type createAppRequest struct {
 	Name string `json:"name"`
 }
 
+// CreateApp creates a new application.
+//
+//	@Summary		Create app
+//	@Description	Create a new application owned by the caller.
+//	@Tags			apps
+//	@Accept			json
+//	@Produce		json
+//	@Param			body	body		createAppRequest	true	"App name"
+//	@Success		201		{object}	AppResponse
+//	@Failure		400		{object}	errorResponse
+//	@Failure		403		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps [post]
 func CreateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -256,6 +271,18 @@ func ListApps(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// GetApp returns a single application by ID or name.
+//
+//	@Summary		Get app
+//	@Description	Get a single application by UUID or name. Returns 404 if not found or caller has no access.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	appResponseV2JSON
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id} [get]
 func GetApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -285,6 +312,21 @@ type updateAppRequest struct {
 	RefreshSchedule      *string  `json:"refresh_schedule"`
 }
 
+// UpdateApp updates an application's configuration.
+//
+//	@Summary		Update app
+//	@Description	Update an application's settings. All fields are optional. Changing access_type requires owner/admin.
+//	@Tags			apps
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string				true	"App ID (UUID) or name"
+//	@Param			body	body		updateAppRequest	true	"Fields to update"
+//	@Success		200		{object}	appResponseV2JSON
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id} [patch]
 func UpdateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -406,6 +448,20 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// DeleteApp soft-deletes an application (or hard-deletes with ?purge=true, admin only).
+//
+//	@Summary		Delete app
+//	@Description	Soft-delete an app, stopping all workers. Use ?purge=true for permanent deletion (admin only, app must be soft-deleted first).
+//	@Tags			apps
+//	@Param			id		path	string	true	"App ID (UUID) or name"
+//	@Param			purge	query	bool	false	"Permanently delete (admin only)"
+//	@Success		204		"Deleted"
+//	@Failure		403		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id} [delete]
 func DeleteApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -461,6 +517,21 @@ type rollbackRequest struct {
 	BundleID string `json:"bundle_id"`
 }
 
+// RollbackApp switches an app to a previous bundle.
+//
+//	@Summary		Rollback app bundle
+//	@Description	Switch an app's active bundle to a previous one. Stops running workers and activates the target bundle.
+//	@Tags			apps
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string			true	"App ID (UUID) or name"
+//	@Param			body	body		rollbackRequest	true	"Target bundle"
+//	@Success		200		{object}	AppResponse
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/rollback [post]
 func RollbackApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -551,6 +622,19 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// RestoreApp restores a soft-deleted application.
+//
+//	@Summary		Restore deleted app
+//	@Description	Restore a soft-deleted app. Only admins and the original owner can restore.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	AppResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		409	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/restore [post]
 func RestoreApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -818,6 +902,19 @@ func drainWorkers(srv *server.Server, appID string, workerIDs []string, sender t
 
 
 // AppLogs streams logs from the LogStore for a specific worker.
+//
+//	@Summary		Stream app logs
+//	@Description	Stream worker logs for an app. Returns buffered output immediately; streams live lines unless stream=false.
+//	@Tags			apps
+//	@Produce		plain
+//	@Param			id			path	string	true	"App ID (UUID) or name"
+//	@Param			worker_id	query	string	true	"Worker ID"
+//	@Param			stream		query	string	false	"Set to 'false' to return buffered logs only"
+//	@Success		200			"Log output (text/plain, chunked)"
+//	@Failure		400			{object}	errorResponse
+//	@Failure		404			{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/logs [get]
 func AppLogs(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())

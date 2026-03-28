@@ -24,6 +24,15 @@ func tagResp(t *db.TagRow) tagResponse {
 }
 
 // ListTags returns all tags, sorted by name.
+//
+//	@Summary		List tags
+//	@Description	List all tags, sorted alphabetically.
+//	@Tags			tags
+//	@Produce		json
+//	@Success		200	{array}		tagResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/tags [get]
 func ListTags(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tags, err := srv.DB.ListTags()
@@ -47,6 +56,20 @@ type createTagRequest struct {
 }
 
 // CreateTag creates a new tag (admin only).
+//
+//	@Summary		Create tag
+//	@Description	Create a new tag. Admin only. Name must be a lowercase slug.
+//	@Tags			tags
+//	@Accept			json
+//	@Produce		json
+//	@Param			body	body		createTagRequest	true	"Tag name"
+//	@Success		201		{object}	tagResponse
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/tags [post]
 func CreateTag(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -83,6 +106,16 @@ func CreateTag(srv *server.Server) http.HandlerFunc {
 }
 
 // DeleteTag deletes a tag by ID (admin only). Cascades to app_tags.
+//
+//	@Summary		Delete tag
+//	@Description	Delete a tag. Admin only. Cascades to all app-tag associations.
+//	@Tags			tags
+//	@Param			tagID	path	string	true	"Tag ID"
+//	@Success		204		"Deleted"
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/tags/{tagID} [delete]
 func DeleteTag(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -111,6 +144,19 @@ type addAppTagRequest struct {
 }
 
 // AddAppTag attaches a tag to an app. Requires owner/collaborator/admin.
+//
+//	@Summary		Add tag to app
+//	@Description	Attach a tag to an app. Requires owner, collaborator, or admin role.
+//	@Tags			tags
+//	@Accept			json
+//	@Param			id		path	string			true	"App ID (UUID) or name"
+//	@Param			body	body	addAppTagRequest	true	"Tag to attach"
+//	@Success		204		"Tag attached"
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/tags [post]
 func AddAppTag(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -167,6 +213,17 @@ func AddAppTag(srv *server.Server) http.HandlerFunc {
 }
 
 // RemoveAppTag detaches a tag from an app. Requires owner/collaborator/admin.
+//
+//	@Summary		Remove tag from app
+//	@Description	Detach a tag from an app. Requires owner, collaborator, or admin role.
+//	@Tags			tags
+//	@Param			id		path	string	true	"App ID (UUID) or name"
+//	@Param			tagID	path	string	true	"Tag ID"
+//	@Success		204		"Tag removed"
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/tags/{tagID} [delete]
 func RemoveAppTag(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())

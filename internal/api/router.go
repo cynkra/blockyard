@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	httpSwagger "github.com/swaggo/http-swagger/v2"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/proxy"
@@ -159,6 +160,9 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Use(auth.AppAuthMiddleware(authDeps))
 		uiHandler.RegisterRoutes(r, srv)
 	})
+
+	// Swagger UI — serves OpenAPI spec and interactive documentation.
+	r.Get("/swagger/*", httpSwagger.WrapHandler)
 
 	// Auth endpoints — strict rate limit to prevent brute-force.
 	r.Group(func(r chi.Router) {

@@ -15,6 +15,18 @@ import (
 )
 
 // PostRefresh starts a dependency refresh for an unpinned deployment.
+//
+//	@Summary		Refresh dependencies
+//	@Description	Start a background dependency refresh for the active bundle. Fails if the bundle was deployed with pinned dependencies.
+//	@Tags			refresh
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		202	{object}	asyncTaskResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		409	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/refresh [post]
 func PostRefresh(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := chi.URLParam(r, "id")
@@ -87,6 +99,19 @@ func PostRefresh(srv *server.Server) http.HandlerFunc {
 }
 
 // PostRefreshRollback rolls back to a previous refresh or the original build.
+//
+//	@Summary		Rollback refresh
+//	@Description	Roll back to the previous refresh or the original build (?target=build). Starts a background task.
+//	@Tags			refresh
+//	@Produce		json
+//	@Param			id		path		string	true	"App ID (UUID) or name"
+//	@Param			target	query		string	false	"Rollback target: 'build' for original deploy, omit for previous refresh"
+//	@Success		202		{object}	asyncTaskResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/refresh/rollback [post]
 func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := chi.URLParam(r, "id")

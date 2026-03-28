@@ -18,6 +18,21 @@ import (
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
+// UploadBundle uploads a new bundle archive for an app.
+//
+//	@Summary		Upload bundle
+//	@Description	Upload a tar.gz bundle archive. Triggers async restore (package installation). Track progress via the returned task_id.
+//	@Tags			bundles
+//	@Accept			application/gzip
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		202	{object}	uploadBundleResponse
+//	@Failure		400	{object}	errorResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		413	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/bundles [post]
 func UploadBundle(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -138,6 +153,18 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// ListBundles lists all bundles for an app.
+//
+//	@Summary		List bundles
+//	@Description	List all bundles for an app, ordered by upload time.
+//	@Tags			bundles
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	bundleListResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/bundles [get]
 func ListBundles(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())

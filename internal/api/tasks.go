@@ -12,6 +12,17 @@ import (
 	"github.com/cynkra/blockyard/internal/task"
 )
 
+// GetTaskStatus returns the status of a background task.
+//
+//	@Summary		Get task status
+//	@Description	Returns the current status (running, completed, failed) of a background task.
+//	@Tags			tasks
+//	@Produce		json
+//	@Param			taskID	path		string	true	"Task ID"
+//	@Success		200		{object}	taskStatusResponse
+//	@Failure		404		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/tasks/{taskID} [get]
 func GetTaskStatus(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -49,6 +60,17 @@ func GetTaskStatus(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// TaskLogs streams the log output of a background task.
+//
+//	@Summary		Stream task logs
+//	@Description	Stream log output for a background task (e.g. bundle restore). Returns buffered output, then follows live lines until task completes.
+//	@Tags			tasks
+//	@Produce		plain
+//	@Param			taskID	path	string	true	"Task ID"
+//	@Success		200		"Log output (text/plain, chunked)"
+//	@Failure		404		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/tasks/{taskID}/logs [get]
 func TaskLogs(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
