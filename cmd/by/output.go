@@ -75,7 +75,7 @@ func streamResponse(resp io.ReadCloser, w io.Writer) error {
 	for {
 		n, err := resp.Read(buf)
 		if n > 0 {
-			w.Write(buf[:n])
+			_, _ = w.Write(buf[:n])
 		}
 		if err == io.EOF {
 			return nil
@@ -92,14 +92,6 @@ func derefStr(s *string, def string) string {
 		return def
 	}
 	return *s
-}
-
-// derefInt dereferences an int pointer, returning a default if nil.
-func derefInt(p *int, def int) string {
-	if p == nil {
-		return fmt.Sprintf("%d", def)
-	}
-	return fmt.Sprintf("%d", *p)
 }
 
 // derefFloat dereferences a float64 pointer, returning a default if nil.

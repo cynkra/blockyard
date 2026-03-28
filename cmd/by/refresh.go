@@ -71,7 +71,7 @@ func refreshCmd() *cobra.Command {
 					Status string `json:"status"`
 				}
 				if statusResp != nil {
-					decodeJSON(statusResp, &status)
+					_ = decodeJSON(statusResp, &status)
 				}
 
 				printJSON(map[string]any{
