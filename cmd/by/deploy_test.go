@@ -157,3 +157,102 @@ func TestParseReposFlag(t *testing.T) {
 		t.Errorf("second repo URL: got %q", repos[1].URL)
 	}
 }
+
+func TestParseReposFlag_WhitespaceOnly(t *testing.T) {
+	repos := parseReposFlag("  ,  ,  ")
+	if len(repos) != 1 || repos[0].URL != defaultRepoURL {
+		t.Errorf("whitespace-only entries should fall back to defaults, got %v", repos)
+	}
+}
+
+func TestCreateArchive_SkipsHiddenDir(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)"), 0o644)
+	os.MkdirAll(filepath.Join(dir, ".git", "objects"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main"), 0o644)
+
+	archive, err := createArchive(dir)
+	if err != nil {
+		t.Fatalf("createArchive: %v", err)
+	}
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+
+	gz, err := gzip.NewReader(archive)
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	tr := tar.NewReader(gz)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar next: %v", err)
+		}
+		if hdr.Name == ".git" || hdr.Name == ".git/HEAD" || hdr.Name == ".git/objects" {
+			t.Errorf("hidden directory contents should be skipped, found %q", hdr.Name)
+		}
+	}
+}
+
+func TestCreateArchive_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+
+	archive, err := createArchive(dir)
+	if err != nil {
+		t.Fatalf("createArchive: %v", err)
+	}
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+
+	gz, err := gzip.NewReader(archive)
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	tr := tar.NewReader(gz)
+
+	count := 0
+	for {
+		_, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar next: %v", err)
+		}
+		count++
+	}
+	if count != 0 {
+		t.Errorf("expected empty archive, got %d entries", count)
+	}
+}
+
+func TestPrepareManifest_UnknownCase(t *testing.T) {
+	det := &detectResult{InputCase: inputCase(99), Mode: "shiny", Entrypoint: "app.R"}
+	_, err := prepareManifest(t.TempDir(), det, "")
+	if err == nil {
+		t.Fatal("expected error for unknown input case")
+	}
+	if err.Error() != "unknown input case" {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDirExists(t *testing.T) {
+	dir := t.TempDir()
+	if !dirExists(dir) {
+		t.Error("expected true for existing directory")
+	}
+	if dirExists(filepath.Join(dir, "nonexistent")) {
+		t.Error("expected false for nonexistent path")
+	}
+	// File is not a directory.
+	f := filepath.Join(dir, "file.txt")
+	os.WriteFile(f, []byte("hi"), 0o644)
+	if dirExists(f) {
+		t.Error("expected false for regular file")
+	}
+}

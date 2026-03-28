@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -113,5 +114,43 @@ func TestResolveCredentials_NoConfig(t *testing.T) {
 	_, _, err := resolveCredentials()
 	if err == nil {
 		t.Fatal("expected error when no config exists")
+	}
+}
+
+func TestConfigDir_FallbackToHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	dir := configDir()
+	// Should fall back to $HOME/.config/by.
+	if dir == "" {
+		t.Fatal("expected non-empty config dir")
+	}
+	if !strings.HasSuffix(dir, filepath.Join(".config", "by")) {
+		t.Errorf("expected path ending in .config/by, got %q", dir)
+	}
+}
+
+func TestResolveCredentials_PartialEnv(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	// Config file has both, env overrides only the URL.
+	cfg := &config{
+		Server: "https://file.example.com",
+		Token:  "by_filetoken",
+	}
+	saveConfig(cfg)
+
+	t.Setenv("BLOCKYARD_URL", "https://env.example.com")
+	t.Setenv("BLOCKYARD_TOKEN", "")
+
+	serverURL, token, err := resolveCredentials()
+	if err != nil {
+		t.Fatalf("resolveCredentials: %v", err)
+	}
+	if serverURL != "https://env.example.com" {
+		t.Errorf("server: got %q, want env value", serverURL)
+	}
+	if token != "by_filetoken" {
+		t.Errorf("token: got %q, want file fallback", token)
 	}
 }
