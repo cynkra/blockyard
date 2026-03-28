@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -254,8 +255,8 @@ func streamTaskLogs(c *apiclient.Client, taskID string, jsonOutput bool, appName
 // confirm prompts the user with a Y/n question.
 func confirm(prompt string) bool {
 	fmt.Printf("%s [Y/n] ", prompt)
-	var line string
-	fmt.Scanln(&line)
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
 	line = strings.TrimSpace(strings.ToLower(line))
 	return line == "" || line == "y" || line == "yes"
 }
