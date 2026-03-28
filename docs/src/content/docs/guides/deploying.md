@@ -18,14 +18,60 @@ automatically.
 Any additional files (data, assets, R scripts sourced by the app) are
 included automatically when you tar the directory.
 
+## Deploying with the CLI
+
+The `by deploy` command handles bundling, uploading, and optionally waiting
+for the build — all in one step:
+
 ```bash
-tar -czf bundle.tar.gz -C my-app .
+by deploy ./my-app --wait
 ```
 
-## Uploading a bundle
+The CLI auto-detects your entrypoint and dependency format, creates the tar
+archive, and uploads it. If the app does not exist yet it is created
+automatically.
+
+### Pinned vs. unpinned dependencies
+
+By default, if your app has a `DESCRIPTION` file, the deploy creates an
+**unpinned** manifest — Blockyard resolves the latest compatible versions at
+build time. To lock exact versions:
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/bundles" \
+by deploy ./my-app --pin --wait
+```
+
+This runs `renv::snapshot()` locally (requires R and renv) and includes the
+resulting lockfile in the bundle. You can also commit a `renv.lock` or
+`manifest.json` directly in your app directory — the CLI will use it as-is.
+
+### Generating a manifest without deploying
+
+To inspect or commit the resolved manifest before deploying:
+
+```bash
+by init ./my-app
+# writes my-app/manifest.json
+```
+
+### Choosing a name
+
+The app name defaults to the directory basename. Override it with `--name`:
+
+```bash
+by deploy ./my-app --name sales-dashboard --wait
+```
+
+See the [CLI reference](/reference/cli/#by-deploy-path) for the full flag list.
+
+## Deploying with the REST API
+
+If you prefer scripting with `curl`:
+
+```bash
+tar -czf bundle.tar.gz -C my-app .
+
+curl -X POST "$BLOCKYARD/api/v1/apps/<app-name>/bundles" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @bundle.tar.gz
@@ -52,6 +98,10 @@ During the build:
 You can monitor the build by streaming task logs:
 
 ```bash
+# With the CLI (by deploy --wait does this automatically)
+by logs my-app --follow
+
+# With curl
 curl "$BLOCKYARD/api/v1/tasks/<task-id>/logs" \
   -H "Authorization: Bearer $TOKEN"
 ```
@@ -71,7 +121,7 @@ the same worker for subsequent requests.
 You can also pre-start a worker via the API:
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/start" \
+curl -X POST "$BLOCKYARD/api/v1/apps/<app-name>/start" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -90,13 +140,39 @@ Worker containers run with hardened defaults:
 
 These settings are not configurable — they are always applied.
 
+## Updating an app
+
+To deploy a new version, run `by deploy` again (or upload another bundle via
+the API). Once it builds successfully, it becomes the new active bundle.
+
+To roll back to a previous bundle:
+
+```bash
+by bundles my-app          # list available bundles
+by rollback my-app <id>    # activate a previous bundle
+```
+
+Old bundles are automatically pruned based on `bundle_retention` (default
+50 per app). The active bundle is never pruned.
+
+## Refreshing unpinned dependencies
+
+For apps deployed with a `DESCRIPTION` (unpinned), you can re-resolve
+packages from repositories without uploading a new bundle:
+
+```bash
+by refresh my-app
+```
+
+This triggers a background build that pulls the latest compatible package
+versions. Use `by refresh my-app --rollback` to revert to the previous set.
+
 ## Disabling an app
 
 You can temporarily take an app offline without deleting it:
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/disable" \
-  -H "Authorization: Bearer $TOKEN"
+by disable my-app
 ```
 
 Disabling an app ends all active sessions, drains running workers, and
@@ -104,14 +180,5 @@ returns `503 Service Unavailable` for any proxy requests. To bring it back
 online:
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/enable" \
-  -H "Authorization: Bearer $TOKEN"
+by enable my-app
 ```
-
-## Updating an app
-
-To deploy a new version, upload another bundle to the same app. Once it
-builds successfully, it becomes the new active bundle.
-
-Old bundles are automatically pruned based on `bundle_retention` (default
-50 per app). The active bundle is never pruned.

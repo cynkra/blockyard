@@ -32,6 +32,7 @@ export default defineConfig({
 				{
 					label: 'Reference',
 					items: [
+						{ label: 'CLI', slug: 'reference/cli' },
 						{ label: 'REST API', slug: 'reference/api' },
 						{ label: 'Configuration File', slug: 'reference/config' },
 					],
