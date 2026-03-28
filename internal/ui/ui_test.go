@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -253,6 +254,34 @@ func TestTimeAgoNil(t *testing.T) {
 	fn := funcMap["timeAgo"].(func(*string) string)
 	if got := fn(nil); got != "" {
 		t.Errorf("timeAgo(nil) = %q, want empty", got)
+	}
+}
+
+func TestTimeAgoParseError(t *testing.T) {
+	fn := funcMap["timeAgo"].(func(*string) string)
+	bad := "not-a-date"
+	if got := fn(&bad); got != bad {
+		t.Errorf("timeAgo(invalid) = %q, want %q (passthrough)", got, bad)
+	}
+}
+
+func TestTimeAgoSingularForms(t *testing.T) {
+	fn := funcMap["timeAgo"].(func(*string) string)
+
+	cases := []struct {
+		offset time.Duration
+		want   string
+	}{
+		{90 * time.Second, "1 minute ago"},
+		{90 * time.Minute, "1 hour ago"},
+		{36 * time.Hour, "1 day ago"},
+	}
+	for _, tc := range cases {
+		ts := time.Now().Add(-tc.offset).UTC().Format(time.RFC3339)
+		got := fn(&ts)
+		if got != tc.want {
+			t.Errorf("timeAgo(-%v) = %q, want %q", tc.offset, got, tc.want)
+		}
 	}
 }
 
@@ -724,6 +753,82 @@ func TestDeploymentsPageRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestRequireAuthNonGetReturns401(t *testing.T) {
+	_, ts := newTestServer(t, oidcConfig())
+
+	form := url.Values{"name": {"test"}}
+	resp, err := http.Post(ts.URL+"/ui/tokens", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// POST without auth should get 401, not a redirect.
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeploymentsPageDBError(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
+	srv.DB.Close()
+
+	resp, err := http.Get(ts.URL + "/deployments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeploymentsPageCustomPage(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "deployer", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("paged-app", "deployer")
+
+	// Create 21 bundles to exceed deploymentsPerPage (20) and land on page 2.
+	for i := range 21 {
+		b, _ := srv.DB.CreateBundle("b-"+strings.Repeat("x", 10)+string(rune('a'+i)), app.ID, "deployer", false)
+		srv.DB.ActivateBundle(app.ID, b.ID)
+	}
+
+	resp, err := http.Get(ts.URL + "/deployments?page=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "Page 2") {
+		t.Error("expected 'Page 2' in pagination info")
+	}
+}
+
+func TestDeploymentsPageDeployedByFallback(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-u", auth.RoleAdmin)
+
+	app, _ := srv.DB.CreateApp("fb-app", "admin-u")
+	// Deploy as "unknown-sub" which has no matching user row →
+	// DeployedByName will be NULL, code should fall back to DeployedBy.
+	b, _ := srv.DB.CreateBundle("bundle-fb-test", app.ID, "unknown-sub", false)
+	srv.DB.ActivateBundle(app.ID, b.ID)
+
+	resp, err := http.Get(ts.URL + "/deployments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "unknown-sub") {
+		t.Error("expected DeployedBy fallback value 'unknown-sub' in deployments table")
+	}
+}
+
 func TestDeploymentsPageRendersEmpty(t *testing.T) {
 	_, ts := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
 
@@ -1056,6 +1161,73 @@ func TestCreateTokenRequiresAuth(t *testing.T) {
 
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateTokenForbiddenForPATSource(t *testing.T) {
+	// Build a server where the caller has PAT source instead of session.
+	cfg := oidcConfig()
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	database.UpsertUserWithRole("pat-caller", "pat@test.com", "pat-caller", "admin")
+
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+
+	uiHandler := New()
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := auth.ContextWithUser(req.Context(), &auth.AuthenticatedUser{Sub: "pat-caller"})
+			ctx = auth.ContextWithCaller(ctx, &auth.CallerIdentity{
+				Sub:    "pat-caller",
+				Name:   "pat-caller",
+				Role:   auth.RoleAdmin,
+				Source: auth.AuthSourcePAT,
+			})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	uiHandler.RegisterRoutes(r, srv)
+	ts := httptest.NewServer(r)
+	t.Cleanup(ts.Close)
+
+	form := url.Values{"name": {"my-token"}}
+	resp, err := http.Post(ts.URL+"/ui/tokens", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for PAT-sourced caller, got %d", resp.StatusCode)
+	}
+}
+
+func TestCreateTokenDBError(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "db-err-user", auth.RoleAdmin)
+	// Close DB so CreatePAT fails.
+	srv.DB.Close()
+
+	form := url.Values{"name": {"my-token"}}
+	resp, err := http.Post(ts.URL+"/ui/tokens", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (htmx inline error), got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "pat-error") {
+		t.Error("expected pat-error class in response")
+	}
+	if !strings.Contains(body, "Failed") {
+		t.Error("expected failure message in response")
 	}
 }
 
