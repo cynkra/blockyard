@@ -49,6 +49,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `bundle_worker_path` | `/app` | Mount point inside worker containers |
 | `bundle_retention` | `50` | Max bundles to keep per app before cleanup |
 | `max_bundle_size` | `104857600` | Maximum upload size in bytes (default 100 MB) |
+| `soft_delete_retention` | `0` | How long to keep soft-deleted apps (e.g. `720h` for 30 days). `0` means immediate hard delete. |
 
 ### `[database]`
 
@@ -141,10 +142,11 @@ shiny_port = 3838
 pak_version = "stable"
 
 [storage]
-bundle_server_path = "/data/bundles"
-bundle_worker_path = "/app"
-bundle_retention   = 50
-max_bundle_size    = 104857600
+bundle_server_path    = "/data/bundles"
+bundle_worker_path    = "/app"
+bundle_retention      = 50
+max_bundle_size       = 104857600
+# soft_delete_retention = "720h"   # 30 days; omit or 0 = immediate hard delete
 
 [database]
 path = "/data/db/blockyard.db"

@@ -52,6 +52,11 @@ and object storage.
 :   A running container serving a Shiny app. Workers are spawned on-demand
     and pinned to user sessions via cookies.
 
+**Session**
+:   A user's connection to a running worker. Sessions are tracked
+    automatically — they start when the proxy assigns a user to a worker
+    and end when the worker is stopped or the session is idle for too long.
+
 **Task**
 :   A background operation with streamable logs. Currently used for
     dependency restoration builds.
