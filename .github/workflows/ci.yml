@@ -78,11 +78,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go test -tags cli_test -count=1 -coverprofile=coverage-cli.out -coverpkg=./internal/... ./cmd/by/...
-      - uses: actions/upload-artifact@v7
-        with:
-          name: coverage-cli
-          path: coverage-cli.out
+      - run: go test -tags cli_test -count=1 ./cmd/by/...
 
   docker:
     runs-on: ubuntu-latest
@@ -154,7 +150,7 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     if: github.event_name != 'merge_group' && github.event_name != 'push' && inputs.job == ''
-    needs: [check, cli, docker, idp, openbao, ui]
+    needs: [check, docker, idp, openbao, ui]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -177,6 +173,6 @@ jobs:
       - uses: codecov/codecov-action@v5
         if: always()
         with:
-          files: coverage-check.out,coverage-cli.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out,coverage-ui.out
-          flags: unit,cli,docker,idp,openbao,ui
+          files: coverage-check.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out,coverage-ui.out
+          flags: unit,docker,idp,openbao,ui
           fail_ci_if_error: false
