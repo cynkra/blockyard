@@ -3,73 +3,63 @@ package api
 import "github.com/cynkra/blockyard/internal/db"
 
 // Swagger documentation types — these provide clean OpenAPI schemas for
-// handlers that return map literals.
+// handlers that return map literals. They are referenced only from swag
+// annotations in comments, so Go's unused checker cannot see the usage.
 
-// bundleListResponse wraps a list of bundles.
-type bundleListResponse struct {
+type bundleListResponse struct { //nolint:unused
 	Bundles []db.BundleRow `json:"bundles"`
 }
 
-// appTagListResponse wraps a list of tags for an app.
-type appTagListResponse struct {
+type appTagListResponse struct { //nolint:unused
 	Tags []tagResponse `json:"tags"`
 }
 
-// sessionListResponse wraps a list of sessions.
-type sessionListResponse struct {
+type sessionListResponse struct { //nolint:unused
 	Sessions []db.SessionRow `json:"sessions"`
 }
 
-// currentUserResponse is the shape returned by GET /users/me.
-type currentUserResponse struct {
+type currentUserResponse struct { //nolint:unused
 	Sub   string `json:"sub"`
 	Email string `json:"email,omitempty"`
 	Name  string `json:"name"`
 	Role  string `json:"role"`
 }
 
-// stopAppResponse is the shape returned by POST /apps/{id}/stop.
-type stopAppResponse struct {
+type stopAppResponse struct { //nolint:unused
 	TaskID         string `json:"task_id,omitempty"`
 	WorkerCount    int    `json:"worker_count,omitempty"`
 	StoppedWorkers int    `json:"stopped_workers,omitempty"`
 }
 
-// taskStatusResponse is the shape returned by GET /tasks/{taskID}.
-type taskStatusResponse struct {
+type taskStatusResponse struct { //nolint:unused
 	ID        string `json:"id"`
 	Status    string `json:"status"`
 	CreatedAt string `json:"created_at"`
 }
 
-// uploadBundleResponse is returned by POST /apps/{id}/bundles.
-type uploadBundleResponse struct {
+type uploadBundleResponse struct { //nolint:unused
 	BundleID string `json:"bundle_id"`
 	TaskID   string `json:"task_id"`
 }
 
-// asyncTaskResponse is returned by endpoints that start background tasks.
-type asyncTaskResponse struct {
+type asyncTaskResponse struct { //nolint:unused
 	TaskID  string `json:"task_id"`
 	Message string `json:"message"`
 }
 
-// vaultExchangeResponse is returned by POST /credentials/vault.
-type vaultExchangeResponse struct {
+type vaultExchangeResponse struct { //nolint:unused
 	Token string `json:"token"`
 	TTL   int    `json:"ttl"`
 }
 
-// catalogResponse is the shape returned by GET /catalog.
-type catalogResponse struct {
+type catalogResponse struct { //nolint:unused
 	Items   []catalogItem `json:"items"`
 	Total   int           `json:"total"`
 	Page    int           `json:"page"`
 	PerPage int           `json:"per_page" example:"20"`
 }
 
-// appResponseV2JSON documents the v2 app response shape for OpenAPI.
-type appResponseV2JSON struct {
+type appResponseV2JSON struct { //nolint:unused
 	ID                   string   `json:"id"`
 	Name                 string   `json:"name"`
 	Owner                string   `json:"owner"`
