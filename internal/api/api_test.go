@@ -21,6 +21,7 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/session"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
@@ -3285,5 +3286,254 @@ func TestListDeploymentsWithSearch(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&body)
 	if body.Total != 1 {
 		t.Errorf("expected total=1, got %d", body.Total)
+	}
+}
+
+// --- Coverage gap tests for runtime.go ---
+
+func TestGetAppRuntimeWithLiveWorkerAndDeadWorker(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "runtime-full")
+	id := created["id"].(string)
+
+	// Register a live worker with a session in the in-memory store.
+	srv.Workers.Set("w-live", server.ActiveWorker{
+		AppID:     id,
+		BundleID:  "bundle-1",
+		StartedAt: time.Now().Add(-10 * time.Minute),
+		IdleSince: time.Now().Add(-1 * time.Minute),
+	})
+	srv.Sessions.Set("sess-1", session.Entry{
+		WorkerID:   "w-live",
+		UserSub:    "admin",
+		LastAccess: time.Now(),
+	})
+
+	// Create a DB session for activity metrics.
+	srv.DB.CreateSession("db-s1", id, "w-live", "admin")
+
+	// Create a dead worker in the logstore.
+	sender := srv.LogStore.Create("w-dead", id)
+	sender.Write("log line")
+	srv.LogStore.MarkEnded("w-dead")
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/runtime", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var rtBody runtimeResponse
+	json.NewDecoder(resp.Body).Decode(&rtBody)
+
+	if len(rtBody.Workers) != 2 {
+		t.Fatalf("expected 2 workers, got %d", len(rtBody.Workers))
+	}
+
+	// Find live and dead workers by status.
+	var live, dead *runtimeWorker
+	for i := range rtBody.Workers {
+		switch rtBody.Workers[i].Status {
+		case "active":
+			live = &rtBody.Workers[i]
+		case "ended":
+			dead = &rtBody.Workers[i]
+		}
+	}
+
+	if live == nil {
+		t.Fatal("expected an active worker")
+	}
+	if live.ID != "w-live" {
+		t.Errorf("expected live worker id=w-live, got %s", live.ID)
+	}
+	if live.BundleID != "bundle-1" {
+		t.Errorf("expected bundle_id=bundle-1, got %s", live.BundleID)
+	}
+	if live.IdleSince == nil {
+		t.Error("expected idle_since to be set")
+	}
+	if len(live.Sessions) != 1 {
+		t.Errorf("expected 1 session on live worker, got %d", len(live.Sessions))
+	} else if live.Sessions[0].UserDisplayName != "Admin" {
+		t.Errorf("expected user_display_name=Admin, got %q", live.Sessions[0].UserDisplayName)
+	}
+
+	if dead == nil {
+		t.Fatal("expected an ended worker")
+	}
+	if dead.ID != "w-dead" {
+		t.Errorf("expected dead worker id=w-dead, got %s", dead.ID)
+	}
+	if dead.EndedAt == nil {
+		t.Error("expected ended_at to be set on dead worker")
+	}
+
+	if rtBody.ActiveSessions != 1 {
+		t.Errorf("expected active_sessions=1, got %d", rtBody.ActiveSessions)
+	}
+	if rtBody.TotalViews != 1 {
+		t.Errorf("expected total_views=1, got %d", rtBody.TotalViews)
+	}
+}
+
+func TestGetAppStoppingStatus(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "stopping-app")
+	id := created["id"].(string)
+
+	// Set a worker with Draining: true.
+	srv.Workers.Set("w-drain", server.ActiveWorker{
+		AppID:     id,
+		Draining:  true,
+		StartedAt: time.Now(),
+	})
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var appBody map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&appBody)
+
+	status, _ := appBody["status"].(string)
+	if status != "stopping" {
+		t.Errorf("expected status=stopping, got %q", status)
+	}
+}
+
+func TestGetAppWithTags(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "tagged-app")
+	id := created["id"].(string)
+
+	tag, err := srv.DB.CreateTag("production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.DB.AddAppTag(id, tag.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var tagBody map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&tagBody)
+
+	tags, ok := tagBody["tags"].([]interface{})
+	if !ok {
+		t.Fatal("expected tags array in response")
+	}
+	if len(tags) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(tags))
+	}
+	if tags[0] != "production" {
+		t.Errorf("expected tag=production, got %v", tags[0])
+	}
+}
+
+func TestDisableAppDrainsWorkers(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "disable-drain")
+	id := created["id"].(string)
+
+	// Register two workers for the app.
+	srv.Workers.Set("w1", server.ActiveWorker{AppID: id, StartedAt: time.Now()})
+	srv.Workers.Set("w2", server.ActiveWorker{AppID: id, StartedAt: time.Now()})
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/disable", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var disBody map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&disBody)
+
+	if disBody["enabled"] != false {
+		t.Errorf("expected enabled=false, got %v", disBody["enabled"])
+	}
+
+	// Workers should be marked draining.
+	w1, ok1 := srv.Workers.Get("w1")
+	w2, ok2 := srv.Workers.Get("w2")
+	if !ok1 || !ok2 {
+		// Workers may have already been evicted by the async goroutine;
+		// that is acceptable.
+		return
+	}
+	if !w1.Draining {
+		t.Error("expected w1 to be draining")
+	}
+	if !w2.Draining {
+		t.Error("expected w2 to be draining")
+	}
+}
+
+func TestListAppsV2WithWorkerStatuses(t *testing.T) {
+	srv, ts := testServer(t)
+	runApp := createApp(t, ts, "v2-running")
+	runID := runApp["id"].(string)
+	stopApp := createApp(t, ts, "v2-stopping")
+	stopID := stopApp["id"].(string)
+	createApp(t, ts, "v2-stopped") // no workers
+
+	// running: at least one non-draining worker.
+	srv.Workers.Set("wr", server.ActiveWorker{AppID: runID, StartedAt: time.Now()})
+	// stopping: all workers draining.
+	srv.Workers.Set("ws", server.ActiveWorker{AppID: stopID, Draining: true, StartedAt: time.Now()})
+
+	req := authReq("GET", ts.URL+"/api/v1/apps?per_page=100", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var body struct {
+		Apps []map[string]interface{} `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+
+	statuses := map[string]string{}
+	for _, a := range body.Apps {
+		name, _ := a["name"].(string)
+		status, _ := a["status"].(string)
+		statuses[name] = status
+	}
+
+	if statuses["v2-running"] != "running" {
+		t.Errorf("expected v2-running status=running, got %q", statuses["v2-running"])
+	}
+	if statuses["v2-stopping"] != "stopping" {
+		t.Errorf("expected v2-stopping status=stopping, got %q", statuses["v2-stopping"])
+	}
+	if statuses["v2-stopped"] != "stopped" {
+		t.Errorf("expected v2-stopped status=stopped, got %q", statuses["v2-stopped"])
 	}
 }
