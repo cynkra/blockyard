@@ -707,9 +707,9 @@ func ListAppsV2(srv *server.Server) http.HandlerFunc {
 				serverError(w, "db error: "+err.Error())
 				return
 			}
-			responses := make([]AppResponse, len(apps))
+			responses := make([]map[string]any, len(apps))
 			for i, app := range apps {
-				responses[i] = appResponse(&app, srv.Workers)
+				responses[i] = appResponseV2(&app, srv)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(responses)

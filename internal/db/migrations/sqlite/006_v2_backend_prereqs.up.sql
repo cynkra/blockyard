@@ -20,5 +20,11 @@ ALTER TABLE bundles ADD COLUMN deployed_by TEXT;
 ALTER TABLE bundles ADD COLUMN deployed_at TEXT;
 ALTER TABLE bundles ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
 
+-- Backfill: existing ready bundles get deployed_at = uploaded_at, deployed_by = app owner.
+UPDATE bundles SET
+    deployed_at = uploaded_at,
+    deployed_by = (SELECT owner FROM apps WHERE apps.id = bundles.app_id)
+WHERE status = 'ready';
+
 -- App enable/disable
 ALTER TABLE apps ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;

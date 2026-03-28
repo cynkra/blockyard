@@ -228,7 +228,7 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(appResponseV2(app, srv))
 	}
 }
 
@@ -592,10 +592,14 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		// Drain and stop running workers.
 		ops.StopAppSync(srv, app.ID)
 
-		// Switch active bundle.
+		// Switch active bundle and record deployment tracking.
 		if err := srv.DB.SetActiveBundle(app.ID, body.BundleID); err != nil {
 			serverError(w, "set active bundle: "+err.Error())
 			return
+		}
+		if err := srv.DB.SetBundleDeployed(body.BundleID, caller.Sub); err != nil {
+			slog.Warn("rollback: failed to update deployment tracking",
+				"bundle_id", body.BundleID, "error", err)
 		}
 
 		// Re-read app to get updated state.
@@ -618,7 +622,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(appResponseV2(app, srv))
 	}
 }
 
@@ -686,7 +690,7 @@ func RestoreApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(appResponseV2(app, srv))
 	}
 }
 

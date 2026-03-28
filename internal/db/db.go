@@ -547,6 +547,17 @@ func (db *DB) DeleteBundle(id string) (bool, error) {
 	return n > 0, nil
 }
 
+// SetBundleDeployed updates the deployed_by and deployed_at fields on a bundle.
+// Used during rollbacks to record who triggered the rollback and when.
+func (db *DB) SetBundleDeployed(bundleID, deployedBy string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE bundles SET deployed_by = ?, deployed_at = ? WHERE id = ?`),
+		deployedBy, now, bundleID,
+	)
+	return err
+}
+
 // --- App update ---
 
 // AppUpdate holds optional fields for updating an app's configuration.
