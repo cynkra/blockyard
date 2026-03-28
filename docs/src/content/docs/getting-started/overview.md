@@ -10,8 +10,9 @@ the right worker.
 
 ## How it works
 
-1. **You deploy a bundle** — a `.tar.gz` archive of your Shiny app source code,
-   optionally with dependency metadata (`renv.lock`, `DESCRIPTION`, or `manifest.json`).
+1. **You deploy a bundle** — run `by deploy ./my-app` or upload a `.tar.gz`
+   archive via the REST API. Bundles optionally include dependency metadata
+   (`renv.lock`, `DESCRIPTION`, or `manifest.json`).
 2. **Blockyard restores dependencies** — it resolves a manifest, spins up a
    build container, and uses [pak](https://pak.r-lib.org/) to install packages.
 3. **Users visit the app** — when a request hits `/app/<name>/`, Blockyard

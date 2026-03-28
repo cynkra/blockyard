@@ -22,8 +22,6 @@ func TestHelloPocketbase(t *testing.T) {
 		cookies1 []*http.Cookie
 		cookies2 []*http.Cookie
 		token1   string
-		appID    string
-		client1  *APIClient
 	)
 
 	t.Run("pre_enrolled_credentials", func(t *testing.T) {
@@ -44,20 +42,29 @@ func TestHelloPocketbase(t *testing.T) {
 	t.Run("user1_deploy", func(t *testing.T) {
 		cookies1 = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token1 = createPAT(t, baseURL, cookies1)
-		client1 = &APIClient{BaseURL: baseURL, Token: token1, Cookies: cookies1}
 
-		appID = client1.CreateApp(t, "hello-pocketbase")
-		client1.UpdateApp(t, appID, `{"access_type":"logged_in","max_sessions_per_worker":10}`)
+		// Set access_type and scaling before deploy starts the app.
+		appDir := copyAppDir(t, "../examples/hello-pocketbase/app")
 
-		bundle := makeBundle(t, "../examples/hello-pocketbase/app")
-		taskID, _ := client1.UploadBundle(t, appID, bundle)
-		client1.PollTask(t, taskID, 10*time.Minute)
+		var result map[string]any
+		runCLIJSON(t, baseURL, token1, &result,
+			"deploy", appDir, "--yes", "--wait", "--name", "hello-pocketbase")
 
-		client1.StartApp(t, appID)
+		if s, _ := result["status"].(string); s != "completed" {
+			t.Fatalf("deploy status: got %q, want completed", s)
+		}
+
+		// Configure access and scaling via CLI.
+		runCLI(t, baseURL, token1, "access", "set-type", "hello-pocketbase", "logged_in")
+		runCLI(t, baseURL, token1, "scale", "hello-pocketbase", "--max-sessions", "10")
+
+		// Enable and trigger cold-start via proxy.
+		runCLI(t, baseURL, token1, "enable", "hello-pocketbase")
+		fetchAppPage(t, baseURL, "hello-pocketbase", cookies1, 120*time.Second)
 	})
 
 	t.Run("user1_app_serves", func(t *testing.T) {
-		if appID == "" {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
@@ -71,7 +78,7 @@ func TestHelloPocketbase(t *testing.T) {
 	})
 
 	t.Run("user1_websocket", func(t *testing.T) {
-		if appID == "" {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
@@ -79,7 +86,7 @@ func TestHelloPocketbase(t *testing.T) {
 	})
 
 	t.Run("user2_access", func(t *testing.T) {
-		if appID == "" {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
@@ -117,27 +124,22 @@ func TestHelloPocketbase(t *testing.T) {
 	})
 
 	t.Run("user2_cannot_manage", func(t *testing.T) {
-		if appID == "" || cookies2 == nil {
+		if token1 == "" || cookies2 == nil {
 			t.Skip("depends on user1_deploy and user2_access")
 		}
 
-		// User2 creates a PAT.
+		// User2 creates a PAT and tries to delete user1's app via CLI.
 		token2 := createPAT(t, baseURL, cookies2)
-		client2 := &APIClient{BaseURL: baseURL, Token: token2, Cookies: cookies2}
-
-		// User2 tries to delete user1's app — should get 404 (not owner).
-		status := client2.DeleteAppRaw(appID)
-		if status != 404 {
-			t.Fatalf("user2 delete app: expected 404, got %d", status)
-		}
+		runCLIFail(t, baseURL, token2, "delete", "hello-pocketbase", "--json")
 	})
 
 	t.Run("stop_and_cleanup", func(t *testing.T) {
-		if appID == "" || client1 == nil {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
-		client1.StopApp(t, appID)
-		client1.DeleteApp(t, appID)
+		runCLI(t, baseURL, token1, "disable", "hello-pocketbase")
+		waitForAppStatus(t, baseURL, token1, "hello-pocketbase", "stopped", 120*time.Second)
+		runCLI(t, baseURL, token1, "delete", "hello-pocketbase")
 	})
 }

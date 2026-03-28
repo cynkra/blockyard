@@ -3,30 +3,26 @@ title: Quick Start
 description: Deploy your first Shiny app to Blockyard in under five minutes.
 ---
 
-This guide walks through deploying a Shiny app from scratch. It assumes
+This guide walks through deploying a Shiny app using the `by` CLI. It assumes
 Blockyard is already running (see [Installation](/getting-started/installation/)).
 
-Set a couple of shell variables to keep the examples concise. Create a
-[Personal Access Token](/guides/authorization/#personal-access-tokens) via the
-web UI first.
+## 1. Install the CLI
+
+Download the `by` binary for your platform from the
+[releases page](https://github.com/cynkra/blockyard/releases) and place it on
+your `PATH`. See [Installation](/getting-started/installation/#cli) for details.
+
+## 2. Log in
 
 ```bash
-export BLOCKYARD=http://localhost:8080
-export TOKEN=by_...   # your Personal Access Token
+by login --server http://localhost:8080
 ```
 
-## 1. Create an app
+This opens your browser to create a
+[Personal Access Token](/guides/authorization/#personal-access-tokens), then
+asks you to paste it back into the terminal.
 
-Before uploading a bundle, you need to register the app:
-
-```bash
-curl -X POST "$BLOCKYARD/api/v1/apps" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "hello-shiny"}'
-```
-
-## 2. Prepare your bundle
+## 3. Create your app
 
 Your app directory should look something like:
 
@@ -36,55 +32,84 @@ my-app/
 └── DESCRIPTION    # optional: declares R package dependencies
 ```
 
-Package it into a `.tar.gz`:
+## 4. Deploy
 
 ```bash
-tar -czf bundle.tar.gz -C my-app .
+by deploy ./my-app --wait
 ```
 
-## 3. Upload the bundle
+The CLI detects your dependencies, bundles the directory, uploads it, and
+streams the build logs:
 
-```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/hello-shiny/bundles" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @bundle.tar.gz
 ```
+Detected: DESCRIPTION with 3 dependencies
+Entrypoint: app.R
 
-```json
-{
-  "bundle_id": "b1234...",
-  "task_id": "t5678..."
-}
+  App:       my-app
+  Files:     2
+  Pinned:    no
+
+Deploy? [Y/n] y
+
+Uploading bundle... done.
+
+  App:       my-app
+  Bundle:    b1234... (building)
+  Task:      t5678...
+  URL:       http://localhost:8080/app/my-app/
+
+Streaming build logs...
+  ✓ Installing pak
+  ✓ Restoring packages (3)
+  ✓ Build complete
 ```
-
-The response returns immediately with a `202 Accepted`. Dependency
-restoration happens in the background.
-
-## 4. Watch the build
-
-Stream the build logs to see dependency restoration progress:
-
-```bash
-curl "$BLOCKYARD/api/v1/tasks/t5678.../logs" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-When the build completes, the bundle status changes to `ready` and becomes
-the active bundle for the app.
 
 ## 5. Open the app
 
-Once the build completes, visit the app in your browser:
+Visit the URL printed by `by deploy`:
 
 ```
-http://localhost:8080/app/hello-shiny/
+http://localhost:8080/app/my-app/
 ```
 
 Blockyard spawns a worker container on demand when the first request arrives.
-You can also pre-start a worker via the API:
+
+## Next steps
+
+- [`by deploy` reference](/reference/cli/#by-deploy-path) — all flags and
+  dependency detection modes
+- [Deploying an App](/guides/deploying/) — bundle structure, build process,
+  pinned vs. unpinned dependencies
+- [Authorization](/guides/authorization/) — roles, per-app ACLs, and
+  visibility settings
+
+---
+
+## Using the REST API directly
+
+If you prefer scripting with `curl` instead of the CLI, the same workflow
+looks like this:
 
 ```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/hello-shiny/start" \
+export BLOCKYARD=http://localhost:8080
+export TOKEN=by_...   # your Personal Access Token
+
+# Create the app
+curl -X POST "$BLOCKYARD/api/v1/apps" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-app"}'
+
+# Bundle and upload
+tar -czf bundle.tar.gz -C my-app .
+curl -X POST "$BLOCKYARD/api/v1/apps/my-app/bundles" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @bundle.tar.gz
+
+# Stream build logs (use the task_id from the upload response)
+curl "$BLOCKYARD/api/v1/tasks/<task-id>/logs" \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+See the [REST API reference](/reference/api/) for the full endpoint list.
