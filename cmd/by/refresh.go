@@ -64,7 +64,7 @@ func refreshCmd() *cobra.Command {
 
 			if jsonOutput {
 				var logBuf strings.Builder
-				streamResponse(logResp.Body, &logBuf)
+				_ = streamResponse(logResp.Body, &logBuf)
 
 				statusResp, _ := c.get(fmt.Sprintf("/api/v1/tasks/%s", taskResp.TaskID))
 				var status struct {

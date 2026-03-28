@@ -64,7 +64,7 @@ func listCmd() *cobra.Command {
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 					a.Name, truncate(title, 30), a.Owner, a.Status, enabled)
 			}
-			w.Flush()
+			_ = w.Flush()
 			if body.Total > len(body.Apps) {
 				fmt.Printf("\nShowing %d of %d apps.\n", len(body.Apps), body.Total)
 			}
@@ -102,7 +102,7 @@ func getCmd() *cobra.Command {
 						runtimeData, _ := readBodyRaw(runtimeResp)
 						// Merge app and runtime into one JSON object.
 						var merged map[string]any
-						json.Unmarshal(appData, &merged)
+						_ = json.Unmarshal(appData, &merged)
 						var rt map[string]any
 						if json.Unmarshal(runtimeData, &rt) == nil {
 							merged["runtime"] = rt
@@ -218,7 +218,7 @@ func printRuntime(c *client, app string) {
 			fmt.Fprintf(w, "  %s\t%s\t%.1f\t%s\t%d\n",
 				truncate(wk.ID, 12), wk.Status, wk.Stats.CPUPercent, mem, len(wk.Sessions))
 		}
-		w.Flush()
+		_ = w.Flush()
 	}
 }
 

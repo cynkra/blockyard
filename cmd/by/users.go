@@ -64,7 +64,7 @@ func usersListCmd() *cobra.Command {
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 					u.Sub, u.Name, u.Email, u.Role, active)
 			}
-			w.Flush()
+			_ = w.Flush()
 			return nil
 		},
 	}

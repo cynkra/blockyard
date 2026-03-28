@@ -58,7 +58,7 @@ func bundlesCmd() *cobra.Command {
 					truncate(b.ID, 12), b.Status, b.UploadedAt,
 					derefStr(b.DeployedBy, "-"), pinned)
 			}
-			w.Flush()
+			_ = w.Flush()
 			return nil
 		},
 	}

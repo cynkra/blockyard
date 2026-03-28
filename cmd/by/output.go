@@ -32,8 +32,8 @@ func printRawJSON(data []byte) {
 		printJSON(v)
 		return
 	}
-	os.Stdout.Write(data)
-	os.Stdout.Write([]byte("\n"))
+	_, _ = os.Stdout.Write(data)
+	_, _ = os.Stdout.Write([]byte("\n"))
 }
 
 // exitError prints an error message and exits.
@@ -65,7 +65,7 @@ func printKeyValue(pairs [][2]string) {
 	for _, p := range pairs {
 		fmt.Fprintf(w, "  %s:\t%s\n", p[0], p[1])
 	}
-	w.Flush()
+	_ = w.Flush()
 }
 
 // streamResponse reads a streaming HTTP response (chunked text) and

@@ -238,9 +238,9 @@ renv::snapshot(".", packages = deps$Package, prompt = FALSE)`
 // they pre-existed (we check if renv.lock is tracked by looking at the
 // directory state before snapshot — but for simplicity, we always clean).
 func cleanRenvArtifacts(dir string) {
-	os.Remove(filepath.Join(dir, "renv.lock"))
-	os.RemoveAll(filepath.Join(dir, "renv"))
-	os.Remove(filepath.Join(dir, ".Rprofile"))
+	_ = os.Remove(filepath.Join(dir, "renv.lock"))
+	_ = os.RemoveAll(filepath.Join(dir, "renv"))
+	_ = os.Remove(filepath.Join(dir, ".Rprofile"))
 }
 
 // parseReposFlag parses the --repositories flag value into Repository entries.
@@ -402,7 +402,7 @@ func streamTaskLogs(c *client, taskID string, jsonOutput bool, appName, bundleID
 	} else {
 		// In JSON mode, consume the log and report final status.
 		var logBuf strings.Builder
-		streamResponse(resp.Body, &logBuf)
+		_ = streamResponse(resp.Body, &logBuf)
 
 		// Check task status.
 		statusResp, err := c.get(fmt.Sprintf("/api/v1/tasks/%s", taskID))
@@ -412,7 +412,7 @@ func streamTaskLogs(c *client, taskID string, jsonOutput bool, appName, bundleID
 		var status struct {
 			Status string `json:"status"`
 		}
-		decodeJSON(statusResp, &status)
+		_ = decodeJSON(statusResp, &status)
 
 		printJSON(map[string]any{
 			"app":       appName,

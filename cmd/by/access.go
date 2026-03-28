@@ -56,7 +56,7 @@ func accessShowCmd() *cobra.Command {
 
 			if jsonOutput {
 				var acl any
-				json.Unmarshal(aclData, &acl)
+				_ = json.Unmarshal(aclData, &acl)
 				printJSON(map[string]any{
 					"access_type": appInfo.AccessType,
 					"acl":         acl,
@@ -73,7 +73,7 @@ func accessShowCmd() *cobra.Command {
 				GrantedBy string `json:"granted_by"`
 				GrantedAt string `json:"granted_at"`
 			}
-			json.Unmarshal(aclData, &entries)
+			_ = json.Unmarshal(aclData, &entries)
 
 			if len(entries) == 0 {
 				fmt.Println("No ACL entries.")
@@ -85,7 +85,7 @@ func accessShowCmd() *cobra.Command {
 			for _, e := range entries {
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", e.Principal, e.Kind, e.Role, e.GrantedBy)
 			}
-			w.Flush()
+			_ = w.Flush()
 			return nil
 		},
 	}
