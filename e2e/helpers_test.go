@@ -201,6 +201,7 @@ var httpClient = &http.Client{
 type APIClient struct {
 	BaseURL string
 	Token   string
+	Cookies []*http.Cookie // session cookies for proxy requests
 }
 
 func (c *APIClient) do(method, path string, body io.Reader) (*http.Response, error) {
@@ -340,10 +341,9 @@ func (c *APIClient) PollTask(t *testing.T, taskID string, timeout time.Duration)
 
 func (c *APIClient) StartApp(t *testing.T, appID string) string {
 	t.Helper()
-	// Ensure the app is enabled, then trigger a cold-start by making a
-	// request to the app URL. The proxy spawns a worker on first request.
-	// Retry on transient errors; on CI runners the container may take a
-	// few seconds to become healthy.
+	// Ensure the app is enabled, then trigger a cold-start by hitting
+	// the app URL with session cookies. The proxy spawns a worker on
+	// first request. Retry until the worker is healthy.
 
 	// First, ensure the app is enabled (it should be by default after deploy).
 	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/enable", nil)
@@ -359,8 +359,8 @@ func (c *APIClient) StartApp(t *testing.T, appID string) string {
 		t.Fatal("start app: could not determine app name")
 	}
 
-	// Hit the app URL to trigger cold-start. Retry until we get a
-	// non-503 response (worker is running).
+	// Hit the app URL with cookies to trigger cold-start. The proxy
+	// authenticates via session cookies, not bearer tokens.
 	var lastErr error
 	for attempt := 0; attempt < 10; attempt++ {
 		if attempt > 0 {
@@ -371,15 +371,28 @@ func (c *APIClient) StartApp(t *testing.T, appID string) string {
 		if reqErr != nil {
 			t.Fatalf("start app: %v", reqErr)
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-		resp, reqErr := httpClient.Do(req)
+		for _, cookie := range c.Cookies {
+			req.AddCookie(cookie)
+		}
+		noRedirect := &http.Client{
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		resp, reqErr := noRedirect.Do(req)
 		if reqErr != nil {
 			lastErr = reqErr
 			continue
 		}
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusServiceUnavailable {
+		// 502/503 = worker not ready yet or app disabled.
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable {
 			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+			continue
+		}
+		// 302 = redirect to login (cookies not working).
+		if resp.StatusCode == http.StatusFound {
+			lastErr = fmt.Errorf("redirected to login (status 302)")
 			continue
 		}
 		// Worker is up. Get the runtime to find the worker ID.
@@ -387,13 +400,13 @@ func (c *APIClient) StartApp(t *testing.T, appID string) string {
 		if rtErr != nil {
 			t.Fatalf("start app: get runtime: %v", rtErr)
 		}
-		defer rtResp.Body.Close()
 		var rt struct {
 			Workers []struct {
 				ID string `json:"id"`
 			} `json:"workers"`
 		}
 		json.NewDecoder(rtResp.Body).Decode(&rt)
+		rtResp.Body.Close()
 		if len(rt.Workers) > 0 {
 			return rt.Workers[0].ID
 		}

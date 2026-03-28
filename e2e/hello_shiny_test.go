@@ -30,7 +30,7 @@ func TestHelloShiny(t *testing.T) {
 		if !strings.HasPrefix(token, "by_") {
 			t.Fatalf("token %q missing by_ prefix", token)
 		}
-		client = &APIClient{BaseURL: baseURL, Token: token}
+		client = &APIClient{BaseURL: baseURL, Token: token, Cookies: cookies}
 	})
 
 	t.Run("deploy_app", func(t *testing.T) {
