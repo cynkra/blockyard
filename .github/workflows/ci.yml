@@ -79,7 +79,15 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go test -tags cli_test -count=1 ./cmd/by/...
+      - name: Run CLI integration tests with coverage
+        run: |
+          export GOCOVERDIR=$(mktemp -d)
+          go test -tags cli_test -count=1 ./cmd/by/...
+          go tool covdata textfmt -i="$GOCOVERDIR" -o=coverage-cli.out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-cli
+          path: coverage-cli.out
 
   docker:
     runs-on: ubuntu-latest
@@ -151,7 +159,7 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     if: github.event_name != 'merge_group' && github.event_name != 'push' && inputs.job == ''
-    needs: [check, docker, idp, openbao, ui]
+    needs: [check, cli, docker, idp, openbao, ui]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -164,7 +172,7 @@ jobs:
       - name: Enforce 80% coverage threshold
         run: |
           head -1 coverage-check.out > merged.out
-          tail -n +2 -q coverage-*.out | sort -u >> merged.out
+          tail -n +2 -q coverage-*.out | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> merged.out
           TOTAL=$(go tool cover -func=merged.out | grep ^total: | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${TOTAL}%"
           if [ "$(echo "$TOTAL < 80" | bc -l)" -eq 1 ]; then
@@ -174,6 +182,6 @@ jobs:
       - uses: codecov/codecov-action@v5
         if: always()
         with:
-          files: coverage-check.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out,coverage-ui.out
-          flags: unit,docker,idp,openbao,ui
+          files: coverage-check.out,coverage-cli.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out,coverage-ui.out
+          flags: unit,cli,docker,idp,openbao,ui
           fail_ci_if_error: false
