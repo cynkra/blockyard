@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -59,19 +60,19 @@ func tagsCreateCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.postJSON("/api/v1/tags", map[string]string{"name": args[0]})
+			resp, err := c.PostJSON("/api/v1/tags", map[string]string{"name": args[0]})
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
 				printRawJSON(data)
 				return nil
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -90,11 +91,11 @@ func tagsDeleteGlobalCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.delete("/api/v1/tags/" + args[0])
+			resp, err := c.Delete("/api/v1/tags/" + args[0])
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -136,12 +137,12 @@ func tagsAppAddCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.postJSON("/api/v1/apps/"+args[0]+"/tags",
+			resp, err := c.PostJSON("/api/v1/apps/"+args[0]+"/tags",
 				map[string]string{"tag_id": args[1]})
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -166,11 +167,11 @@ func tagsAppRemoveCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.delete("/api/v1/apps/" + args[0] + "/tags/" + args[1])
+			resp, err := c.Delete("/api/v1/apps/" + args[0] + "/tags/" + args[1])
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -185,14 +186,14 @@ func tagsAppRemoveCmd() *cobra.Command {
 	}
 }
 
-func printTagList(c *client, jsonOutput bool, path string) error {
-	resp, err := c.get(path)
+func printTagList(c *apiclient.Client, jsonOutput bool, path string) error {
+	resp, err := c.Get(path)
 	if err != nil {
 		exitErrorf(jsonOutput, "request failed: %v", err)
 	}
 
 	if jsonOutput {
-		data, err := readBodyRaw(resp)
+		data, err := apiclient.ReadBodyRaw(resp)
 		if err != nil {
 			exitErrorf(jsonOutput, "%v", err)
 		}
@@ -206,7 +207,7 @@ func printTagList(c *client, jsonOutput bool, path string) error {
 			Name string `json:"name"`
 		} `json:"tags"`
 	}
-	if err := decodeJSON(resp, &body); err != nil {
+	if err := apiclient.DecodeJSON(resp, &body); err != nil {
 		exitErrorf(jsonOutput, "%v", err)
 	}
 

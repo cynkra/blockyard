@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -41,13 +42,13 @@ func scaleCmd() *cobra.Command {
 				exitErrorf(jsonOutput, "no flags specified; use --memory, --cpu, --max-workers, --max-sessions, or --pre-warm")
 			}
 
-			resp, err := c.patchJSON("/api/v1/apps/"+args[0], body)
+			resp, err := c.PatchJSON("/api/v1/apps/"+args[0], body)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
@@ -55,7 +56,7 @@ func scaleCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -94,13 +95,13 @@ func updateCmd() *cobra.Command {
 				exitErrorf(jsonOutput, "no flags specified; use --title or --description")
 			}
 
-			resp, err := c.patchJSON("/api/v1/apps/"+args[0], body)
+			resp, err := c.PatchJSON("/api/v1/apps/"+args[0], body)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
@@ -108,7 +109,7 @@ func updateCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()

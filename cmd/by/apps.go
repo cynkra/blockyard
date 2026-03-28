@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -20,13 +21,13 @@ func listCmd() *cobra.Command {
 				params["deleted"] = "true"
 			}
 
-			resp, err := c.get(buildQuery("/api/v1/apps", params))
+			resp, err := c.Get(apiclient.BuildQuery("/api/v1/apps", params))
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
@@ -44,7 +45,7 @@ func listCmd() *cobra.Command {
 				} `json:"apps"`
 				Total int `json:"total"`
 			}
-			if err := decodeJSON(resp, &body); err != nil {
+			if err := apiclient.DecodeJSON(resp, &body); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 
@@ -86,20 +87,20 @@ func getCmd() *cobra.Command {
 			app := args[0]
 			runtimeFlag, _ := cmd.Flags().GetBool("runtime")
 
-			resp, err := c.get("/api/v1/apps/" + app)
+			resp, err := c.Get("/api/v1/apps/" + app)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				appData, err := readBodyRaw(resp)
+				appData, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
 				if runtimeFlag {
-					runtimeResp, err := c.get("/api/v1/apps/" + app + "/runtime")
+					runtimeResp, err := c.Get("/api/v1/apps/" + app + "/runtime")
 					if err == nil && runtimeResp.StatusCode == 200 {
-						runtimeData, _ := readBodyRaw(runtimeResp)
+						runtimeData, _ := apiclient.ReadBodyRaw(runtimeResp)
 						// Merge app and runtime into one JSON object.
 						var merged map[string]any
 						_ = json.Unmarshal(appData, &merged)
@@ -130,7 +131,7 @@ func getCmd() *cobra.Command {
 				Tags         []string `json:"tags"`
 				CreatedAt    string   `json:"created_at"`
 			}
-			if err := decodeJSON(resp, &appInfo); err != nil {
+			if err := apiclient.DecodeJSON(resp, &appInfo); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 
@@ -165,8 +166,8 @@ func getCmd() *cobra.Command {
 	return cmd
 }
 
-func printRuntime(c *client, app string) {
-	resp, err := c.get("/api/v1/apps/" + app + "/runtime")
+func printRuntime(c *apiclient.Client, app string) {
+	resp, err := c.Get("/api/v1/apps/" + app + "/runtime")
 	if err != nil || resp.StatusCode != 200 {
 		// Silently skip if not authorized.
 		if resp != nil {
@@ -195,7 +196,7 @@ func printRuntime(c *client, app string) {
 		UniqueVisitors int    `json:"unique_visitors"`
 		LastDeployedAt string `json:"last_deployed_at"`
 	}
-	if err := decodeJSON(resp, &rt); err != nil {
+	if err := apiclient.DecodeJSON(resp, &rt); err != nil {
 		return
 	}
 
@@ -230,16 +231,16 @@ func enableCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
-			resp, err := c.postJSON("/api/v1/apps/"+args[0]+"/enable", nil)
+			resp, err := c.PostJSON("/api/v1/apps/"+args[0]+"/enable", nil)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 			if jsonOutput {
-				data, _ := readBodyRaw(resp)
+				data, _ := apiclient.ReadBodyRaw(resp)
 				printRawJSON(data)
 				return nil
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -257,16 +258,16 @@ func disableCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
-			resp, err := c.postJSON("/api/v1/apps/"+args[0]+"/disable", nil)
+			resp, err := c.PostJSON("/api/v1/apps/"+args[0]+"/disable", nil)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 			if jsonOutput {
-				data, _ := readBodyRaw(resp)
+				data, _ := apiclient.ReadBodyRaw(resp)
 				printRawJSON(data)
 				return nil
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -290,11 +291,11 @@ func deleteCmd() *cobra.Command {
 			if purge {
 				path += "?purge=true"
 			}
-			resp, err := c.delete(path)
+			resp, err := c.Delete(path)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -325,16 +326,16 @@ func restoreCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
-			resp, err := c.postJSON("/api/v1/apps/"+args[0]+"/restore", nil)
+			resp, err := c.PostJSON("/api/v1/apps/"+args[0]+"/restore", nil)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 			if jsonOutput {
-				data, _ := readBodyRaw(resp)
+				data, _ := apiclient.ReadBodyRaw(resp)
 				printRawJSON(data)
 				return nil
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -33,23 +34,23 @@ func accessShowCmd() *cobra.Command {
 			app := args[0]
 
 			// Get app info for access_type.
-			appResp, err := c.get("/api/v1/apps/" + app)
+			appResp, err := c.Get("/api/v1/apps/" + app)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 			var appInfo struct {
 				AccessType string `json:"access_type"`
 			}
-			if err := decodeJSON(appResp, &appInfo); err != nil {
+			if err := apiclient.DecodeJSON(appResp, &appInfo); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 
 			// Get ACL entries.
-			aclResp, err := c.get("/api/v1/apps/" + app + "/access")
+			aclResp, err := c.Get("/api/v1/apps/" + app + "/access")
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
-			aclData, err := readBodyRaw(aclResp)
+			aclData, err := apiclient.ReadBodyRaw(aclResp)
 			if err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
@@ -106,18 +107,18 @@ func accessSetTypeCmd() *cobra.Command {
 				exitErrorf(jsonOutput, "invalid access type %q; must be acl, logged_in, or public", accessType)
 			}
 
-			resp, err := c.patchJSON("/api/v1/apps/"+args[0], map[string]string{
+			resp, err := c.PatchJSON("/api/v1/apps/"+args[0], map[string]string{
 				"access_type": accessType,
 			})
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 			if jsonOutput {
-				data, _ := readBodyRaw(resp)
+				data, _ := apiclient.ReadBodyRaw(resp)
 				printRawJSON(data)
 				return nil
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -145,7 +146,7 @@ func accessGrantCmd() *cobra.Command {
 				exitErrorf(jsonOutput, "invalid role %q; must be viewer or collaborator", role)
 			}
 
-			resp, err := c.postJSON("/api/v1/apps/"+args[0]+"/access", map[string]string{
+			resp, err := c.PostJSON("/api/v1/apps/"+args[0]+"/access", map[string]string{
 				"principal": args[1],
 				"kind":      "user",
 				"role":      role,
@@ -153,7 +154,7 @@ func accessGrantCmd() *cobra.Command {
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
@@ -183,11 +184,11 @@ func accessRevokeCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.delete("/api/v1/apps/" + args[0] + "/access/user/" + args[1])
+			resp, err := c.Delete("/api/v1/apps/" + args[0] + "/access/user/" + args[1])
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()

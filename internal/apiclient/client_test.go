@@ -1,4 +1,4 @@
-package main
+package apiclient
 
 import (
 	"encoding/json"
@@ -25,8 +25,8 @@ func TestClient_Get(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "test-token")
-	resp, err := c.get("/api/v1/apps")
+	c := New(srv.URL, "test-token")
+	resp, err := c.Get("/api/v1/apps")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -54,8 +54,8 @@ func TestClient_PostJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "test-token")
-	resp, err := c.postJSON("/api/v1/apps", map[string]string{"name": "myapp"})
+	c := New(srv.URL, "test-token")
+	resp, err := c.PostJSON("/api/v1/apps", map[string]string{"name": "myapp"})
 	if err != nil {
 		t.Fatalf("postJSON: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestCheckResponse_Success(t *testing.T) {
 		StatusCode: 200,
 		Body:       http.NoBody,
 	}
-	if err := checkResponse(resp); err != nil {
+	if err := CheckResponse(resp); err != nil {
 		t.Errorf("expected nil, got %v", err)
 	}
 }
@@ -85,19 +85,19 @@ func TestCheckResponse_Error(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "test-token")
-	resp, err := c.get("/api/v1/apps/missing")
+	c := New(srv.URL, "test-token")
+	resp, err := c.Get("/api/v1/apps/missing")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
-	err = checkResponse(resp)
+	err = CheckResponse(resp)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	apiErr, ok := err.(*apiError)
+	apiErr, ok := err.(*APIError)
 	if !ok {
-		t.Fatalf("expected *apiError, got %T", err)
+		t.Fatalf("expected *APIError, got %T", err)
 	}
 	if apiErr.Status != 404 {
 		t.Errorf("expected status 404, got %d", apiErr.Status)
@@ -124,8 +124,8 @@ func TestClient_PatchJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "test-token")
-	resp, err := c.patchJSON("/api/v1/users/u1", map[string]string{"role": "admin"})
+	c := New(srv.URL, "test-token")
+	resp, err := c.PatchJSON("/api/v1/users/u1", map[string]string{"role": "admin"})
 	if err != nil {
 		t.Fatalf("patchJSON: %v", err)
 	}
@@ -147,8 +147,8 @@ func TestClient_Delete(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "test-token")
-	resp, err := c.delete("/api/v1/apps/myapp")
+	c := New(srv.URL, "test-token")
+	resp, err := c.Delete("/api/v1/apps/myapp")
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -175,8 +175,8 @@ func TestClient_Post(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "test-token")
-	resp, err := c.post("/api/v1/apps/a1/bundles", strings.NewReader("binary-data"), "application/gzip")
+	c := New(srv.URL, "test-token")
+	resp, err := c.Post("/api/v1/apps/a1/bundles", strings.NewReader("binary-data"), "application/gzip")
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -195,8 +195,8 @@ func TestClient_DoWithoutToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "")
-	resp, err := c.get("/api/v1/health")
+	c := New(srv.URL, "")
+	resp, err := c.Get("/api/v1/health")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -206,24 +206,24 @@ func TestClient_DoWithoutToken(t *testing.T) {
 	}
 }
 
-func TestNewStreamingClient(t *testing.T) {
-	c := newStreamingClient("https://example.com/", "tok")
-	if c.baseURL != "https://example.com" {
-		t.Errorf("expected trailing slash stripped, got %q", c.baseURL)
+func TestNewStreaming(t *testing.T) {
+	c := NewStreaming("https://example.com/", "tok")
+	if c.BaseURL != "https://example.com" {
+		t.Errorf("expected trailing slash stripped, got %q", c.BaseURL)
 	}
-	if c.httpClient.Timeout != 0 {
-		t.Errorf("expected zero timeout for streaming client, got %v", c.httpClient.Timeout)
+	if c.HTTPClient.Timeout != 0 {
+		t.Errorf("expected zero timeout for streaming client, got %v", c.HTTPClient.Timeout)
 	}
 }
 
 func TestAPIError_Error(t *testing.T) {
 	// With message.
-	e := &apiError{Status: 404, Code: "not_found", Message: "app not found"}
+	e := &APIError{Status: 404, Code: "not_found", Message: "app not found"}
 	if got := e.Error(); got != "app not found" {
 		t.Errorf("with message: got %q", got)
 	}
 	// Without message — falls back to status+code.
-	e2 := &apiError{Status: 500, Code: "internal"}
+	e2 := &APIError{Status: 500, Code: "internal"}
 	if got := e2.Error(); got != "HTTP 500: internal" {
 		t.Errorf("without message: got %q", got)
 	}
@@ -236,15 +236,15 @@ func TestDecodeJSON_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "tok")
-	resp, err := c.get("/test")
+	c := New(srv.URL, "tok")
+	resp, err := c.Get("/test")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
 	var result map[string]string
-	if err := decodeJSON(resp, &result); err != nil {
-		t.Fatalf("decodeJSON: %v", err)
+	if err := DecodeJSON(resp, &result); err != nil {
+		t.Fatalf("DecodeJSON: %v", err)
 	}
 	if result["name"] != "myapp" {
 		t.Errorf("expected name=myapp, got %q", result["name"])
@@ -258,20 +258,20 @@ func TestDecodeJSON_Error(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "tok")
-	resp, err := c.get("/test")
+	c := New(srv.URL, "tok")
+	resp, err := c.Get("/test")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
 	var result map[string]string
-	err = decodeJSON(resp, &result)
+	err = DecodeJSON(resp, &result)
 	if err == nil {
 		t.Fatal("expected error for 403 response")
 	}
-	apiErr, ok := err.(*apiError)
+	apiErr, ok := err.(*APIError)
 	if !ok {
-		t.Fatalf("expected *apiError, got %T", err)
+		t.Fatalf("expected *APIError, got %T", err)
 	}
 	if apiErr.Status != 403 {
 		t.Errorf("expected status 403, got %d", apiErr.Status)
@@ -285,15 +285,15 @@ func TestReadBodyRaw_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "tok")
-	resp, err := c.get("/test")
+	c := New(srv.URL, "tok")
+	resp, err := c.Get("/test")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
-	data, err := readBodyRaw(resp)
+	data, err := ReadBodyRaw(resp)
 	if err != nil {
-		t.Fatalf("readBodyRaw: %v", err)
+		t.Fatalf("ReadBodyRaw: %v", err)
 	}
 	if string(data) != "raw content here" {
 		t.Errorf("got %q", string(data))
@@ -307,13 +307,13 @@ func TestReadBodyRaw_Error(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "tok")
-	resp, err := c.get("/test")
+	c := New(srv.URL, "tok")
+	resp, err := c.Get("/test")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
-	_, err = readBodyRaw(resp)
+	_, err = ReadBodyRaw(resp)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
@@ -326,19 +326,34 @@ func TestCheckResponse_ErrorWithoutMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newClient(srv.URL, "tok")
-	resp, err := c.get("/test")
+	c := New(srv.URL, "tok")
+	resp, err := c.Get("/test")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
-	err = checkResponse(resp)
+	err = CheckResponse(resp)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	apiErr := err.(*apiError)
+	apiErr := err.(*APIError)
 	// When body is not valid JSON, message should be the raw body text.
 	if apiErr.Message != "plain text error" {
 		t.Errorf("expected raw body as message, got %q", apiErr.Message)
+	}
+}
+
+func TestBuildQuery(t *testing.T) {
+	got := BuildQuery("/api/v1/apps", map[string]string{
+		"search": "hello",
+		"empty":  "",
+	})
+	if got != "/api/v1/apps?search=hello" {
+		t.Errorf("got %q", got)
+	}
+
+	got = BuildQuery("/api/v1/apps", map[string]string{})
+	if got != "/api/v1/apps" {
+		t.Errorf("empty params: got %q", got)
 	}
 }

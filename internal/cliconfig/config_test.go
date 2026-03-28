@@ -1,4 +1,4 @@
-package main
+package cliconfig
 
 import (
 	"os"
@@ -12,12 +12,12 @@ func TestConfigSaveLoad(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
-	cfg := &config{
+	cfg := &Config{
 		Server: "https://example.com",
 		Token:  "by_testtoken123",
 	}
-	if err := saveConfig(cfg); err != nil {
-		t.Fatalf("saveConfig: %v", err)
+	if err := Save(cfg); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
 
 	// Verify file permissions.
@@ -29,9 +29,9 @@ func TestConfigSaveLoad(t *testing.T) {
 		t.Errorf("expected 0600 perms, got %o", info.Mode().Perm())
 	}
 
-	loaded, err := loadConfig()
+	loaded, err := Load()
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if loaded.Server != cfg.Server {
 		t.Errorf("server: got %q, want %q", loaded.Server, cfg.Server)
@@ -45,9 +45,9 @@ func TestConfigLoadMissing(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
-	cfg, err := loadConfig()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if cfg.Server != "" || cfg.Token != "" {
 		t.Errorf("expected empty config, got %+v", cfg)
@@ -59,19 +59,19 @@ func TestResolveCredentials_EnvVarsPrecedence(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
 	// Save config file.
-	cfg := &config{
+	cfg := &Config{
 		Server: "https://file.example.com",
 		Token:  "by_filetoken",
 	}
-	saveConfig(cfg)
+	Save(cfg)
 
 	// Env vars should take precedence.
 	t.Setenv("BLOCKYARD_URL", "https://env.example.com")
 	t.Setenv("BLOCKYARD_TOKEN", "by_envtoken")
 
-	serverURL, token, err := resolveCredentials()
+	serverURL, token, err := ResolveCredentials()
 	if err != nil {
-		t.Fatalf("resolveCredentials: %v", err)
+		t.Fatalf("ResolveCredentials: %v", err)
 	}
 	if serverURL != "https://env.example.com" {
 		t.Errorf("server: got %q, want env value", serverURL)
@@ -87,15 +87,15 @@ func TestResolveCredentials_FallbackToFile(t *testing.T) {
 	t.Setenv("BLOCKYARD_URL", "")
 	t.Setenv("BLOCKYARD_TOKEN", "")
 
-	cfg := &config{
+	cfg := &Config{
 		Server: "https://file.example.com",
 		Token:  "by_filetoken",
 	}
-	saveConfig(cfg)
+	Save(cfg)
 
-	serverURL, token, err := resolveCredentials()
+	serverURL, token, err := ResolveCredentials()
 	if err != nil {
-		t.Fatalf("resolveCredentials: %v", err)
+		t.Fatalf("ResolveCredentials: %v", err)
 	}
 	if serverURL != "https://file.example.com" {
 		t.Errorf("server: got %q, want file value", serverURL)
@@ -111,15 +111,15 @@ func TestResolveCredentials_NoConfig(t *testing.T) {
 	t.Setenv("BLOCKYARD_URL", "")
 	t.Setenv("BLOCKYARD_TOKEN", "")
 
-	_, _, err := resolveCredentials()
+	_, _, err := ResolveCredentials()
 	if err == nil {
 		t.Fatal("expected error when no config exists")
 	}
 }
 
-func TestConfigDir_FallbackToHome(t *testing.T) {
+func TestDir_FallbackToHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
-	dir := configDir()
+	dir := Dir()
 	// Should fall back to $HOME/.config/by.
 	if dir == "" {
 		t.Fatal("expected non-empty config dir")
@@ -134,18 +134,18 @@ func TestResolveCredentials_PartialEnv(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
 	// Config file has both, env overrides only the URL.
-	cfg := &config{
+	cfg := &Config{
 		Server: "https://file.example.com",
 		Token:  "by_filetoken",
 	}
-	saveConfig(cfg)
+	Save(cfg)
 
 	t.Setenv("BLOCKYARD_URL", "https://env.example.com")
 	t.Setenv("BLOCKYARD_TOKEN", "")
 
-	serverURL, token, err := resolveCredentials()
+	serverURL, token, err := ResolveCredentials()
 	if err != nil {
-		t.Fatalf("resolveCredentials: %v", err)
+		t.Fatalf("ResolveCredentials: %v", err)
 	}
 	if serverURL != "https://env.example.com" {
 		t.Errorf("server: got %q, want env value", serverURL)

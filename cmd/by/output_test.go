@@ -45,21 +45,6 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
-func TestBuildQuery(t *testing.T) {
-	got := buildQuery("/api/v1/apps", map[string]string{
-		"search": "hello",
-		"empty":  "",
-	})
-	if got != "/api/v1/apps?search=hello" {
-		t.Errorf("got %q", got)
-	}
-
-	got = buildQuery("/api/v1/apps", map[string]string{})
-	if got != "/api/v1/apps" {
-		t.Errorf("empty params: got %q", got)
-	}
-}
-
 func TestJoinOr(t *testing.T) {
 	if got := joinOr(nil); got != "" {
 		t.Errorf("nil: got %q", got)

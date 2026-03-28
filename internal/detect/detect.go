@@ -1,4 +1,4 @@
-package main
+package detect
 
 import (
 	"crypto/sha256"
@@ -11,10 +11,10 @@ import (
 	"github.com/cynkra/blockyard/internal/manifest"
 )
 
-// detectResult holds the results of app detection from a source directory.
-type detectResult struct {
+// Result holds the results of app detection from a source directory.
+type Result struct {
 	// Which input case was detected.
-	InputCase inputCase
+	InputCase InputCase
 	// App name (directory basename).
 	Name string
 	// App mode (shiny).
@@ -27,52 +27,55 @@ type detectResult struct {
 	RepoLabel string
 }
 
-type inputCase int
+// InputCase represents how the app's dependencies are specified.
+type InputCase int
 
 const (
-	caseManifest    inputCase = iota // 1a: manifest.json exists
-	caseRenvLock                     // 1b: renv.lock exists
-	casePinFlag                      // 1c: --pin, need R + renv
-	caseDescription                  // 2a: DESCRIPTION exists
-	caseBareScripts                  // 2b: bare scripts only
+	CaseManifest    InputCase = iota // 1a: manifest.json exists
+	CaseRenvLock                     // 1b: renv.lock exists
+	CasePinFlag                      // 1c: --pin, need R + renv
+	CaseDescription                  // 2a: DESCRIPTION exists
+	CaseBareScripts                  // 2b: bare scripts only
 )
 
-func (c inputCase) String() string {
+func (c InputCase) String() string {
 	switch c {
-	case caseManifest:
+	case CaseManifest:
 		return "manifest.json"
-	case caseRenvLock:
+	case CaseRenvLock:
 		return "renv.lock"
-	case casePinFlag:
+	case CasePinFlag:
 		return "--pin (renv snapshot)"
-	case caseDescription:
+	case CaseDescription:
 		return "DESCRIPTION"
-	case caseBareScripts:
+	case CaseBareScripts:
 		return "bare scripts"
 	default:
 		return "unknown"
 	}
 }
 
-// detectApp inspects the source directory and determines the input case,
+const DefaultRepoURL = "https://p3m.dev/cran/latest"
+
+// App inspects the source directory and determines the input case,
 // app mode, and entrypoint.
-func detectApp(dir string, pinFlag bool) (*detectResult, []string) {
+func App(dir string, pinFlag bool) (*Result, []string) {
 	name := filepath.Base(dir)
-	mode := detectAppMode(dir)
-	entrypoint := detectEntrypoint(dir)
+	mode := AppMode(dir)
+	entrypoint := Entrypoint(dir)
 	var warnings []string
 
 	// Priority: manifest.json > renv.lock > DESCRIPTION > bare scripts.
-	hasManifest := fileExists(filepath.Join(dir, "manifest.json"))
-	hasRenvLock := fileExists(filepath.Join(dir, "renv.lock"))
-	hasDescription := fileExists(filepath.Join(dir, "DESCRIPTION"))
+	hasManifest := FileExists(filepath.Join(dir, "manifest.json"))
+	hasRenvLock := FileExists(filepath.Join(dir, "renv.lock"))
+	hasDescription := FileExists(filepath.Join(dir, "DESCRIPTION"))
 
-	var ic inputCase
+	var ic InputCase
 	var depsLabel, repoLabel string
 
 	switch {
 	case hasManifest:
-		ic = caseManifest
+		ic = CaseManifest
 		depsLabel = "manifest.json"
 		if hasRenvLock {
 			warnings = append(warnings, "Using manifest.json; ignoring renv.lock")
@@ -81,29 +84,29 @@ func detectApp(dir string, pinFlag bool) (*detectResult, []string) {
 			warnings = append(warnings, "Using manifest.json; ignoring DESCRIPTION")
 		}
 	case hasRenvLock:
-		ic = caseRenvLock
+		ic = CaseRenvLock
 		depsLabel = "pinned (renv.lock found)"
 		if hasDescription {
 			warnings = append(warnings, "Using renv.lock; ignoring DESCRIPTION")
 		}
 	case pinFlag:
-		ic = casePinFlag
+		ic = CasePinFlag
 		depsLabel = "pinned (--pin, will snapshot)"
 	case hasDescription:
-		ic = caseDescription
+		ic = CaseDescription
 		depsLabel = "unpinned (DESCRIPTION)"
 	default:
-		ic = caseBareScripts
+		ic = CaseBareScripts
 		depsLabel = "unpinned (server scans)"
 	}
 
-	if ic == caseRenvLock || ic == caseManifest {
+	if ic == CaseRenvLock || ic == CaseManifest {
 		repoLabel = "(from lockfile/manifest)"
 	} else {
-		repoLabel = defaultRepoURL
+		repoLabel = DefaultRepoURL
 	}
 
-	return &detectResult{
+	return &Result{
 		InputCase:  ic,
 		Name:       name,
 		Mode:       mode,
@@ -113,27 +116,25 @@ func detectApp(dir string, pinFlag bool) (*detectResult, []string) {
 	}, warnings
 }
 
-const defaultRepoURL = "https://p3m.dev/cran/latest"
-
-// detectAppMode infers the application mode from directory contents.
-func detectAppMode(dir string) string {
+// AppMode infers the application mode from directory contents.
+func AppMode(dir string) string {
 	return "shiny"
 }
 
-// detectEntrypoint returns the primary entrypoint file name.
-func detectEntrypoint(dir string) string {
-	if fileExists(filepath.Join(dir, "app.R")) {
+// Entrypoint returns the primary entrypoint file name.
+func Entrypoint(dir string) string {
+	if FileExists(filepath.Join(dir, "app.R")) {
 		return "app.R"
 	}
-	if fileExists(filepath.Join(dir, "server.R")) {
+	if FileExists(filepath.Join(dir, "server.R")) {
 		return "server.R"
 	}
 	return "app.R"
 }
 
-// computeFileChecksums walks the directory and computes SHA-256 checksums
+// FileChecksums walks the directory and computes SHA-256 checksums
 // for all regular files, skipping hidden files and renv artifacts.
-func computeFileChecksums(dir string) map[string]manifest.FileInfo {
+func FileChecksums(dir string) map[string]manifest.FileInfo {
 	files := make(map[string]manifest.FileInfo)
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -163,15 +164,21 @@ func computeFileChecksums(dir string) map[string]manifest.FileInfo {
 	return files
 }
 
-// fileExists checks if a path is a regular file.
-func fileExists(path string) bool {
+// FileExists checks if a path is a regular file.
+func FileExists(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && !fi.IsDir()
 }
 
-// defaultRepositories returns the default repository list.
-func defaultRepositories() []manifest.Repository {
+// DirExists checks if a path is a directory.
+func DirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// DefaultRepositories returns the default repository list.
+func DefaultRepositories() []manifest.Repository {
 	return []manifest.Repository{
-		{Name: "CRAN", URL: defaultRepoURL},
+		{Name: "CRAN", URL: DefaultRepoURL},
 	}
 }

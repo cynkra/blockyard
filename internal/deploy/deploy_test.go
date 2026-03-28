@@ -1,4 +1,4 @@
-package main
+package deploy
 
 import (
 	"archive/tar"
@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cynkra/blockyard/internal/detect"
 	"github.com/cynkra/blockyard/internal/manifest"
 )
 
@@ -21,10 +22,10 @@ func TestPrepareManifest_CaseManifest(t *testing.T) {
 	m.Write(filepath.Join(dir, "manifest.json"))
 	os.WriteFile(filepath.Join(dir, "app.R"), []byte("# app"), 0o644)
 
-	det := &detectResult{InputCase: caseManifest, Mode: "shiny", Entrypoint: "app.R"}
-	result, err := prepareManifest(dir, det, "")
+	det := &detect.Result{InputCase: detect.CaseManifest, Mode: "shiny", Entrypoint: "app.R"}
+	result, err := PrepareManifest(dir, det, "")
 	if err != nil {
-		t.Fatalf("prepareManifest: %v", err)
+		t.Fatalf("PrepareManifest: %v", err)
 	}
 	if result == nil {
 		t.Fatal("expected non-nil manifest")
@@ -45,10 +46,10 @@ func TestPrepareManifest_CaseRenvLock(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "renv.lock"), []byte(lockJSON), 0o644)
 	os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)"), 0o644)
 
-	det := &detectResult{InputCase: caseRenvLock, Mode: "shiny", Entrypoint: "app.R"}
-	result, err := prepareManifest(dir, det, "")
+	det := &detect.Result{InputCase: detect.CaseRenvLock, Mode: "shiny", Entrypoint: "app.R"}
+	result, err := PrepareManifest(dir, det, "")
 	if err != nil {
-		t.Fatalf("prepareManifest: %v", err)
+		t.Fatalf("PrepareManifest: %v", err)
 	}
 	if result == nil {
 		t.Fatal("expected non-nil manifest")
@@ -66,10 +67,10 @@ func TestPrepareManifest_CaseDescription(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "DESCRIPTION"), []byte("Imports: shiny\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)"), 0o644)
 
-	det := &detectResult{InputCase: caseDescription, Mode: "shiny", Entrypoint: "app.R"}
-	result, err := prepareManifest(dir, det, "")
+	det := &detect.Result{InputCase: detect.CaseDescription, Mode: "shiny", Entrypoint: "app.R"}
+	result, err := PrepareManifest(dir, det, "")
 	if err != nil {
-		t.Fatalf("prepareManifest: %v", err)
+		t.Fatalf("PrepareManifest: %v", err)
 	}
 	if result == nil {
 		t.Fatal("expected non-nil manifest")
@@ -85,10 +86,10 @@ func TestPrepareManifest_CaseDescription(t *testing.T) {
 func TestPrepareManifest_CaseBareScripts(t *testing.T) {
 	dir := t.TempDir()
 
-	det := &detectResult{InputCase: caseBareScripts, Mode: "shiny", Entrypoint: "app.R"}
-	result, err := prepareManifest(dir, det, "")
+	det := &detect.Result{InputCase: detect.CaseBareScripts, Mode: "shiny", Entrypoint: "app.R"}
+	result, err := PrepareManifest(dir, det, "")
 	if err != nil {
-		t.Fatalf("prepareManifest: %v", err)
+		t.Fatalf("PrepareManifest: %v", err)
 	}
 	if result != nil {
 		t.Error("expected nil manifest for bare scripts")
@@ -103,9 +104,9 @@ func TestCreateArchive(t *testing.T) {
 	// Hidden file should be skipped.
 	os.WriteFile(filepath.Join(dir, ".hidden"), []byte("secret"), 0o644)
 
-	archive, err := createArchive(dir)
+	archive, err := CreateArchive(dir)
 	if err != nil {
-		t.Fatalf("createArchive: %v", err)
+		t.Fatalf("CreateArchive: %v", err)
 	}
 	defer os.Remove(archive.Name())
 	defer archive.Close()
@@ -141,12 +142,12 @@ func TestCreateArchive(t *testing.T) {
 }
 
 func TestParseReposFlag(t *testing.T) {
-	repos := parseReposFlag("")
-	if len(repos) != 1 || repos[0].URL != defaultRepoURL {
+	repos := ParseReposFlag("")
+	if len(repos) != 1 || repos[0].URL != detect.DefaultRepoURL {
 		t.Errorf("empty flag should return default repos, got %v", repos)
 	}
 
-	repos = parseReposFlag("https://cran.r-project.org,https://bioc.example.com")
+	repos = ParseReposFlag("https://cran.r-project.org,https://bioc.example.com")
 	if len(repos) != 2 {
 		t.Fatalf("expected 2 repos, got %d", len(repos))
 	}
@@ -159,8 +160,8 @@ func TestParseReposFlag(t *testing.T) {
 }
 
 func TestParseReposFlag_WhitespaceOnly(t *testing.T) {
-	repos := parseReposFlag("  ,  ,  ")
-	if len(repos) != 1 || repos[0].URL != defaultRepoURL {
+	repos := ParseReposFlag("  ,  ,  ")
+	if len(repos) != 1 || repos[0].URL != detect.DefaultRepoURL {
 		t.Errorf("whitespace-only entries should fall back to defaults, got %v", repos)
 	}
 }
@@ -171,9 +172,9 @@ func TestCreateArchive_SkipsHiddenDir(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".git", "objects"), 0o755)
 	os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main"), 0o644)
 
-	archive, err := createArchive(dir)
+	archive, err := CreateArchive(dir)
 	if err != nil {
-		t.Fatalf("createArchive: %v", err)
+		t.Fatalf("CreateArchive: %v", err)
 	}
 	defer os.Remove(archive.Name())
 	defer archive.Close()
@@ -201,9 +202,9 @@ func TestCreateArchive_SkipsHiddenDir(t *testing.T) {
 func TestCreateArchive_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 
-	archive, err := createArchive(dir)
+	archive, err := CreateArchive(dir)
 	if err != nil {
-		t.Fatalf("createArchive: %v", err)
+		t.Fatalf("CreateArchive: %v", err)
 	}
 	defer os.Remove(archive.Name())
 	defer archive.Close()
@@ -231,28 +232,12 @@ func TestCreateArchive_EmptyDir(t *testing.T) {
 }
 
 func TestPrepareManifest_UnknownCase(t *testing.T) {
-	det := &detectResult{InputCase: inputCase(99), Mode: "shiny", Entrypoint: "app.R"}
-	_, err := prepareManifest(t.TempDir(), det, "")
+	det := &detect.Result{InputCase: detect.InputCase(99), Mode: "shiny", Entrypoint: "app.R"}
+	_, err := PrepareManifest(t.TempDir(), det, "")
 	if err == nil {
 		t.Fatal("expected error for unknown input case")
 	}
 	if err.Error() != "unknown input case" {
 		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestDirExists(t *testing.T) {
-	dir := t.TempDir()
-	if !dirExists(dir) {
-		t.Error("expected true for existing directory")
-	}
-	if dirExists(filepath.Join(dir, "nonexistent")) {
-		t.Error("expected false for nonexistent path")
-	}
-	// File is not a directory.
-	f := filepath.Join(dir, "file.txt")
-	os.WriteFile(f, []byte("hi"), 0o644)
-	if dirExists(f) {
-		t.Error("expected false for regular file")
 	}
 }

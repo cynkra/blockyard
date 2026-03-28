@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -41,7 +42,7 @@ func logsCmd() *cobra.Command {
 			}
 
 			sc := mustStreamingClient(jsonOutput)
-			resp, err := sc.get(buildQuery("/api/v1/apps/"+app+"/logs", params))
+			resp, err := sc.Get(apiclient.BuildQuery("/api/v1/apps/"+app+"/logs", params))
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
@@ -72,8 +73,8 @@ func logsCmd() *cobra.Command {
 
 // autoSelectWorker picks the most recently started active worker, or falls
 // back to the most recently ended worker.
-func autoSelectWorker(c *client, app string, jsonOutput bool) (workerID, note string) {
-	resp, err := c.get("/api/v1/apps/" + app + "/runtime")
+func autoSelectWorker(c *apiclient.Client, app string, jsonOutput bool) (workerID, note string) {
+	resp, err := c.Get("/api/v1/apps/" + app + "/runtime")
 	if err != nil || resp.StatusCode != 200 {
 		if resp != nil {
 			resp.Body.Close()
