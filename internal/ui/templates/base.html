@@ -6,11 +6,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{block "title" .}}blockyard{{end}}</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/htmx.min.js"></script>
 </head>
 <body>
+    {{if .ActivePage}}
+    <div class="page-layout">
+        <nav class="left-nav">
+            <div class="left-nav-brand">blockyard</div>
+            <a href="/" class="left-nav-link {{if eq .ActivePage "apps"}}active{{end}}">Apps</a>
+            <a href="/deployments" class="left-nav-link {{if eq .ActivePage "deployments"}}active{{end}}">Deployment History</a>
+            {{if .OpenbaoEnabled}}
+            <a href="/api-keys" class="left-nav-link {{if eq .ActivePage "api-keys"}}active{{end}}">API Keys</a>
+            {{end}}
+            <a href="/profile" class="left-nav-link {{if eq .ActivePage "profile"}}active{{end}}">Profile</a>
+            <div class="left-nav-version">{{.Version}}</div>
+        </nav>
+        <main class="main-content">
+            <div class="container">
+                {{block "content" .}}{{end}}
+            </div>
+        </main>
+    </div>
+    {{else}}
     <div class="container">
         {{block "content" .}}{{end}}
     </div>
+    {{end}}
 </body>
 </html>
 {{end}}

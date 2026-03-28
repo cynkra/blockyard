@@ -1,0 +1,25 @@
+{{template "base" .}}
+
+{{define "title"}}API Keys — blockyard{{end}}
+
+{{define "content"}}
+<div class="page-header">
+    <h1>API Keys</h1>
+    <p class="page-description">Manage credentials for external services.</p>
+</div>
+{{range .Services}}
+<div class="credential-row">
+    <div class="credential-info">
+        <span class="credential-label">{{.Label}}</span>
+        <span class="status-badge status-{{.Status}}">{{if eq .Status "configured"}}configured{{else}}not set{{end}}</span>
+    </div>
+    <form class="credential-form"
+          hx-post="/api/v1/users/me/credentials/{{.ID}}"
+          hx-swap="none"
+          hx-on::after-request="if(event.detail.successful) location.reload()">
+        <input type="password" name="api_key" placeholder="Enter API key" required>
+        <button type="submit" class="btn btn-sm">Save</button>
+    </form>
+</div>
+{{end}}
+{{end}}

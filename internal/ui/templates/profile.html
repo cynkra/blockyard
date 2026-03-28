@@ -1,0 +1,65 @@
+{{template "base" .}}
+
+{{define "title"}}Profile — blockyard{{end}}
+
+{{define "content"}}
+<div class="page-header">
+    <h1>Profile</h1>
+</div>
+<div class="profile-section">
+    <div class="profile-field">
+        <label>Display name</label>
+        <p>{{.User.DisplayName}}</p>
+    </div>
+    <div class="profile-field">
+        <label>Email</label>
+        <p>{{.User.Email}}</p>
+    </div>
+    <div class="profile-field">
+        <label>Role</label>
+        <span class="role-badge">{{.User.Role}}</span>
+    </div>
+    <form method="POST" action="/logout">
+        <button type="submit" class="btn">Sign out</button>
+    </form>
+</div>
+
+<div id="tokens" class="pat-section">
+    <h2>Personal Access Tokens</h2>
+    <p class="section-description">Tokens authenticate against the blockyard API.
+       Treat them like passwords.</p>
+
+    <form class="pat-create-form"
+          hx-post="/ui/tokens"
+          hx-target="#pat-result"
+          hx-swap="innerHTML">
+        <input type="text" name="name" placeholder="Token name (e.g., CI deploy)" required>
+        <button type="submit" class="btn">Create token</button>
+    </form>
+    <div id="pat-result"></div>
+
+    {{if .Tokens}}
+    <table class="data-table">
+        <thead>
+            <tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr>
+        </thead>
+        <tbody>
+        {{range .Tokens}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td>{{.CreatedAt | timeAgo}}</td>
+                <td>{{if .LastUsedAt}}{{.LastUsedAt | timeAgo}}{{else}}Never{{end}}</td>
+                <td><button class="btn btn-sm btn-danger"
+                            hx-delete="/api/v1/users/me/tokens/{{.ID}}"
+                            hx-confirm="Revoke token '{{.Name}}'? This cannot be undone."
+                            hx-target="closest tr"
+                            hx-swap="outerHTML swap:0.2s">Revoke</button></td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="empty-state">No tokens created.</p>
+    {{end}}
+</div>
+{{end}}
