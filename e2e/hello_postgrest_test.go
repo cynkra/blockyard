@@ -25,8 +25,6 @@ func TestHelloPostgrest(t *testing.T) {
 		cookies1 []*http.Cookie
 		cookies2 []*http.Cookie
 		token1   string
-		appID    string
-		client1  *APIClient
 	)
 
 	t.Run("vault_oidc_configured", func(t *testing.T) {
@@ -90,20 +88,28 @@ func TestHelloPostgrest(t *testing.T) {
 	t.Run("user1_deploy", func(t *testing.T) {
 		cookies1 = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token1 = createPAT(t, baseURL, cookies1)
-		client1 = &APIClient{BaseURL: baseURL, Token: token1, Cookies: cookies1}
 
-		appID = client1.CreateApp(t, "hello-postgrest")
-		client1.UpdateApp(t, appID, `{"access_type":"logged_in","max_sessions_per_worker":10}`)
+		appDir := copyAppDir(t, "../examples/hello-postgrest/app")
 
-		bundle := makeBundle(t, "../examples/hello-postgrest/app")
-		taskID, _ := client1.UploadBundle(t, appID, bundle)
-		client1.PollTask(t, taskID, 10*time.Minute)
+		var result map[string]any
+		runCLIJSON(t, baseURL, token1, &result,
+			"deploy", appDir, "--yes", "--wait", "--name", "hello-postgrest")
 
-		client1.StartApp(t, appID)
+		if s, _ := result["status"].(string); s != "completed" {
+			t.Fatalf("deploy status: got %q, want completed", s)
+		}
+
+		// Configure access and scaling via CLI.
+		runCLI(t, baseURL, token1, "access", "set-type", "hello-postgrest", "logged_in")
+		runCLI(t, baseURL, token1, "scale", "hello-postgrest", "--max-sessions", "10")
+
+		// Enable and trigger cold-start via proxy.
+		runCLI(t, baseURL, token1, "enable", "hello-postgrest")
+		fetchAppPage(t, baseURL, "hello-postgrest", cookies1, 120*time.Second)
 	})
 
 	t.Run("user1_app_serves", func(t *testing.T) {
-		if appID == "" {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
@@ -117,7 +123,7 @@ func TestHelloPostgrest(t *testing.T) {
 	})
 
 	t.Run("user1_websocket", func(t *testing.T) {
-		if appID == "" {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
@@ -125,7 +131,7 @@ func TestHelloPostgrest(t *testing.T) {
 	})
 
 	t.Run("user2_access", func(t *testing.T) {
-		if appID == "" {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
@@ -146,11 +152,12 @@ func TestHelloPostgrest(t *testing.T) {
 	})
 
 	t.Run("stop_and_cleanup", func(t *testing.T) {
-		if appID == "" || client1 == nil {
+		if token1 == "" {
 			t.Skip("depends on user1_deploy")
 		}
 
-		client1.StopApp(t, appID)
-		client1.DeleteApp(t, appID)
+		runCLI(t, baseURL, token1, "disable", "hello-postgrest")
+		waitForAppStatus(t, baseURL, token1, "hello-postgrest", "stopped", 120*time.Second)
+		runCLI(t, baseURL, token1, "delete", "hello-postgrest")
 	})
 }

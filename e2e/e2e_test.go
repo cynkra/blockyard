@@ -3,8 +3,10 @@
 package e2e_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -16,6 +18,9 @@ const (
 	demoSub2       = "Cg1kZW1vLXVzZXItMDAyEgVsb2NhbA"
 	vaultRootToken = "root-dev-token"
 )
+
+// byBin is the path to the compiled CLI binary, set once in TestMain.
+var byBin string
 
 func TestMain(m *testing.M) {
 	// Find repo root.
@@ -36,5 +41,21 @@ func TestMain(m *testing.M) {
 		panic("docker build failed: " + err.Error())
 	}
 
-	os.Exit(m.Run())
+	// Build the CLI binary so e2e tests exercise it end-to-end.
+	tmpDir, err := os.MkdirTemp("", "by-e2e-*")
+	if err != nil {
+		panic("temp dir: " + err.Error())
+	}
+
+	byBin = filepath.Join(tmpDir, "by")
+	build := exec.Command("go", "build", "-o", byBin, "./cmd/by")
+	build.Dir = repoRoot
+	if out, err := build.CombinedOutput(); err != nil {
+		os.RemoveAll(tmpDir)
+		panic(fmt.Sprintf("build CLI: %v\n%s", err, out))
+	}
+
+	code := m.Run()
+	os.RemoveAll(tmpDir)
+	os.Exit(code)
 }

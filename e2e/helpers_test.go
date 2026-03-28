@@ -3,9 +3,7 @@
 package e2e_test
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -150,6 +148,15 @@ func dexLogin(t *testing.T, baseURL, dexURL, email, password string) []*http.Coo
 // PAT creation
 // ---------------------------------------------------------------------------
 
+// httpClient is a shared client with a generous timeout for CI.
+// Disable keep-alive to prevent stale connection issues on GHA runners.
+var httpClient = &http.Client{
+	Timeout: 120 * time.Second,
+	Transport: &http.Transport{
+		DisableKeepAlives: true,
+	},
+}
+
 func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 	t.Helper()
 
@@ -186,322 +193,120 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 }
 
 // ---------------------------------------------------------------------------
-// API Client
+// CLI helpers
 // ---------------------------------------------------------------------------
 
-// httpClient is a shared client with a generous timeout for CI.
-// Disable keep-alive to prevent stale connection issues on GHA runners.
-var httpClient = &http.Client{
-	Timeout: 120 * time.Second,
-	Transport: &http.Transport{
-		DisableKeepAlives: true,
-	},
-}
-
-type APIClient struct {
-	BaseURL string
-	Token   string
-	Cookies []*http.Cookie // session cookies for proxy requests
-}
-
-func (c *APIClient) do(method, path string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest(method, c.BaseURL+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return httpClient.Do(req)
-}
-
-func (c *APIClient) doOctet(method, path string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest(method, c.BaseURL+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/octet-stream")
-	return httpClient.Do(req)
-}
-
-// CreateApp creates an app and returns its ID. Handles 409 (already exists)
-// by listing apps and finding the ID.
-func (c *APIClient) CreateApp(t *testing.T, name string) string {
+// runCLI executes the by CLI binary with the given arguments.
+// BLOCKYARD_URL and BLOCKYARD_TOKEN are injected via env vars.
+// Returns stdout on success; fails the test on non-zero exit.
+func runCLI(t *testing.T, serverURL, token string, args ...string) string {
 	t.Helper()
-
-	resp, err := c.do("POST", "/api/v1/apps", strings.NewReader(fmt.Sprintf(`{"name":%q}`, name)))
-	if err != nil {
-		t.Fatalf("create app: %v", err)
+	cmd := exec.Command(byBin, args...)
+	cmd.Env = append(os.Environ(),
+		"BLOCKYARD_URL="+serverURL,
+		"BLOCKYARD_TOKEN="+token,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("by %s: %v\nstdout: %s\nstderr: %s",
+			strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusCreated {
-		var result struct {
-			ID string `json:"id"`
-		}
-		json.NewDecoder(resp.Body).Decode(&result)
-		return result.ID
-	}
-
-	if resp.StatusCode == http.StatusConflict {
-		// App already exists — find it.
-		return c.findAppByName(t, name)
-	}
-
-	b, _ := io.ReadAll(resp.Body)
-	t.Fatalf("create app %q: status %d, body: %s", name, resp.StatusCode, b)
-	return ""
+	return stdout.String()
 }
 
-func (c *APIClient) findAppByName(t *testing.T, name string) string {
+// runCLIJSON executes the by CLI with --json appended and decodes stdout
+// into v. Fails the test on non-zero exit or JSON parse errors.
+func runCLIJSON(t *testing.T, serverURL, token string, v any, args ...string) {
 	t.Helper()
-	resp, err := c.do("GET", "/api/v1/apps", nil)
-	if err != nil {
-		t.Fatalf("list apps: %v", err)
+	args = append(args, "--json")
+	out := runCLI(t, serverURL, token, args...)
+	if err := json.Unmarshal([]byte(out), v); err != nil {
+		t.Fatalf("by %s: parse JSON: %v\noutput: %s",
+			strings.Join(args, " "), err, out)
 	}
-	defer resp.Body.Close()
-
-	var apps []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	json.NewDecoder(resp.Body).Decode(&apps)
-	for _, a := range apps {
-		if a.Name == name {
-			return a.ID
-		}
-	}
-	t.Fatalf("app %q not found in list", name)
-	return ""
 }
 
-func (c *APIClient) UpdateApp(t *testing.T, id string, body string) {
+// runCLIFail executes the by CLI and expects a non-zero exit code.
+// Returns stdout and stderr.
+func runCLIFail(t *testing.T, serverURL, token string, args ...string) (stdout, stderr string) {
 	t.Helper()
-	resp, err := c.do("PATCH", "/api/v1/apps/"+id, strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("update app: %v", err)
+	cmd := exec.Command(byBin, args...)
+	cmd.Env = append(os.Environ(),
+		"BLOCKYARD_URL="+serverURL,
+		"BLOCKYARD_TOKEN="+token,
+	)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("by %s: expected failure but succeeded\nstdout: %s",
+			strings.Join(args, " "), outBuf.String())
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("update app: status %d", resp.StatusCode)
-	}
+	return outBuf.String(), errBuf.String()
 }
 
-func (c *APIClient) UploadBundle(t *testing.T, appID string, tarGz []byte) (taskID, bundleID string) {
-	t.Helper()
-	resp, err := c.doOctet("POST", "/api/v1/apps/"+appID+"/bundles", bytes.NewReader(tarGz))
-	if err != nil {
-		t.Fatalf("upload bundle: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusAccepted {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("upload bundle: status %d, body: %s", resp.StatusCode, b)
-	}
-
-	var result struct {
-		TaskID   string `json:"task_id"`
-		BundleID string `json:"bundle_id"`
-	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	return result.TaskID, result.BundleID
-}
-
-func (c *APIClient) PollTask(t *testing.T, taskID string, timeout time.Duration) {
+// waitForAppStatus polls `by get <app> --json` until the app reaches
+// the desired status or the timeout expires.
+func waitForAppStatus(t *testing.T, serverURL, token, app, wantStatus string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	for {
-		resp, err := c.do("GET", "/api/v1/tasks/"+taskID, nil)
-		if err != nil {
-			t.Fatalf("poll task: %v", err)
-		}
-		var result struct {
-			Status string `json:"status"`
-		}
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-
-		switch result.Status {
-		case "completed":
-			return
-		case "failed":
-			t.Fatalf("task %s failed", taskID)
-		}
-
-		if time.Now().After(deadline) {
-			t.Fatalf("task %s did not complete within %s (last status: %s)",
-				taskID, timeout, result.Status)
-		}
-		time.Sleep(5 * time.Second)
-	}
-}
-
-func (c *APIClient) StartApp(t *testing.T, appID string) string {
-	t.Helper()
-	// Ensure the app is enabled, then trigger a cold-start by hitting
-	// the app URL with session cookies. The proxy spawns a worker on
-	// first request. Retry until the worker is healthy.
-
-	// First, ensure the app is enabled (it should be by default after deploy).
-	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/enable", nil)
-	if err != nil {
-		t.Fatalf("enable app: %v", err)
-	}
-	resp.Body.Close()
-
-	// Look up the app name for the proxy URL.
-	_, appBody := c.GetApp(t, appID)
-	appName, _ := appBody["name"].(string)
-	if appName == "" {
-		t.Fatal("start app: could not determine app name")
-	}
-
-	// Hit the app URL with cookies to trigger cold-start. The proxy
-	// authenticates via session cookies, not bearer tokens.
-	var lastErr error
-	for attempt := 0; attempt < 10; attempt++ {
-		if attempt > 0 {
-			t.Logf("start app: retrying (attempt %d) after: %v", attempt+1, lastErr)
-			time.Sleep(5 * time.Second)
-		}
-		req, reqErr := http.NewRequest("GET", c.BaseURL+"/app/"+appName+"/", nil)
-		if reqErr != nil {
-			t.Fatalf("start app: %v", reqErr)
-		}
-		for _, cookie := range c.Cookies {
-			req.AddCookie(cookie)
-		}
-		noRedirect := &http.Client{
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		resp, reqErr := noRedirect.Do(req)
-		if reqErr != nil {
-			lastErr = reqErr
-			continue
-		}
-		resp.Body.Close()
-		// 502/503 = worker not ready yet or app disabled.
-		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable {
-			lastErr = fmt.Errorf("status %d", resp.StatusCode)
-			continue
-		}
-		// 302 = redirect to login (cookies not working).
-		if resp.StatusCode == http.StatusFound {
-			lastErr = fmt.Errorf("redirected to login (status 302)")
-			continue
-		}
-		// Worker is up. Get the runtime to find the worker ID.
-		rtResp, rtErr := c.do("GET", "/api/v1/apps/"+appID+"/runtime", nil)
-		if rtErr != nil {
-			t.Fatalf("start app: get runtime: %v", rtErr)
-		}
-		var rt struct {
-			Workers []struct {
-				ID string `json:"id"`
-			} `json:"workers"`
-		}
-		json.NewDecoder(rtResp.Body).Decode(&rt)
-		rtResp.Body.Close()
-		if len(rt.Workers) > 0 {
-			return rt.Workers[0].ID
-		}
-		lastErr = fmt.Errorf("no workers in runtime response")
-	}
-	t.Fatalf("start app: all attempts failed, last error: %v", lastErr)
-	return ""
-}
-
-func (c *APIClient) StopApp(t *testing.T, appID string) {
-	t.Helper()
-	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/disable", nil)
-	if err != nil {
-		t.Fatalf("disable app: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("disable app: status %d, body: %s", resp.StatusCode, b)
-	}
-
-	// Disable triggers async worker drain. Poll until the app reports stopped.
-	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
-		status, body := c.GetApp(t, appID)
-		if status == 200 {
-			if s, _ := body["status"].(string); s == "stopped" {
-				return
-			}
+		var info map[string]any
+		runCLIJSON(t, serverURL, token, &info, "get", app)
+		if s, _ := info["status"].(string); s == wantStatus {
+			return
 		}
 		time.Sleep(2 * time.Second)
 	}
-	t.Log("disable app: timed out waiting for stopped status")
+	t.Fatalf("app %s did not reach status %q within %s", app, wantStatus, timeout)
 }
 
-func (c *APIClient) DeleteApp(t *testing.T, appID string) {
+// copyAppDir copies src to a temp directory so `by deploy` can write
+// manifest.json without modifying the source tree.
+func copyAppDir(t *testing.T, src string) string {
 	t.Helper()
-	resp, err := c.do("DELETE", "/api/v1/apps/"+appID, nil)
+	absSrc, err := filepath.Abs(src)
 	if err != nil {
-		t.Fatalf("delete app: %v", err)
+		t.Fatalf("abs path: %v", err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete app: status %d", resp.StatusCode)
-	}
-}
 
-func (c *APIClient) GetApp(t *testing.T, id string) (int, map[string]any) {
-	t.Helper()
-	resp, err := c.do("GET", "/api/v1/apps/"+id, nil)
+	dst, err := os.MkdirTemp("", "by-e2e-app-*")
 	if err != nil {
-		t.Fatalf("get app: %v", err)
+		t.Fatalf("temp dir: %v", err)
 	}
-	defer resp.Body.Close()
-	var result map[string]any
-	json.NewDecoder(resp.Body).Decode(&result)
-	return resp.StatusCode, result
-}
+	t.Cleanup(func() { os.RemoveAll(dst) })
 
-// DeleteAppRaw does DELETE without failing the test; returns status code.
-func (c *APIClient) DeleteAppRaw(appID string) int {
-	resp, err := c.do("DELETE", "/api/v1/apps/"+appID, nil)
+	err = filepath.Walk(absSrc, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, _ := filepath.Rel(absSrc, path)
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 	if err != nil {
-		return 0
+		t.Fatalf("copy app dir: %v", err)
 	}
-	resp.Body.Close()
-	return resp.StatusCode
+	return dst
 }
 
 // ---------------------------------------------------------------------------
 // Credential enrollment
 // ---------------------------------------------------------------------------
 
-func enrollCredential(t *testing.T, baseURL string, cookies []*http.Cookie, service, apiKey string) {
-	t.Helper()
-	body := fmt.Sprintf(`{"api_key":%q}`, apiKey)
-	req, _ := http.NewRequest("POST",
-		baseURL+"/api/v1/users/me/credentials/"+service,
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		t.Fatalf("enroll credential: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("enroll credential: expected 204, got %d", resp.StatusCode)
-	}
-}
-
-// enrollCredentialWithPAT enrolls a credential using a bearer token.
 func enrollCredentialWithPAT(t *testing.T, baseURL, token, service, apiKey string) {
 	t.Helper()
 	body := fmt.Sprintf(`{"api_key":%q}`, apiKey)
@@ -550,63 +355,7 @@ func readVaultSecret(t *testing.T, vaultURL, token, path string) map[string]any 
 }
 
 // ---------------------------------------------------------------------------
-// Bundle creation from directory
-// ---------------------------------------------------------------------------
-
-func makeBundle(t *testing.T, dir string) []byte {
-	t.Helper()
-
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		t.Fatalf("abs dir: %v", err)
-	}
-
-	err = filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(absDir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		header.Name = rel
-
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(tw, f)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("create tar.gz: %v", err)
-	}
-	tw.Close()
-	gz.Close()
-	return buf.Bytes()
-}
-
-// ---------------------------------------------------------------------------
-// App page fetch
+// App page fetch (proxy — requires session cookies, not CLI)
 // ---------------------------------------------------------------------------
 
 func fetchAppPage(t *testing.T, baseURL, appName string, cookies []*http.Cookie, timeout time.Duration) (int, string) {
@@ -665,7 +414,7 @@ func fetchAppPageNoRedirect(t *testing.T, baseURL, appName string) (int, string)
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket helper
+// WebSocket helper (proxy — requires session cookies, not CLI)
 // ---------------------------------------------------------------------------
 
 func dialAppWebSocket(t *testing.T, baseURL, appName string, cookies []*http.Cookie) {
@@ -716,4 +465,29 @@ func dialAppWebSocket(t *testing.T, baseURL, appName string, cookies []*http.Coo
 		lastErr = fmt.Errorf("status %d", resp.StatusCode)
 	}
 	t.Fatalf("websocket dial: all attempts failed, last error: %v", lastErr)
+}
+
+// ---------------------------------------------------------------------------
+// Raw HTTP helper for edge cases without CLI equivalent
+// ---------------------------------------------------------------------------
+
+// apiPost performs a POST request with Bearer auth. Returns the response
+// for the caller to inspect (caller must close body).
+func apiPost(t *testing.T, baseURL, token, path string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("POST", baseURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

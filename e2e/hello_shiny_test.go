@@ -20,70 +20,73 @@ func TestHelloShiny(t *testing.T) {
 	var (
 		cookies []*http.Cookie
 		token   string
-		appID   string
-		client  *APIClient
 	)
 
-	t.Run("auth_and_pat", func(t *testing.T) {
+	t.Run("auth", func(t *testing.T) {
 		cookies = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token = createPAT(t, baseURL, cookies)
 		if !strings.HasPrefix(token, "by_") {
 			t.Fatalf("token %q missing by_ prefix", token)
 		}
-		client = &APIClient{BaseURL: baseURL, Token: token, Cookies: cookies}
 	})
 
-	t.Run("deploy_app", func(t *testing.T) {
-		if client == nil {
-			t.Skip("depends on auth_and_pat")
+	t.Run("deploy", func(t *testing.T) {
+		if token == "" {
+			t.Skip("depends on auth")
 		}
 
-		appID = client.CreateApp(t, "hello")
+		appDir := copyAppDir(t, "../examples/hello-shiny/app")
 
-		bundle := makeBundle(t, "../examples/hello-shiny/app")
-		taskID, _ := client.UploadBundle(t, appID, bundle)
-		client.PollTask(t, taskID, 10*time.Minute)
+		var result map[string]any
+		runCLIJSON(t, baseURL, token, &result,
+			"deploy", appDir, "--yes", "--wait", "--name", "hello")
 
-		workerID := client.StartApp(t, appID)
-		if workerID == "" {
-			t.Fatal("start returned empty worker_id")
+		if s, _ := result["status"].(string); s != "completed" {
+			t.Fatalf("deploy status: got %q, want completed", s)
 		}
-
-		// Verify app status is running.
-		status, body := client.GetApp(t, appID)
-		if status != 200 {
-			t.Fatalf("get app: status %d", status)
+		if s, _ := result["app"].(string); s != "hello" {
+			t.Fatalf("deploy app: got %q, want hello", s)
 		}
-		if s, _ := body["status"].(string); s != "running" {
-			t.Fatalf("expected status running, got %q", s)
+		if result["bundle_id"] == nil || result["bundle_id"] == "" {
+			t.Fatal("deploy: missing bundle_id")
 		}
 	})
 
 	t.Run("app_serves_html", func(t *testing.T) {
-		if appID == "" {
-			t.Skip("depends on deploy_app")
+		if token == "" {
+			t.Skip("depends on deploy")
 		}
 
-		status, body := fetchAppPage(t, baseURL, "hello", cookies, 60*time.Second)
+		// Ensure the app is enabled (should be by default after deploy).
+		runCLI(t, baseURL, token, "enable", "hello")
+
+		status, body := fetchAppPage(t, baseURL, "hello", cookies, 120*time.Second)
 		if status != 200 {
 			t.Fatalf("expected 200, got %d", status)
 		}
 		if !strings.Contains(body, "Hello Blockyard") {
 			t.Fatalf("page body does not contain 'Hello Blockyard': %s", truncate(body, 500))
 		}
+
+		// Verify app is running via CLI.
+		var app map[string]any
+		runCLIJSON(t, baseURL, token, &app, "get", "hello")
+		if s, _ := app["status"].(string); s != "running" {
+			t.Fatalf("expected status running, got %q", s)
+		}
 	})
 
 	t.Run("websocket_connects", func(t *testing.T) {
-		if appID == "" {
-			t.Skip("depends on deploy_app")
+		if token == "" {
+			t.Skip("depends on deploy")
 		}
 
 		dialAppWebSocket(t, baseURL, "hello", cookies)
 	})
 
 	t.Run("unauthenticated_redirects", func(t *testing.T) {
-		if appID == "" {
-			t.Skip("depends on deploy_app")
+		if token == "" {
+			t.Skip("depends on deploy")
 		}
 
 		status, _ := fetchAppPageNoRedirect(t, baseURL, "hello")
@@ -92,35 +95,45 @@ func TestHelloShiny(t *testing.T) {
 		}
 	})
 
-	t.Run("stop_and_cleanup", func(t *testing.T) {
-		if appID == "" || client == nil {
-			t.Skip("depends on deploy_app")
+	t.Run("cli_list_shows_app", func(t *testing.T) {
+		if token == "" {
+			t.Skip("depends on deploy")
 		}
 
-		client.StopApp(t, appID)
-
-		// Verify stopped.
-		status, body := client.GetApp(t, appID)
-		if status != 200 {
-			t.Fatalf("get app after stop: status %d", status)
+		var result struct {
+			Apps []struct {
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			} `json:"apps"`
 		}
-		if s, _ := body["status"].(string); s != "stopped" {
-			t.Fatalf("expected status stopped, got %q", s)
+		runCLIJSON(t, baseURL, token, &result, "list")
+
+		found := false
+		for _, a := range result.Apps {
+			if a.Name == "hello" {
+				found = true
+				if a.Status != "running" {
+					t.Fatalf("list: app status = %q, want running", a.Status)
+				}
+				break
+			}
 		}
-
-		client.DeleteApp(t, appID)
-
-		// Verify 404.
-		getStatus, _ := client.GetApp(t, appID)
-		if getStatus != 404 {
-			t.Fatalf("expected 404 after delete, got %d", getStatus)
+		if !found {
+			t.Fatal("list: app 'hello' not found")
 		}
 	})
-}
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+	t.Run("stop_and_cleanup", func(t *testing.T) {
+		if token == "" {
+			t.Skip("depends on deploy")
+		}
+
+		runCLI(t, baseURL, token, "disable", "hello")
+		waitForAppStatus(t, baseURL, token, "hello", "stopped", 120*time.Second)
+
+		runCLI(t, baseURL, token, "delete", "hello")
+
+		// Verify the app is gone.
+		runCLIFail(t, baseURL, token, "get", "hello", "--json")
+	})
 }
