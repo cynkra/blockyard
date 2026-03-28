@@ -1,0 +1,79 @@
+{{template "base" .}}
+
+{{define "title"}}Apps — blockyard{{end}}
+
+{{define "content"}}
+<div class="page-header">
+    <h1>Apps</h1>
+    <form method="GET" action="/" class="search-form">
+        <input type="search" name="search" value="{{.Search}}"
+               placeholder="Search apps..." class="search-input" aria-label="Search apps">
+        {{if .AllTags}}
+        <select name="tag" aria-label="Filter by tag">
+            <option value="">All tags</option>
+            {{range .AllTags}}
+            <option value="{{.Name}}" {{if eq .Name $.ActiveTag}}selected{{end}}>
+                {{.Name}}
+            </option>
+            {{end}}
+        </select>
+        {{end}}
+        <button type="submit" class="btn">Search</button>
+    </form>
+</div>
+
+{{if .Apps}}
+<section class="app-grid">
+    {{range .Apps}}
+    <a href="/app/{{.Name}}/" class="app-card">
+        {{if .CanManage}}
+        <button class="app-card-gear"
+                hx-get="/ui/apps/{{.Name}}/sidebar"
+                hx-target="#sidebar"
+                hx-swap="innerHTML"
+                aria-label="Manage {{.Name}}"
+                onclick="event.stopPropagation(); event.preventDefault()">&#9881;</button>
+        {{end}}
+        <span class="app-name">{{.Name}}</span>
+        {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
+        {{if .Description}}<span class="app-desc">{{deref .Description}}</span>{{end}}
+        <span class="app-status app-status--{{.Status}}">{{.Status}}</span>
+        {{if .Tags}}
+        <span class="app-tags">
+            {{range .Tags}}<span class="tag">{{.}}</span>{{end}}
+        </span>
+        {{end}}
+    </a>
+    {{end}}
+</section>
+{{else}}
+<section class="empty-state">
+    {{if eq .UserRole "publisher"}}
+    <p>No apps yet. Deploy your first app using the API.</p>
+    {{else if eq .UserRole "admin"}}
+    <p>No apps deployed.</p>
+    {{else}}
+    <p>No apps shared with you.</p>
+    {{end}}
+</section>
+{{end}}
+
+<aside id="sidebar" class="sidebar"></aside>
+<div id="sidebar-overlay" class="sidebar-overlay" hx-on:click="closeSidebar()"></div>
+
+<script>
+function closeSidebar() {
+    if (typeof stopLogs === 'function') stopLogs();
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sidebar-overlay').classList.remove('open');
+    document.getElementById('sidebar').innerHTML = '';
+}
+
+document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target.id === 'sidebar') {
+        document.getElementById('sidebar').classList.add('open');
+        document.getElementById('sidebar-overlay').classList.add('open');
+    }
+});
+</script>
+{{end}}

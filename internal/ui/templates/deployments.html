@@ -1,0 +1,53 @@
+{{template "base" .}}
+
+{{define "title"}}Deployment History — blockyard{{end}}
+
+{{define "content"}}
+<div class="page-header">
+    <h1>Deployment History</h1>
+    <form method="GET" action="/deployments" class="search-form">
+        <input type="search" name="search" placeholder="Search by app name..."
+               class="search-input" value="{{.Search}}">
+        <button type="submit" class="btn">Search</button>
+    </form>
+</div>
+{{if .Deployments}}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>App</th>
+            <th>Bundle</th>
+            <th>Deployed by</th>
+            <th>Deployed</th>
+            <th>Status</th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Deployments}}
+        <tr>
+            <td>{{.AppName}}</td>
+            <td class="monospace">{{.BundleID | truncate}}</td>
+            <td>{{.DeployedByName}}</td>
+            <td>{{.DeployedAt | timeAgo}}</td>
+            <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+{{with .Pagination}}
+{{if gt .TotalPages 1}}
+<nav class="pagination">
+    {{if gt .Page 1}}
+    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}" class="btn btn-sm">&laquo; Prev</a>
+    {{end}}
+    <span class="pagination-info">Page {{.Page}} of {{.TotalPages}}</span>
+    {{if lt .Page .TotalPages}}
+    <a href="?page={{add .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}" class="btn btn-sm">Next &raquo;</a>
+    {{end}}
+</nav>
+{{end}}
+{{end}}
+{{else}}
+<p class="empty-state">No deployments found.</p>
+{{end}}
+{{end}}
