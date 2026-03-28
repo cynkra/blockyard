@@ -218,7 +218,10 @@ func TestTaskLogsStreamsOutput(t *testing.T) {
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
 		bytes.NewReader(testutil.MakeBundle(t)))
 	req.Header.Set("Authorization", "Bearer "+testPAT)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var body map[string]string
 	json.NewDecoder(resp.Body).Decode(&body)
 	taskID := body["task_id"]
@@ -228,7 +231,7 @@ func TestTaskLogsStreamsOutput(t *testing.T) {
 
 	// Fetch task logs
 	req = authReq("GET", ts.URL+"/api/v1/tasks/"+taskID+"/logs", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +260,10 @@ func TestListBundles(t *testing.T) {
 	}
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/bundles", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var envelope struct {
 		Bundles []map[string]interface{} `json:"bundles"`
@@ -290,7 +296,10 @@ func TestCreateAppRejectsInvalidName(t *testing.T) {
 	for _, name := range []string{"My-App", "-app", "app-", "app_name", "1app"} {
 		body := fmt.Sprintf(`{"name":"%s"}`, name)
 		req := authReq("POST", ts.URL+"/api/v1/apps", strings.NewReader(body))
-		resp, _ := http.DefaultClient.Do(req)
+		resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("name %q: expected 400, got %d", name, resp.StatusCode)
 		}
@@ -303,7 +312,10 @@ func TestCreateDuplicateNameReturns409(t *testing.T) {
 
 	body := `{"name":"my-app"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("expected 409, got %d", resp.StatusCode)
 	}
@@ -315,7 +327,10 @@ func TestListApps(t *testing.T) {
 	createApp(t, ts, "app-b")
 
 	req := authReq("GET", ts.URL+"/api/v1/apps", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if resp.StatusCode != 200 {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -336,7 +351,10 @@ func TestGetAppByIDAndName(t *testing.T) {
 
 	// Get by UUID
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Errorf("expected 200 for UUID lookup, got %d", resp.StatusCode)
 	}
@@ -352,7 +370,10 @@ func TestGetAppByIDAndName(t *testing.T) {
 func TestGetNonexistentAppReturns404(t *testing.T) {
 	_, ts := testServer(t)
 	req := authReq("GET", ts.URL+"/api/v1/apps/nonexistent", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -365,7 +386,10 @@ func TestUpdateApp(t *testing.T) {
 
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
 		strings.NewReader(`{"memory_limit":"512m"}`))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -385,7 +409,10 @@ func TestUpdateAppRejectsInvalidSessionLimit(t *testing.T) {
 	// max_sessions_per_worker = 0 is invalid
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
 		strings.NewReader(`{"max_sessions_per_worker":0}`))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for max_sessions_per_worker=0, got %d", resp.StatusCode)
 	}
@@ -413,7 +440,10 @@ func TestDeleteApp(t *testing.T) {
 	id := created["id"].(string)
 
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
 	}
@@ -434,7 +464,10 @@ func TestEnableAppWithoutBundle(t *testing.T) {
 	id := created["id"].(string)
 
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/enable", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -461,7 +494,10 @@ func TestEnableAndDisableApp(t *testing.T) {
 
 	// Enable
 	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/enable", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("enable: expected 200, got %d: %s", resp.StatusCode, b)
@@ -538,7 +574,10 @@ func TestDeleteAppStopsWorkers(t *testing.T) {
 
 	// Delete
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
 	}
@@ -574,7 +613,10 @@ func TestEnableAppSucceedsRegardlessOfWorkerLimit(t *testing.T) {
 
 	// Enable just sets the flag — no worker spawning, so max_workers doesn't matter.
 	req := authReq("POST", ts2.URL+"/api/v1/apps/"+id+"/enable", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -592,7 +634,10 @@ func TestAppLogsMissingWorkerID(t *testing.T) {
 	id := created["id"].(string)
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 without worker_id, got %d", resp.StatusCode)
 	}
@@ -604,7 +649,10 @@ func TestAppLogsNotFound(t *testing.T) {
 	id := created["id"].(string)
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=nonexistent", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for nonexistent worker, got %d", resp.StatusCode)
 	}
@@ -625,7 +673,10 @@ func TestAppLogsReturnsBufferedLines(t *testing.T) {
 	srv.LogStore.MarkEnded("w1")
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/logs?worker_id=w1", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -678,7 +729,10 @@ func TestGetTaskStatusCompleted(t *testing.T) {
 	sender.Complete(task.Completed)
 
 	req := authReq("GET", ts.URL+"/api/v1/tasks/task-done", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -698,7 +752,10 @@ func TestGetTaskStatusFailed(t *testing.T) {
 	sender.Complete(task.Failed)
 
 	req := authReq("GET", ts.URL+"/api/v1/tasks/task-fail", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -714,7 +771,10 @@ func TestGetTaskStatusNotFound(t *testing.T) {
 	_, ts := testServer(t)
 
 	req := authReq("GET", ts.URL+"/api/v1/tasks/nonexistent", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -726,7 +786,10 @@ func TestTaskLogsNotFound(t *testing.T) {
 	_, ts := testServer(t)
 
 	req := authReq("GET", ts.URL+"/api/v1/tasks/nonexistent/logs", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -974,7 +1037,10 @@ func TestResolveAppByUUIDAndName(t *testing.T) {
 	// Both UUID and name should resolve via the API (which uses resolveApp)
 	for _, lookup := range []string{id, "my-app"} {
 		req := authReq("GET", ts.URL+"/api/v1/apps/"+lookup, nil)
-		resp, _ := http.DefaultClient.Do(req)
+		resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 		if resp.StatusCode != 200 {
 			t.Errorf("lookup %q: expected 200, got %d", lookup, resp.StatusCode)
 		}
@@ -1051,7 +1117,10 @@ func TestUploadBundleMissingEntrypoint(t *testing.T) {
 func TestListBundlesNonexistentApp(t *testing.T) {
 	_, ts := testServer(t)
 	req := authReq("GET", ts.URL+"/api/v1/apps/nonexistent/bundles", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -1060,7 +1129,10 @@ func TestListBundlesNonexistentApp(t *testing.T) {
 func TestEnableAppNonexistent(t *testing.T) {
 	_, ts := testServer(t)
 	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/enable", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -1916,7 +1988,10 @@ func TestTaskLogsWithAppAccess(t *testing.T) {
 	sender.Complete(task.Completed)
 
 	req := authReq("GET", ts.URL+"/api/v1/tasks/task-with-app/logs", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -1944,7 +2019,10 @@ func TestRollbackAppValidBundle(t *testing.T) {
 	// Rollback to b-2.
 	body := `{"bundle_id":"b-2"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -1964,7 +2042,10 @@ func TestRollbackToNonexistentBundle(t *testing.T) {
 
 	body := `{"bundle_id":"nonexistent"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -1982,7 +2063,10 @@ func TestRollbackToBundleOfDifferentApp(t *testing.T) {
 
 	body := `{"bundle_id":"b-other"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id1+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -1998,7 +2082,10 @@ func TestRollbackToFailedBundle(t *testing.T) {
 
 	body := `{"bundle_id":"b-fail"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2015,7 +2102,10 @@ func TestRollbackToAlreadyActiveBundle(t *testing.T) {
 
 	body := `{"bundle_id":"b-1"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2028,7 +2118,10 @@ func TestRollbackWithoutBundleID(t *testing.T) {
 
 	body := `{}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2057,7 +2150,10 @@ func TestRollbackStopsRunningWorkers(t *testing.T) {
 	// Rollback to the new bundle.
 	body := `{"bundle_id":"b-rollback"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2117,7 +2213,10 @@ func TestSoftDeleteApp(t *testing.T) {
 
 	// Delete (soft).
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
 	}
@@ -2145,7 +2244,10 @@ func TestHardDeleteAppWhenSoftDeleteDisabled(t *testing.T) {
 	id := created["id"].(string)
 
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 204 {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
 	}
@@ -2168,7 +2270,10 @@ func TestRestoreAppAPI(t *testing.T) {
 
 	// Restore.
 	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2196,7 +2301,10 @@ func TestRestoreWithNameCollisionAPI(t *testing.T) {
 
 	// Restore should fail with 409.
 	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 409 {
 		t.Errorf("expected 409, got %d", resp.StatusCode)
 	}
@@ -2206,7 +2314,10 @@ func TestRestoreNonexistentApp(t *testing.T) {
 	_, ts := testServer(t)
 
 	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/restore", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -2218,7 +2329,10 @@ func TestRestoreNonDeletedApp(t *testing.T) {
 	id := created["id"].(string)
 
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -2236,7 +2350,10 @@ func TestListDeletedAppsAdmin(t *testing.T) {
 
 	// List deleted apps.
 	req = authReq("GET", ts.URL+"/api/v1/apps?deleted=true", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -2256,7 +2373,10 @@ func TestListDeletedAppsNonAdminForbidden(t *testing.T) {
 	seedTestViewer(t, srv.DB)
 
 	req := viewerReq("GET", ts.URL+"/api/v1/apps?deleted=true", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 403 {
 		t.Errorf("expected 403, got %d", resp.StatusCode)
 	}
@@ -2278,7 +2398,10 @@ func TestRollbackWithoutDeployPermission(t *testing.T) {
 	// Viewer tries to rollback → 404 (permission denied, masked as not found).
 	body := `{"bundle_id":"b-2"}`
 	req := viewerReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -2296,7 +2419,10 @@ func TestRestoreWithoutPermission(t *testing.T) {
 
 	// Viewer tries to restore → 404 (permission denied, masked as not found).
 	req = viewerReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -2311,7 +2437,10 @@ func TestUpdateAppInvalidMemoryLimit(t *testing.T) {
 
 	body := `{"memory_limit":"banana"}`
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2324,7 +2453,10 @@ func TestUpdateAppNegativeCPULimit(t *testing.T) {
 
 	body := `{"cpu_limit":-1}`
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2360,7 +2492,10 @@ func TestUpdateAppCPULimitExceedsCeiling(t *testing.T) {
 
 	body := `{"cpu_limit":5.0}`
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2406,7 +2541,10 @@ func TestUpdateAppCPULimitCeilingDisabled(t *testing.T) {
 	// Any positive value should be accepted.
 	body := `{"cpu_limit":100.0}`
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2420,7 +2558,10 @@ func TestUpdateAppValidResourceLimits(t *testing.T) {
 
 	body := `{"memory_limit":"512m","cpu_limit":2.0}`
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2444,7 +2585,10 @@ func TestUpdateAppEmptyMemoryLimitAccepted(t *testing.T) {
 	// Empty string clears the limit — should not be validated.
 	body := `{"memory_limit":""}`
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Errorf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2458,7 +2602,10 @@ func TestUpdateAppPreWarmedSeats(t *testing.T) {
 
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
 		strings.NewReader(`{"pre_warmed_seats":1}`))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2477,7 +2624,10 @@ func TestUpdateAppPreWarmedSeatsNegative(t *testing.T) {
 
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
 		strings.NewReader(`{"pre_warmed_seats":-1}`))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2490,7 +2640,10 @@ func TestUpdateAppPreWarmedSeatsExceedsCap(t *testing.T) {
 
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
 		strings.NewReader(`{"pre_warmed_seats":11}`))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2502,7 +2655,10 @@ func TestGetAppIncludesPreWarmedSeats(t *testing.T) {
 	id := created["id"].(string)
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var app map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&app)
 
@@ -2531,7 +2687,10 @@ func TestRollbackAppAuditLog(t *testing.T) {
 	// Rollback to b-2.
 	body := `{"bundle_id":"b-2"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2599,7 +2758,10 @@ func TestRestoreAppAuditLog(t *testing.T) {
 
 	// Restore.
 	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -2620,7 +2782,10 @@ func TestRollbackAppInvalidJSON(t *testing.T) {
 
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback",
 		strings.NewReader("not json"))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2636,7 +2801,10 @@ func TestRollbackAppPendingBundle(t *testing.T) {
 
 	body := `{"bundle_id":"b-pending"}`
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/rollback", strings.NewReader(body))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
 	}
@@ -2652,7 +2820,10 @@ func TestUploadBundleTooLarge(t *testing.T) {
 	// Send a body that exceeds MaxBundleSize (10 MiB).
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
 		strings.NewReader(strings.Repeat("x", 11*1024*1024)))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 413 {
 		t.Errorf("expected 413, got %d", resp.StatusCode)
 	}
@@ -2665,7 +2836,10 @@ func TestUploadBundleInvalidArchive(t *testing.T) {
 
 	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
 		strings.NewReader("not a tar.gz"))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Should fail during unpack with 500.
 	if resp.StatusCode != 500 {
 		t.Errorf("expected 500, got %d", resp.StatusCode)
@@ -2680,7 +2854,10 @@ func TestUploadBundleNoDeployPermission(t *testing.T) {
 
 	req := viewerReq("POST", ts.URL+"/api/v1/apps/"+id+"/bundles",
 		strings.NewReader("data"))
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -2732,7 +2909,10 @@ func TestGetAppRuntimeViewerDenied(t *testing.T) {
 	id := created["id"].(string)
 
 	req := viewerReq("GET", ts.URL+"/api/v1/apps/"+id+"/runtime", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Viewer cannot access runtime — should get 404 (opaque denial).
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404 for viewer, got %d", resp.StatusCode)
@@ -2742,7 +2922,10 @@ func TestGetAppRuntimeViewerDenied(t *testing.T) {
 func TestGetAppRuntimeNonexistent(t *testing.T) {
 	_, ts := testServer(t)
 	req := authReq("GET", ts.URL+"/api/v1/apps/nonexistent/runtime", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -2785,7 +2968,10 @@ func TestListAppSessionsViewerDenied(t *testing.T) {
 	id := created["id"].(string)
 
 	req := viewerReq("GET", ts.URL+"/api/v1/apps/"+id+"/sessions", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404 for viewer, got %d", resp.StatusCode)
 	}
@@ -2830,7 +3016,10 @@ func TestListAppTags(t *testing.T) {
 func TestListAppTagsNonexistent(t *testing.T) {
 	_, ts := testServer(t)
 	req := authReq("GET", ts.URL+"/api/v1/apps/nonexistent/tags", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -2865,7 +3054,10 @@ func TestGetCurrentUserUnauthenticated(t *testing.T) {
 	_, ts := testServer(t)
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/users/me", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 401 {
 		t.Errorf("expected 401, got %d", resp.StatusCode)
 	}
@@ -2922,7 +3114,10 @@ func TestListDeploymentsAPI(t *testing.T) {
 func TestListDeploymentsUnauthenticated(t *testing.T) {
 	_, ts := testServer(t)
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/deployments", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Unauthenticated should be rejected (401 from auth middleware).
 	if resp.StatusCode != 401 {
 		t.Errorf("expected 401, got %d", resp.StatusCode)
@@ -2938,7 +3133,10 @@ func TestPurgeAppAdmin(t *testing.T) {
 
 	// Soft-delete first.
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 204 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("soft-delete: expected 204, got %d: %s", resp.StatusCode, b)
@@ -2952,7 +3150,7 @@ func TestPurgeAppAdmin(t *testing.T) {
 
 	// Purge (admin + soft-deleted).
 	req = authReq("DELETE", ts.URL+"/api/v1/apps/"+id+"?purge=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2975,7 +3173,10 @@ func TestPurgeAppNotSoftDeleted(t *testing.T) {
 
 	// Try to purge without soft-deleting first.
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id+"?purge=true", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 409 {
 		t.Errorf("expected 409 for purge of active app, got %d", resp.StatusCode)
 	}
@@ -2993,7 +3194,10 @@ func TestPurgeAppViewerDenied(t *testing.T) {
 
 	// Try to purge as viewer.
 	req = viewerReq("DELETE", ts.URL+"/api/v1/apps/"+id+"?purge=true", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 403 {
 		t.Errorf("expected 403 for viewer purge, got %d", resp.StatusCode)
 	}
@@ -3002,7 +3206,10 @@ func TestPurgeAppViewerDenied(t *testing.T) {
 func TestPurgeAppNonexistent(t *testing.T) {
 	_, ts := testServer(t)
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/nonexistent?purge=true", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
@@ -3067,7 +3274,10 @@ func TestListAppsV2DeletedAdmin(t *testing.T) {
 
 	// Soft-delete (retention > 0, so this is a soft delete).
 	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 204 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("soft-delete: expected 204, got %d: %s", resp.StatusCode, b)
@@ -3075,7 +3285,7 @@ func TestListAppsV2DeletedAdmin(t *testing.T) {
 
 	// List deleted apps.
 	req = authReq("GET", ts.URL+"/api/v1/apps?deleted=true", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3096,7 +3306,10 @@ func TestListAppsV2DeletedViewerDenied(t *testing.T) {
 	seedTestViewer(t, srv.DB)
 
 	req := viewerReq("GET", ts.URL+"/api/v1/apps?deleted=true", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 403 {
 		t.Errorf("expected 403 for viewer listing deleted, got %d", resp.StatusCode)
 	}
@@ -3108,7 +3321,10 @@ func TestListAppsV2SearchFilter(t *testing.T) {
 	createApp(t, ts, "plumber-search")
 
 	req := authReq("GET", ts.URL+"/api/v1/apps?search=dashboard", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -3133,7 +3349,10 @@ func TestListAppsV2TagFilter(t *testing.T) {
 	srv.DB.AddAppTag(id, tag.ID)
 
 	req := authReq("GET", ts.URL+"/api/v1/apps?tag=v2-tag", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -3151,7 +3370,10 @@ func TestListAppsV2TagFilter(t *testing.T) {
 func TestListAppsV2Unauthenticated(t *testing.T) {
 	_, ts := testServer(t)
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Unauthenticated is rejected by the auth middleware.
 	if resp.StatusCode != 401 {
 		t.Errorf("expected 401, got %d", resp.StatusCode)
@@ -3164,7 +3386,10 @@ func TestGetCurrentUserWithDBUser(t *testing.T) {
 	// The admin user already has a DB row (from seedTestAdmin).
 	// Verify we get the email field.
 	req := authReq("GET", ts.URL+"/api/v1/users/me", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -3186,7 +3411,10 @@ func TestGetCurrentUserViewerPAT(t *testing.T) {
 	seedTestViewer(t, srv.DB)
 
 	req := viewerReq("GET", ts.URL+"/api/v1/users/me", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -3213,7 +3441,10 @@ func TestGetAppRuntimeWithSessions(t *testing.T) {
 	srv.DB.CreateSession("rs3", id, "w1", "user-a") // duplicate user
 
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/runtime", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
@@ -3243,7 +3474,10 @@ func TestListAppSessionsWithFilter(t *testing.T) {
 
 	// Filter by status.
 	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/sessions?status=active", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -3274,7 +3508,10 @@ func TestListDeploymentsWithSearch(t *testing.T) {
 	}
 
 	req := authReq("GET", ts.URL+"/api/v1/deployments?search=search-a", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -3492,6 +3729,532 @@ func TestDisableAppDrainsWorkers(t *testing.T) {
 	}
 }
 
+// --- Coverage gap: ListDeployments ---
+
+func TestListDeploymentsStatusFilter(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "deploy-status")
+	id := created["id"].(string)
+
+	// Create a bundle with deployed status.
+	srv.DB.CreateBundle("ds-bun-1", id, "", false)
+	now := time.Now().UTC().Format(time.RFC3339)
+	srv.DB.Exec(`UPDATE bundles SET deployed_at = ?, status = 'active' WHERE id = ?`, now, "ds-bun-1")
+
+	// Filter by status=active.
+	req := authReq("GET", ts.URL+"/api/v1/deployments?status=active", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var body struct {
+		Deployments []map[string]interface{} `json:"deployments"`
+		Total       int                      `json:"total"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body.Total < 1 {
+		t.Errorf("expected at least 1 deployment, got %d", body.Total)
+	}
+}
+
+func TestListDeploymentsPagination(t *testing.T) {
+	_, ts := testServer(t)
+
+	// Create enough apps with deployments for pagination.
+	for i := 0; i < 3; i++ {
+		createApp(t, ts, fmt.Sprintf("page-deploy-%d", i))
+	}
+
+	req := authReq("GET", ts.URL+"/api/v1/deployments?page=1&per_page=2", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Page    int `json:"page"`
+		PerPage int `json:"per_page"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body.Page != 1 {
+		t.Errorf("expected page=1, got %d", body.Page)
+	}
+	if body.PerPage != 2 {
+		t.Errorf("expected per_page=2, got %d", body.PerPage)
+	}
+}
+
+// --- Coverage gap: ListAppSessions ---
+
+func TestListAppSessionsUserFilter(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "sess-user-filter")
+	id := created["id"].(string)
+
+	srv.DB.CreateSession("suf1", id, "w1", "user-a")
+	srv.DB.CreateSession("suf2", id, "w1", "user-b")
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/sessions?user=user-a", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Sessions) != 1 {
+		t.Errorf("expected 1 session for user-a, got %d", len(body.Sessions))
+	}
+}
+
+func TestListAppSessionsLimit(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "sess-limit")
+	id := created["id"].(string)
+
+	for i := 0; i < 5; i++ {
+		srv.DB.CreateSession(fmt.Sprintf("sl%d", i), id, "w1", "user-a")
+	}
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/sessions?limit=2", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if len(body.Sessions) != 2 {
+		t.Errorf("expected 2 sessions with limit, got %d", len(body.Sessions))
+	}
+}
+
+// --- Coverage gap: EnableApp HX-Request ---
+
+func TestEnableAppHXRequest(t *testing.T) {
+	fb := &faultyBackend{
+		MockBackend: mock.New(),
+		spawnErr:    fmt.Errorf("container runtime unavailable"),
+	}
+	_, ts := testServerWithBackend(t, fb)
+	created := createApp(t, ts, "enable-hx")
+	id := created["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/enable", nil)
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	if resp.Header.Get("HX-Trigger") != "appEnabled" {
+		t.Errorf("expected HX-Trigger=appEnabled, got %q", resp.Header.Get("HX-Trigger"))
+	}
+}
+
+// --- Coverage gap: DisableApp HX-Request ---
+
+func TestDisableAppHXRequest(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "disable-hx")
+	id := created["id"].(string)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/disable", nil)
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	if resp.Header.Get("HX-Trigger") != "appDisabled" {
+		t.Errorf("expected HX-Trigger=appDisabled, got %q", resp.Header.Get("HX-Trigger"))
+	}
+}
+
+// --- Coverage gap: GrantAccess form-urlencoded ---
+
+func TestGrantAccessFormEncoded(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "grant-form")
+	id := created["id"].(string)
+
+	srv.DB.UpsertUserWithRole("grantee-f", "g@test", "Grantee", "publisher")
+
+	body := "principal=grantee-f&kind=user&role=viewer"
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/access", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- Coverage gap: GrantAccess HX-Request ---
+
+func TestGrantAccessHXRequest(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "grant-hx")
+	id := created["id"].(string)
+
+	srv.DB.UpsertUserWithRole("grantee-hx", "ghx@test", "Grantee", "publisher")
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/access",
+		strings.NewReader(`{"principal":"grantee-hx","kind":"user","role":"viewer"}`))
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	if resp.Header.Get("HX-Trigger") != "accessGranted" {
+		t.Errorf("expected HX-Trigger=accessGranted, got %q", resp.Header.Get("HX-Trigger"))
+	}
+}
+
+// --- Coverage gap: GrantAccess audit log ---
+
+func TestGrantAccessAuditLog(t *testing.T) {
+	srv, ts, _ := testServerWithAudit(t)
+	created := createApp(t, ts, "grant-audit")
+	id := created["id"].(string)
+
+	srv.DB.UpsertUserWithRole("grantee-a", "ga@test", "Grantee", "publisher")
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+id+"/access",
+		strings.NewReader(`{"principal":"grantee-a","kind":"user","role":"viewer"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- Coverage gap: RevokeAccess audit log ---
+
+func TestRevokeAccessAuditLog(t *testing.T) {
+	srv, ts, _ := testServerWithAudit(t)
+	created := createApp(t, ts, "revoke-audit")
+	id := created["id"].(string)
+
+	srv.DB.UpsertUserWithRole("revokee-a", "ra@test", "Revokee", "publisher")
+	srv.DB.GrantAppAccess(id, "revokee-a", "user", "viewer", "admin")
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id+"/access/user/revokee-a", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- Coverage gap: AddAppTag/RemoveAppTag edge cases ---
+
+func TestAddAppTagNonexistentApp(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/tags",
+		strings.NewReader(`{"tag_id":"some-tag"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRemoveAppTagNonexistentApp(t *testing.T) {
+	_, ts := testServer(t)
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/nonexistent/tags/some-tag", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestAddAppTagFormEncoded(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "tag-form-app")
+	appID := created["id"].(string)
+
+	tag, _ := srv.DB.CreateTag("form-tag")
+
+	body := "tag_id=" + tag.ID
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+appID+"/tags", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestAddAppTagHXRequest(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "tag-hx-app")
+	appID := created["id"].(string)
+
+	tag, _ := srv.DB.CreateTag("hx-tag")
+
+	req := authReq("POST", ts.URL+"/api/v1/apps/"+appID+"/tags",
+		strings.NewReader(fmt.Sprintf(`{"tag_id":"%s"}`, tag.ID)))
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	if resp.Header.Get("HX-Trigger") != "tagAdded" {
+		t.Errorf("expected HX-Trigger=tagAdded, got %q", resp.Header.Get("HX-Trigger"))
+	}
+}
+
+func TestRemoveAppTagHXRequest(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "rmtag-hx-app")
+	appID := created["id"].(string)
+
+	tag, _ := srv.DB.CreateTag("rm-hx-tag")
+	srv.DB.AddAppTag(appID, tag.ID)
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+appID+"/tags/"+tag.ID, nil)
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	if resp.Header.Get("HX-Trigger") != "tagRemoved" {
+		t.Errorf("expected HX-Trigger=tagRemoved, got %q", resp.Header.Get("HX-Trigger"))
+	}
+}
+
+// --- Coverage gap: ListTokens via session cookie ---
+
+func TestListTokensViaCookie(t *testing.T) {
+	srv, ts := testServer(t)
+
+	cookie := sessionCookie(t, srv, "admin")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/users/me/tokens", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- Coverage gap: RevokeToken not owned ---
+
+func TestRevokeTokenWrongUser(t *testing.T) {
+	srv, ts := testServer(t)
+
+	cookie := sessionCookie(t, srv, "admin")
+
+	// Create a token first.
+	reqC, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(`{"name":"tok-to-revoke"}`))
+	reqC.AddCookie(cookie)
+	reqC.Header.Set("Content-Type", "application/json")
+	respC, _ := http.DefaultClient.Do(reqC)
+	var tokBody map[string]interface{}
+	json.NewDecoder(respC.Body).Decode(&tokBody)
+	respC.Body.Close()
+	tokID, _ := tokBody["id"].(string)
+
+	// Create a different user and try to revoke admin's token.
+	srv.DB.UpsertUserWithRole("other-user", "other@test", "Other", "publisher")
+	otherCookie := sessionCookie(t, srv, "other-user")
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens/"+tokID, nil)
+	req.AddCookie(otherCookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Should fail because the token belongs to a different user.
+	if resp.StatusCode != http.StatusNotFound {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 404, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- Coverage gap: RevokeAllTokens via cookie ---
+
+func TestRevokeAllTokensViaCookie(t *testing.T) {
+	srv, ts := testServer(t)
+
+	cookie := sessionCookie(t, srv, "admin")
+
+	// Create a token first.
+	reqC, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(`{"name":"to-revoke-all"}`))
+	reqC.AddCookie(cookie)
+	reqC.Header.Set("Content-Type", "application/json")
+	respC, _ := http.DefaultClient.Do(reqC)
+	respC.Body.Close()
+
+	// Revoke all.
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- Coverage gap: GetCurrentUser via cookie ---
+
+func TestGetCurrentUserViaCookie(t *testing.T) {
+	srv, ts := testServer(t)
+
+	cookie := sessionCookie(t, srv, "admin")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/users/me/", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["sub"] != "admin" {
+		t.Errorf("expected sub=admin, got %q", body["sub"])
+	}
+	if body["email"] != "admin@test" {
+		t.Errorf("expected email=admin@test, got %q", body["email"])
+	}
+}
+
+// --- Coverage gap: app RuntimeResponse with deployment ---
+
+func TestGetAppRuntimeWithDeployment(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "runtime-deploy")
+	id := created["id"].(string)
+
+	// Create and activate a bundle.
+	srv.DB.CreateBundle("rt-bun", id, "", false)
+	srv.DB.ActivateBundle(id, "rt-bun")
+	now := time.Now().UTC().Format(time.RFC3339)
+	srv.DB.Exec(`UPDATE bundles SET deployed_at = ?, status = 'active' WHERE id = ?`, now, "rt-bun")
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/runtime", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["last_deployed_at"] == nil {
+		t.Error("expected last_deployed_at to be set")
+	}
+}
+
 func TestListAppsV2WithWorkerStatuses(t *testing.T) {
 	srv, ts := testServer(t)
 	runApp := createApp(t, ts, "v2-running")
@@ -3535,5 +4298,434 @@ func TestListAppsV2WithWorkerStatuses(t *testing.T) {
 	}
 	if statuses["v2-stopped"] != "stopped" {
 		t.Errorf("expected v2-stopped status=stopped, got %q", statuses["v2-stopped"])
+	}
+}
+
+// --- Coverage gap batch 2: error paths and unauthenticated access ---
+
+func TestListTokensUnauthenticatedPAT(t *testing.T) {
+	_, ts := testServer(t)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/users/me/tokens", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeTokenHXRequest(t *testing.T) {
+	srv, ts := testServer(t)
+	cookie := sessionCookie(t, srv, "admin")
+
+	// Create a token.
+	reqC, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(`{"name":"hx-revoke"}`))
+	reqC.AddCookie(cookie)
+	reqC.Header.Set("Content-Type", "application/json")
+	respC, _ := http.DefaultClient.Do(reqC)
+	var tok map[string]interface{}
+	json.NewDecoder(respC.Body).Decode(&tok)
+	respC.Body.Close()
+	tokID := tok["id"].(string)
+
+	// Revoke with HX-Request.
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens/"+tokID, nil)
+	req.AddCookie(cookie)
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 for HX-Request, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestRevokeTokenUnauthenticated(t *testing.T) {
+	_, ts := testServer(t)
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens/some-id", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeAllTokensUnauthenticated(t *testing.T) {
+	_, ts := testServer(t)
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeTokenAuditLogEmitted(t *testing.T) {
+	srv, ts, _ := testServerWithAudit(t)
+	cookie := sessionCookie(t, srv, "admin")
+
+	reqC, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(`{"name":"audit-tok"}`))
+	reqC.AddCookie(cookie)
+	reqC.Header.Set("Content-Type", "application/json")
+	respC, _ := http.DefaultClient.Do(reqC)
+	var tok map[string]interface{}
+	json.NewDecoder(respC.Body).Decode(&tok)
+	respC.Body.Close()
+	tokID := tok["id"].(string)
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens/"+tokID, nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", resp.StatusCode)
+	}
+}
+
+func TestRevokeAllTokensAuditLogEmitted(t *testing.T) {
+	srv, ts, _ := testServerWithAudit(t)
+	cookie := sessionCookie(t, srv, "admin")
+
+	reqC, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/tokens", strings.NewReader(`{"name":"audit-tok-all"}`))
+	reqC.AddCookie(cookie)
+	reqC.Header.Set("Content-Type", "application/json")
+	respC, _ := http.DefaultClient.Do(reqC)
+	respC.Body.Close()
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/users/me/tokens", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", resp.StatusCode)
+	}
+}
+
+func TestPostRefreshUnauthenticated(t *testing.T) {
+	_, ts := testServer(t)
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps/some-id/refresh", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestPostRefreshNonexistentApp(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/refresh", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestPostRefreshRollbackNonexistent(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("POST", ts.URL+"/api/v1/apps/nonexistent/refresh/rollback", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestListBundlesEmpty(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "empty-bundles-app")
+	id := created["id"].(string)
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id+"/bundles", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var bundles []map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&bundles)
+	if len(bundles) != 0 {
+		t.Errorf("expected 0 bundles, got %d", len(bundles))
+	}
+}
+
+func TestAPIAuthCookieFallback(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	// Set up a valid session cookie for admin.
+	cookie := sessionCookie(t, srv, "admin")
+
+	// Hit a regular API endpoint using cookie auth (not users/me).
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 via cookie auth, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestAPIAuthNonByPrefixToken(t *testing.T) {
+	_, ts := testServer(t)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps", nil)
+	req.Header.Set("Authorization", "Bearer not-a-by-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for non-by_ token, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppFormEncoded(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "update-form-app")
+	id := created["id"].(string)
+
+	body := "title=My+App&description=A+test+app"
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["title"] != "My App" {
+		t.Errorf("expected title=My App, got %v", result["title"])
+	}
+}
+
+func TestUpdateAppRefreshSchedule(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "refresh-sched-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"refresh_schedule":"0 0 * * *"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["refresh_schedule"] != "0 0 * * *" {
+		t.Errorf("expected refresh_schedule=0 0 * * *, got %v", result["refresh_schedule"])
+	}
+}
+
+func TestUpdateAppInvalidRefreshSchedule(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "bad-sched-app")
+	id := created["id"].(string)
+
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"refresh_schedule":"not a cron"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestTaskLogsNonexistentApp(t *testing.T) {
+	_, ts := testServer(t)
+	req := authReq("GET", ts.URL+"/api/v1/tasks/nonexistent/logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetCurrentUserNoDB(t *testing.T) {
+	srv, ts := testServer(t)
+	// Create a session for a sub that does NOT exist in the users table.
+	cookie := sessionCookie(t, srv, "ghost-user")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/users/me/", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["sub"] != "ghost-user" {
+		t.Errorf("expected sub=ghost-user, got %q", body["sub"])
+	}
+	// No email for users without DB row.
+	if body["email"] != "" {
+		t.Errorf("expected no email, got %q", body["email"])
+	}
+	if body["role"] != "viewer" {
+		t.Errorf("expected role=viewer, got %q", body["role"])
+	}
+}
+
+func TestUpdateAppFormEncodedWithSchedule(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "form-sched")
+	id := created["id"].(string)
+
+	body := "refresh_schedule=*/5+*+*+*+*"
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppFormEncodedClearSchedule(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "clear-sched")
+	id := created["id"].(string)
+
+	// Set schedule first.
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"refresh_schedule":"0 0 * * *"}`))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// Clear via form (empty value).
+	body := "refresh_schedule="
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["refresh_schedule"] != "" {
+		t.Errorf("expected empty schedule, got %v", result["refresh_schedule"])
+	}
+}
+
+func TestRemoveAppTagNotAssigned(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "rmtag-unassigned")
+	appID := created["id"].(string)
+
+	tag, _ := srv.DB.CreateTag("unassigned-tag")
+
+	// Try to remove a tag that was never added.
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+appID+"/tags/"+tag.ID, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 404 for unassigned tag, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestEnrollCredentialFormEncoded(t *testing.T) {
+	srv, ts := testServer(t)
+	cookie := sessionCookie(t, srv, "admin")
+
+	body := "api_key=test-key-123"
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/users/me/credentials/posit-connect", strings.NewReader(body))
+	req.AddCookie(cookie)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Expect 503 (no vault configured) — but the form parsing path is exercised.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 503, got %d: %s", resp.StatusCode, b)
 	}
 }
