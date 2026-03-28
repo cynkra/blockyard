@@ -155,10 +155,12 @@ func TestAdminSeesAllApps(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var apps []map[string]any
-	json.NewDecoder(resp.Body).Decode(&apps)
-	if len(apps) != 1 {
-		t.Errorf("expected 1 app, got %d", len(apps))
+	var envelope struct {
+		Apps []map[string]any `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&envelope)
+	if len(envelope.Apps) != 1 {
+		t.Errorf("expected 1 app, got %d", len(envelope.Apps))
 	}
 }
 
@@ -189,25 +191,29 @@ func TestPublisherSeesOnlyOwnAndGrantedApps(t *testing.T) {
 	// Publisher-1 should only see app-1 (not app-2)
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", token1, nil))
-	var apps []map[string]any
-	json.NewDecoder(resp.Body).Decode(&apps)
+	var listEnv1 struct {
+		Apps []map[string]any `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&listEnv1)
 	resp.Body.Close()
 
-	if len(apps) != 1 {
-		t.Fatalf("expected 1 app, got %d", len(apps))
+	if len(listEnv1.Apps) != 1 {
+		t.Fatalf("expected 1 app, got %d", len(listEnv1.Apps))
 	}
-	if apps[0]["name"] != "app-1" {
-		t.Errorf("expected app-1, got %v", apps[0]["name"])
+	if listEnv1.Apps[0]["name"] != "app-1" {
+		t.Errorf("expected app-1, got %v", listEnv1.Apps[0]["name"])
 	}
 
 	// Grant viewer access to publisher-1 on app-2
 	app2ID := ""
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", token2, nil))
-	var pub2Apps []map[string]any
-	json.NewDecoder(resp.Body).Decode(&pub2Apps)
+	var listEnv2 struct {
+		Apps []map[string]any `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&listEnv2)
 	resp.Body.Close()
-	for _, a := range pub2Apps {
+	for _, a := range listEnv2.Apps {
 		if a["name"] == "app-2" {
 			app2ID = a["id"].(string)
 		}
@@ -221,11 +227,14 @@ func TestPublisherSeesOnlyOwnAndGrantedApps(t *testing.T) {
 	// Now publisher-1 should see both
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", token1, nil))
-	json.NewDecoder(resp.Body).Decode(&apps)
+	var listEnv3 struct {
+		Apps []map[string]any `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&listEnv3)
 	resp.Body.Close()
 
-	if len(apps) != 2 {
-		t.Errorf("expected 2 apps after grant, got %d", len(apps))
+	if len(listEnv3.Apps) != 2 {
+		t.Errorf("expected 2 apps after grant, got %d", len(listEnv3.Apps))
 	}
 }
 
@@ -289,11 +298,13 @@ func TestUnmappedUserHasNoRole(t *testing.T) {
 	// Empty list
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", token, nil))
-	var apps []map[string]any
-	json.NewDecoder(resp.Body).Decode(&apps)
+	var unmappedEnv struct {
+		Apps []map[string]any `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&unmappedEnv)
 	resp.Body.Close()
-	if len(apps) != 0 {
-		t.Errorf("expected 0 apps, got %d", len(apps))
+	if len(unmappedEnv.Apps) != 0 {
+		t.Errorf("expected 0 apps, got %d", len(unmappedEnv.Apps))
 	}
 }
 
@@ -709,12 +720,14 @@ func TestPublicAppInUnfilteredList(t *testing.T) {
 	otherToken := createTestPAT(t, srv.DB, "other-user")
 	resp, _ = http.DefaultClient.Do(
 		jwtReq("GET", ts.URL+"/api/v1/apps", otherToken, nil))
-	var apps []map[string]any
-	json.NewDecoder(resp.Body).Decode(&apps)
+	var publicEnv struct {
+		Apps []map[string]any `json:"apps"`
+	}
+	json.NewDecoder(resp.Body).Decode(&publicEnv)
 	resp.Body.Close()
 
 	found := false
-	for _, a := range apps {
+	for _, a := range publicEnv.Apps {
 		if a["name"] == "public-app" {
 			found = true
 		}
@@ -724,7 +737,7 @@ func TestPublicAppInUnfilteredList(t *testing.T) {
 	}
 }
 
-func TestViewerCannotStartApp(t *testing.T) {
+func TestViewerCannotEnableApp(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
@@ -745,17 +758,17 @@ func TestViewerCannotStartApp(t *testing.T) {
 	// Grant viewer access
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
-	// Viewer tries to start the app -> 404
+	// Viewer tries to enable the app -> 404
 	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
-		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/start", viewerToken, nil))
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/enable", viewerToken, nil))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("viewer start: expected 404, got %d", resp.StatusCode)
+		t.Errorf("viewer enable: expected 404, got %d", resp.StatusCode)
 	}
 }
 
-func TestViewerCannotStopApp(t *testing.T) {
+func TestViewerCannotDisableApp(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
 	srv, ts := testServerWithOIDC(t, idp)
@@ -776,13 +789,13 @@ func TestViewerCannotStopApp(t *testing.T) {
 	// Grant viewer access
 	srv.DB.GrantAppAccess(appID, "viewer-1", "user", "viewer", "owner-1")
 
-	// Viewer tries to stop the app -> 404
+	// Viewer tries to disable the app -> 404
 	viewerToken := createTestPAT(t, srv.DB, "viewer-1")
 	resp, _ = http.DefaultClient.Do(
-		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/stop", viewerToken, nil))
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/disable", viewerToken, nil))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("viewer stop: expected 404, got %d", resp.StatusCode)
+		t.Errorf("viewer disable: expected 404, got %d", resp.StatusCode)
 	}
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -26,6 +27,20 @@ type accessGrantResponse struct {
 	GrantedAt string `json:"granted_at"`
 }
 
+// GrantAccess grants access to an app for a user.
+//
+//	@Summary		Grant access
+//	@Description	Grant a user viewer or collaborator access to an app. Requires owner or admin role.
+//	@Tags			access
+//	@Accept			json
+//	@Param			id		path	string			true	"App ID (UUID) or name"
+//	@Param			body	body	grantRequest	true	"Access grant"
+//	@Success		204		"Access granted"
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/access [post]
 func GrantAccess(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -42,9 +57,17 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		}
 
 		var body grantRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid request body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			_ = r.ParseForm()
+			body.Principal = r.FormValue("principal")
+			body.Kind = r.FormValue("kind")
+			body.Role = r.FormValue("role")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid request body")
+				return
+			}
 		}
 
 		if body.Kind != "user" {
@@ -79,10 +102,27 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 				map[string]any{"principal": body.Principal, "role": body.Role}))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", "accessGranted")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
+// ListAccess lists all access grants for an app.
+//
+//	@Summary		List access grants
+//	@Description	List all ACL entries for an app. Requires owner or admin role.
+//	@Tags			access
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{array}		accessGrantResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/access [get]
 func ListAccess(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -119,6 +159,19 @@ func ListAccess(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// RevokeAccess revokes a user's access to an app.
+//
+//	@Summary		Revoke access
+//	@Description	Remove a specific access grant from an app. Requires owner or admin role.
+//	@Tags			access
+//	@Param			id			path	string	true	"App ID (UUID) or name"
+//	@Param			kind		path	string	true	"Grant kind (e.g. 'user')"
+//	@Param			principal	path	string	true	"User sub"
+//	@Success		204			"Access revoked"
+//	@Failure		404			{object}	errorResponse
+//	@Failure		500			{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/access/{kind}/{principal} [delete]
 func RevokeAccess(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -152,6 +205,10 @@ func RevokeAccess(srv *server.Server) http.HandlerFunc {
 				map[string]any{"principal": principal}))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

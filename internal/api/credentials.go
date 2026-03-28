@@ -18,6 +18,16 @@ import (
 // This endpoint does NOT use the standard API bearer token auth.
 // The session reference token is its own authentication — it proves
 // the caller was routed through the proxy to a specific worker.
+//
+//	@Summary		Exchange vault credential
+//	@Description	Exchange a proxy session reference token for a scoped OpenBao vault token. Used internally by workers.
+//	@Tags			credentials
+//	@Produce		json
+//	@Success		200	{object}	vaultExchangeResponse
+//	@Failure		401	{object}	errorResponse
+//	@Failure		502	{object}	errorResponse
+//	@Failure		503	{object}	errorResponse
+//	@Router			/credentials/vault [post]
 func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Extract Bearer token

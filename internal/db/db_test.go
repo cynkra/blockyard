@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/google/uuid"
@@ -242,7 +243,7 @@ func TestCreateAndGetBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
 
-		b, err := db.CreateBundle("b-1", app.ID)
+		b, err := db.CreateBundle("b-1", app.ID, "", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -267,8 +268,8 @@ func TestListBundlesByApp(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
 
-		db.CreateBundle("b-1", app.ID)
-		db.CreateBundle("b-2", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
+		db.CreateBundle("b-2", app.ID, "", false)
 
 		bundles, err := db.ListBundlesByApp(app.ID)
 		if err != nil {
@@ -283,7 +284,7 @@ func TestListBundlesByApp(t *testing.T) {
 func TestUpdateBundleStatus(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		if err := db.UpdateBundleStatus("b-1", "building"); err != nil {
 			t.Fatal(err)
@@ -299,7 +300,7 @@ func TestUpdateBundleStatus(t *testing.T) {
 func TestSetActiveBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		if err := db.SetActiveBundle(app.ID, "b-1"); err != nil {
 			t.Fatal(err)
@@ -315,7 +316,7 @@ func TestSetActiveBundle(t *testing.T) {
 func TestDeleteBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		deleted, err := db.DeleteBundle("b-1")
 		if err != nil {
@@ -375,7 +376,7 @@ func TestUpdateAppNotFound(t *testing.T) {
 func TestClearActiveBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 		db.SetActiveBundle(app.ID, "b-1")
 
 		// Verify it's set
@@ -1058,7 +1059,7 @@ func TestRemoveAppTagNonexistent(t *testing.T) {
 func TestActivateBundle(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
 		app, _ := db.CreateApp("my-app", "admin")
-		db.CreateBundle("b-1", app.ID)
+		db.CreateBundle("b-1", app.ID, "", false)
 
 		if err := db.ActivateBundle(app.ID, "b-1"); err != nil {
 			t.Fatal(err)
@@ -1115,7 +1116,7 @@ func TestFailStaleBuildsMultiple(t *testing.T) {
 			"sb2", app.ID,
 		)
 		// One bundle in "ready" state — should not be affected.
-		db.CreateBundle("sb3", app.ID)
+		db.CreateBundle("sb3", app.ID, "", false)
 		db.UpdateBundleStatus("sb3", "ready")
 
 		n, err := db.FailStaleBuilds()
@@ -1259,7 +1260,7 @@ func TestUpdatePATLastUsed(t *testing.T) {
 
 func TestCreateBundleForeignKeyViolation(t *testing.T) {
 	eachDB(t, func(t *testing.T, db *DB) {
-		_, err := db.CreateBundle("b-orphan", "nonexistent-app-id")
+		_, err := db.CreateBundle("b-orphan", "nonexistent-app-id", "", false)
 		if err == nil {
 			t.Error("expected error for foreign key violation")
 		}
@@ -1583,3 +1584,612 @@ func TestGetAppByNameExcludesDeleted(t *testing.T) {
 		}
 	})
 }
+
+// --- Session CRUD tests ---
+
+func TestSessionCRUD(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("sess-app", "admin")
+
+		// CreateSession
+		err := db.CreateSession("s1", app.ID, "w1", "user-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// GetSession
+		s, err := db.GetSession("s1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s == nil {
+			t.Fatal("expected session, got nil")
+		}
+		if s.AppID != app.ID {
+			t.Errorf("expected app_id=%s, got %s", app.ID, s.AppID)
+		}
+		if s.WorkerID != "w1" {
+			t.Errorf("expected worker_id=w1, got %s", s.WorkerID)
+		}
+		if s.Status != "active" {
+			t.Errorf("expected status=active, got %s", s.Status)
+		}
+		if s.UserSub == nil || *s.UserSub != "user-a" {
+			t.Errorf("expected user_sub=user-a, got %v", s.UserSub)
+		}
+
+		// GetSession nonexistent
+		missing, err := db.GetSession("nonexistent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if missing != nil {
+			t.Error("expected nil for nonexistent session")
+		}
+
+		// CreateSession without user_sub
+		err = db.CreateSession("s2", app.ID, "w1", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s2, _ := db.GetSession("s2")
+		if s2.UserSub != nil {
+			t.Errorf("expected nil user_sub, got %v", s2.UserSub)
+		}
+
+		// EndSession
+		err = db.EndSession("s1", "ended")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, _ = db.GetSession("s1")
+		if s.Status != "ended" {
+			t.Errorf("expected status=ended, got %s", s.Status)
+		}
+		if s.EndedAt == nil {
+			t.Error("expected ended_at to be set")
+		}
+	})
+}
+
+func TestCrashWorkerSessions(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("crash-app", "admin")
+		db.CreateSession("c1", app.ID, "w-crash", "user-a")
+		db.CreateSession("c2", app.ID, "w-crash", "user-b")
+		db.CreateSession("c3", app.ID, "w-other", "user-c")
+
+		err := db.CrashWorkerSessions("w-crash")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		s1, _ := db.GetSession("c1")
+		s2, _ := db.GetSession("c2")
+		s3, _ := db.GetSession("c3")
+
+		if s1.Status != "crashed" {
+			t.Errorf("expected c1 crashed, got %s", s1.Status)
+		}
+		if s2.Status != "crashed" {
+			t.Errorf("expected c2 crashed, got %s", s2.Status)
+		}
+		if s3.Status != "active" {
+			t.Errorf("expected c3 active, got %s", s3.Status)
+		}
+	})
+}
+
+func TestEndWorkerSessions(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("end-w-app", "admin")
+		db.CreateSession("e1", app.ID, "w-end", "user-a")
+		db.CreateSession("e2", app.ID, "w-end", "user-b")
+
+		err := db.EndWorkerSessions("w-end")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		s1, _ := db.GetSession("e1")
+		s2, _ := db.GetSession("e2")
+		if s1.Status != "ended" {
+			t.Errorf("expected e1 ended, got %s", s1.Status)
+		}
+		if s2.Status != "ended" {
+			t.Errorf("expected e2 ended, got %s", s2.Status)
+		}
+	})
+}
+
+func TestEndAppSessions(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("end-a-app", "admin")
+		app2, _ := db.CreateApp("end-a-other", "admin")
+		db.CreateSession("a1", app.ID, "w1", "user-a")
+		db.CreateSession("a2", app.ID, "w2", "user-b")
+		db.CreateSession("a3", app2.ID, "w3", "user-c")
+
+		err := db.EndAppSessions(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		s1, _ := db.GetSession("a1")
+		s2, _ := db.GetSession("a2")
+		s3, _ := db.GetSession("a3")
+		if s1.Status != "ended" {
+			t.Errorf("expected a1 ended, got %s", s1.Status)
+		}
+		if s2.Status != "ended" {
+			t.Errorf("expected a2 ended, got %s", s2.Status)
+		}
+		if s3.Status != "active" {
+			t.Errorf("expected a3 active (different app), got %s", s3.Status)
+		}
+	})
+}
+
+func TestListSessions(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("list-sess-app", "admin")
+		db.CreateSession("ls1", app.ID, "w1", "user-a")
+		db.CreateSession("ls2", app.ID, "w1", "user-b")
+		db.CreateSession("ls3", app.ID, "w1", "user-a")
+
+		// List all sessions for the app.
+		sessions, err := db.ListSessions(app.ID, SessionListOpts{Limit: 50})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sessions) != 3 {
+			t.Errorf("expected 3 sessions, got %d", len(sessions))
+		}
+
+		// Filter by user.
+		sessions, err = db.ListSessions(app.ID, SessionListOpts{UserSub: "user-a", Limit: 50})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sessions) != 2 {
+			t.Errorf("expected 2 sessions for user-a, got %d", len(sessions))
+		}
+
+		// Filter by status.
+		db.EndSession("ls1", "ended")
+		sessions, err = db.ListSessions(app.ID, SessionListOpts{Status: "active", Limit: 50})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sessions) != 2 {
+			t.Errorf("expected 2 active sessions, got %d", len(sessions))
+		}
+	})
+}
+
+// --- Activity metrics tests ---
+
+func TestCountSessions(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("count-app", "admin")
+		db.CreateSession("cnt1", app.ID, "w1", "user-a")
+		db.CreateSession("cnt2", app.ID, "w1", "user-b")
+
+		n, err := db.CountSessions(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Errorf("expected 2, got %d", n)
+		}
+	})
+}
+
+func TestCountRecentSessions(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("recent-app", "admin")
+		db.CreateSession("r1", app.ID, "w1", "user-a")
+		db.CreateSession("r2", app.ID, "w1", "user-b")
+
+		// All sessions are recent (just created).
+		n, err := db.CountRecentSessions(app.ID, time.Now().AddDate(0, 0, -7))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Errorf("expected 2 recent, got %d", n)
+		}
+
+		// Far future since — should return 0.
+		n, err = db.CountRecentSessions(app.ID, time.Now().AddDate(1, 0, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("expected 0 from future since, got %d", n)
+		}
+	})
+}
+
+func TestCountUniqueVisitors(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("visitors-app", "admin")
+		db.CreateSession("v1", app.ID, "w1", "user-a")
+		db.CreateSession("v2", app.ID, "w1", "user-b")
+		db.CreateSession("v3", app.ID, "w1", "user-a") // duplicate user
+		db.CreateSession("v4", app.ID, "w1", "")        // anonymous
+
+		n, err := db.CountUniqueVisitors(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Errorf("expected 2 unique visitors, got %d", n)
+		}
+	})
+}
+
+// --- SetAppEnabled tests ---
+
+func TestSetAppEnabled(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("enable-app", "admin")
+
+		// Default is enabled=true.
+		if !app.Enabled {
+			t.Error("expected new app to be enabled by default")
+		}
+
+		// Disable.
+		err := db.SetAppEnabled(app.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fetched, _ := db.GetApp(app.ID)
+		if fetched.Enabled {
+			t.Error("expected disabled after SetAppEnabled(false)")
+		}
+
+		// Re-enable.
+		err = db.SetAppEnabled(app.ID, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fetched, _ = db.GetApp(app.ID)
+		if !fetched.Enabled {
+			t.Error("expected enabled after SetAppEnabled(true)")
+		}
+	})
+}
+
+// --- PurgeApp tests ---
+
+func TestPurgeApp(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("purge-app", "admin")
+		db.CreateBundle("pb1", app.ID, "", false)
+		db.SetActiveBundle(app.ID, "pb1")
+		db.CreateSession("ps1", app.ID, "w1", "user-a")
+		tag, _ := db.CreateTag("purge-tag")
+		db.AddAppTag(app.ID, tag.ID)
+		db.GrantAppAccess(app.ID, "alice", "user", "viewer", "admin")
+
+		// Soft-delete first (as the real flow would).
+		db.SoftDeleteApp(app.ID)
+
+		// Purge.
+		err := db.PurgeApp(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// App should be completely gone.
+		fetched, _ := db.GetApp(app.ID)
+		if fetched != nil {
+			t.Error("expected nil after purge")
+		}
+		fetched, _ = db.GetAppIncludeDeleted(app.ID)
+		if fetched != nil {
+			t.Error("expected nil from GetAppIncludeDeleted after purge")
+		}
+
+		// Sessions should be gone.
+		s, _ := db.GetSession("ps1")
+		if s != nil {
+			t.Error("expected session to be purged")
+		}
+
+		// Bundle should be gone.
+		b, _ := db.GetBundle("pb1")
+		if b != nil {
+			t.Error("expected bundle to be purged")
+		}
+	})
+}
+
+// --- ListDeployments tests ---
+
+func TestListDeployments(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("deploy-app", "admin")
+		db.CreateBundle("d1", app.ID, "", false)
+		// Simulate a deployed bundle by setting deployed_at.
+		now := time.Now().UTC().Format(time.RFC3339)
+		db.Exec(db.rebind(`UPDATE bundles SET deployed_at = ?, deployed_by = ?, status = 'active' WHERE id = ?`),
+			now, "admin", "d1")
+
+		// Admin listing.
+		rows, total, err := db.ListDeployments(DeploymentListOpts{
+			CallerSub:  "admin",
+			CallerRole: "admin",
+			Page:       1,
+			PerPage:    25,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected total=1, got %d", total)
+		}
+		if len(rows) != 1 {
+			t.Errorf("expected 1 deployment, got %d", len(rows))
+		}
+		if len(rows) > 0 && rows[0].BundleID != "d1" {
+			t.Errorf("expected bundle_id=d1, got %s", rows[0].BundleID)
+		}
+	})
+}
+
+func TestListDeploymentsNonAdmin(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("deploy-owner-app", "user-1")
+		db.CreateBundle("d2", app.ID, "", false)
+		now := time.Now().UTC().Format(time.RFC3339)
+		db.Exec(db.rebind(`UPDATE bundles SET deployed_at = ?, status = 'active' WHERE id = ?`),
+			now, "d2")
+
+		// Non-admin owner can see own app deployments.
+		rows, total, err := db.ListDeployments(DeploymentListOpts{
+			CallerSub:  "user-1",
+			CallerRole: "publisher",
+			Page:       1,
+			PerPage:    25,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected total=1, got %d", total)
+		}
+		if len(rows) != 1 {
+			t.Errorf("expected 1 deployment, got %d", len(rows))
+		}
+
+		// Different user with no access sees nothing.
+		rows, total, err = db.ListDeployments(DeploymentListOpts{
+			CallerSub:  "user-2",
+			CallerRole: "publisher",
+			Page:       1,
+			PerPage:    25,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 0 {
+			t.Errorf("expected total=0, got %d", total)
+		}
+		if len(rows) != 0 {
+			t.Errorf("expected 0 deployments, got %d", len(rows))
+		}
+	})
+}
+
+// --- ListCatalogWithRelation tests ---
+
+func TestListCatalogWithRelationAdmin(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		db.CreateApp("cwr-a", "user-1")
+		db.CreateApp("cwr-b", "user-2")
+
+		rows, total, err := db.ListCatalogWithRelation(CatalogParams{
+			CallerRole: "admin",
+			CallerSub:  "admin-sub",
+			Page:       1,
+			PerPage:    25,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 2 {
+			t.Errorf("expected total=2, got %d", total)
+		}
+		if len(rows) != 2 {
+			t.Errorf("expected 2 rows, got %d", len(rows))
+		}
+		// Admin relation.
+		for _, r := range rows {
+			if r.Relation != "admin" {
+				t.Errorf("expected relation=admin, got %s", r.Relation)
+			}
+		}
+	})
+}
+
+func TestListCatalogWithRelationOwner(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		db.CreateApp("cwr-own", "user-1")
+		db.CreateApp("cwr-other", "user-2")
+
+		rows, total, err := db.ListCatalogWithRelation(CatalogParams{
+			CallerSub: "user-1",
+			Page:      1,
+			PerPage:   25,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected total=1, got %d", total)
+		}
+		if len(rows) != 1 {
+			t.Errorf("expected 1 row, got %d", len(rows))
+		}
+		if len(rows) > 0 && rows[0].Relation != "owner" {
+			t.Errorf("expected relation=owner, got %s", rows[0].Relation)
+		}
+	})
+}
+
+func TestListCatalogWithRelationTags(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("cwr-tagged", "admin")
+		tag, _ := db.CreateTag("prod")
+		db.AddAppTag(app.ID, tag.ID)
+
+		rows, _, err := db.ListCatalogWithRelation(CatalogParams{
+			CallerRole: "admin",
+			Page:       1,
+			PerPage:    25,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(rows))
+		}
+		if rows[0].Tags != "prod" {
+			t.Errorf("expected tags=prod, got %q", rows[0].Tags)
+		}
+	})
+}
+
+func TestListCatalogWithRelationSearch(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		db.CreateApp("dashboard-app", "admin")
+		db.CreateApp("plumber-app", "admin")
+
+		rows, total, err := db.ListCatalogWithRelation(CatalogParams{
+			CallerRole: "admin",
+			Search:     "dashboard",
+			Page:       1,
+			PerPage:    25,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 {
+			t.Errorf("expected total=1, got %d", total)
+		}
+		if len(rows) != 1 {
+			t.Errorf("expected 1 row, got %d", len(rows))
+		}
+	})
+}
+
+// --- ListAppAccessWithNames tests ---
+
+func TestListAppAccessWithNames(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("access-names-app", "owner")
+		db.UpsertUser("alice-sub", "alice@example.com", "Alice Smith")
+		db.GrantAppAccess(app.ID, "alice-sub", "user", "collaborator", "owner")
+
+		grants, err := db.ListAppAccessWithNames(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(grants) != 1 {
+			t.Fatalf("expected 1 grant, got %d", len(grants))
+		}
+		if grants[0].DisplayName != "Alice Smith" {
+			t.Errorf("expected display_name=Alice Smith, got %s", grants[0].DisplayName)
+		}
+		if grants[0].Role != "collaborator" {
+			t.Errorf("expected role=collaborator, got %s", grants[0].Role)
+		}
+	})
+}
+
+func TestListAppAccessWithNamesNoUser(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("access-nouser-app", "owner")
+		// Grant to a principal with no user row — should fall back to principal.
+		db.GrantAppAccess(app.ID, "unknown-sub", "user", "viewer", "owner")
+
+		grants, err := db.ListAppAccessWithNames(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(grants) != 1 {
+			t.Fatalf("expected 1 grant, got %d", len(grants))
+		}
+		if grants[0].DisplayName != "unknown-sub" {
+			t.Errorf("expected display_name=unknown-sub (fallback), got %s", grants[0].DisplayName)
+		}
+	})
+}
+
+// --- GetAppByNameIncludeDeleted tests ---
+
+func TestGetAppByNameIncludeDeleted(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("incl-del", "admin")
+		db.SoftDeleteApp(app.ID)
+
+		// Normal lookup should miss it.
+		fetched, _ := db.GetAppByName("incl-del")
+		if fetched != nil {
+			t.Error("expected nil from GetAppByName for deleted app")
+		}
+
+		// IncludeDeleted should find it.
+		fetched, err := db.GetAppByNameIncludeDeleted("incl-del")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched == nil {
+			t.Fatal("expected non-nil from GetAppByNameIncludeDeleted")
+		}
+		if fetched.ID != app.ID {
+			t.Errorf("expected id=%s, got %s", app.ID, fetched.ID)
+		}
+
+		// Nonexistent.
+		missing, err := db.GetAppByNameIncludeDeleted("nonexistent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if missing != nil {
+			t.Error("expected nil for nonexistent app")
+		}
+	})
+}
+
+// --- GetAppIncludeDeleted tests ---
+
+func TestGetAppIncludeDeleted(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("incl-del-id", "admin")
+		db.SoftDeleteApp(app.ID)
+
+		// Normal lookup should miss it.
+		fetched, _ := db.GetApp(app.ID)
+		if fetched != nil {
+			t.Error("expected nil from GetApp for deleted app")
+		}
+
+		// IncludeDeleted should find it.
+		fetched, err := db.GetAppIncludeDeleted(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched == nil {
+			t.Fatal("expected non-nil from GetAppIncludeDeleted")
+		}
+		if fetched.DeletedAt == nil {
+			t.Error("expected deleted_at to be set")
+		}
+	})
+}
+
+// --- GetAppIncludeDeleted tests ---

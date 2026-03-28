@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	httpSwagger "github.com/swaggo/http-swagger/v2"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/proxy"
@@ -160,6 +161,9 @@ func NewRouter(srv *server.Server) http.Handler {
 		uiHandler.RegisterRoutes(r, srv)
 	})
 
+	// Swagger UI — serves OpenAPI spec and interactive documentation.
+	r.Get("/swagger/*", httpSwagger.WrapHandler)
+
 	// Auth endpoints — strict rate limit to prevent brute-force.
 	r.Group(func(r chi.Router) {
 		r.Use(httprate.LimitByIP(10, time.Minute))
@@ -190,6 +194,7 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Use(limitBody)
 		r.Use(apiCSP)
 		r.Use(UserAuth(srv))
+		r.Get("/", GetCurrentUser(srv))
 		r.Post("/credentials/{service}", EnrollCredential(srv))
 		r.Post("/tokens", CreateToken(srv))
 		r.Get("/tokens", ListTokens(srv))
@@ -220,18 +225,21 @@ func NewRouter(srv *server.Server) http.Handler {
 			r.Use(limitBody)
 
 		r.Post("/apps", CreateApp(srv))
-		r.Get("/apps", ListApps(srv))
+		r.Get("/apps", ListAppsV2(srv))
 		r.Get("/apps/{id}", GetApp(srv))
 		r.Patch("/apps/{id}", UpdateApp(srv))
 		r.Delete("/apps/{id}", DeleteApp(srv))
 
 		r.Get("/apps/{id}/bundles", ListBundles(srv))
+		r.Get("/apps/{id}/runtime", GetAppRuntime(srv))
+		r.Get("/apps/{id}/sessions", ListAppSessions(srv))
+		r.Get("/apps/{id}/tags", ListAppTags(srv))
 
 		r.Post("/apps/{id}/rollback", RollbackApp(srv))
 		r.Post("/apps/{id}/restore", RestoreApp(srv))
 
-		r.Post("/apps/{id}/start", StartApp(srv))
-		r.Post("/apps/{id}/stop", StopApp(srv))
+		r.Post("/apps/{id}/enable", EnableApp(srv))
+		r.Post("/apps/{id}/disable", DisableApp(srv))
 		r.Get("/apps/{id}/logs", AppLogs(srv))
 
 		r.Get("/tasks/{taskID}", GetTaskStatus(srv))
@@ -256,8 +264,11 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Post("/apps/{id}/tags", AddAppTag(srv))
 		r.Delete("/apps/{id}/tags/{tagID}", RemoveAppTag(srv))
 
-		// Content discovery
+		// Content discovery (deprecated — use GET /api/v1/apps with search/tag params)
 		r.Get("/catalog", CatalogHandler(srv))
+
+		// Deployments
+		r.Get("/deployments", ListDeployments(srv))
 
 		// Dependency refresh
 		r.Post("/apps/{id}/refresh", PostRefresh(srv))

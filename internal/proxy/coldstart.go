@@ -260,6 +260,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 
 	srv.Workers.Set(wid, server.ActiveWorker{
 		AppID: app.ID, BundleID: *app.ActiveBundle,
+		StartedAt:   time.Now(),
 		CancelToken: cancelToken,
 	})
 	srv.Registry.Set(wid, a)

@@ -33,6 +33,13 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 		telemetry.WorkersActive.Dec()
 	}
 	sessionCount := srv.Sessions.CountForWorkers([]string{workerID})
+
+	// End session records in the database.
+	if err := srv.DB.EndWorkerSessions(workerID); err != nil {
+		slog.Warn("evict: failed to end worker sessions",
+			"worker_id", workerID, "error", err)
+	}
+
 	srv.Registry.Delete(workerID)
 	srv.Sessions.DeleteByWorker(workerID)
 	srv.LogStore.MarkEnded(workerID)
@@ -178,6 +185,11 @@ func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
 				"worker_id", r.workerID,
 				"consecutive_misses", misses[r.workerID])
 			telemetry.HealthChecksFailed.Inc()
+			// Mark sessions as crashed before eviction (which marks them as ended).
+			if err := srv.DB.CrashWorkerSessions(r.workerID); err != nil {
+				slog.Warn("health poller: failed to crash worker sessions",
+					"worker_id", r.workerID, "error", err)
+			}
 			EvictWorker(ctx, srv, r.workerID)
 			delete(misses, r.workerID)
 		}

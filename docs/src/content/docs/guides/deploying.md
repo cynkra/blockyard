@@ -90,6 +90,24 @@ Worker containers run with hardened defaults:
 
 These settings are not configurable — they are always applied.
 
+## Disabling an app
+
+You can temporarily take an app offline without deleting it:
+
+```bash
+curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/disable" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Disabling an app ends all active sessions, drains running workers, and
+returns `503 Service Unavailable` for any proxy requests. To bring it back
+online:
+
+```bash
+curl -X POST "$BLOCKYARD/api/v1/apps/<app-id>/enable" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ## Updating an app
 
 To deploy a new version, upload another bundle to the same app. Once it

@@ -570,7 +570,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundleID := uuid.New().String()[:8]
-	if _, err := database.CreateBundle(bundleID, app.ID); err != nil {
+	if _, err := database.CreateBundle(bundleID, app.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
 

@@ -90,7 +90,7 @@ func TestHelloPostgrest(t *testing.T) {
 	t.Run("user1_deploy", func(t *testing.T) {
 		cookies1 = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token1 = createPAT(t, baseURL, cookies1)
-		client1 = &APIClient{BaseURL: baseURL, Token: token1}
+		client1 = &APIClient{BaseURL: baseURL, Token: token1, Cookies: cookies1}
 
 		appID = client1.CreateApp(t, "hello-postgrest")
 		client1.UpdateApp(t, appID, `{"access_type":"logged_in","max_sessions_per_worker":10}`)

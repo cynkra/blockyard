@@ -1373,3 +1373,73 @@ func TestParseLogLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvVarOverrideTrustedProxies(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "blockyard.toml")
+	os.WriteFile(cfgPath, []byte(minimalTOML), 0644)
+	os.MkdirAll("/tmp/blockyard-test/bundles", 0755)
+	os.MkdirAll("/tmp/blockyard-test/db", 0755)
+
+	t.Setenv("BLOCKYARD_SERVER_TRUSTED_PROXIES", "10.0.0.0/8, 172.16.0.0/12")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Server.TrustedProxies) != 2 {
+		t.Fatalf("expected 2 trusted proxies, got %d: %v", len(cfg.Server.TrustedProxies), cfg.Server.TrustedProxies)
+	}
+	if cfg.Server.TrustedProxies[0] != "10.0.0.0/8" {
+		t.Errorf("expected first proxy=10.0.0.0/8, got %s", cfg.Server.TrustedProxies[0])
+	}
+}
+
+func TestEnvVarOverrideBundleRetention(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "blockyard.toml")
+	os.WriteFile(cfgPath, []byte(minimalTOML), 0644)
+	os.MkdirAll("/tmp/blockyard-test/bundles", 0755)
+	os.MkdirAll("/tmp/blockyard-test/db", 0755)
+
+	t.Setenv("BLOCKYARD_STORAGE_BUNDLE_RETENTION", "99")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.BundleRetention != 99 {
+		t.Errorf("expected BundleRetention=99, got %d", cfg.Storage.BundleRetention)
+	}
+}
+
+func TestValidationRejectsInvalidTrustedProxyCIDR(t *testing.T) {
+	tmp := t.TempDir()
+	toml := `
+[server]
+trusted_proxies = ["not-a-cidr"]
+
+[docker]
+image = "test"
+
+[storage]
+bundle_server_path = "` + filepath.ToSlash(filepath.Join(tmp, "bundles")) + `"
+
+[database]
+path = "` + filepath.ToSlash(filepath.Join(tmp, "db", "test.db")) + `"
+
+[proxy]
+`
+	os.MkdirAll(filepath.Join(tmp, "bundles"), 0755)
+	os.MkdirAll(filepath.Join(tmp, "db"), 0755)
+	cfgPath := filepath.Join(tmp, "config.toml")
+	os.WriteFile(cfgPath, []byte(toml), 0644)
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("expected validation error for invalid CIDR")
+	}
+	if !strings.Contains(err.Error(), "CIDR") {
+		t.Errorf("expected CIDR error, got: %v", err)
+	}
+}

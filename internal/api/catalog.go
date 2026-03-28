@@ -24,6 +24,20 @@ type catalogItem struct {
 
 // CatalogHandler returns GET /api/v1/catalog — a paginated, RBAC-filtered
 // listing of apps with metadata, tags, and search/filter support.
+//
+//	@Summary		List catalog
+//	@Description	Paginated, RBAC-filtered app listing with tags and search. Deprecated — use GET /apps with search/tag params.
+//	@Tags			catalog
+//	@Produce		json
+//	@Param			search		query		string	false	"Search by name/title"
+//	@Param			tag			query		string	false	"Filter by tag name"
+//	@Param			page		query		int		false	"Page number"	default(1)
+//	@Param			per_page	query		int		false	"Items per page (1-100)"	default(20)
+//	@Success		200			{object}	catalogResponse
+//	@Failure		500			{object}	errorResponse
+//	@Security		BearerAuth
+//	@Deprecated
+//	@Router			/catalog [get]
 func CatalogHandler(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())

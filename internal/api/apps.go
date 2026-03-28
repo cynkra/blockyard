@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -166,6 +168,21 @@ type createAppRequest struct {
 	Name string `json:"name"`
 }
 
+// CreateApp creates a new application.
+//
+//	@Summary		Create app
+//	@Description	Create a new application owned by the caller.
+//	@Tags			apps
+//	@Accept			json
+//	@Produce		json
+//	@Param			body	body		createAppRequest	true	"App name"
+//	@Success		201		{object}	AppResponse
+//	@Failure		400		{object}	errorResponse
+//	@Failure		403		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps [post]
 func CreateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -211,7 +228,7 @@ func CreateApp(srv *server.Server) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(appResponseV2(app, srv))
 	}
 }
 
@@ -254,18 +271,32 @@ func ListApps(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// GetApp returns a single application by ID or name.
+//
+//	@Summary		Get app
+//	@Description	Get a single application by UUID or name. Returns 404 if not found or caller has no access.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	appResponseV2JSON
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id} [get]
 func GetApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
-		app, _, ok := resolveAppRelation(srv, w, caller, id)
+		app, relation, ok := resolveAppRelation(srv, w, caller, id)
 		if !ok {
 			return
 		}
 
+		resp := appResponseV2WithRelation(app, srv, relation.String())
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -278,17 +309,43 @@ type updateAppRequest struct {
 	Title                *string  `json:"title"`
 	Description          *string  `json:"description"`
 	PreWarmedSeats       *int     `json:"pre_warmed_seats"`
+	RefreshSchedule      *string  `json:"refresh_schedule"`
 }
 
+// UpdateApp updates an application's configuration.
+//
+//	@Summary		Update app
+//	@Description	Update an application's settings. All fields are optional. Changing access_type requires owner/admin.
+//	@Tags			apps
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string				true	"App ID (UUID) or name"
+//	@Param			body	body		updateAppRequest	true	"Fields to update"
+//	@Success		200		{object}	appResponseV2JSON
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id} [patch]
 func UpdateApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
 		var body updateAppRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid JSON body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			// htmx sends form-encoded by default.
+			if err := r.ParseForm(); err != nil {
+				badRequest(w, "invalid form data")
+				return
+			}
+			body = parseUpdateAppForm(r)
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid JSON body")
+				return
+			}
 		}
 
 		if body.MaxSessionsPerWorker != nil && *body.MaxSessionsPerWorker < 1 {
@@ -348,6 +405,19 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			}
 		}
 
+		// Validate refresh_schedule if provided.
+		if body.RefreshSchedule != nil && *body.RefreshSchedule != "" {
+			if !isValidCron(*body.RefreshSchedule) {
+				if r.Header.Get("HX-Request") != "" {
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					w.Write([]byte("invalid cron expression"))
+					return
+				}
+				badRequest(w, "invalid refresh_schedule cron expression")
+				return
+			}
+		}
+
 		update := db.AppUpdate{
 			MaxWorkersPerApp:     body.MaxWorkersPerApp,
 			MaxSessionsPerWorker: body.MaxSessionsPerWorker,
@@ -357,6 +427,7 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			Title:                body.Title,
 			Description:          body.Description,
 			PreWarmedSeats:       body.PreWarmedSeats,
+			RefreshSchedule:      body.RefreshSchedule,
 		}
 		app, err := srv.DB.UpdateApp(app.ID, update)
 		if err != nil {
@@ -368,15 +439,39 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppUpdate, app.ID, nil))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", "appUpdated")
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(appResponseV2(app, srv))
 	}
 }
 
+// DeleteApp soft-deletes an application (or hard-deletes with ?purge=true, admin only).
+//
+//	@Summary		Delete app
+//	@Description	Soft-delete an app, stopping all workers. Use ?purge=true for permanent deletion (admin only, app must be soft-deleted first).
+//	@Tags			apps
+//	@Param			id		path	string	true	"App ID (UUID) or name"
+//	@Param			purge	query	bool	false	"Permanently delete (admin only)"
+//	@Success		204		"Deleted"
+//	@Failure		403		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id} [delete]
 func DeleteApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
+
+		// Handle ?purge=true — admin-only hard delete.
+		if r.URL.Query().Get("purge") == "true" {
+			HardDeleteApp(srv, true, w, r, caller, id)
+			return
+		}
 
 		app, relation, ok := resolveAppRelation(srv, w, caller, id)
 		if !ok {
@@ -410,6 +505,10 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 				map[string]any{"name": app.Name}))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -418,15 +517,36 @@ type rollbackRequest struct {
 	BundleID string `json:"bundle_id"`
 }
 
+// RollbackApp switches an app to a previous bundle.
+//
+//	@Summary		Rollback app bundle
+//	@Description	Switch an app's active bundle to a previous one. Stops running workers and activates the target bundle.
+//	@Tags			apps
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string			true	"App ID (UUID) or name"
+//	@Param			body	body		rollbackRequest	true	"Target bundle"
+//	@Success		200		{object}	AppResponse
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/rollback [post]
 func RollbackApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
 		id := chi.URLParam(r, "id")
 
 		var body rollbackRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid JSON body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			_ = r.ParseForm()
+			body.BundleID = r.FormValue("bundle_id")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid JSON body")
+				return
+			}
 		}
 
 		if body.BundleID == "" {
@@ -472,10 +592,14 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		// Drain and stop running workers.
 		ops.StopAppSync(srv, app.ID)
 
-		// Switch active bundle.
+		// Switch active bundle and record deployment tracking.
 		if err := srv.DB.SetActiveBundle(app.ID, body.BundleID); err != nil {
 			serverError(w, "set active bundle: "+err.Error())
 			return
+		}
+		if err := srv.DB.SetBundleDeployed(body.BundleID, caller.Sub); err != nil {
+			slog.Warn("rollback: failed to update deployment tracking",
+				"bundle_id", body.BundleID, "error", err)
 		}
 
 		// Re-read app to get updated state.
@@ -493,11 +617,28 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 				}))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", "bundleRolledBack")
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(appResponseV2(app, srv))
 	}
 }
 
+// RestoreApp restores a soft-deleted application.
+//
+//	@Summary		Restore deleted app
+//	@Description	Restore a soft-deleted app. Only admins and the original owner can restore.
+//	@Tags			apps
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	AppResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		409	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/restore [post]
 func RestoreApp(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -508,8 +649,8 @@ func RestoreApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// Look up the app including deleted — GetApp filters them out.
-		app, err := srv.DB.GetAppIncludeDeleted(id)
+		// Look up the app including deleted — supports both UUID and name.
+		app, err := resolveAppIncludeDeleted(srv.DB, id)
 		if err != nil {
 			serverError(w, "db error: "+err.Error())
 			return
@@ -549,7 +690,7 @@ func RestoreApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(appResponse(app, srv.Workers))
+		json.NewEncoder(w).Encode(appResponseV2(app, srv))
 	}
 }
 
@@ -649,7 +790,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID, BundleID: *app.ActiveBundle})
+		srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID, BundleID: *app.ActiveBundle, StartedAt: time.Now()})
 
 		addr, err := srv.Backend.Addr(spawnCtx, workerID)
 		if err != nil {
@@ -765,6 +906,19 @@ func drainWorkers(srv *server.Server, appID string, workerIDs []string, sender t
 
 
 // AppLogs streams logs from the LogStore for a specific worker.
+//
+//	@Summary		Stream app logs
+//	@Description	Stream worker logs for an app. Returns buffered output immediately; streams live lines unless stream=false.
+//	@Tags			apps
+//	@Produce		plain
+//	@Param			id			path	string	true	"App ID (UUID) or name"
+//	@Param			worker_id	query	string	true	"Worker ID"
+//	@Param			stream		query	string	false	"Set to 'false' to return buffered logs only"
+//	@Success		200			"Log output (text/plain, chunked)"
+//	@Failure		400			{object}	errorResponse
+//	@Failure		404			{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/logs [get]
 func AppLogs(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -785,11 +939,20 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// Verify the worker belongs to this app to prevent cross-app log access.
+		// Verify the worker belongs to this app — check both live workers
+		// and the logstore (for dead workers with historical logs).
 		worker, workerExists := srv.Workers.Get(workerID)
-		if !workerExists || worker.AppID != app.ID {
+		if workerExists && worker.AppID != app.ID {
 			notFound(w, "worker not found for app")
 			return
+		}
+		if !workerExists {
+			// Check logstore for dead workers.
+			logAppID := srv.LogStore.WorkerAppID(workerID)
+			if logAppID == "" || logAppID != app.ID {
+				notFound(w, "worker not found for app")
+				return
+			}
 		}
 
 		snapshot, live, ok := srv.LogStore.Subscribe(workerID)
@@ -798,6 +961,8 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 			return
 		}
 		ended := srv.LogStore.IsEnded(workerID)
+		streamParam := r.URL.Query().Get("stream")
+		noStream := streamParam == "false"
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")
@@ -812,8 +977,8 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 			flusher.Flush()
 		}
 
-		// If worker already exited, return buffer only
-		if ended {
+		// If worker already exited or stream=false, return buffer only
+		if ended || noStream {
 			return
 		}
 
@@ -848,6 +1013,53 @@ func floatOrZero(f *float64) float64 {
 		return 0
 	}
 	return *f
+}
+
+// parseUpdateAppForm parses form-encoded data into an updateAppRequest.
+func parseUpdateAppForm(r *http.Request) updateAppRequest {
+	var body updateAppRequest
+	if v := r.FormValue("title"); v != "" {
+		body.Title = &v
+	}
+	if v := r.FormValue("description"); v != "" {
+		body.Description = &v
+	}
+	if v := r.FormValue("access_type"); v != "" {
+		body.AccessType = &v
+	}
+	if v := r.FormValue("refresh_schedule"); r.Form.Has("refresh_schedule") {
+		body.RefreshSchedule = &v
+	}
+	if v := r.FormValue("memory_limit"); v != "" {
+		body.MemoryLimit = &v
+	}
+	if v := r.FormValue("max_workers_per_app"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			body.MaxWorkersPerApp = &n
+		}
+	}
+	if v := r.FormValue("max_sessions_per_worker"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			body.MaxSessionsPerWorker = &n
+		}
+	}
+	if v := r.FormValue("pre_warmed_seats"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			body.PreWarmedSeats = &n
+		}
+	}
+	if v := r.FormValue("cpu_limit"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			body.CPULimit = &f
+		}
+	}
+	return body
+}
+
+// isValidCron validates a standard five-field cron expression.
+func isValidCron(expr string) bool {
+	fields := strings.Fields(expr)
+	return len(fields) == 5
 }
 
 // pollWorkerHealthy polls the backend health check with exponential backoff

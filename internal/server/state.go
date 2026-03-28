@@ -143,6 +143,7 @@ type ActiveWorker struct {
 	BundleID    string    // bundle active at spawn time; runtime installs resolve against this
 	Draining    bool      // set by graceful drain; no new sessions routed
 	IdleSince   time.Time // zero value = not idle; set when session count hits 0
+	StartedAt   time.Time // when the worker was spawned
 	CancelToken func()    // stops the token refresher goroutine; nil if no token
 }
 

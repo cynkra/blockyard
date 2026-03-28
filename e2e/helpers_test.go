@@ -201,6 +201,7 @@ var httpClient = &http.Client{
 type APIClient struct {
 	BaseURL string
 	Token   string
+	Cookies []*http.Cookie // session cookies for proxy requests
 }
 
 func (c *APIClient) do(method, path string, body io.Reader) (*http.Response, error) {
@@ -340,41 +341,76 @@ func (c *APIClient) PollTask(t *testing.T, taskID string, timeout time.Duration)
 
 func (c *APIClient) StartApp(t *testing.T, appID string) string {
 	t.Helper()
-	// The start endpoint blocks while spawning a Docker container and
-	// waiting for it to become healthy. On CI runners, the TCP connection
-	// can be dropped during this idle period. Retry on transient errors;
-	// the server returns the existing worker if one is already running.
+	// Ensure the app is enabled, then trigger a cold-start by hitting
+	// the app URL with session cookies. The proxy spawns a worker on
+	// first request. Retry until the worker is healthy.
+
+	// First, ensure the app is enabled (it should be by default after deploy).
+	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/enable", nil)
+	if err != nil {
+		t.Fatalf("enable app: %v", err)
+	}
+	resp.Body.Close()
+
+	// Look up the app name for the proxy URL.
+	_, appBody := c.GetApp(t, appID)
+	appName, _ := appBody["name"].(string)
+	if appName == "" {
+		t.Fatal("start app: could not determine app name")
+	}
+
+	// Hit the app URL with cookies to trigger cold-start. The proxy
+	// authenticates via session cookies, not bearer tokens.
 	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < 10; attempt++ {
 		if attempt > 0 {
 			t.Logf("start app: retrying (attempt %d) after: %v", attempt+1, lastErr)
 			time.Sleep(5 * time.Second)
 		}
-		req, err := http.NewRequest("POST", c.BaseURL+"/api/v1/apps/"+appID+"/start", http.NoBody)
-		if err != nil {
-			t.Fatalf("start app: %v", err)
+		req, reqErr := http.NewRequest("GET", c.BaseURL+"/app/"+appName+"/", nil)
+		if reqErr != nil {
+			t.Fatalf("start app: %v", reqErr)
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			lastErr = err
+		for _, cookie := range c.Cookies {
+			req.AddCookie(cookie)
+		}
+		noRedirect := &http.Client{
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		resp, reqErr := noRedirect.Do(req)
+		if reqErr != nil {
+			lastErr = reqErr
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			var result struct {
-				WorkerID string `json:"worker_id"`
-			}
-			json.Unmarshal(body, &result)
-			return result.WorkerID
-		}
-		// 503 = worker failed to start, may succeed on retry.
-		if resp.StatusCode == http.StatusServiceUnavailable {
-			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, body)
+		// 502/503 = worker not ready yet or app disabled.
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable {
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
 			continue
 		}
-		t.Fatalf("start app: status %d, body: %s", resp.StatusCode, body)
+		// 302 = redirect to login (cookies not working).
+		if resp.StatusCode == http.StatusFound {
+			lastErr = fmt.Errorf("redirected to login (status 302)")
+			continue
+		}
+		// Worker is up. Get the runtime to find the worker ID.
+		rtResp, rtErr := c.do("GET", "/api/v1/apps/"+appID+"/runtime", nil)
+		if rtErr != nil {
+			t.Fatalf("start app: get runtime: %v", rtErr)
+		}
+		var rt struct {
+			Workers []struct {
+				ID string `json:"id"`
+			} `json:"workers"`
+		}
+		json.NewDecoder(rtResp.Body).Decode(&rt)
+		rtResp.Body.Close()
+		if len(rt.Workers) > 0 {
+			return rt.Workers[0].ID
+		}
+		lastErr = fmt.Errorf("no workers in runtime response")
 	}
 	t.Fatalf("start app: all attempts failed, last error: %v", lastErr)
 	return ""
@@ -382,24 +418,28 @@ func (c *APIClient) StartApp(t *testing.T, appID string) string {
 
 func (c *APIClient) StopApp(t *testing.T, appID string) {
 	t.Helper()
-	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/stop", nil)
+	resp, err := c.do("POST", "/api/v1/apps/"+appID+"/disable", nil)
 	if err != nil {
-		t.Fatalf("stop app: %v", err)
+		t.Fatalf("disable app: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("stop app: status %d, body: %s", resp.StatusCode, b)
+		t.Fatalf("disable app: status %d, body: %s", resp.StatusCode, b)
 	}
 
-	// If async stop, poll the task.
-	var result struct {
-		TaskID string `json:"task_id"`
+	// Disable triggers async worker drain. Poll until the app reports stopped.
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		status, body := c.GetApp(t, appID)
+		if status == 200 {
+			if s, _ := body["status"].(string); s == "stopped" {
+				return
+			}
+		}
+		time.Sleep(2 * time.Second)
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	if result.TaskID != "" {
-		c.PollTask(t, result.TaskID, 120*time.Second)
-	}
+	t.Log("disable app: timed out waiting for stopped status")
 }
 
 func (c *APIClient) DeleteApp(t *testing.T, appID string) {

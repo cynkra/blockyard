@@ -44,7 +44,7 @@ func TestHelloPocketbase(t *testing.T) {
 	t.Run("user1_deploy", func(t *testing.T) {
 		cookies1 = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token1 = createPAT(t, baseURL, cookies1)
-		client1 = &APIClient{BaseURL: baseURL, Token: token1}
+		client1 = &APIClient{BaseURL: baseURL, Token: token1, Cookies: cookies1}
 
 		appID = client1.CreateApp(t, "hello-pocketbase")
 		client1.UpdateApp(t, appID, `{"access_type":"logged_in","max_sessions_per_worker":10}`)
@@ -123,7 +123,7 @@ func TestHelloPocketbase(t *testing.T) {
 
 		// User2 creates a PAT.
 		token2 := createPAT(t, baseURL, cookies2)
-		client2 := &APIClient{BaseURL: baseURL, Token: token2}
+		client2 := &APIClient{BaseURL: baseURL, Token: token2, Cookies: cookies2}
 
 		// User2 tries to delete user1's app — should get 404 (not owner).
 		status := client2.DeleteAppRaw(appID)

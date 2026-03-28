@@ -123,6 +123,19 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 
 // EnrollCredential handles POST /api/v1/users/me/credentials/{service}.
 // Stores a user's credential in OpenBao's KV v2 store.
+//
+//	@Summary		Enroll credential
+//	@Description	Store a credential (API key) for an external service in the vault.
+//	@Tags			credentials
+//	@Accept			json
+//	@Param			service	path	string	true	"Service name (alphanumeric, hyphens, underscores)"
+//	@Success		204		"Credential stored"
+//	@Failure		400		{object}	errorResponse
+//	@Failure		401		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Failure		503		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/me/credentials/{service} [post]
 func EnrollCredential(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -145,9 +158,15 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 		var body struct {
 			APIKey string `json:"api_key"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid request body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			_ = r.ParseForm()
+			body.APIKey = r.FormValue("api_key")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid request body")
+				return
+			}
 		}
 		if body.APIKey == "" {
 			badRequest(w, "api_key is required")
@@ -177,6 +196,16 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 // --- User management endpoints (admin only) ---
 
 // ListUsers handles GET /api/v1/users — list all users.
+//
+//	@Summary		List users
+//	@Description	List all users. Admin only.
+//	@Tags			users
+//	@Produce		json
+//	@Success		200	{array}		db.UserRow
+//	@Failure		403	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users [get]
 func ListUsers(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -200,6 +229,18 @@ func ListUsers(srv *server.Server) http.HandlerFunc {
 }
 
 // GetUser handles GET /api/v1/users/{sub} — get a single user.
+//
+//	@Summary		Get user
+//	@Description	Get a single user by sub. Admin only.
+//	@Tags			users
+//	@Produce		json
+//	@Param			sub	path		string	true	"User sub (OIDC subject)"
+//	@Success		200	{object}	db.UserRow
+//	@Failure		403	{object}	errorResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/{sub} [get]
 func GetUser(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -230,6 +271,21 @@ type updateUserRequest struct {
 }
 
 // UpdateUser handles PATCH /api/v1/users/{sub} — update a user's role or active status.
+//
+//	@Summary		Update user
+//	@Description	Update a user's role or active status. Admin only. Cannot modify own account.
+//	@Tags			users
+//	@Accept			json
+//	@Produce		json
+//	@Param			sub		path		string				true	"User sub (OIDC subject)"
+//	@Param			body	body		updateUserRequest	true	"Fields to update"
+//	@Success		200		{object}	db.UserRow
+//	@Failure		400		{object}	errorResponse
+//	@Failure		403		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/{sub} [patch]
 func UpdateUser(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -337,6 +393,20 @@ type createTokenResponse struct {
 
 // CreateToken handles POST /api/v1/users/me/tokens — create a new PAT.
 // Session-only: PATs cannot create other PATs.
+//
+//	@Summary		Create personal access token
+//	@Description	Create a new PAT. Can only be called via browser session (not via another PAT). The token value is returned only once.
+//	@Tags			tokens
+//	@Accept			json
+//	@Produce		json
+//	@Param			body	body		createTokenRequest	true	"Token name and optional expiry"
+//	@Success		201		{object}	createTokenResponse
+//	@Failure		400		{object}	errorResponse
+//	@Failure		401		{object}	errorResponse
+//	@Failure		403		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/me/tokens [post]
 func CreateToken(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -401,6 +471,16 @@ func CreateToken(srv *server.Server) http.HandlerFunc {
 }
 
 // ListTokens handles GET /api/v1/users/me/tokens — list caller's PATs.
+//
+//	@Summary		List personal access tokens
+//	@Description	List all PATs for the authenticated user.
+//	@Tags			tokens
+//	@Produce		json
+//	@Success		200	{array}		db.PATRow
+//	@Failure		401	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/me/tokens [get]
 func ListTokens(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -423,7 +503,18 @@ func ListTokens(srv *server.Server) http.HandlerFunc {
 	}
 }
 
-// RevokeToken handles DELETE /api/v1/users/me/tokens/{id} — revoke a single PAT.
+// RevokeToken handles DELETE /api/v1/users/me/tokens/{tokenID} — revoke a single PAT.
+//
+//	@Summary		Revoke token
+//	@Description	Revoke a single personal access token by ID.
+//	@Tags			tokens
+//	@Param			tokenID	path	string	true	"Token ID"
+//	@Success		204		"Token revoked"
+//	@Failure		401		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/me/tokens/{tokenID} [delete]
 func RevokeToken(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -447,11 +538,24 @@ func RevokeToken(srv *server.Server) http.HandlerFunc {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionTokenRevoke, tokenID, nil))
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
 // RevokeAllTokens handles DELETE /api/v1/users/me/tokens — revoke all PATs.
+//
+//	@Summary		Revoke all tokens
+//	@Description	Revoke all personal access tokens for the authenticated user.
+//	@Tags			tokens
+//	@Success		204		"All tokens revoked"
+//	@Failure		401		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/users/me/tokens [delete]
 func RevokeAllTokens(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())

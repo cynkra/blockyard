@@ -133,6 +133,7 @@ func (srv *Server) completeTransfer(
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{
 		AppID: oldWorker.AppID, BundleID: oldWorker.BundleID,
+		StartedAt:   time.Now(),
 		CancelToken: cancelToken,
 	})
 	srv.Registry.Set(newWorkerID, addr)

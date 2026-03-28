@@ -13,10 +13,26 @@ import (
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/bundle"
+	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
+// UploadBundle uploads a new bundle archive for an app.
+//
+//	@Summary		Upload bundle
+//	@Description	Upload a tar.gz bundle archive. Triggers async restore (package installation). Track progress via the returned task_id.
+//	@Tags			bundles
+//	@Accept			application/gzip
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		202	{object}	uploadBundleResponse
+//	@Failure		400	{object}	errorResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		413	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/bundles [post]
 func UploadBundle(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
@@ -75,7 +91,17 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 		}
 
 		// Insert bundle row (status = pending)
-		if _, err := srv.DB.CreateBundle(bundleID, app.ID); err != nil {
+		// Determine if bundle has pinned dependencies by checking the manifest.
+		bundlePinned := false
+		manifestPath := filepath.Join(paths.Unpacked, "manifest.json")
+		if m, mErr := manifest.Read(manifestPath); mErr == nil {
+			bundlePinned = m.IsPinned()
+		}
+		deployedBy := ""
+		if caller != nil {
+			deployedBy = caller.Sub
+		}
+		if _, err := srv.DB.CreateBundle(bundleID, app.ID, deployedBy, bundlePinned); err != nil {
 			bundle.DeleteFiles(paths)
 			serverError(w, "create bundle row: "+err.Error())
 			return
@@ -127,13 +153,31 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 	}
 }
 
+// ListBundles lists all bundles for an app.
+//
+//	@Summary		List bundles
+//	@Description	List all bundles for an app, ordered by upload time.
+//	@Tags			bundles
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		200	{object}	bundleListResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/bundles [get]
 func ListBundles(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
 		appID := chi.URLParam(r, "id")
 
-		app, _, ok := resolveAppRelation(srv, w, caller, appID)
+		app, relation, ok := resolveAppRelation(srv, w, caller, appID)
 		if !ok {
+			return
+		}
+
+		// RBAC: collaborator+ required (tightened from "any access").
+		if !relation.CanDeploy() {
+			notFound(w, "app not found")
 			return
 		}
 
@@ -144,6 +188,6 @@ func ListBundles(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(bundles)
+		json.NewEncoder(w).Encode(map[string]any{"bundles": bundles})
 	}
 }

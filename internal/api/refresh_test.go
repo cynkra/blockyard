@@ -53,7 +53,7 @@ func TestPostRefresh_PinnedDeployment(t *testing.T) {
 	appID := app["id"].(string)
 
 	bundleID := "test-bundle-pinned"
-	srv.DB.CreateBundle(bundleID, appID)
+	srv.DB.CreateBundle(bundleID, appID, "", false)
 	srv.DB.UpdateBundleStatus(bundleID, "active")
 	srv.DB.SetActiveBundle(appID, bundleID)
 
@@ -88,7 +88,7 @@ func TestPostRefresh_UnpinnedStartsTask(t *testing.T) {
 	appID := app["id"].(string)
 
 	bundleID := "test-bundle-unpinned"
-	srv.DB.CreateBundle(bundleID, appID)
+	srv.DB.CreateBundle(bundleID, appID, "", false)
 	srv.DB.UpdateBundleStatus(bundleID, "active")
 	srv.DB.SetActiveBundle(appID, bundleID)
 
@@ -146,7 +146,7 @@ func TestPostRefreshRollback_NoPrevManifest(t *testing.T) {
 	appID := app["id"].(string)
 
 	bundleID := "test-bundle-rollback"
-	srv.DB.CreateBundle(bundleID, appID)
+	srv.DB.CreateBundle(bundleID, appID, "", false)
 	srv.DB.UpdateBundleStatus(bundleID, "active")
 	srv.DB.SetActiveBundle(appID, bundleID)
 
@@ -173,7 +173,7 @@ func TestPostRefreshRollback_WithPrevManifest(t *testing.T) {
 	appID := app["id"].(string)
 
 	bundleID := "test-bundle-rollback-prev"
-	srv.DB.CreateBundle(bundleID, appID)
+	srv.DB.CreateBundle(bundleID, appID, "", false)
 	srv.DB.UpdateBundleStatus(bundleID, "active")
 	srv.DB.SetActiveBundle(appID, bundleID)
 
@@ -218,7 +218,7 @@ func TestPostRefreshRollback_BuildTarget_NoManifest(t *testing.T) {
 	appID := app["id"].(string)
 
 	bundleID := "test-bundle-build-rollback"
-	srv.DB.CreateBundle(bundleID, appID)
+	srv.DB.CreateBundle(bundleID, appID, "", false)
 	srv.DB.UpdateBundleStatus(bundleID, "active")
 	srv.DB.SetActiveBundle(appID, bundleID)
 

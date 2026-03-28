@@ -27,7 +27,7 @@ func setupRestoreTest(t *testing.T, buildSuccess bool) (RestoreParams, *task.Sto
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.CreateBundle("b-1", app.ID); err != nil {
+	if _, err := database.CreateBundle("b-1", app.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
 

@@ -225,15 +225,15 @@ func TestCollaboratorCanStartButNotDelete(t *testing.T) {
 	// Grant collaborator access.
 	srv.DB.GrantAppAccess(appID, "collab", "user", "collaborator", "owner")
 
-	// Collaborator can start (CanStartStop) — 409 proves auth passed.
+	// Collaborator can enable (CanStartStop) — 200 proves auth passed.
 	resp, err := http.DefaultClient.Do(
-		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/start", collabToken, nil))
+		jwtReq("POST", ts.URL+"/api/v1/apps/"+appID+"/enable", collabToken, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("expected 409 (no bundle), got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (enable), got %d", resp.StatusCode)
 	}
 
 	// Collaborator cannot delete (CanDelete requires owner).

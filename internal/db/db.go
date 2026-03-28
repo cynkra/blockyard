@@ -224,13 +224,69 @@ type AppRow struct {
 	PreWarmedSeats       int      `db:"pre_warmed_seats" json:"pre_warmed_seats"`
 	RefreshSchedule      string   `db:"refresh_schedule" json:"refresh_schedule"`
 	LastRefreshAt        *string  `db:"last_refresh_at" json:"last_refresh_at,omitempty"`
+	Enabled              bool     `db:"enabled" json:"enabled"`
 }
 
 type BundleRow struct {
-	ID         string `db:"id" json:"id"`
-	AppID      string `db:"app_id" json:"app_id"`
-	Status     string `db:"status" json:"status"`
-	UploadedAt string `db:"uploaded_at" json:"uploaded_at"`
+	ID         string  `db:"id" json:"id"`
+	AppID      string  `db:"app_id" json:"app_id"`
+	Status     string  `db:"status" json:"status"`
+	UploadedAt string  `db:"uploaded_at" json:"uploaded_at"`
+	DeployedBy *string `db:"deployed_by" json:"deployed_by"`
+	DeployedAt *string `db:"deployed_at" json:"deployed_at"`
+	Pinned     bool    `db:"pinned" json:"pinned"`
+}
+
+// SessionRow represents a row from the sessions table.
+type SessionRow struct {
+	ID        string  `db:"id" json:"id"`
+	AppID     string  `db:"app_id" json:"app_id"`
+	WorkerID  string  `db:"worker_id" json:"worker_id"`
+	UserSub   *string `db:"user_sub" json:"user_sub"`
+	StartedAt string  `db:"started_at" json:"started_at"`
+	EndedAt   *string `db:"ended_at" json:"ended_at"`
+	Status    string  `db:"status" json:"status"`
+}
+
+// DeploymentRow represents a bundle deployment joined with app and user info.
+type DeploymentRow struct {
+	AppID          string  `db:"app_id" json:"app_id"`
+	AppName        string  `db:"app_name" json:"app_name"`
+	BundleID       string  `db:"bundle_id" json:"bundle_id"`
+	DeployedBy     *string `db:"deployed_by" json:"deployed_by"`
+	DeployedByName *string `db:"deployed_by_name" json:"deployed_by_name"`
+	DeployedAt     *string `db:"deployed_at" json:"deployed_at"`
+	Status         string  `db:"status" json:"status"`
+}
+
+// CatalogRow extends AppRow with per-app relation and tags for list responses.
+type CatalogRow struct {
+	AppRow
+	Relation string `db:"relation" json:"relation"`
+	Tags     string `db:"tags" json:"tags"` // comma-separated tag names
+}
+
+// AccessGrantWithName extends AppAccessRow with the user's display name.
+type AccessGrantWithName struct {
+	AppAccessRow
+	DisplayName string `db:"display_name" json:"display_name"`
+}
+
+// SessionListOpts holds query parameters for listing sessions.
+type SessionListOpts struct {
+	UserSub string
+	Status  string
+	Limit   int
+}
+
+// DeploymentListOpts holds query parameters for listing deployments.
+type DeploymentListOpts struct {
+	CallerSub  string
+	CallerRole string
+	Search     string
+	Status     string
+	Page       int
+	PerPage    int
 }
 
 // Ping verifies the database connection is alive.
@@ -403,12 +459,20 @@ func (db *DB) UpdateLastRefresh(appID string, t time.Time) error {
 
 // --- Bundles ---
 
-func (db *DB) CreateBundle(id, appID string) (*BundleRow, error) {
+func (db *DB) CreateBundle(id, appID, deployedBy string, pinned bool) (*BundleRow, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	pinnedInt := 0
+	if pinned {
+		pinnedInt = 1
+	}
+	var deployedByVal *string
+	if deployedBy != "" {
+		deployedByVal = &deployedBy
+	}
 	_, err := db.Exec(db.rebind(
-		`INSERT INTO bundles (id, app_id, status, uploaded_at)
-		 VALUES (?, ?, 'pending', ?)`),
-		id, appID, now,
+		`INSERT INTO bundles (id, app_id, status, uploaded_at, deployed_by, pinned)
+		 VALUES (?, ?, 'pending', ?, ?, ?)`),
+		id, appID, now, deployedByVal, pinnedInt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert bundle: %w", err)
@@ -453,8 +517,8 @@ func (db *DB) SetActiveBundle(appID, bundleID string) error {
 	return err
 }
 
-// ActivateBundle marks a bundle as ready and sets it as the app's active
-// bundle in a single transaction.
+// ActivateBundle marks a bundle as ready, sets deployed_at, and sets it as
+// the app's active bundle in a single transaction.
 func (db *DB) ActivateBundle(appID, bundleID string) error {
 	tx, err := db.Beginx()
 	if err != nil {
@@ -462,11 +526,11 @@ func (db *DB) ActivateBundle(appID, bundleID string) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(db.rebind(`UPDATE bundles SET status = 'ready' WHERE id = ?`), bundleID); err != nil {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(db.rebind(`UPDATE bundles SET status = 'ready', deployed_at = ? WHERE id = ?`), now, bundleID); err != nil {
 		return fmt.Errorf("update bundle status: %w", err)
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := tx.Exec(db.rebind(`UPDATE apps SET active_bundle = ?, updated_at = ? WHERE id = ?`), bundleID, now, appID); err != nil {
 		return fmt.Errorf("set active bundle: %w", err)
 	}
@@ -483,6 +547,17 @@ func (db *DB) DeleteBundle(id string) (bool, error) {
 	return n > 0, nil
 }
 
+// SetBundleDeployed updates the deployed_by and deployed_at fields on a bundle.
+// Used during rollbacks to record who triggered the rollback and when.
+func (db *DB) SetBundleDeployed(bundleID, deployedBy string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE bundles SET deployed_by = ?, deployed_at = ? WHERE id = ?`),
+		deployedBy, now, bundleID,
+	)
+	return err
+}
+
 // --- App update ---
 
 // AppUpdate holds optional fields for updating an app's configuration.
@@ -495,6 +570,7 @@ type AppUpdate struct {
 	Title                *string
 	Description          *string
 	PreWarmedSeats       *int
+	RefreshSchedule      *string
 }
 
 // UpdateApp applies partial updates to an app's configuration.
@@ -532,6 +608,9 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	if u.PreWarmedSeats != nil {
 		app.PreWarmedSeats = *u.PreWarmedSeats
 	}
+	if u.RefreshSchedule != nil {
+		app.RefreshSchedule = *u.RefreshSchedule
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(db.rebind(
@@ -544,6 +623,7 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 			title = ?,
 			description = ?,
 			pre_warmed_seats = ?,
+			refresh_schedule = ?,
 			updated_at = ?
 		WHERE id = ?`),
 		app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
@@ -551,6 +631,7 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 		app.AccessType,
 		app.Title, app.Description,
 		app.PreWarmedSeats,
+		app.RefreshSchedule,
 		now, id,
 	)
 	if err != nil {
@@ -1033,4 +1114,402 @@ func (db *DB) UpdatePATLastUsed(ctx context.Context, id string) {
 		"UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?"),
 		now, id,
 	)
+}
+
+// --- Sessions ---
+
+// CreateSession inserts a new session record.
+func (db *DB) CreateSession(id, appID, workerID, userSub string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	var sub *string
+	if userSub != "" {
+		sub = &userSub
+	}
+	_, err := db.Exec(db.rebind(
+		`INSERT INTO sessions (id, app_id, worker_id, user_sub, started_at, status)
+		 VALUES (?, ?, ?, ?, ?, 'active')`),
+		id, appID, workerID, sub, now,
+	)
+	return err
+}
+
+// EndSession marks a session as ended with the given status.
+func (db *DB) EndSession(id, status string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE sessions SET status = ?, ended_at = ? WHERE id = ? AND status = 'active'`),
+		status, now, id,
+	)
+	return err
+}
+
+// CrashWorkerSessions marks all active sessions for a worker as crashed.
+func (db *DB) CrashWorkerSessions(workerID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE sessions SET status = 'crashed', ended_at = ? WHERE worker_id = ? AND status = 'active'`),
+		now, workerID,
+	)
+	return err
+}
+
+// EndWorkerSessions marks all active sessions for a worker as ended.
+func (db *DB) EndWorkerSessions(workerID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE sessions SET status = 'ended', ended_at = ? WHERE worker_id = ? AND status = 'active'`),
+		now, workerID,
+	)
+	return err
+}
+
+// EndAppSessions marks all active sessions for an app as ended.
+func (db *DB) EndAppSessions(appID string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE sessions SET status = 'ended', ended_at = ? WHERE app_id = ? AND status = 'active'`),
+		now, appID,
+	)
+	return err
+}
+
+// ListSessions returns sessions for an app, most recent first.
+func (db *DB) ListSessions(appID string, opts SessionListOpts) ([]SessionRow, error) {
+	conditions := []string{"app_id = ?"}
+	args := []any{appID}
+
+	if opts.UserSub != "" {
+		conditions = append(conditions, "user_sub = ?")
+		args = append(args, opts.UserSub)
+	}
+	if opts.Status != "" {
+		conditions = append(conditions, "status = ?")
+		args = append(args, opts.Status)
+	}
+
+	limit := opts.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	query := db.rebind(fmt.Sprintf(
+		`SELECT * FROM sessions WHERE %s ORDER BY started_at DESC LIMIT ?`,
+		strings.Join(conditions, " AND "),
+	))
+	args = append(args, limit)
+
+	var sessions []SessionRow
+	if err := db.DB.Select(&sessions, query, args...); err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+// GetSession returns a single session by ID.
+func (db *DB) GetSession(id string) (*SessionRow, error) {
+	var s SessionRow
+	err := db.DB.Get(&s, db.rebind(`SELECT * FROM sessions WHERE id = ?`), id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// --- Activity metrics (derived from sessions) ---
+
+// CountSessions returns total session count for an app.
+func (db *DB) CountSessions(appID string) (int, error) {
+	var n int
+	err := db.DB.Get(&n, db.rebind(`SELECT COUNT(*) FROM sessions WHERE app_id = ?`), appID)
+	return n, err
+}
+
+// CountRecentSessions returns session count since the given time.
+func (db *DB) CountRecentSessions(appID string, since time.Time) (int, error) {
+	var n int
+	err := db.DB.Get(&n, db.rebind(
+		`SELECT COUNT(*) FROM sessions WHERE app_id = ? AND started_at >= ?`),
+		appID, since.UTC().Format(time.RFC3339))
+	return n, err
+}
+
+// CountUniqueVisitors returns distinct user_sub count for an app.
+func (db *DB) CountUniqueVisitors(appID string) (int, error) {
+	var n int
+	err := db.DB.Get(&n, db.rebind(
+		`SELECT COUNT(DISTINCT user_sub) FROM sessions WHERE app_id = ? AND user_sub IS NOT NULL`),
+		appID)
+	return n, err
+}
+
+// --- Enable/Disable ---
+
+// SetAppEnabled sets the enabled flag on an app.
+func (db *DB) SetAppEnabled(appID string, enabled bool) error {
+	val := 0
+	if enabled {
+		val = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE apps SET enabled = ?, updated_at = ? WHERE id = ?`),
+		val, now, appID,
+	)
+	return err
+}
+
+// --- Hard delete (purge) ---
+
+// PurgeApp permanently removes an app and all associated data in a
+// single transaction. The caller must verify the app is soft-deleted.
+func (db *DB) PurgeApp(appID string) error {
+	tx, err := db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Order matters for foreign key constraints.
+	// Clear active_bundle reference first.
+	if _, err := tx.Exec(db.rebind(`UPDATE apps SET active_bundle = NULL WHERE id = ?`), appID); err != nil {
+		return fmt.Errorf("clear active bundle: %w", err)
+	}
+	if _, err := tx.Exec(db.rebind(`DELETE FROM sessions WHERE app_id = ?`), appID); err != nil {
+		return fmt.Errorf("delete sessions: %w", err)
+	}
+	if _, err := tx.Exec(db.rebind(`DELETE FROM app_tags WHERE app_id = ?`), appID); err != nil {
+		return fmt.Errorf("delete app tags: %w", err)
+	}
+	if _, err := tx.Exec(db.rebind(`DELETE FROM app_access WHERE app_id = ?`), appID); err != nil {
+		return fmt.Errorf("delete access grants: %w", err)
+	}
+	if _, err := tx.Exec(db.rebind(`DELETE FROM bundles WHERE app_id = ?`), appID); err != nil {
+		return fmt.Errorf("delete bundles: %w", err)
+	}
+	if _, err := tx.Exec(db.rebind(`DELETE FROM apps WHERE id = ?`), appID); err != nil {
+		return fmt.Errorf("delete app: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// --- Deployments ---
+
+// ListDeployments returns a cross-app deployment listing with pagination.
+// Results are filtered to apps where the caller has collaborator+ access.
+func (db *DB) ListDeployments(opts DeploymentListOpts) ([]DeploymentRow, int, error) {
+	conditions := []string{"b.deployed_at IS NOT NULL", "apps.deleted_at IS NULL"}
+	var args []any
+
+	// Access control
+	if opts.CallerRole != "admin" && opts.CallerSub != "" {
+		accessFilter := `(
+			apps.owner = ?
+			OR EXISTS (
+				SELECT 1 FROM app_access
+				WHERE app_access.app_id = apps.id
+				AND app_access.kind = 'user'
+				AND app_access.principal = ?
+				AND app_access.role = 'collaborator'
+			)
+		)`
+		conditions = append(conditions, accessFilter)
+		args = append(args, opts.CallerSub, opts.CallerSub)
+	}
+
+	if opts.Search != "" {
+		conditions = append(conditions, "LOWER(apps.name) LIKE LOWER(?)")
+		args = append(args, "%"+escapeLike(opts.Search)+"%")
+	}
+	if opts.Status != "" {
+		conditions = append(conditions, "b.status = ?")
+		args = append(args, opts.Status)
+	}
+
+	where := "WHERE " + strings.Join(conditions, " AND ")
+
+	// Count total
+	var total int
+	countQuery := db.rebind(fmt.Sprintf(
+		`SELECT COUNT(*) FROM bundles b JOIN apps ON b.app_id = apps.id %s`, where))
+	if err := db.DB.Get(&total, countQuery, args...); err != nil {
+		return nil, 0, err
+	}
+
+	perPage := opts.PerPage
+	if perPage <= 0 || perPage > 100 {
+		perPage = 25
+	}
+	page := opts.Page
+	if page < 1 {
+		page = 1
+	}
+
+	query := db.rebind(fmt.Sprintf(
+		`SELECT b.app_id, apps.name AS app_name, b.id AS bundle_id,
+		        b.deployed_by, u.name AS deployed_by_name,
+		        b.deployed_at, b.status
+		 FROM bundles b
+		 JOIN apps ON b.app_id = apps.id
+		 LEFT JOIN users u ON b.deployed_by = u.sub
+		 %s
+		 ORDER BY b.deployed_at DESC
+		 LIMIT ? OFFSET ?`, where))
+	pageArgs := append(append([]any{}, args...), perPage, (page-1)*perPage)
+
+	var rows []DeploymentRow
+	if err := db.DB.Select(&rows, query, pageArgs...); err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
+}
+
+// --- Consolidated app listing ---
+
+// ListCatalogWithRelation returns apps visible to the caller with per-app
+// relation and tags computed in the query. Replaces N+1 ListAppTags calls.
+func (db *DB) ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, error) {
+	conditions := []string{"apps.deleted_at IS NULL"}
+	var args []any
+
+	// Access control filter
+	if params.CallerRole == "admin" {
+		// Admin sees everything
+	} else if params.CallerSub != "" {
+		accessFilter := `(
+			apps.owner = ?
+			OR apps.access_type IN ('public', 'logged_in')
+			OR EXISTS (
+				SELECT 1 FROM app_access
+				WHERE app_access.app_id = apps.id
+				AND app_access.kind = 'user'
+				AND app_access.principal = ?
+			)
+		)`
+		conditions = append(conditions, accessFilter)
+		args = append(args, params.CallerSub, params.CallerSub)
+	} else {
+		conditions = append(conditions, "apps.access_type = 'public'")
+	}
+
+	if params.Tag != "" {
+		conditions = append(conditions,
+			`EXISTS (
+				SELECT 1 FROM app_tags
+				JOIN tags ON tags.id = app_tags.tag_id
+				WHERE app_tags.app_id = apps.id AND tags.name = ?
+			)`)
+		args = append(args, params.Tag)
+	}
+
+	if params.Search != "" {
+		conditions = append(conditions,
+			"(LOWER(apps.name) LIKE LOWER(?) ESCAPE '\\' OR LOWER(apps.title) LIKE LOWER(?) ESCAPE '\\' OR LOWER(apps.description) LIKE LOWER(?) ESCAPE '\\')")
+		like := "%" + escapeLike(params.Search) + "%"
+		args = append(args, like, like, like)
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Count total
+	var total int
+	countQuery := db.rebind("SELECT COUNT(*) FROM apps " + where)
+	if err := db.DB.Get(&total, countQuery, args...); err != nil {
+		return nil, 0, err
+	}
+
+	// Build relation CASE expression
+	relationExpr := "'viewer'" // default for unauthenticated
+	if params.CallerRole == "admin" {
+		relationExpr = "'admin'"
+	} else if params.CallerSub != "" {
+		relationExpr = `CASE
+			WHEN apps.owner = ? THEN 'owner'
+			WHEN EXISTS (
+				SELECT 1 FROM app_access
+				WHERE app_access.app_id = apps.id
+				AND app_access.kind = 'user'
+				AND app_access.principal = ?
+				AND app_access.role = 'collaborator'
+			) THEN 'collaborator'
+			ELSE 'viewer'
+		END`
+		args = append(args, params.CallerSub, params.CallerSub)
+	}
+
+	// Tags subquery — uses GROUP_CONCAT for SQLite, STRING_AGG for Postgres
+	var tagsAgg string
+	switch db.dialect {
+	case DialectPostgres:
+		tagsAgg = `COALESCE((SELECT STRING_AGG(t.name, ',' ORDER BY t.name)
+			FROM app_tags at JOIN tags t ON t.id = at.tag_id
+			WHERE at.app_id = apps.id), '')`
+	default:
+		tagsAgg = `COALESCE((SELECT GROUP_CONCAT(t.name, ',')
+			FROM (SELECT t2.name FROM app_tags at2 JOIN tags t2 ON t2.id = at2.tag_id
+			      WHERE at2.app_id = apps.id ORDER BY t2.name) t), '')`
+	}
+
+	perPage := params.PerPage
+	if perPage <= 0 || perPage > 100 {
+		perPage = 25
+	}
+	page := params.Page
+	if page < 1 {
+		page = 1
+	}
+
+	query := db.rebind(fmt.Sprintf(
+		`SELECT apps.*, %s AS relation, %s AS tags
+		 FROM apps %s
+		 ORDER BY apps.updated_at DESC
+		 LIMIT ? OFFSET ?`,
+		relationExpr, tagsAgg, where,
+	))
+	pageArgs := append(append([]any{}, args...), perPage, (page-1)*perPage)
+
+	var rows []CatalogRow
+	if err := db.DB.Select(&rows, query, pageArgs...); err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
+}
+
+// --- Collaborator display names ---
+
+// ListAppAccessWithNames returns access grants joined with user display names.
+func (db *DB) ListAppAccessWithNames(appID string) ([]AccessGrantWithName, error) {
+	var grants []AccessGrantWithName
+	err := db.DB.Select(&grants, db.rebind(
+		`SELECT aa.app_id, aa.principal, aa.kind, aa.role, aa.granted_by, aa.granted_at,
+		        COALESCE(u.name, aa.principal) AS display_name
+		 FROM app_access aa
+		 LEFT JOIN users u ON aa.principal = u.sub
+		 WHERE aa.app_id = ?`), appID)
+	if err != nil {
+		return nil, err
+	}
+	return grants, nil
+}
+
+// --- App lookup variants ---
+
+// GetAppByNameIncludeDeleted returns an app by name regardless of soft-delete status.
+func (db *DB) GetAppByNameIncludeDeleted(name string) (*AppRow, error) {
+	var app AppRow
+	err := db.DB.Get(&app, db.rebind(
+		`SELECT * FROM apps WHERE name = ?`), name)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
 }

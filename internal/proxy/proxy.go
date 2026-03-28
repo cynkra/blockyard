@@ -68,6 +68,12 @@ func Handler(srv *server.Server) http.Handler {
 			return
 		}
 
+		// Reject requests to disabled apps before session routing.
+		if !app.Enabled {
+			http.Error(w, "app is disabled", http.StatusServiceUnavailable)
+			return
+		}
+
 		// Resolve caller identity (may be nil when OIDC is not configured).
 		caller := auth.CallerFromContext(r.Context())
 		callerSub := ""
@@ -192,6 +198,12 @@ func Handler(srv *server.Server) http.Handler {
 				LastAccess: time.Now(),
 			})
 			telemetry.SessionsActive.Inc()
+
+			// Track session in the database for activity metrics.
+			if err := srv.DB.CreateSession(sessionID, app.ID, workerID, callerSub); err != nil {
+				slog.Warn("proxy: failed to create session record",
+					"session_id", sessionID, "error", err)
+			}
 
 			// Trigger pre-warm replacement if we just claimed a warm worker.
 			if wasIdle && app.PreWarmedSeats > 0 {

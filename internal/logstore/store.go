@@ -13,12 +13,21 @@ type Store struct {
 }
 
 type logEntry struct {
-	mu      sync.Mutex // protects buffer and ended
-	appID   string
-	buffer  []string
-	ch      chan string
-	ended   bool
-	endedAt time.Time
+	mu        sync.Mutex // protects buffer and ended
+	appID     string
+	buffer    []string
+	ch        chan string
+	ended     bool
+	endedAt   time.Time
+	startedAt time.Time
+}
+
+// WorkerInfo provides timing data for a worker's log stream.
+type WorkerInfo struct {
+	ID        string
+	StartedAt time.Time
+	EndedAt   time.Time // zero for active
+	Ended     bool
 }
 
 func NewStore() *Store {
@@ -29,8 +38,9 @@ func NewStore() *Store {
 // for writing log lines from the capture goroutine.
 func (s *Store) Create(workerID, appID string) Sender {
 	e := &logEntry{
-		appID: appID,
-		ch:    make(chan string, 64),
+		appID:     appID,
+		ch:        make(chan string, 64),
+		startedAt: time.Now(),
 	}
 	s.mu.Lock()
 	s.entries[workerID] = e
@@ -53,16 +63,44 @@ func (s *Store) Subscribe(workerID string) (snapshot []string, live <-chan strin
 	return snap, e.ch, true
 }
 
-// WorkerIDsByApp returns worker IDs for all workers of the given app.
-func (s *Store) WorkerIDsByApp(appID string) (workerIDs []string) {
+// WorkerIDsByApp returns worker info for all workers of the given app.
+func (s *Store) WorkerIDsByApp(appID string) []WorkerInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var infos []WorkerInfo
 	for wid, e := range s.entries {
 		if e.appID == appID {
-			workerIDs = append(workerIDs, wid)
+			e.mu.Lock()
+			info := WorkerInfo{
+				ID:        wid,
+				StartedAt: e.startedAt,
+				Ended:     e.ended,
+				EndedAt:   e.endedAt,
+			}
+			e.mu.Unlock()
+			infos = append(infos, info)
 		}
 	}
-	return workerIDs
+	return infos
+}
+
+// HasWorker returns true if the store has a log entry for the given worker ID.
+func (s *Store) HasWorker(workerID string) bool {
+	s.mu.Lock()
+	_, ok := s.entries[workerID]
+	s.mu.Unlock()
+	return ok
+}
+
+// WorkerAppID returns the app ID for a worker, or empty string if not found.
+func (s *Store) WorkerAppID(workerID string) string {
+	s.mu.Lock()
+	e, ok := s.entries[workerID]
+	s.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	return e.appID
 }
 
 

@@ -136,6 +136,19 @@ func (s *Store) RerouteWorker(oldWorkerID, newWorkerID string) int {
 	return n
 }
 
+// EntriesForWorker returns a snapshot of all sessions for a worker.
+func (s *Store) EntriesForWorker(workerID string) map[string]Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make(map[string]Entry)
+	for sid, e := range s.sessions {
+		if e.WorkerID == workerID {
+			result[sid] = e
+		}
+	}
+	return result
+}
+
 // SweepIdle removes sessions whose LastAccess is older than maxAge.
 // Returns the number of sessions removed.
 func (s *Store) SweepIdle(maxAge time.Duration) int {

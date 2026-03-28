@@ -74,10 +74,11 @@ pak_version = "stable"
 
 ```toml
 [storage]
-bundle_server_path = "/data/bundles"
-bundle_worker_path = "/app"
-bundle_retention   = 50
-max_bundle_size    = 104857600
+bundle_server_path    = "/data/bundles"
+bundle_worker_path    = "/app"
+bundle_retention      = 50
+max_bundle_size       = 104857600
+# soft_delete_retention = "720h"   # 30 days; omit or 0 = immediate hard delete
 ```
 
 | Field | Type | Default | Required | Description |
@@ -86,6 +87,7 @@ max_bundle_size    = 104857600
 | `bundle_worker_path` | `path` | `/app` | No | Mount point inside worker containers |
 | `bundle_retention` | `integer` | `50` | No | Max bundles kept per app (oldest pruned first) |
 | `max_bundle_size` | `integer` | `104857600` | No | Maximum bundle upload size in bytes (default 100 MB) |
+| `soft_delete_retention` | `duration` | `0` | No | How long to keep soft-deleted apps before permanent removal. When `0` (default), `DELETE` is an immediate hard delete. When set (e.g. `"720h"` for 30 days), deleted apps are recoverable during the retention window and purged automatically afterwards. |
 
 ## `[database]`
 

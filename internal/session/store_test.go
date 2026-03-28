@@ -138,6 +138,29 @@ func TestCountForWorkers(t *testing.T) {
 	}
 }
 
+func TestEntriesForWorker(t *testing.T) {
+	s := NewStore()
+	s.Set("s1", Entry{WorkerID: "w1", UserSub: "user-a", LastAccess: time.Now()})
+	s.Set("s2", Entry{WorkerID: "w1", UserSub: "user-b", LastAccess: time.Now()})
+	s.Set("s3", Entry{WorkerID: "w2", UserSub: "user-c", LastAccess: time.Now()})
+
+	entries := s.EntriesForWorker("w1")
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries for w1, got %d", len(entries))
+	}
+	if _, ok := entries["s1"]; !ok {
+		t.Error("expected s1 in entries")
+	}
+	if _, ok := entries["s2"]; !ok {
+		t.Error("expected s2 in entries")
+	}
+
+	empty := s.EntriesForWorker("nonexistent")
+	if len(empty) != 0 {
+		t.Errorf("expected 0 entries for nonexistent, got %d", len(empty))
+	}
+}
+
 func TestSweepIdle(t *testing.T) {
 	s := NewStore()
 	s.Set("old", Entry{WorkerID: "w1", LastAccess: time.Now().Add(-2 * time.Hour)})

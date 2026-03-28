@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/cynkra/blockyard/internal/api"
+	_ "github.com/cynkra/blockyard/internal/api/docs"
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/docker"

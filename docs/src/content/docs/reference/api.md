@@ -116,16 +116,57 @@ end with a hyphen; 1–63 characters).
 
 ### `GET /api/v1/apps`
 
-List all apps.
+List apps visible to the caller. Paginated with RBAC filtering.
 
-**Response:** `200 OK` — array of app objects, each with a derived `status`
-field (`"running"` or `"stopped"`).
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | — | Search by app name or title |
+| `tag` | `string` | — | Filter by tag name |
+| `deleted` | `bool` | `false` | Show soft-deleted apps (admin only) |
+| `page` | `integer` | `1` | Page number |
+| `per_page` | `integer` | `25` | Items per page (max 100) |
+
+**Response:** `200 OK`
+
+```json
+{
+  "apps": [
+    {
+      "id": "a1b2c3...",
+      "name": "my-dashboard",
+      "owner": "jane",
+      "access_type": "acl",
+      "active_bundle": "b1234...",
+      "title": "My Dashboard",
+      "description": "A sales analytics dashboard",
+      "enabled": true,
+      "status": "running",
+      "relation": "owner",
+      "tags": ["production"],
+      "created_at": "2025-01-15T09:30:00Z",
+      "updated_at": "2025-01-15T09:30:00Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "per_page": 25
+}
+```
+
+`status` is one of `"running"`, `"stopped"`, or `"stopping"` (workers are
+draining). `relation` is the caller's relationship to the app (`"owner"`,
+`"collaborator"`, `"viewer"`, or `"admin"`).
 
 ### `GET /api/v1/apps/{id}`
 
-Get a single app by ID.
+Get a single app by ID. Returns app metadata including `enabled` and
+derived `status`. Workers are available via the
+[runtime endpoint](#get-apiv1appsidruntime).
 
-**Response:** `200 OK` — app object with derived `status`.
+**Response:** `200 OK` — app object with `status` (`"running"`, `"stopped"`,
+or `"stopping"`) and `enabled` field.
 
 ### `PATCH /api/v1/apps/{id}`
 
@@ -158,8 +199,25 @@ updated.
 
 ### `DELETE /api/v1/apps/{id}`
 
-Delete an app. Stops all running workers, removes bundle files from disk,
-and deletes all database rows.
+Delete an app. Stops all running workers.
+
+When [`soft_delete_retention`](/reference/config/#storage) is configured, the
+app is **soft-deleted** — it is hidden from listings but retains its data for
+the configured retention period. Soft-deleted apps can be restored with
+`POST /api/v1/apps/{id}/restore`.
+
+When `soft_delete_retention` is not set (or `0`), the app is permanently
+deleted along with all bundles, sessions, and access grants.
+
+**Response:** `204 No Content`
+
+#### `DELETE /api/v1/apps/{id}?purge=true`
+
+**Admin only.** Permanently delete a soft-deleted app. The app must already
+be soft-deleted — returns `409 Conflict` otherwise.
+
+Removes all database rows (bundles, sessions, access grants) and bundle
+files from disk.
 
 **Response:** `204 No Content`
 
@@ -217,7 +275,100 @@ running, buffered lines are sent immediately followed by live streaming.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `worker_id` | `string` | — | **Required.** The worker to stream logs from. Use the `workers` field from the app response to discover IDs. |
+| `worker_id` | `string` | — | **Required.** The worker to stream logs from. Use the [runtime endpoint](#get-apiv1appsidruntime) to discover worker IDs. |
+
+### `POST /api/v1/apps/{id}/enable`
+
+Enable an app, allowing it to accept traffic and cold-start workers.
+Requires collaborator or higher permissions.
+
+**Response:** `200 OK` — updated app object.
+
+### `POST /api/v1/apps/{id}/disable`
+
+Disable an app. Active sessions are ended and running workers are drained
+and stopped. Disabled apps return `503 Service Unavailable` for all proxy
+requests. Requires collaborator or higher permissions.
+
+**Response:** `200 OK` — updated app object.
+
+---
+
+## Runtime & Sessions
+
+### `GET /api/v1/apps/{id}/runtime`
+
+Get live operational data for an app, including running workers, container
+resource usage, active sessions, and activity metrics. Requires collaborator
+or higher permissions.
+
+**Response:** `200 OK`
+
+```json
+{
+  "workers": [
+    {
+      "id": "w-a3f2...",
+      "bundle_id": "01ABC...",
+      "status": "active",
+      "started_at": "2026-03-26T11:00:00Z",
+      "idle_since": null,
+      "stats": {
+        "cpu_percent": 12.5,
+        "memory_usage_bytes": 268435456,
+        "memory_limit_bytes": 536870912
+      },
+      "sessions": [
+        {
+          "id": "s-9e1b...",
+          "user_sub": "alice@company.com",
+          "user_display_name": "Alice",
+          "started_at": "2026-03-26T11:00:00Z"
+        }
+      ]
+    }
+  ],
+  "active_sessions": 3,
+  "total_views": 1247,
+  "recent_views": 89,
+  "unique_visitors": 42,
+  "last_deployed_at": "2026-03-26T10:00:00Z"
+}
+```
+
+`workers[].status` is `"active"` or `"draining"`. `stats` may be `null` if
+container metrics are unavailable. Dead workers (recently exited) are
+included with an `ended_at` timestamp.
+
+### `GET /api/v1/apps/{id}/sessions`
+
+List sessions for an app. Requires collaborator or higher permissions.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `user` | `string` | — | Filter by user sub |
+| `status` | `string` | — | Filter by status (`active`, `ended`, `crashed`) |
+| `limit` | `integer` | `50` | Max results (1–200) |
+
+**Response:** `200 OK`
+
+```json
+{
+  "sessions": [
+    {
+      "id": "s-9e1b...",
+      "app_id": "a1b2c3...",
+      "worker_id": "w-a3f2...",
+      "user_sub": "alice@company.com",
+      "started_at": "2026-03-26T11:00:00Z",
+      "ended_at": null,
+      "status": "active"
+    }
+  ]
+}
+```
 
 ---
 
@@ -249,6 +400,46 @@ to follow progress.
 List all bundles for an app.
 
 **Response:** `200 OK` — array of bundle objects.
+
+---
+
+## Deployments
+
+### `GET /api/v1/deployments`
+
+List bundle deployments across all apps. Results are RBAC-filtered to apps
+where the caller is collaborator or higher. Supports search, status filter,
+and pagination.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `search` | `string` | — | Search by app name |
+| `status` | `string` | — | Filter by bundle status (`ready`, `pending`, `failed`) |
+| `page` | `integer` | `1` | Page number |
+| `per_page` | `integer` | `25` | Items per page (max 100) |
+
+**Response:** `200 OK`
+
+```json
+{
+  "deployments": [
+    {
+      "app_id": "a1b2c3...",
+      "app_name": "my-dashboard",
+      "bundle_id": "b1234...",
+      "deployed_by": "jane-sub",
+      "deployed_by_name": "Jane",
+      "deployed_at": "2026-03-26T10:00:00Z",
+      "status": "ready"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "per_page": 25
+}
+```
 
 ---
 
@@ -561,6 +752,9 @@ worker container (cold start), waits for it to become healthy, and forwards
 the request. A `blockyard_session` cookie is set to pin subsequent requests
 to the same worker.
 
+If the app is [disabled](#post-apiv1appsiddisable), all proxy requests
+return `503 Service Unavailable`.
+
 WebSocket upgrade requests are also supported at any path under
 `/app/{name}/`.
 
@@ -591,4 +785,4 @@ All error responses use a consistent JSON shape:
 | `413` | Bundle exceeds `max_bundle_size` |
 | `500` | Internal server error |
 | `502` | Upstream service error (e.g. OpenBao login failure) |
-| `503` | Service unavailable (e.g. max workers reached, worker start timeout) |
+| `503` | Service unavailable (e.g. max workers reached, worker start timeout, app disabled) |

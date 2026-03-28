@@ -163,3 +163,27 @@ func TestBufferCap(t *testing.T) {
 		t.Errorf("expected buffer capped at %d, got %d", maxLogLines, len(snapshot))
 	}
 }
+
+func TestHasWorker(t *testing.T) {
+	s := NewStore()
+	s.Create("worker-has", "app-1")
+
+	if !s.HasWorker("worker-has") {
+		t.Error("expected HasWorker to return true for existing worker")
+	}
+	if s.HasWorker("nonexistent") {
+		t.Error("expected HasWorker to return false for nonexistent worker")
+	}
+}
+
+func TestWorkerAppID(t *testing.T) {
+	s := NewStore()
+	s.Create("worker-appid", "app-99")
+
+	if id := s.WorkerAppID("worker-appid"); id != "app-99" {
+		t.Errorf("expected app-99, got %q", id)
+	}
+	if id := s.WorkerAppID("nonexistent"); id != "" {
+		t.Errorf("expected empty string, got %q", id)
+	}
+}

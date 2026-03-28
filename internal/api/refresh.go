@@ -15,13 +15,31 @@ import (
 )
 
 // PostRefresh starts a dependency refresh for an unpinned deployment.
+//
+//	@Summary		Refresh dependencies
+//	@Description	Start a background dependency refresh for the active bundle. Fails if the bundle was deployed with pinned dependencies.
+//	@Tags			refresh
+//	@Produce		json
+//	@Param			id	path		string	true	"App ID (UUID) or name"
+//	@Success		202	{object}	asyncTaskResponse
+//	@Failure		404	{object}	errorResponse
+//	@Failure		409	{object}	errorResponse
+//	@Failure		500	{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/refresh [post]
 func PostRefresh(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := chi.URLParam(r, "id")
 		caller := auth.CallerFromContext(r.Context())
 
-		app, _, ok := resolveAppRelation(srv, w, caller, appID)
+		app, relation, ok := resolveAppRelation(srv, w, caller, appID)
 		if !ok {
+			return
+		}
+
+		// RBAC: collaborator+ required.
+		if !relation.CanDeploy() {
+			notFound(w, "app not found")
 			return
 		}
 
@@ -31,7 +49,22 @@ func PostRefresh(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// Only unpinned deployments can be refreshed.
+		// Check the bundle's pinned flag first (server-side guard).
+		activeBundle, err := srv.DB.GetBundle(*app.ActiveBundle)
+		if err != nil {
+			serverError(w, "get bundle: "+err.Error())
+			return
+		}
+		if activeBundle != nil && activeBundle.Pinned {
+			writeJSON(w, http.StatusConflict,
+				map[string]string{
+					"error":   "conflict",
+					"message": "App was deployed with pinned dependencies. Redeploy to update.",
+				})
+			return
+		}
+
+		// Read manifest for the refresh operation.
 		manifestPath := filepath.Join(
 			srv.BundlePaths(app.ID, *app.ActiveBundle).Base,
 			"manifest.json")
@@ -44,8 +77,8 @@ func PostRefresh(srv *server.Server) http.HandlerFunc {
 		if m.IsPinned() {
 			writeJSON(w, http.StatusConflict,
 				map[string]string{
-					"message": "app was deployed with pinned dependencies; " +
-						"redeploy to update",
+					"error":   "conflict",
+					"message": "App was deployed with pinned dependencies. Redeploy to update.",
 				})
 			return
 		}
@@ -55,6 +88,9 @@ func PostRefresh(srv *server.Server) http.HandlerFunc {
 		sender := srv.Tasks.Create(taskID, app.ID)
 		go srv.RunRefresh(context.Background(), app, m, sender)
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", "refreshStarted")
+		}
 		writeJSON(w, http.StatusAccepted, map[string]string{
 			"task_id": taskID,
 			"message": "refresh started",
@@ -63,19 +99,53 @@ func PostRefresh(srv *server.Server) http.HandlerFunc {
 }
 
 // PostRefreshRollback rolls back to a previous refresh or the original build.
+//
+//	@Summary		Rollback refresh
+//	@Description	Roll back to the previous refresh or the original build (?target=build). Starts a background task.
+//	@Tags			refresh
+//	@Produce		json
+//	@Param			id		path		string	true	"App ID (UUID) or name"
+//	@Param			target	query		string	false	"Rollback target: 'build' for original deploy, omit for previous refresh"
+//	@Success		202		{object}	asyncTaskResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/apps/{id}/refresh/rollback [post]
 func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := chi.URLParam(r, "id")
 		caller := auth.CallerFromContext(r.Context())
 
-		app, _, ok := resolveAppRelation(srv, w, caller, appID)
+		app, relation, ok := resolveAppRelation(srv, w, caller, appID)
 		if !ok {
+			return
+		}
+
+		// RBAC: collaborator+ required.
+		if !relation.CanDeploy() {
+			notFound(w, "app not found")
 			return
 		}
 
 		if app.ActiveBundle == nil {
 			writeJSON(w, http.StatusConflict,
 				map[string]string{"message": "app has no active bundle"})
+			return
+		}
+
+		// Check pinned guard.
+		activeBundle, err := srv.DB.GetBundle(*app.ActiveBundle)
+		if err != nil {
+			serverError(w, "get bundle: "+err.Error())
+			return
+		}
+		if activeBundle != nil && activeBundle.Pinned {
+			writeJSON(w, http.StatusConflict,
+				map[string]string{
+					"error":   "conflict",
+					"message": "App was deployed with pinned dependencies. Redeploy to update.",
+				})
 			return
 		}
 

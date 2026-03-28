@@ -245,7 +245,7 @@ func TestProxyAtCapacityReturns503(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&created)
 	id := created["id"].(string)
 
-	srv.DB.CreateBundle("b-1", id)
+	srv.DB.CreateBundle("b-1", id, "", false)
 	srv.DB.UpdateBundleStatus("b-1", "ready")
 	srv.DB.SetActiveBundle(id, "b-1")
 
