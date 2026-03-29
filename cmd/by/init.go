@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cynkra/blockyard/internal/deploy"
+	"github.com/cynkra/blockyard/internal/detect"
 	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/spf13/cobra"
 )
@@ -23,7 +25,7 @@ func initCmd() *cobra.Command {
 			if err != nil {
 				exitErrorf(jsonOutput, "invalid path: %v", err)
 			}
-			if !dirExists(absDir) {
+			if !detect.DirExists(absDir) {
 				exitErrorf(jsonOutput, "directory not found: %s", dir)
 			}
 
@@ -33,7 +35,7 @@ func initCmd() *cobra.Command {
 			manifestPath := filepath.Join(absDir, "manifest.json")
 
 			// If manifest.json already exists, validate and exit.
-			if fileExists(manifestPath) {
+			if detect.FileExists(manifestPath) {
 				m, err := readAndValidateManifest(manifestPath)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
@@ -50,7 +52,7 @@ func initCmd() *cobra.Command {
 				return nil
 			}
 
-			det, warnings := detectApp(absDir, pinFlag)
+			det, warnings := detect.App(absDir, pinFlag)
 			for _, w := range warnings {
 				if !jsonOutput {
 					fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
@@ -58,7 +60,7 @@ func initCmd() *cobra.Command {
 			}
 
 			// Bare scripts can't generate a manifest.
-			if det.InputCase == caseBareScripts {
+			if det.InputCase == detect.CaseBareScripts {
 				exitErrorf(jsonOutput, "cannot generate manifest from bare scripts; add a DESCRIPTION or renv.lock file, or use --pin")
 			}
 
@@ -73,7 +75,7 @@ func initCmd() *cobra.Command {
 				fmt.Println()
 			}
 
-			m, err := prepareManifest(absDir, det, reposFlag)
+			m, err := deploy.PrepareManifest(absDir, det, reposFlag)
 			if err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}

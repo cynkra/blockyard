@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -15,13 +16,13 @@ func bundlesCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.get("/api/v1/apps/" + args[0] + "/bundles")
+			resp, err := c.Get("/api/v1/apps/" + args[0] + "/bundles")
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
@@ -38,7 +39,7 @@ func bundlesCmd() *cobra.Command {
 					Pinned     bool    `json:"pinned"`
 				} `json:"bundles"`
 			}
-			if err := decodeJSON(resp, &body); err != nil {
+			if err := apiclient.DecodeJSON(resp, &body); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 
@@ -73,14 +74,14 @@ func rollbackCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.postJSON("/api/v1/apps/"+args[0]+"/rollback",
+			resp, err := c.PostJSON("/api/v1/apps/"+args[0]+"/rollback",
 				map[string]string{"bundle_id": args[1]})
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
@@ -88,7 +89,7 @@ func rollbackCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()

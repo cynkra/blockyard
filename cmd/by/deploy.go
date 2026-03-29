@@ -1,19 +1,18 @@
 package main
 
 import (
-	"archive/tar"
 	"bufio"
-	"compress/gzip"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/cynkra/blockyard/internal/manifest"
+	"github.com/cynkra/blockyard/internal/apiclient"
+	"github.com/cynkra/blockyard/internal/cliconfig"
+	"github.com/cynkra/blockyard/internal/deploy"
+	"github.com/cynkra/blockyard/internal/detect"
 	"github.com/spf13/cobra"
 )
 
@@ -31,7 +30,7 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				exitErrorf(jsonOutput, "invalid path: %v", err)
 			}
-			if !dirExists(absDir) {
+			if !detect.DirExists(absDir) {
 				exitErrorf(jsonOutput, "directory not found: %s", dir)
 			}
 
@@ -43,7 +42,7 @@ func deployCmd() *cobra.Command {
 
 			c := mustClient(jsonOutput)
 
-			det, warnings := detectApp(absDir, pinFlag)
+			det, warnings := detect.App(absDir, pinFlag)
 			if nameFlag != "" {
 				det.Name = nameFlag
 			}
@@ -55,7 +54,7 @@ func deployCmd() *cobra.Command {
 			}
 
 			// First-deploy confirmation (unless manifest.json already exists or --yes).
-			if det.InputCase != caseManifest && !yesFlag && !jsonOutput {
+			if det.InputCase != detect.CaseManifest && !yesFlag && !jsonOutput {
 				fmt.Println("Detected:")
 				printKeyValue([][2]string{
 					{"Name", det.Name},
@@ -71,13 +70,13 @@ func deployCmd() *cobra.Command {
 			}
 
 			// Generate manifest (if needed).
-			m, err := prepareManifest(absDir, det, reposFlag)
+			m, err := deploy.PrepareManifest(absDir, det, reposFlag)
 			if err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 
 			// Write manifest.json into source dir (for subsequent deploys).
-			if m != nil && det.InputCase != caseManifest {
+			if m != nil && det.InputCase != detect.CaseManifest {
 				if err := m.Write(filepath.Join(absDir, "manifest.json")); err != nil {
 					exitErrorf(jsonOutput, "write manifest: %v", err)
 				}
@@ -88,7 +87,7 @@ func deployCmd() *cobra.Command {
 				fmt.Print("Uploading bundle... ")
 			}
 
-			archiveBuf, err := createArchive(absDir)
+			archiveBuf, err := deploy.CreateArchive(absDir)
 			if err != nil {
 				exitErrorf(jsonOutput, "create archive: %v", err)
 			}
@@ -100,7 +99,7 @@ func deployCmd() *cobra.Command {
 			}
 
 			// Upload bundle.
-			resp, err := c.post(
+			resp, err := c.Post(
 				fmt.Sprintf("/api/v1/apps/%s/bundles", appID),
 				archiveBuf,
 				"application/gzip",
@@ -113,11 +112,11 @@ func deployCmd() *cobra.Command {
 				BundleID string `json:"bundle_id"`
 				TaskID   string `json:"task_id"`
 			}
-			if err := decodeJSON(resp, &uploadResp); err != nil {
+			if err := apiclient.DecodeJSON(resp, &uploadResp); err != nil {
 				exitErrorf(jsonOutput, "upload failed: %v", err)
 			}
 
-			serverURL, _, _ := resolveCredentials()
+			serverURL, _, _ := cliconfig.ResolveCredentials()
 			appURL := serverURL + "/app/" + det.Name + "/"
 
 			if !jsonOutput {
@@ -155,117 +154,10 @@ func deployCmd() *cobra.Command {
 	return cmd
 }
 
-// prepareManifest generates a manifest based on the input case.
-func prepareManifest(dir string, det *detectResult, reposFlag string) (*manifest.Manifest, error) {
-	meta := manifest.Metadata{
-		AppMode:    det.Mode,
-		Entrypoint: det.Entrypoint,
-	}
-
-	switch det.InputCase {
-	case caseManifest:
-		// 1a: manifest.json exists — validate and use.
-		m, err := manifest.Read(filepath.Join(dir, "manifest.json"))
-		if err != nil {
-			return nil, fmt.Errorf("invalid manifest: %w", err)
-		}
-		return m, nil
-
-	case caseRenvLock:
-		// 1b: renv.lock exists — convert to manifest.
-		files := computeFileChecksums(dir)
-		m, err := manifest.FromRenvLock(filepath.Join(dir, "renv.lock"), meta, files)
-		if err != nil {
-			return nil, fmt.Errorf("convert renv.lock: %w", err)
-		}
-		return m, nil
-
-	case casePinFlag:
-		// 1c: --pin — shell out to R + renv, then convert.
-		if err := runRenvSnapshot(dir); err != nil {
-			return nil, err
-		}
-		files := computeFileChecksums(dir)
-		m, err := manifest.FromRenvLock(filepath.Join(dir, "renv.lock"), meta, files)
-		if err != nil {
-			return nil, fmt.Errorf("convert renv.lock: %w", err)
-		}
-		// Clean up renv artifacts if we generated them.
-		cleanRenvArtifacts(dir)
-		return m, nil
-
-	case caseDescription:
-		// 2a: DESCRIPTION exists — build unpinned manifest.
-		files := computeFileChecksums(dir)
-		repos := parseReposFlag(reposFlag)
-		m, err := manifest.FromDescription(filepath.Join(dir, "DESCRIPTION"), meta, files, repos)
-		if err != nil {
-			return nil, fmt.Errorf("convert DESCRIPTION: %w", err)
-		}
-		return m, nil
-
-	case caseBareScripts:
-		// 2b: bare scripts — no manifest generated, upload as-is.
-		return nil, nil
-
-	default:
-		return nil, fmt.Errorf("unknown input case")
-	}
-}
-
-// runRenvSnapshot shells out to R to create an renv.lock file.
-func runRenvSnapshot(dir string) error {
-	// Check that R is available.
-	if _, err := exec.LookPath("Rscript"); err != nil {
-		return fmt.Errorf("pinning requires R + renv; Rscript not found in PATH")
-	}
-
-	script := `options(renv.consent = TRUE)
-deps <- renv::dependencies(".", quiet = TRUE, progress = FALSE)
-renv::snapshot(".", packages = deps$Package, prompt = FALSE)`
-
-	cmd := exec.Command("Rscript", "-e", script)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("renv snapshot failed: %w", err)
-	}
-	return nil
-}
-
-// cleanRenvArtifacts removes renv artifacts generated by --pin, unless
-// they pre-existed (we check if renv.lock is tracked by looking at the
-// directory state before snapshot — but for simplicity, we always clean).
-func cleanRenvArtifacts(dir string) {
-	_ = os.Remove(filepath.Join(dir, "renv.lock"))
-	_ = os.RemoveAll(filepath.Join(dir, "renv"))
-	_ = os.Remove(filepath.Join(dir, ".Rprofile"))
-}
-
-// parseReposFlag parses the --repositories flag value into Repository entries.
-func parseReposFlag(flag string) []manifest.Repository {
-	if flag == "" {
-		return defaultRepositories()
-	}
-	var repos []manifest.Repository
-	for i, url := range strings.Split(flag, ",") {
-		url = strings.TrimSpace(url)
-		if url != "" {
-			name := fmt.Sprintf("repo%d", i+1)
-			repos = append(repos, manifest.Repository{Name: name, URL: url})
-		}
-	}
-	if len(repos) == 0 {
-		return defaultRepositories()
-	}
-	return repos
-}
-
 // ensureApp checks if the app exists, and creates it if not.
-func ensureApp(c *client, name string) (string, error) {
+func ensureApp(c *apiclient.Client, name string) (string, error) {
 	// Try to get app by name.
-	resp, err := c.get("/api/v1/apps/" + name)
+	resp, err := c.Get("/api/v1/apps/" + name)
 	if err != nil {
 		return "", fmt.Errorf("check app: %w", err)
 	}
@@ -273,7 +165,7 @@ func ensureApp(c *client, name string) (string, error) {
 		var app struct {
 			ID string `json:"id"`
 		}
-		if err := decodeJSON(resp, &app); err != nil {
+		if err := apiclient.DecodeJSON(resp, &app); err != nil {
 			return "", fmt.Errorf("read app: %w", err)
 		}
 		return app.ID, nil
@@ -285,105 +177,23 @@ func ensureApp(c *client, name string) (string, error) {
 	}
 
 	// Create the app.
-	createResp, err := c.postJSON("/api/v1/apps", map[string]string{"name": name})
+	createResp, err := c.PostJSON("/api/v1/apps", map[string]string{"name": name})
 	if err != nil {
 		return "", fmt.Errorf("create app: %w", err)
 	}
 	var created struct {
 		ID string `json:"id"`
 	}
-	if err := decodeJSON(createResp, &created); err != nil {
+	if err := apiclient.DecodeJSON(createResp, &created); err != nil {
 		return "", fmt.Errorf("create app: %w", err)
 	}
 	return created.ID, nil
 }
 
-// createArchive creates a tar.gz archive of the directory contents.
-func createArchive(dir string) (*os.File, error) {
-	tmp, err := os.CreateTemp("", "by-bundle-*.tar.gz")
-	if err != nil {
-		return nil, err
-	}
-
-	gw := gzip.NewWriter(tmp)
-	tw := tar.NewWriter(gw)
-
-	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		// Skip hidden files/directories.
-		if d.Name() != "." && strings.HasPrefix(d.Name(), ".") {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		hdr, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		hdr.Name = rel
-
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			f, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			if _, err := io.Copy(tw, f); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, err
-	}
-
-	if err := tw.Close(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, err
-	}
-	if err := gw.Close(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, err
-	}
-
-	// Seek to beginning for reading.
-	if _, err := tmp.Seek(0, 0); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, err
-	}
-	return tmp, nil
-}
-
 // streamTaskLogs connects to the task log endpoint and streams output.
-func streamTaskLogs(c *client, taskID string, jsonOutput bool, appName, bundleID string) error {
+func streamTaskLogs(c *apiclient.Client, taskID string, jsonOutput bool, appName, bundleID string) error {
 	sc := mustStreamingClient(jsonOutput)
-	resp, err := sc.get(fmt.Sprintf("/api/v1/tasks/%s/logs", taskID))
+	resp, err := sc.Get(fmt.Sprintf("/api/v1/tasks/%s/logs", taskID))
 	if err != nil {
 		exitErrorf(jsonOutput, "stream logs: %v", err)
 	}
@@ -405,14 +215,14 @@ func streamTaskLogs(c *client, taskID string, jsonOutput bool, appName, bundleID
 		_ = streamResponse(resp.Body, &logBuf)
 
 		// Check task status.
-		statusResp, err := c.get(fmt.Sprintf("/api/v1/tasks/%s", taskID))
+		statusResp, err := c.Get(fmt.Sprintf("/api/v1/tasks/%s", taskID))
 		if err != nil {
 			return fmt.Errorf("check task status: %w", err)
 		}
 		var status struct {
 			Status string `json:"status"`
 		}
-		_ = decodeJSON(statusResp, &status)
+		_ = apiclient.DecodeJSON(statusResp, &status)
 
 		printJSON(map[string]any{
 			"app":       appName,
@@ -427,14 +237,14 @@ func streamTaskLogs(c *client, taskID string, jsonOutput bool, appName, bundleID
 	}
 
 	// Check final task status.
-	statusResp, err := c.get(fmt.Sprintf("/api/v1/tasks/%s", taskID))
+	statusResp, err := c.Get(fmt.Sprintf("/api/v1/tasks/%s", taskID))
 	if err != nil {
 		return nil
 	}
 	var status struct {
 		Status string `json:"status"`
 	}
-	if decodeJSON(statusResp, &status) == nil && status.Status == "failed" {
+	if apiclient.DecodeJSON(statusResp, &status) == nil && status.Status == "failed" {
 		return fmt.Errorf("build failed")
 	}
 
@@ -449,10 +259,4 @@ func confirm(prompt string) bool {
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimSpace(strings.ToLower(line))
 	return line == "" || line == "y" || line == "yes"
-}
-
-// dirExists checks if a path is a directory.
-func dirExists(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
 }

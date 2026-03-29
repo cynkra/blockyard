@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +28,7 @@ func refreshCmd() *cobra.Command {
 				path = "/api/v1/apps/" + app + "/refresh"
 			}
 
-			resp, err := c.postJSON(path, nil)
+			resp, err := c.PostJSON(path, nil)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
@@ -36,7 +37,7 @@ func refreshCmd() *cobra.Command {
 				TaskID  string `json:"task_id"`
 				Message string `json:"message"`
 			}
-			if err := decodeJSON(resp, &taskResp); err != nil {
+			if err := apiclient.DecodeJSON(resp, &taskResp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 
@@ -51,7 +52,7 @@ func refreshCmd() *cobra.Command {
 
 			// Always stream task logs (refresh is interactive).
 			sc := mustStreamingClient(jsonOutput)
-			logResp, err := sc.get(fmt.Sprintf("/api/v1/tasks/%s/logs", taskResp.TaskID))
+			logResp, err := sc.Get(fmt.Sprintf("/api/v1/tasks/%s/logs", taskResp.TaskID))
 			if err != nil {
 				exitErrorf(jsonOutput, "stream logs: %v", err)
 			}
@@ -66,12 +67,12 @@ func refreshCmd() *cobra.Command {
 				var logBuf strings.Builder
 				_ = streamResponse(logResp.Body, &logBuf)
 
-				statusResp, _ := c.get(fmt.Sprintf("/api/v1/tasks/%s", taskResp.TaskID))
+				statusResp, _ := c.Get(fmt.Sprintf("/api/v1/tasks/%s", taskResp.TaskID))
 				var status struct {
 					Status string `json:"status"`
 				}
 				if statusResp != nil {
-					_ = decodeJSON(statusResp, &status)
+					_ = apiclient.DecodeJSON(statusResp, &status)
 				}
 
 				printJSON(map[string]any{
@@ -90,12 +91,12 @@ func refreshCmd() *cobra.Command {
 			}
 
 			// Check final status.
-			statusResp, _ := c.get(fmt.Sprintf("/api/v1/tasks/%s", taskResp.TaskID))
+			statusResp, _ := c.Get(fmt.Sprintf("/api/v1/tasks/%s", taskResp.TaskID))
 			if statusResp != nil {
 				var status struct {
 					Status string `json:"status"`
 				}
-				if decodeJSON(statusResp, &status) == nil && status.Status == "failed" {
+				if apiclient.DecodeJSON(statusResp, &status) == nil && status.Status == "failed" {
 					return fmt.Errorf("refresh failed")
 				}
 			}

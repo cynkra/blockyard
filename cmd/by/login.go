@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
+	"github.com/cynkra/blockyard/internal/cliconfig"
 	"github.com/spf13/cobra"
 )
 
@@ -45,8 +47,8 @@ func loginCmd() *cobra.Command {
 			}
 
 			// Verify token by calling GET /api/v1/users/me.
-			c := newClient(serverURL, token)
-			resp, err := c.get("/api/v1/users/me")
+			c := apiclient.New(serverURL, token)
+			resp, err := c.Get("/api/v1/users/me")
 			if err != nil {
 				exitErrorf(jsonOutput, "failed to connect to server: %v", err)
 			}
@@ -54,16 +56,16 @@ func loginCmd() *cobra.Command {
 				Sub  string `json:"sub"`
 				Name string `json:"name"`
 			}
-			if err := decodeJSON(resp, &user); err != nil {
+			if err := apiclient.DecodeJSON(resp, &user); err != nil {
 				exitErrorf(jsonOutput, "authentication failed: %v", err)
 			}
 
 			// Save credentials.
-			cfg := &config{
+			cfg := &cliconfig.Config{
 				Server: serverURL,
 				Token:  token,
 			}
-			if err := saveConfig(cfg); err != nil {
+			if err := cliconfig.Save(cfg); err != nil {
 				exitErrorf(jsonOutput, "failed to save config: %v", err)
 			}
 

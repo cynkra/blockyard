@@ -28,7 +28,12 @@ func TestMain(m *testing.M) {
 	}
 
 	byBin = filepath.Join(dir, "by")
-	build := exec.Command("go", "build", "-o", byBin, ".")
+	args := []string{"build"}
+	if os.Getenv("GOCOVERDIR") != "" {
+		args = append(args, "-cover", "-coverpkg=github.com/cynkra/blockyard/...")
+	}
+	args = append(args, "-o", byBin, ".")
+	build := exec.Command("go", args...)
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build: %v\n%s\n", err, out)
 		os.RemoveAll(dir)
@@ -173,6 +178,9 @@ func runNoEnv(t *testing.T, args ...string) result {
 		"HOME=" + t.TempDir(),
 		"XDG_CONFIG_HOME=" + t.TempDir(),
 		"PATH=" + os.Getenv("PATH"),
+	}
+	if d := os.Getenv("GOCOVERDIR"); d != "" {
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+d)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

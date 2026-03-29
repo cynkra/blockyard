@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/cynkra/blockyard/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 
@@ -24,13 +25,13 @@ func usersListCmd() *cobra.Command {
 			jsonOutput := jsonFlag(cmd)
 			c := mustClient(jsonOutput)
 
-			resp, err := c.get("/api/v1/users")
+			resp, err := c.Get("/api/v1/users")
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
@@ -45,7 +46,7 @@ func usersListCmd() *cobra.Command {
 				Role   string `json:"role"`
 				Active bool   `json:"active"`
 			}
-			if err := decodeJSON(resp, &users); err != nil {
+			if err := apiclient.DecodeJSON(resp, &users); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 
@@ -93,13 +94,13 @@ func usersUpdateCmd() *cobra.Command {
 				exitErrorf(jsonOutput, "no flags specified; use --role or --active")
 			}
 
-			resp, err := c.patchJSON("/api/v1/users/"+args[0], body)
+			resp, err := c.PatchJSON("/api/v1/users/"+args[0], body)
 			if err != nil {
 				exitErrorf(jsonOutput, "request failed: %v", err)
 			}
 
 			if jsonOutput {
-				data, err := readBodyRaw(resp)
+				data, err := apiclient.ReadBodyRaw(resp)
 				if err != nil {
 					exitErrorf(jsonOutput, "%v", err)
 				}
@@ -107,7 +108,7 @@ func usersUpdateCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := checkResponse(resp); err != nil {
+			if err := apiclient.CheckResponse(resp); err != nil {
 				exitErrorf(jsonOutput, "%v", err)
 			}
 			resp.Body.Close()
