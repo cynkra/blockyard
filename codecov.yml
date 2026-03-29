@@ -29,11 +29,8 @@ flags:
   ui:
     paths: [internal/ui/]
     carryforward: true
-  e2e-server:
-    paths: [cmd/blockyard/, internal/]
-    carryforward: true
-  e2e-cli:
-    paths: [cmd/by/, internal/]
+  e2e:
+    paths: [cmd/blockyard/, cmd/by/, internal/]
     carryforward: true
 
 ignore:
