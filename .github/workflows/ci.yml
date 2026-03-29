@@ -104,7 +104,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: docker pull alpine:latest
-      - run: sudo --preserve-env=PATH,GOMODCACHE,GOCACHE go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/... ./internal/backend/docker/... ./internal/proxy/...
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/... ./internal/backend/docker/... ./internal/proxy/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker
@@ -124,7 +124,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
-      - run: sudo --preserve-env=PATH,GOMODCACHE,GOCACHE go test -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/... ./internal/backend/docker/... ./internal/server/...
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/... ./internal/backend/docker/... ./internal/server/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-pak
