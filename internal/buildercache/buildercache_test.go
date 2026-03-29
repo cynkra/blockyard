@@ -58,6 +58,46 @@ func TestEnsureCachedHit(t *testing.T) {
 	}
 }
 
+func TestCopyBinary(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	src := filepath.Join(srcDir, "src-bin")
+	dst := filepath.Join(dstDir, "dst-bin")
+
+	content := []byte("#!/bin/sh\necho hello")
+	os.WriteFile(src, content, 0o755)
+
+	if err := copyBinary(src, dst); err != nil {
+		t.Fatalf("copyBinary: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("content mismatch: got %q", got)
+	}
+
+	info, _ := os.Stat(dst)
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("permissions: got %o, want 755", info.Mode().Perm())
+	}
+
+	// Temp file should be cleaned up.
+	if fileExists(dst + ".tmp") {
+		t.Error(".tmp file should not remain")
+	}
+}
+
+func TestCopyBinary_SourceMissing(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "dst")
+	if err := copyBinary("/nonexistent/file", dst); err == nil {
+		t.Error("expected error for missing source")
+	}
+}
+
 func TestEnsureCachedBuildFromSource(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping build test in short mode")

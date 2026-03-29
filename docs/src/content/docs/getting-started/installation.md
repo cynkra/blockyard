@@ -82,7 +82,7 @@ sudo mv by /usr/local/bin/
 
 ### Build from source
 
-If you have Go 1.23+ installed:
+If you have Go 1.25+ installed:
 
 ```bash
 go install github.com/cynkra/blockyard/cmd/by@latest

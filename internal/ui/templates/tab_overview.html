@@ -1,0 +1,26 @@
+<div class="overview-grid">
+    <div class="overview-card">
+        <h3>Status</h3>
+        <span class="status-badge status-{{.Status}}">{{.Status}}</span>
+        <p class="overview-meta">Last deployed {{.LastDeployed | timeAgo}}</p>
+    </div>
+    <div class="overview-card">
+        <h3>Workers</h3>
+        <p class="overview-stat">{{.ActiveWorkers}} active</p>
+        <p class="overview-meta">{{.ActiveSessions}} sessions</p>
+    </div>
+    <div class="overview-card">
+        <h3>Activity</h3>
+        <p class="overview-stat">{{.TotalViews}} total views</p>
+        <p class="overview-meta">{{.RecentViews}} last 7 days</p>
+    </div>
+    <div class="overview-card">
+        <h3>Bundle</h3>
+        {{if .ActiveBundle}}
+        <p class="overview-stat monospace">{{.ActiveBundle.ID | truncate}}</p>
+        <span class="status-badge status-{{.ActiveBundle.Status}}">{{.ActiveBundle.Status}}</span>
+        {{else}}
+        <p class="overview-stat">None</p>
+        {{end}}
+    </div>
+</div>

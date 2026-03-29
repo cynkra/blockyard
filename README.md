@@ -29,7 +29,8 @@ Client Request
       │                                               │
       ▼                                               ▼
   ┌────────┐                                    ┌──────────┐
-  │ SQLite │  (app & bundle metadata)           │ OpenBao  │ (credentials)
+  │SQLite/ │  (app & bundle metadata)           │ OpenBao  │ (credentials)
+  │Postgres│
   └────────┘                                    └──────────┘
 ```
 
@@ -37,7 +38,7 @@ The server is generic over a `Backend` interface, allowing the Docker runtime to
 
 ## Tech Stack
 
-- **Go** 1.24 with standard library `net/http`
+- **Go** 1.25 with standard library `net/http`
 - **Chi** — HTTP router with middleware support
 - **Docker SDK** — Docker API client (`github.com/docker/docker`)
 - **modernc.org/sqlite** — pure-Go SQLite driver
@@ -51,7 +52,7 @@ The server is generic over a `Backend` interface, allowing the Docker runtime to
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Docker or Podman
 - SQLite 3
 
@@ -102,7 +103,7 @@ container (e.g. the devcontainer) instead.
   - `proxy/` — Reverse proxy, WebSocket forwarding, cold-start, session routing, autoscaling.
   - `backend/` — Container runtime abstraction (`docker/` for Docker/Podman, `mock/` for tests).
   - `bundle/` — Bundle archive storage, unpacking, and R dependency restoration.
-  - `db/` — SQLite pool, migrations, and CRUD queries.
+  - `db/` — SQLite/PostgreSQL database layer, migrations, and CRUD queries.
   - `integration/` — OpenBao (Vault) client, bootstrapping, and credential enrollment.
   - `config/`, `server/` — TOML/env configuration and shared server state.
   - `ops/` — Health polling, log capture, orphan cleanup.
@@ -133,7 +134,8 @@ bundle_retention   = 50
 max_bundle_size    = 104857600
 
 [database]
-path = "/data/db/blockyard.db"
+driver = "sqlite"
+path   = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl         = "60s"

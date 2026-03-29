@@ -31,6 +31,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `management_bind` | — | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Observability](/guides/observability/#management-listener). |
 | `session_secret` | — | Secret for signing session cookies. Required when `[oidc]` is set without `[openbao]`; auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | — | Public-facing URL of the server (used for OIDC redirect URIs) |
+| `trusted_proxies` | — | CIDRs whose `X-Forwarded-For` to trust (e.g. `["10.0.0.0/8"]`) |
 
 ### `[docker]`
 
@@ -40,6 +41,8 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `image` | *(required)* | Base container image for workers and builds |
 | `shiny_port` | `3838` | Port Shiny listens on inside the container |
 | `pak_version` | `stable` | [pak](https://pak.r-lib.org/) release channel (`stable`, `rc`, or `devel`) |
+| `service_network` | — | Docker network whose containers are reachable from workers |
+| `store_retention` | `0` | Package store eviction duration (`0` = disabled) |
 
 ### `[storage]`
 
@@ -55,7 +58,9 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 
 | Field | Default | Description |
 |---|---|---|
-| `path` | `/data/db/blockyard.db` | Path to the SQLite database file |
+| `driver` | `sqlite` | Database driver: `sqlite` or `postgres` |
+| `path` | `/data/db/blockyard.db` | Path to the SQLite database file (when `driver = "sqlite"`) |
+| `url` | — | PostgreSQL connection string (when `driver = "postgres"`) |
 
 ### `[proxy]`
 
@@ -68,6 +73,9 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `log_retention` | `1h` | How long to keep worker log entries before cleanup |
 | `session_idle_ttl` | `1h` | Time before an idle session is cleaned up |
 | `idle_worker_timeout` | `5m` | Time before an idle worker container is stopped |
+| `http_forward_timeout` | `5m` | Timeout for forwarding HTTP requests to workers |
+| `max_cpu_limit` | `16.0` | Max CPU limit settable per app |
+| `transfer_timeout` | `60s` | Timeout for bundle transfers to workers |
 
 ### `[oidc]` *(optional)*
 
@@ -149,7 +157,8 @@ max_bundle_size       = 104857600
 # soft_delete_retention = "720h"   # 30 days; omit or 0 = immediate hard delete
 
 [database]
-path = "/data/db/blockyard.db"
+driver = "sqlite"
+path   = "/data/db/blockyard.db"
 
 [proxy]
 ws_cache_ttl         = "60s"

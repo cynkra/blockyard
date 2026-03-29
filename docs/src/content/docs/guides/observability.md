@@ -171,8 +171,8 @@ Each line is a JSON object with the following fields:
 | `app.create` | App created |
 | `app.update` | App settings changed |
 | `app.delete` | App deleted |
-| `app.start` | Worker started via API |
-| `app.stop` | Workers stopped via API |
+| `app.rollback` | App rolled back to a previous bundle |
+| `app.restore` | Soft-deleted app restored |
 | `bundle.upload` | Bundle uploaded |
 | `bundle.restore.success` | Dependency restore completed |
 | `bundle.restore.fail` | Dependency restore failed |
@@ -189,6 +189,7 @@ Each line is a JSON object with the following fields:
 ### Buffering
 
 Audit entries are buffered in memory (up to 1000 entries) and flushed to
-disk by a background writer. If the buffer is full, new entries are
-dropped and the `blockyard_audit_entries_dropped_total` metric is
-incremented. Under normal load, entries are written within milliseconds.
+disk by a background writer. If the buffer is full, new entries wait up
+to 500 ms for space before being dropped. Dropped entries increment the
+`blockyard_audit_entries_dropped_total` metric. Under normal load,
+entries are written within milliseconds.

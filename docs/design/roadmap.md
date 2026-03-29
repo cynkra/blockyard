@@ -650,10 +650,13 @@ existing Docker deployment. No Kubernetes dependency.
   healthy, then redirects. Not customizable in v2 — branding and
   customization are v3 concerns.
 
-- **Web UI expansion.** Per-app settings panel (ACLs, resource limits,
-  metadata, tags), content filtering by tag/name/description on the
-  dashboard, and per-app live-streaming log viewer. Builds on the v1
-  dashboard — no new navigation chrome.
+- **Web UI expansion.** Multi-page layout powered by htmx with left
+  sidebar navigation: Apps (grid with search and tag filtering),
+  Deployment History (paginated), API Keys, and Profile (PAT management).
+  Per-app management sidebar with six tabs — Overview, Settings, Runtime,
+  Bundles, Collaborators (owner+), and Logs — with RBAC enforcement per
+  tab. Content filtering by tag/name on the dashboard and per-app
+  live-streaming log viewer with worker scoping.
 
 - **Board storage.** Per-user board save/restore and sharing for blockr.
   The production backend is PostgreSQL with Row-Level Security, accessed

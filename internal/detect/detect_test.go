@@ -146,6 +146,38 @@ func TestFileChecksums_SkipsRenvArtifacts(t *testing.T) {
 	}
 }
 
+func TestInputCaseString(t *testing.T) {
+	tests := []struct {
+		c    InputCase
+		want string
+	}{
+		{CaseManifest, "manifest.json"},
+		{CaseRenvLock, "renv.lock"},
+		{CasePinFlag, "--pin (renv snapshot)"},
+		{CaseDescription, "DESCRIPTION"},
+		{CaseBareScripts, "bare scripts"},
+		{InputCase(99), "unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.c.String(); got != tt.want {
+			t.Errorf("InputCase(%d).String() = %q, want %q", tt.c, got, tt.want)
+		}
+	}
+}
+
+func TestDefaultRepositories(t *testing.T) {
+	repos := DefaultRepositories()
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 repository, got %d", len(repos))
+	}
+	if repos[0].Name != "CRAN" {
+		t.Errorf("expected name CRAN, got %q", repos[0].Name)
+	}
+	if repos[0].URL != DefaultRepoURL {
+		t.Errorf("expected URL %q, got %q", DefaultRepoURL, repos[0].URL)
+	}
+}
+
 func TestDirExists(t *testing.T) {
 	dir := t.TempDir()
 	if !DirExists(dir) {

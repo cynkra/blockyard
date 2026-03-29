@@ -180,14 +180,14 @@ All worker containers receive:
 | Variable | Value |
 |---|---|
 | `SHINY_PORT` | The Shiny port (from `[docker] shiny_port`, default `3838`) |
-| `R_LIBS` | Always `/blockyard-lib` — the restored package library |
+| `R_LIBS` | The restored package library path — typically `/blockyard-lib`, or `/blockyard-lib-store` when using the shared package store |
+| `BLOCKYARD_API_URL` | The server's internal API URL (used for runtime package installs and credential exchange) |
 
 When `[openbao]` is configured, workers also receive:
 
 | Variable | Value |
 |---|---|
 | `VAULT_ADDR` | The OpenBao server address (from `[openbao] address`) |
-| `BLOCKYARD_API_URL` | The server's API URL (shared container mode only) |
 | `BLOCKYARD_VAULT_SERVICES` | JSON map of service IDs to Vault paths (only when `[[openbao.services]]` are defined) |
 
 ## Security model

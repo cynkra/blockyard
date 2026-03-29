@@ -231,6 +231,31 @@ func TestCreateArchive_EmptyDir(t *testing.T) {
 	}
 }
 
+func TestCleanRenvArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "renv.lock"), []byte("{}"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "renv", "lib"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".Rprofile"), []byte("# profile"), 0o644)
+	// Keep a file that should NOT be removed.
+	os.WriteFile(filepath.Join(dir, "app.R"), []byte("# app"), 0o644)
+
+	CleanRenvArtifacts(dir)
+
+	for _, name := range []string{"renv.lock", "renv", ".Rprofile"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "app.R")); err != nil {
+		t.Error("app.R should still exist")
+	}
+}
+
+func TestCleanRenvArtifacts_NoFiles(t *testing.T) {
+	// Should not panic when files don't exist.
+	CleanRenvArtifacts(t.TempDir())
+}
+
 func TestPrepareManifest_UnknownCase(t *testing.T) {
 	det := &detect.Result{InputCase: detect.InputCase(99), Mode: "shiny", Entrypoint: "app.R"}
 	_, err := PrepareManifest(t.TempDir(), det, "")
