@@ -64,6 +64,10 @@ type Server struct {
 	// library state, and conflict detection.
 	installMus sync.Map // workerID → *sync.Mutex
 
+	// Tracks workers that have a container transfer in progress.
+	// Prevents a second install from starting a parallel transfer.
+	transferring sync.Map // workerID → bool
+
 	// Version is the server version string, set at build time.
 	Version string
 
@@ -86,6 +90,23 @@ func (srv *Server) workerInstallMu(workerID string) *sync.Mutex {
 // CleanupInstallMu removes the per-worker mutex (called on eviction).
 func (srv *Server) CleanupInstallMu(workerID string) {
 	srv.installMus.Delete(workerID)
+}
+
+// IsTransferring returns true if a container transfer is in progress
+// for the given worker.
+func (srv *Server) IsTransferring(workerID string) bool {
+	_, ok := srv.transferring.Load(workerID)
+	return ok
+}
+
+// SetTransferring marks a worker as having a transfer in progress.
+func (srv *Server) SetTransferring(workerID string) {
+	srv.transferring.Store(workerID, true)
+}
+
+// ClearTransferring removes the transfer-in-progress flag for a worker.
+func (srv *Server) ClearTransferring(workerID string) {
+	srv.transferring.Delete(workerID)
 }
 
 // BundlePaths returns the filesystem paths for a bundle.

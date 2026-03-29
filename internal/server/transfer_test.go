@@ -333,3 +333,107 @@ func TestHandleTransfer(t *testing.T) {
 func mockWorkerSpec(id string) backend.WorkerSpec {
 	return backend.WorkerSpec{WorkerID: id, AppID: "app-1"}
 }
+
+// ---------------------------------------------------------------------------
+// T2: completeTransfer partial failure — new worker unhealthy
+// ---------------------------------------------------------------------------
+
+func TestCompleteTransfer_UnhealthyWorkerCleanup(t *testing.T) {
+	srv, be := testServerWithMock(t)
+	srv.Config.Proxy.TransferTimeout.Duration = 5 * time.Second
+	srv.Config.Proxy.WorkerStartTimeout.Duration = 300 * time.Millisecond
+
+	// Old worker must exist so completeTransfer doesn't bail at the guard.
+	srv.Workers.Set("old-w", ActiveWorker{AppID: "app-1", BundleID: "b-1"})
+
+	// Create a store package and write a store-manifest referencing it.
+	store := srv.PkgStore
+	store.SetPlatform("test-platform")
+	pkgDir := store.Path("shiny", "src1", "cfg1")
+	os.MkdirAll(pkgDir, 0o755)
+	os.WriteFile(filepath.Join(pkgDir, "DESCRIPTION"), []byte("Package: shiny"), 0o644)
+	metaPath := store.ConfigMetaPath("shiny", "src1", "cfg1")
+	os.WriteFile(metaPath, []byte(`{}`), 0o644)
+
+	transferDir := t.TempDir()
+	pkgstore.WriteStoreManifest(transferDir, map[string]string{"shiny": "src1/cfg1"})
+	storeManifestPath := filepath.Join(transferDir, "store-manifest.json")
+
+	// New worker will spawn but never become healthy.
+	be.HealthOK.Store(false)
+
+	workerCountBefore := srv.Workers.Count()
+
+	srv.completeTransfer(context.Background(), "app-1", "old-w",
+		storeManifestPath, transferDir)
+
+	// The new worker should have been cleaned up.
+	// Workers should only contain the original old-w (not cleaned up here
+	// because completeTransfer bails before reroute/evict on health failure).
+	if srv.Workers.Count() != workerCountBefore {
+		t.Errorf("Workers.Count = %d, want %d (ghost worker not cleaned up)",
+			srv.Workers.Count(), workerCountBefore)
+	}
+
+	// The mock backend should have had the unhealthy worker stopped.
+	// Since the new worker ID is random, check that be has no workers
+	// (old-w was never spawned on the backend, and the new one was stopped).
+	if be.WorkerCount() != 0 {
+		t.Errorf("backend WorkerCount = %d, want 0 (unhealthy worker not stopped)",
+			be.WorkerCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T3: completeTransfer when old worker already evicted
+// ---------------------------------------------------------------------------
+
+func TestCompleteTransfer_OldWorkerEvicted(t *testing.T) {
+	srv, be := testServerWithMock(t)
+	srv.Config.Proxy.WorkerStartTimeout.Duration = 2 * time.Second
+
+	store := srv.PkgStore
+	store.SetPlatform("test-platform")
+
+	// Do NOT register "old-w" in Workers — simulates eviction.
+	transferDir := t.TempDir()
+	pkgstore.WriteStoreManifest(transferDir, map[string]string{"shiny": "src1/cfg1"})
+	storeManifestPath := filepath.Join(transferDir, "store-manifest.json")
+
+	srv.completeTransfer(context.Background(), "app-1", "old-w",
+		storeManifestPath, transferDir)
+
+	// No new worker should have been spawned.
+	if be.WorkerCount() != 0 {
+		t.Errorf("expected no workers spawned, got %d", be.WorkerCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T7: completeTransfer with missing store entries → abort
+// ---------------------------------------------------------------------------
+
+func TestCompleteTransfer_MissingStoreEntries(t *testing.T) {
+	srv, be := testServerWithMock(t)
+	srv.Config.Proxy.WorkerStartTimeout.Duration = 2 * time.Second
+
+	// Old worker exists.
+	srv.Workers.Set("old-w", ActiveWorker{AppID: "app-1", BundleID: "b-1"})
+
+	store := srv.PkgStore
+	store.SetPlatform("test-platform")
+
+	// Write a store-manifest referencing a package NOT in the store.
+	transferDir := t.TempDir()
+	pkgstore.WriteStoreManifest(transferDir, map[string]string{"missing-pkg": "src1/cfg1"})
+	storeManifestPath := filepath.Join(transferDir, "store-manifest.json")
+
+	srv.completeTransfer(context.Background(), "app-1", "old-w",
+		storeManifestPath, transferDir)
+
+	// Should have aborted — no new worker spawned.
+	if be.WorkerCount() != 0 {
+		t.Errorf("expected no workers spawned (missing store entries), got %d",
+			be.WorkerCount())
+	}
+}

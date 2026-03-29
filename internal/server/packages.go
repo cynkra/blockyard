@@ -48,6 +48,12 @@ func (srv *Server) InstallPackage(
 	mu.Lock()
 	defer mu.Unlock()
 
+	// Reject if a container transfer is already in progress for this worker.
+	if srv.IsTransferring(workerID) {
+		return PackageResponse{}, fmt.Errorf(
+			"worker %s: container transfer in progress", workerID)
+	}
+
 	// 1. Look up the worker and its library path.
 	worker, ok := srv.Workers.Get(workerID)
 	if !ok {

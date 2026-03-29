@@ -20,6 +20,7 @@ type MockBackend struct {
 	BuildSuccess     atomic.Bool      // configurable: default true
 	wsHandler        http.HandlerFunc // optional WS handler for mock workers
 	httpHandler      http.HandlerFunc // optional HTTP handler for mock workers
+	BuildFn          func(context.Context, backend.BuildSpec) (backend.BuildResult, error) // optional build callback
 }
 
 type mockWorker struct {
@@ -170,11 +171,14 @@ func (b *MockBackend) Addr(_ context.Context, id string) (string, error) {
 	return w.server.Listener.Addr().String(), nil
 }
 
-func (b *MockBackend) Build(_ context.Context, _ backend.BuildSpec) (backend.BuildResult, error) {
+func (b *MockBackend) Build(ctx context.Context, spec backend.BuildSpec) (backend.BuildResult, error) {
+	if b.BuildFn != nil {
+		return b.BuildFn(ctx, spec)
+	}
 	if b.BuildSuccess.Load() {
 		return backend.BuildResult{Success: true, ExitCode: 0}, nil
 	}
-	return backend.BuildResult{Success: false, ExitCode: 1}, nil
+	return backend.BuildResult{Success: false, ExitCode: 1, Logs: "mock build failure"}, nil
 }
 
 func (b *MockBackend) ListManaged(_ context.Context) ([]backend.ManagedResource, error) {

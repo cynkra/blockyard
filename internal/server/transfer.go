@@ -39,6 +39,9 @@ func (srv *Server) handleTransfer(
 			fmt.Errorf("copy store-manifest to transfer dir: %w", err)
 	}
 
+	// Mark this worker as having a transfer in progress.
+	srv.SetTransferring(workerID)
+
 	// Start watching for the board state file in a background goroutine.
 	go srv.watchTransfer(ctx, appID, workerID, transferManifest, transferDir)
 
@@ -55,6 +58,8 @@ func (srv *Server) watchTransfer(
 	ctx context.Context,
 	appID, workerID, storeManifestPath, transferDir string,
 ) {
+	defer srv.ClearTransferring(workerID)
+
 	boardPath := filepath.Join(transferDir, "board.json")
 	timeout := srv.Config.Proxy.TransferTimeout.Duration
 	if timeout <= 0 {
@@ -96,6 +101,15 @@ func (srv *Server) completeTransfer(
 		return
 	}
 
+	// Verify the old worker still exists — it may have been evicted
+	// between returning "transfer" and board.json appearing.
+	oldWorker, ok := srv.Workers.Get(oldWorkerID)
+	if !ok {
+		slog.Error("transfer: old worker no longer exists",
+			"worker_id", oldWorkerID)
+		return
+	}
+
 	newWorkerID := uuid.New().String()
 	newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
 	missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
@@ -104,13 +118,13 @@ func (srv *Server) completeTransfer(
 		return
 	}
 	if len(missing) > 0 {
-		slog.Warn("transfer: missing store entries",
+		slog.Error("transfer: missing store entries, aborting",
 			"worker_id", newWorkerID, "missing", missing)
+		return
 	}
 
 	// Spawn new worker with updated library and old worker's
 	// transfer dir (containing board.json).
-	oldWorker, _ := srv.Workers.Get(oldWorkerID)
 	spec := srv.buildTransferWorkerSpec(appID, newWorkerID, newLibDir, transferDir, oldWorker.BundleID)
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {
 		slog.Error("transfer: spawn worker", "error", err)
@@ -140,7 +154,15 @@ func (srv *Server) completeTransfer(
 
 	// Wait for new worker to become healthy.
 	if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
-		slog.Error("transfer: worker not healthy", "error", err)
+		slog.Error("transfer: worker not healthy, cleaning up",
+			"worker_id", newWorkerID, "error", err)
+		// Clean up the ghost worker.
+		if cancelToken != nil {
+			cancelToken()
+		}
+		srv.Workers.Delete(newWorkerID)
+		srv.Registry.Delete(newWorkerID)
+		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
 		return
 	}
 
