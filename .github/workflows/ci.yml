@@ -64,12 +64,12 @@ jobs:
       - uses: golangci/golangci-lint-action@v7
       - name: Check for known vulnerabilities
         run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
-      - run: go test -coverprofile=coverage-check.out -coverpkg=./internal/... ./internal/...
+      - run: go test -coverprofile=coverage-unit.out -coverpkg=./internal/... ./internal/...
       - run: go test ./cmd/...
       - uses: actions/upload-artifact@v7
         with:
-          name: coverage-check
-          path: coverage-check.out
+          name: coverage-unit
+          path: coverage-unit.out
 
   cli:
     runs-on: ubuntu-latest
@@ -192,7 +192,7 @@ jobs:
           merge-multiple: true
       - name: Enforce 80% coverage threshold
         run: |
-          head -1 coverage-check.out > merged.out
+          head -1 coverage-unit.out > merged.out
           tail -n +2 -q coverage-*.out | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> merged.out
           TOTAL=$(go tool cover -func=merged.out | grep ^total: | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${TOTAL}%"

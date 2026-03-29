@@ -7,6 +7,34 @@ coverage:
       default:
         informational: true
 
+flags:
+  unit:
+    paths: [internal/]
+    carryforward: true
+  cli:
+    paths: [cmd/by/, internal/]
+    carryforward: true
+  docker:
+    paths: [internal/]
+    carryforward: true
+  idp:
+    paths: [internal/auth/]
+    carryforward: true
+  openbao:
+    paths: [internal/integration/]
+    carryforward: true
+  pak:
+    paths: [internal/]
+    carryforward: true
+  ui:
+    paths: [internal/ui/]
+    carryforward: true
+  e2e-server:
+    paths: [cmd/blockyard/, internal/]
+    carryforward: true
+  e2e-cli:
+    paths: [cmd/by/, internal/]
+    carryforward: true
+
 ignore:
-  - "cmd/blockyard/**"              # main() server wiring — not unit-testable
   - "internal/testutil/**"          # test helpers only

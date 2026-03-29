@@ -139,8 +139,8 @@ func TestHelloShinyUI(t *testing.T) {
 		if !strings.Contains(body, ">hello</span>") {
 			t.Fatal("app name 'hello' not in card")
 		}
-		if !strings.Contains(body, "running") {
-			t.Fatal("running status not shown")
+		if !strings.Contains(body, "stopped") {
+			t.Fatal("stopped status not shown (cold-start: no workers until first request)")
 		}
 		if !strings.Contains(body, `class="app-card-gear"`) {
 			t.Fatal("gear icon not shown for owner")
@@ -402,8 +402,8 @@ func TestHelloShinyUI(t *testing.T) {
 		if !strings.Contains(body, "hello") {
 			t.Fatal("app 'hello' not in deployment history")
 		}
-		if !strings.Contains(body, "completed") {
-			t.Fatal("completed status not found")
+		if !strings.Contains(body, "ready") {
+			t.Fatal("ready status not found (bundle status after deploy is 'ready')")
 		}
 	})
 
