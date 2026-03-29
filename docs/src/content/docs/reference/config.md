@@ -36,6 +36,7 @@ shutdown_timeout = "30s"
 # log_level      = "info"
 # session_secret = "random-secret"   # required when [oidc] is configured
 # external_url   = "https://blockyard.example.com"
+# trusted_proxies = ["10.0.0.0/8"]
 ```
 
 | Field | Type | Default | Required | Description |
@@ -44,8 +45,9 @@ shutdown_timeout = "30s"
 | `management_bind` | `string` | — | No | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Management listener](/guides/observability/#management-listener). |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
 | `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn`, `error`. |
-| `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Auto-generated and stored in vault when `[openbao]` is configured. |
+| `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
+| `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
 
 <Aside type="note">
   API authentication uses [Personal Access Tokens](/guides/authorization/#personal-access-tokens)
@@ -57,10 +59,12 @@ shutdown_timeout = "30s"
 
 ```toml
 [docker]
-socket     = "/var/run/docker.sock"
-image      = "ghcr.io/rocker-org/r-ver:4.4.3"
-shiny_port = 3838
-pak_version = "stable"
+socket          = "/var/run/docker.sock"
+image           = "ghcr.io/rocker-org/r-ver:4.4.3"
+shiny_port      = 3838
+pak_version     = "stable"
+# service_network = ""
+# store_retention = "0"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -69,6 +73,8 @@ pak_version = "stable"
 | `image` | `string` | — | **Yes** | Base image for worker and build containers |
 | `shiny_port` | `integer` | `3838` | No | Port Shiny listens on inside containers |
 | `pak_version` | `string` | `stable` | No | [pak](https://pak.r-lib.org/) release channel (`stable`, `rc`, or `devel`) |
+| `service_network` | `string` | — | No | Docker network whose containers are made reachable from workers. Used when apps need access to sidecar services (e.g. PocketBase, PostgREST). |
+| `store_retention` | `duration` | `0` | No | How long to keep unused entries in the shared package store. `0` (default) disables eviction — the store grows indefinitely. |
 
 ## `[storage]`
 
@@ -93,12 +99,16 @@ max_bundle_size       = 104857600
 
 ```toml
 [database]
-path = "/data/db/blockyard.db"
+driver = "sqlite"
+path   = "/data/db/blockyard.db"
+# url  = ""   # PostgreSQL connection string (when driver = "postgres")
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `path` | `path` | `/data/db/blockyard.db` | No | Path to the SQLite database file (created if missing) |
+| `driver` | `string` | `sqlite` | No | Database driver: `sqlite` or `postgres` |
+| `path` | `path` | `/data/db/blockyard.db` | When `driver = "sqlite"` | Path to the SQLite database file (created if missing) |
+| `url` | `string` | — | When `driver = "postgres"` | PostgreSQL connection string (e.g. `postgres://user:pass@host/dbname`) |
 
 ## `[proxy]`
 
@@ -111,6 +121,9 @@ max_workers          = 100
 log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
+# http_forward_timeout = "5m"
+# max_cpu_limit        = 16.0
+# transfer_timeout     = "60s"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -122,6 +135,9 @@ idle_worker_timeout  = "5m"
 | `log_retention` | `duration` | `1h` | No | How long to keep worker log entries before cleanup |
 | `session_idle_ttl` | `duration` | `1h` | No | Time before an idle session is cleaned up |
 | `idle_worker_timeout` | `duration` | `5m` | No | Time before an idle worker container is stopped |
+| `http_forward_timeout` | `duration` | `5m` | No | Timeout for forwarding HTTP requests to worker containers |
+| `max_cpu_limit` | `float` | `16.0` | No | Maximum CPU limit that can be set per app (caps the `cpu_limit` field on `PATCH /api/v1/apps/{id}`) |
+| `transfer_timeout` | `duration` | `60s` | No | Timeout for transferring bundle files to worker containers |
 
 ## `[oidc]` *(optional)*
 
@@ -142,7 +158,7 @@ initial_admin        = "google-oauth2|abc123"
 | `issuer_url` | `string` | — | **Yes** | OIDC provider issuer URL (must match the `iss` claim in tokens) |
 | `issuer_discovery_url` | `string` | — | No | Internal URL for OIDC discovery and server-side requests. Use when the IdP is reachable at a different address from the server than from browsers (e.g. Docker DNS). See [Split-URL OIDC](#split-url-oidc). |
 | `client_id` | `string` | — | **Yes** | OIDC client ID |
-| `client_secret` | `string` | — | **Yes** | OIDC client secret |
+| `client_secret` | `string` | — | **Yes** | OIDC client secret. Supports [vault references](#vault-references). |
 | `cookie_max_age` | `duration` | `24h` | No | Maximum lifetime of session cookies |
 | `initial_admin` | `string` | — | No | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
 
@@ -195,9 +211,10 @@ jwt_auth_path = "jwt"
 |---|---|---|---|---|
 | `address` | `string` | — | **Yes** | OpenBao server address |
 | `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via the `BLOCKYARD_OPENBAO_SECRET_ID` env var at bootstrap. |
-| `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Use `role_id` with AppRole auth instead. |
+| `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Supports [vault references](#vault-references). Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in OpenBao |
+| `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during OpenBao bootstrap. Useful when the OpenBao policy format differs from what Blockyard expects. |
 
 <Aside type="tip">
   With AppRole auth (`role_id`), the server authenticates to OpenBao using a

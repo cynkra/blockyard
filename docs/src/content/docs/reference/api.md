@@ -194,8 +194,14 @@ updated.
 | `access_type` | `string` | `"acl"` | `"acl"`, `"logged_in"`, or `"public"` (requires owner or admin) |
 | `title` | `string` | none | Human-readable title for the catalog |
 | `description` | `string` | none | Description for the catalog |
+| `pre_warmed_seats` | `integer` | `0` | Number of standby workers to keep pre-warmed |
+| `refresh_schedule` | `string` | none | Cron expression for automatic dependency refresh |
 
 **Response:** `200 OK` — updated app object.
+
+App response objects include the following additional fields beyond the
+example above: `max_workers_per_app`, `max_sessions_per_worker`,
+`memory_limit`, `cpu_limit`, `pre_warmed_seats`, and `refresh_schedule`.
 
 ### `DELETE /api/v1/apps/{id}`
 
@@ -225,44 +231,6 @@ files from disk.
 
 ## App Lifecycle
 
-### `POST /api/v1/apps/{id}/start`
-
-Start an app by spawning a worker container. No-op if already running.
-The app must have an active bundle.
-
-**Response:** `200 OK`
-
-```json
-{
-  "worker_id": "w1234...",
-  "status": "running"
-}
-```
-
-### `POST /api/v1/apps/{id}/stop`
-
-Stop all workers for an app. Workers are drained asynchronously — active
-sessions are allowed to finish before containers are removed.
-
-If no workers are running, returns `200 OK`:
-
-```json
-{
-  "stopped_workers": 0
-}
-```
-
-Otherwise, returns `202 Accepted` with a task ID for tracking the drain:
-
-```json
-{
-  "task_id": "t1234...",
-  "worker_count": 2
-}
-```
-
-Use `GET /api/v1/tasks/{task_id}/logs` to follow drain progress.
-
 ### `GET /api/v1/apps/{id}/logs`
 
 Stream logs from a running worker. Returns chunked `text/plain`.
@@ -291,6 +259,51 @@ and stopped. Disabled apps return `503 Service Unavailable` for all proxy
 requests. Requires collaborator or higher permissions.
 
 **Response:** `200 OK` — updated app object.
+
+### `POST /api/v1/apps/{id}/rollback`
+
+Roll back to a previous bundle. The request body specifies the target
+bundle ID.
+
+**Request body:**
+
+```json
+{ "bundle_id": "b1234..." }
+```
+
+**Response:** `200 OK` — updated app object with the new active bundle.
+
+### `POST /api/v1/apps/{id}/restore`
+
+Restore a soft-deleted app. The app must be soft-deleted — returns
+`409 Conflict` otherwise.
+
+**Response:** `200 OK` — restored app object.
+
+### `POST /api/v1/apps/{id}/refresh`
+
+Start a dependency refresh for the active bundle. Re-resolves packages
+from configured repositories without uploading a new bundle.
+
+**Response:** `202 Accepted`
+
+```json
+{
+  "task_id": "t5678..."
+}
+```
+
+### `POST /api/v1/apps/{id}/refresh/rollback`
+
+Roll back a dependency refresh, restoring the previous package set.
+
+**Response:** `202 Accepted`
+
+```json
+{
+  "task_id": "t5678..."
+}
+```
 
 ---
 
@@ -349,7 +362,7 @@ List sessions for an app. Requires collaborator or higher permissions.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `user` | `string` | — | Filter by user sub |
-| `status` | `string` | — | Filter by status (`active`, `ended`, `crashed`) |
+| `status` | `string` | — | Filter by status (`active`, `ended`) |
 | `limit` | `integer` | `50` | Max results (1–200) |
 
 **Response:** `200 OK`
@@ -524,8 +537,16 @@ Revoke a specific access grant.
 
 ## Users
 
-Admin-only endpoints for managing user roles and status. Users are created
-automatically on first OIDC login.
+Admin-only endpoints for managing user roles and status (except
+`GET /api/v1/users/me` which is available to any authenticated user).
+Users are created automatically on first OIDC login.
+
+### `GET /api/v1/users/me`
+
+Get the current authenticated user's profile. Available to any
+authenticated user (not admin-only).
+
+**Response:** `200 OK` — user object.
 
 ### `GET /api/v1/users`
 
@@ -647,6 +668,12 @@ Delete a tag. Admin only. Cascades to all app–tag associations.
 
 **Response:** `204 No Content`
 
+### `GET /api/v1/apps/{id}/tags`
+
+List tags attached to an app.
+
+**Response:** `200 OK` — array of tag objects.
+
 ### `POST /api/v1/apps/{id}/tags`
 
 Attach a tag to an app. Requires deploy permissions (owner, collaborator, or admin).
@@ -670,6 +697,9 @@ Remove a tag from an app. Requires deploy permissions.
 ## Catalog
 
 ### `GET /api/v1/catalog`
+
+**Deprecated** — use `GET /api/v1/apps` with `search` and `tag` query
+parameters instead.
 
 Paginated, RBAC-filtered listing of apps with metadata and tags.
 
