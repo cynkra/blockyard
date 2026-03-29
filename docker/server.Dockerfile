@@ -8,8 +8,9 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-RUN CGO_ENABLED=0 go build -o /blockyard ./cmd/blockyard
-RUN CGO_ENABLED=0 go build -o /by-builder ./cmd/by-builder
+ARG COVER=""
+RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /blockyard ./cmd/blockyard
+RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
 FROM debian:bookworm-slim
 

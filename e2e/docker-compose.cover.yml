@@ -1,0 +1,6 @@
+services:
+  blockyard:
+    environment:
+      GOCOVERDIR: /coverage
+    volumes:
+      - ${E2E_GOCOVERDIR}:/coverage

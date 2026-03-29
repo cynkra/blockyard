@@ -200,9 +200,3 @@ jobs:
             echo "::error::Coverage ${TOTAL}% is below 80% threshold"
             exit 1
           fi
-      - uses: codecov/codecov-action@v5
-        if: always()
-        with:
-          files: coverage-check.out,coverage-cli.out,coverage-docker.out,coverage-idp.out,coverage-openbao.out,coverage-pak.out,coverage-ui.out
-          flags: unit,cli,docker,idp,openbao,pak,ui
-          fail_ci_if_error: false
