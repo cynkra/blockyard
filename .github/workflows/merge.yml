@@ -138,6 +138,18 @@ jobs:
           pattern: coverage-e2e-*
           merge-multiple: true
 
+      # Aggregate per-test e2e files into one file per binary type
+      # (e2e-server, e2e-cli) so Codecov flags stay clean.
+      - name: Aggregate e2e coverage
+        run: |
+          for kind in server cli; do
+            files=$(ls coverage-e2e-${kind}-*.out 2>/dev/null || true)
+            [ -z "$files" ] && continue
+            head -1 $(echo "$files" | head -1) > coverage-e2e-${kind}.out
+            tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-e2e-${kind}.out
+            rm -f $files
+          done
+
       - name: List coverage files
         run: ls -la coverage-*.out 2>/dev/null || echo "No coverage files found"
 
