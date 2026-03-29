@@ -124,7 +124,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
-      - run: sudo --preserve-env=PATH go test -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/... ./internal/...
+      - run: sudo --preserve-env=PATH go test -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/... ./internal/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-pak
