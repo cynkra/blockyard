@@ -71,7 +71,7 @@ func setupDockerServer(t *testing.T) *server.Server {
 		},
 		Proxy: config.ProxyConfig{
 			MaxWorkers:         10,
-			WorkerStartTimeout: config.Duration{Duration: 60 * time.Second},
+			WorkerStartTimeout: config.Duration{Duration: 2 * time.Second},
 			TransferTimeout:    config.Duration{Duration: 30 * time.Second},
 		},
 		Server: config.ServerConfig{Bind: ":8080"},
