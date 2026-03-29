@@ -62,11 +62,13 @@
     <h3>Resource Configuration</h3>
     <div class="field-group">
         <label for="memory-limit">Memory limit</label>
+        <p class="field-description">Number with unit: <code>512m</code>, <code>1g</code>, <code>256mb</code>. Leave empty for system default.</p>
         <div class="field-row">
             <input type="text" id="memory-limit" name="memory_limit"
                    value="{{deref .App.MemoryLimit}}"
                    data-original="{{deref .App.MemoryLimit}}"
-                   oninput="toggleSaveBtn(this)">
+                   placeholder="512m"
+                   oninput="validateMemoryLimit(this)">
             <button class="field-save hidden"
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='memory_limit']"
@@ -74,6 +76,7 @@
                     hx-swap="innerHTML">&#10003;</button>
             <span class="field-feedback"></span>
         </div>
+        <span class="field-error" id="memory-limit-error"></span>
     </div>
     <div class="field-group">
         <label for="cpu-limit">CPU limit</label>

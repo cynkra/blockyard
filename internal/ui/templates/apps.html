@@ -85,6 +85,21 @@ function toggleSaveBtn(input) {
     }
 }
 
+function validateMemoryLimit(input) {
+    var val = input.value.trim();
+    var error = document.getElementById('memory-limit-error');
+    var saveBtn = input.closest('.field-row').querySelector('.field-save');
+    if (val === '' || /^\d+\s*(kb|mb|gb|k|m|g)?$/i.test(val)) {
+        input.classList.remove('field-invalid');
+        if (error) error.textContent = '';
+        toggleSaveBtn(input);
+    } else {
+        input.classList.add('field-invalid');
+        if (error) error.textContent = 'Invalid format. Use a number with a unit: 512m, 1g, 256mb, 100kb.';
+        if (saveBtn) saveBtn.classList.add('hidden');
+    }
+}
+
 document.body.addEventListener('htmx:afterSwap', function(e) {
     if (e.detail.target.id === 'sidebar') {
         document.getElementById('sidebar').classList.add('open');
