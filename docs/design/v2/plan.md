@@ -23,14 +23,19 @@ are extended in place.
 ```
 cmd/
 ├── blockyard/                  # (existing) server binary
-└── by/                         # NEW: CLI binary
-    └── main.go                 # subcommands: deploy, list, logs, start, stop, ...
+├── by/                         # NEW: CLI binary
+│   └── main.go                 # subcommands: login, init, deploy, list, get, enable,
+│                               #   disable, delete, restore, bundles, rollback, scale,
+│                               #   update, access, tags, refresh, logs, users
+└── by-builder/                 # NEW: builder/store utility (cross-compiled linux binary)
+    └── main.go                 # subcommands: store populate, store ingest
 
 internal/
-├── db/
-│   ├── db.go                   # refactored: sqlx + dialect abstraction
-│   ├── dialect.go              # SQLite/PostgreSQL dialect helpers
-│   └── ...
+├── apiclient/                  # NEW: HTTP client for CLI (request building, response parsing)
+├── buildercache/               # NEW: by-builder binary cache (download + platform selection)
+├── cliconfig/                  # NEW: CLI local configuration (~/.config/by/)
+├── deploy/                     # NEW: deployment coordination (manifest prep, bundle upload)
+├── detect/                     # NEW: app type detection (manifest.json vs renv.lock vs bare)
 ├── manifest/
 │   ├── manifest.go             # manifest types, validation, dispatch
 │   ├── renvlock.go             # renv.lock → pinned manifest (pure Go)
@@ -39,7 +44,8 @@ internal/
 │   └── pakcache.go             # pak binary cache (replaces rvcache)
 ├── pkgstore/
 │   ├── store.go                # content-addressable package store
-│   └── assembly.go             # library assembly from store (hard links)
+│   ├── assembly.go             # library assembly from store (hard links)
+│   └── evict.go                # store retention sweeper
 ├── proxy/
 │   ├── ... (existing)
 │   ├── loading.go              # cold-start loading page handler
@@ -47,8 +53,22 @@ internal/
 ├── ui/
 │   ├── ... (existing)
 │   └── templates/
-│       ├── app_settings.html   # per-app settings panel
-│       └── app_logs.html       # per-app log viewer
+│       ├── base.html              # shared layout with left navigation
+│       ├── apps.html              # app grid with search/tag filtering
+│       ├── deployments.html       # deployment history with pagination
+│       ├── api_keys.html          # third-party credential management
+│       ├── profile.html           # user identity + PAT management
+│       ├── landing.html           # unauthenticated landing page
+│       ├── sidebar.html           # per-app management sidebar shell
+│       ├── tab_overview.html      # app status, activity, health
+│       ├── tab_settings.html      # metadata, resource config, start/stop/delete
+│       ├── tab_runtime.html       # live worker statistics (CPU, memory)
+│       ├── tab_bundles.html       # bundle list, rollback, refresh
+│       ├── tab_collaborators.html # owner+ only, ACL management
+│       ├── tab_logs.html          # worker-scoped log viewer
+│       ├── tab_logs_worker.html   # single-worker log stream
+│       ├── pat_created.html       # inline token creation response
+│       └── error_fragment.html    # htmx error partial
 
 ├── db/
 │   ├── db.go
@@ -60,7 +80,11 @@ internal/
 │       │   ├── 002_v2_soft_delete.up.sql
 │       │   ├── 002_v2_soft_delete.down.sql
 │       │   ├── 003_v2_pre_warming.up.sql
-│       │   └── 003_v2_pre_warming.down.sql
+│       │   ├── 003_v2_pre_warming.down.sql
+│       │   ├── 005_v2_refresh.up.sql
+│       │   ├── 005_v2_refresh.down.sql
+│       │   ├── 006_v2_backend_prereqs.up.sql
+│       │   └── 006_v2_backend_prereqs.down.sql
 │       └── postgres/
 │           ├── 001_initial.up.sql
 │           ├── 001_initial.down.sql
@@ -69,7 +93,11 @@ internal/
 │           ├── 003_v2_pre_warming.up.sql
 │           ├── 003_v2_pre_warming.down.sql
 │           ├── 004_v2_boards.up.sql    # board storage (PostgreSQL only)
-│           └── 004_v2_boards.down.sql
+│           ├── 004_v2_boards.down.sql
+│           ├── 005_v2_refresh.up.sql
+│           ├── 005_v2_refresh.down.sql
+│           ├── 006_v2_backend_prereqs.up.sql
+│           └── 006_v2_backend_prereqs.down.sql
 ```
 
 ## New Dependencies
