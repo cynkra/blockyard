@@ -1,4 +1,4 @@
-//go:build docker_test
+//go:build pak_test
 
 package server_test
 
