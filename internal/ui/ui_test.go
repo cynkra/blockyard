@@ -17,6 +17,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/session"
 )
 
 // --- Test helpers ---
@@ -1765,5 +1766,900 @@ func TestBuildServiceEntriesWithVaultMock(t *testing.T) {
 	}
 	if entries[1].Status != "not_set" {
 		t.Errorf("github status = %q, want 'not_set'", entries[1].Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Option A: Enrich tab tests with real data
+// ---------------------------------------------------------------------------
+
+// TestOverviewTabWithActiveData verifies the overview tab renders actual
+// worker counts, session counts, view statistics, and bundle info.
+func TestOverviewTabWithActiveData(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("ov-data-app", "owner")
+
+	// Create and activate a bundle.
+	bundleID := "bun-ov-" + app.ID[:8]
+	srv.DB.CreateBundle(bundleID, app.ID, "owner", false)
+	srv.DB.UpdateBundleStatus(bundleID, "ready")
+	srv.DB.ActivateBundle(app.ID, bundleID)
+
+	// Register two workers with sessions.
+	srv.Workers.Set("w-ov-1", server.ActiveWorker{AppID: app.ID, BundleID: bundleID, StartedAt: time.Now()})
+	srv.Workers.Set("w-ov-2", server.ActiveWorker{AppID: app.ID, BundleID: bundleID, StartedAt: time.Now()})
+	srv.Sessions.Set("sess-1", session.Entry{WorkerID: "w-ov-1", UserSub: "owner", LastAccess: time.Now()})
+	srv.Sessions.Set("sess-2", session.Entry{WorkerID: "w-ov-2", UserSub: "owner", LastAccess: time.Now()})
+	srv.Sessions.Set("sess-3", session.Entry{WorkerID: "w-ov-2", UserSub: "other", LastAccess: time.Now()})
+
+	// Seed DB sessions for view counts.
+	srv.DB.CreateSession("db-s1", app.ID, "w-ov-1", "owner")
+	srv.DB.CreateSession("db-s2", app.ID, "w-ov-2", "other")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/ov-data-app/tab/overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "2 active") {
+		t.Error("expected '2 active' workers in overview")
+	}
+	if !strings.Contains(body, "3 sessions") {
+		t.Error("expected '3 sessions' in overview")
+	}
+	if !strings.Contains(body, "2 total views") {
+		t.Error("expected '2 total views' in overview")
+	}
+	if !strings.Contains(body, "status-running") {
+		t.Error("expected running status badge")
+	}
+	// Bundle should be shown.
+	if !strings.Contains(body, "status-ready") {
+		t.Error("expected ready status badge for active bundle")
+	}
+}
+
+// TestSettingsTabWithTagsAndResourceLimits verifies the settings tab
+// renders applied tags, available tags, and resource limit values.
+func TestSettingsTabWithTagsAndResourceLimits(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("set-data-app", "owner")
+
+	// Set resource limits.
+	mem := "1g"
+	cpu := 2.5
+	maxW := 4
+	title := "My Dashboard"
+	desc := "A test app"
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{
+		MemoryLimit:      &mem,
+		CPULimit:         &cpu,
+		MaxWorkersPerApp: &maxW,
+		Title:            &title,
+		Description:      &desc,
+	})
+
+	// Create tags: apply one, leave one available.
+	tag1, _ := srv.DB.CreateTag("production")
+	tag2, _ := srv.DB.CreateTag("staging")
+	srv.DB.AddAppTag(app.ID, tag1.ID)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/set-data-app/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	// Applied tag should appear as a chip.
+	if !strings.Contains(body, "production") {
+		t.Error("expected applied tag 'production' in settings")
+	}
+	// Available tag should appear in the add-tag select.
+	if !strings.Contains(body, tag2.Name) {
+		t.Error("expected available tag 'staging' in tag select")
+	}
+	// Resource limits.
+	if !strings.Contains(body, `value="1g"`) {
+		t.Error("expected memory_limit value '1g'")
+	}
+	if !strings.Contains(body, `value="2.5"`) {
+		t.Error("expected cpu_limit value '2.5'")
+	}
+	if !strings.Contains(body, `value="4"`) {
+		t.Error("expected max_workers value '4'")
+	}
+	// Title and description.
+	if !strings.Contains(body, "My Dashboard") {
+		t.Error("expected title 'My Dashboard'")
+	}
+	if !strings.Contains(body, "A test app") {
+		t.Error("expected description 'A test app'")
+	}
+}
+
+// TestSettingsTabRefreshScheduleShownForUnpinnedBundle verifies the
+// refresh schedule field appears only when the active bundle is not pinned.
+func TestSettingsTabRefreshScheduleShownForUnpinnedBundle(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("sched-app", "owner")
+
+	// Unpinned bundle → refresh schedule should appear.
+	bid := "bun-sched-" + app.ID[:8]
+	srv.DB.CreateBundle(bid, app.ID, "owner", false)
+	srv.DB.UpdateBundleStatus(bid, "ready")
+	srv.DB.ActivateBundle(app.ID, bid)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/sched-app/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, `name="refresh_schedule"`) {
+		t.Error("expected refresh_schedule field for unpinned bundle")
+	}
+}
+
+// TestSettingsTabRefreshScheduleHiddenForPinnedBundle verifies the
+// refresh schedule field is absent when the active bundle is pinned.
+func TestSettingsTabRefreshScheduleHiddenForPinnedBundle(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("pinned-app", "owner")
+
+	// Pinned bundle → refresh schedule should be hidden.
+	bid := "bun-pin-" + app.ID[:8]
+	srv.DB.CreateBundle(bid, app.ID, "owner", true)
+	srv.DB.UpdateBundleStatus(bid, "ready")
+	srv.DB.ActivateBundle(app.ID, bid)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/pinned-app/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if strings.Contains(body, `name="refresh_schedule"`) {
+		t.Error("refresh_schedule field should be hidden for pinned bundle")
+	}
+}
+
+// TestRuntimeTabWithWorkersAndSessions verifies the runtime tab renders
+// worker table rows with status, sessions, and summary statistics.
+func TestRuntimeTabWithWorkersAndSessions(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("rt-data-app", "owner")
+
+	srv.Workers.Set("w-runtime-active-1", server.ActiveWorker{AppID: app.ID, StartedAt: time.Now()})
+	srv.Workers.Set("w-runtime-draining", server.ActiveWorker{AppID: app.ID, Draining: true, StartedAt: time.Now()})
+
+	srv.Sessions.Set("s-rt-1", session.Entry{WorkerID: "w-runtime-active-1", UserSub: "owner", LastAccess: time.Now()})
+	srv.Sessions.Set("s-rt-2", session.Entry{WorkerID: "w-runtime-active-1", UserSub: "viewer", LastAccess: time.Now()})
+
+	// Seed display name for user lookup.
+	srv.DB.UpsertUserWithRole("owner", "owner@test.com", "Owner Name", "admin")
+
+	// DB sessions for view counts.
+	srv.DB.CreateSession("db-rt1", app.ID, "w-runtime-active-1", "owner")
+	srv.DB.CreateSession("db-rt2", app.ID, "w-runtime-active-1", "viewer")
+	srv.DB.CreateSession("db-rt3", app.ID, "w-runtime-draining", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/rt-data-app/tab/runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	// Should have worker rows, not the empty state.
+	if strings.Contains(body, "No active workers") {
+		t.Error("should not show empty state when workers exist")
+	}
+	// Worker IDs should be truncated in the table.
+	if !strings.Contains(body, "w-runtim...") {
+		t.Error("expected truncated worker ID 'w-runtim...' in table")
+	}
+	// Draining worker should show draining status.
+	if !strings.Contains(body, "status-draining") {
+		t.Error("expected draining status badge for worker 2")
+	}
+	// Active status for worker 1.
+	if !strings.Contains(body, "status-active") {
+		t.Error("expected active status badge for worker 1")
+	}
+	// Session chip with display name.
+	if !strings.Contains(body, "Owner Name") {
+		t.Error("expected display name 'Owner Name' in session chip")
+	}
+	// Summary stats.
+	if !strings.Contains(body, "2 active sessions") {
+		t.Error("expected '2 active sessions' in summary")
+	}
+	if !strings.Contains(body, "3 total views") {
+		t.Error("expected '3 total views' in summary")
+	}
+}
+
+// TestBundlesTabWithMultipleBundles verifies the bundles tab renders
+// multiple bundles with the active badge and rollback buttons correctly.
+func TestBundlesTabWithMultipleBundles(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("bun-data-app", "owner")
+
+	// Create two bundles, activate the second.
+	bid1 := "bun-old-" + app.ID[:8]
+	bid2 := "bun-new-" + app.ID[:8]
+	srv.DB.CreateBundle(bid1, app.ID, "owner", false)
+	srv.DB.UpdateBundleStatus(bid1, "ready")
+	srv.DB.CreateBundle(bid2, app.ID, "owner", false)
+	srv.DB.UpdateBundleStatus(bid2, "ready")
+	srv.DB.ActivateBundle(app.ID, bid2)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/bun-data-app/tab/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	// Should not show empty state.
+	if strings.Contains(body, "No bundles") {
+		t.Error("should not show empty state with bundles present")
+	}
+	// Active bundle should have the "active" badge.
+	if !strings.Contains(body, `status-ready">active`) {
+		t.Error("expected 'active' badge on the active bundle")
+	}
+	// Old bundle should have a Rollback button (it's ready and not active).
+	if !strings.Contains(body, "Rollback") {
+		t.Error("expected Rollback button for old ready bundle")
+	}
+	// Unpinned active bundle → show refresh button.
+	if !strings.Contains(body, "Refresh dependencies") {
+		t.Error("expected 'Refresh dependencies' button for unpinned bundle")
+	}
+}
+
+// TestBundlesTabRefreshHiddenForPinnedBundle verifies the refresh button
+// is hidden when the active bundle is pinned.
+func TestBundlesTabRefreshHiddenForPinnedBundle(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("bun-pin-app", "owner")
+
+	bid := "bun-pinned-" + app.ID[:8]
+	srv.DB.CreateBundle(bid, app.ID, "owner", true)
+	srv.DB.UpdateBundleStatus(bid, "ready")
+	srv.DB.ActivateBundle(app.ID, bid)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/bun-pin-app/tab/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if strings.Contains(body, "Refresh dependencies") {
+		t.Error("should not show refresh button for pinned bundle")
+	}
+}
+
+// TestBundlesTabNoRollbackForActiveBundle verifies the active bundle
+// does not show a rollback button.
+func TestBundlesTabNoRollbackForActiveBundle(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("bun-noroll-app", "owner")
+
+	// Single bundle, active.
+	bid := "bun-only-" + app.ID[:8]
+	srv.DB.CreateBundle(bid, app.ID, "owner", false)
+	srv.DB.UpdateBundleStatus(bid, "ready")
+	srv.DB.ActivateBundle(app.ID, bid)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/bun-noroll-app/tab/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if strings.Contains(body, "Rollback") {
+		t.Error("active bundle should not show Rollback button")
+	}
+}
+
+// TestCollaboratorsTabWithACLGrants verifies the collaborators tab
+// renders grants when access type is ACL.
+func TestCollaboratorsTabWithACLGrants(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RolePublisher)
+	app, _ := srv.DB.CreateApp("acl-data-app", "owner")
+
+	// Set ACL access type.
+	acl := "acl"
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{AccessType: &acl})
+
+	// Grant access and create user for display name.
+	srv.DB.UpsertUserWithRole("alice", "alice@test.com", "Alice Smith", "viewer")
+	srv.DB.GrantAppAccess(app.ID, "alice", "user", "viewer", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	// ACL section should be visible.
+	if !strings.Contains(body, "acl-section") {
+		t.Error("expected acl-section for ACL access type")
+	}
+	// Grant should show display name.
+	if !strings.Contains(body, "Alice Smith") {
+		t.Error("expected display name 'Alice Smith' in grant list")
+	}
+	// Access type selector should have ACL selected.
+	if !strings.Contains(body, `value="acl" selected`) {
+		t.Error("expected 'acl' option to be selected")
+	}
+}
+
+// TestCollaboratorsTabPublicAccessHidesACLSection verifies the ACL
+// section is hidden when access type is not 'acl'.
+func TestCollaboratorsTabPublicAccessHidesACLSection(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RolePublisher)
+	app, _ := srv.DB.CreateApp("pub-acl-app", "owner")
+
+	public := "public"
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{AccessType: &public})
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if strings.Contains(body, "acl-section") {
+		t.Error("acl-section should be hidden for public access type")
+	}
+	if !strings.Contains(body, `value="public" selected`) {
+		t.Error("expected 'public' option to be selected")
+	}
+}
+
+// TestLogsTabWithLiveAndDeadWorkers verifies the logs tab shows both
+// live workers from WorkerMap and dead workers from LogStore.
+func TestLogsTabWithLiveAndDeadWorkers(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("log-data-app", "owner")
+
+	// Live worker.
+	srv.Workers.Set("w-log-live", server.ActiveWorker{AppID: app.ID, StartedAt: time.Now()})
+	srv.Sessions.Set("s-log-1", session.Entry{WorkerID: "w-log-live", UserSub: "owner", LastAccess: time.Now()})
+
+	// Dead worker in logstore.
+	sender := srv.LogStore.Create("w-log-dead", app.ID)
+	sender.Write("some log line")
+	srv.LogStore.MarkEnded("w-log-dead")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/log-data-app/tab/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if strings.Contains(body, "No workers") {
+		t.Error("should not show empty state when workers exist")
+	}
+	// Live worker.
+	if !strings.Contains(body, "w-log-li...") {
+		t.Error("expected truncated live worker ID")
+	}
+	if !strings.Contains(body, "status-active") {
+		t.Error("expected active status for live worker")
+	}
+	// Dead worker.
+	if !strings.Contains(body, "w-log-de...") {
+		t.Error("expected truncated dead worker ID")
+	}
+	if !strings.Contains(body, "status-ended") {
+		t.Error("expected ended status for dead worker")
+	}
+}
+
+// TestLogsWorkerTabWithHistoricalLogs verifies historical logs are
+// pre-rendered in the log output area.
+func TestLogsWorkerTabWithHistoricalLogs(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("logw-data-app", "owner")
+
+	// Create logstore entry with buffered lines.
+	sender := srv.LogStore.Create("w-logw-hist", app.ID)
+	sender.Write("[INFO] Server started on :3838")
+	sender.Write("[INFO] Ready to accept connections")
+
+	// Worker is still active.
+	srv.Workers.Set("w-logw-hist", server.ActiveWorker{AppID: app.ID, StartedAt: time.Now()})
+
+	resp, err := http.Get(ts.URL + "/ui/apps/logw-data-app/tab/logs/worker/w-logw-hist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "[INFO] Server started on :3838") {
+		t.Error("expected first historical log line")
+	}
+	if !strings.Contains(body, "[INFO] Ready to accept connections") {
+		t.Error("expected second historical log line")
+	}
+	// Active worker should have streaming button.
+	if !strings.Contains(body, "Start streaming") {
+		t.Error("expected 'Start streaming' button for active worker")
+	}
+}
+
+// TestLogsWorkerTabInactiveWorkerNoStreamButton verifies the streaming
+// button is hidden when the worker is not active.
+func TestLogsWorkerTabInactiveWorkerNoStreamButton(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("logw-dead-app", "owner")
+
+	// Dead worker with logs, not in WorkerMap.
+	sender := srv.LogStore.Create("w-logw-dead", app.ID)
+	sender.Write("[INFO] Shutting down")
+	srv.LogStore.MarkEnded("w-logw-dead")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/logw-dead-app/tab/logs/worker/w-logw-dead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "[INFO] Shutting down") {
+		t.Error("expected historical log for dead worker")
+	}
+	if strings.Contains(body, `id="log-toggle"`) {
+		t.Error("should not show streaming button for inactive worker")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Option B: computeAppStatus unit tests
+// ---------------------------------------------------------------------------
+
+func TestComputeAppStatusDisabled(t *testing.T) {
+	srv, _ := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("status-dis", "u")
+	srv.DB.SetAppEnabled(app.ID, false)
+	app.Enabled = false
+
+	if got := computeAppStatus(srv, app); got != "disabled" {
+		t.Errorf("computeAppStatus(disabled) = %q, want 'disabled'", got)
+	}
+}
+
+func TestComputeAppStatusStopped(t *testing.T) {
+	srv, _ := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("status-stop", "u")
+
+	// Enabled, no workers → stopped.
+	if got := computeAppStatus(srv, app); got != "stopped" {
+		t.Errorf("computeAppStatus(no workers) = %q, want 'stopped'", got)
+	}
+}
+
+func TestComputeAppStatusRunning(t *testing.T) {
+	srv, _ := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("status-run", "u")
+
+	srv.Workers.Set("w-run-1", server.ActiveWorker{AppID: app.ID, StartedAt: time.Now()})
+
+	if got := computeAppStatus(srv, app); got != "running" {
+		t.Errorf("computeAppStatus(active worker) = %q, want 'running'", got)
+	}
+}
+
+func TestComputeAppStatusStopping(t *testing.T) {
+	srv, _ := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("status-drain", "u")
+
+	// All workers draining → stopping.
+	srv.Workers.Set("w-drain-1", server.ActiveWorker{AppID: app.ID, Draining: true, StartedAt: time.Now()})
+	srv.Workers.Set("w-drain-2", server.ActiveWorker{AppID: app.ID, Draining: true, StartedAt: time.Now()})
+
+	if got := computeAppStatus(srv, app); got != "stopping" {
+		t.Errorf("computeAppStatus(all draining) = %q, want 'stopping'", got)
+	}
+}
+
+func TestComputeAppStatusRunningMixedDrain(t *testing.T) {
+	srv, _ := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("status-mix", "u")
+
+	// One draining, one active → running.
+	srv.Workers.Set("w-mix-1", server.ActiveWorker{AppID: app.ID, Draining: true, StartedAt: time.Now()})
+	srv.Workers.Set("w-mix-2", server.ActiveWorker{AppID: app.ID, Draining: false, StartedAt: time.Now()})
+
+	if got := computeAppStatus(srv, app); got != "running" {
+		t.Errorf("computeAppStatus(mixed drain) = %q, want 'running'", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Option C: Granular per-tab RBAC boundary tests
+// ---------------------------------------------------------------------------
+
+// TestAdminCanAccessAllTabsOnOtherUsersApp verifies that an admin user
+// can access every tab on an app they don't own.
+func TestAdminCanAccessAllTabsOnOtherUsersApp(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin", auth.RoleAdmin)
+	srv.DB.CreateApp("other-app", "someone-else")
+
+	tabs := []string{"overview", "settings", "runtime", "bundles", "collaborators", "logs"}
+	for _, tab := range tabs {
+		t.Run(tab, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + "/ui/apps/other-app/tab/" + tab)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("admin should access %s tab, got %d", tab, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestCollaboratorCannotAccessCollaboratorsTabDirectly verifies that a
+// collaborator gets 404 when hitting the collaborators tab endpoint.
+func TestCollaboratorCannotAccessCollaboratorsTabDirectly(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "collab", auth.RoleViewer)
+	app, _ := srv.DB.CreateApp("rbac-collab-app", "someone-else")
+	srv.DB.GrantAppAccess(app.ID, "collab", "user", "collaborator", "someone-else")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("collaborator should get 404 on collaborators tab, got %d", resp.StatusCode)
+	}
+}
+
+// TestCollaboratorCanAccessNonOwnerTabs verifies that a collaborator can
+// access all tabs except collaborators.
+func TestCollaboratorCanAccessNonOwnerTabs(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "collab2", auth.RoleViewer)
+	app, _ := srv.DB.CreateApp("rbac-tabs-app", "someone-else")
+	srv.DB.GrantAppAccess(app.ID, "collab2", "user", "collaborator", "someone-else")
+
+	tabs := []string{"overview", "settings", "runtime", "bundles", "logs"}
+	for _, tab := range tabs {
+		t.Run(tab, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/" + tab)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("collaborator should access %s tab, got %d", tab, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestViewerCannotAccessAnyTab verifies that a viewer (not collaborator)
+// gets 404 on all tab endpoints.
+func TestViewerCannotAccessAnyTab(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "viewer2", auth.RoleViewer)
+	app, _ := srv.DB.CreateApp("rbac-viewer-app", "someone-else")
+	srv.DB.GrantAppAccess(app.ID, "viewer2", "user", "viewer", "someone-else")
+
+	tabs := []string{"overview", "settings", "runtime", "bundles", "collaborators", "logs"}
+	for _, tab := range tabs {
+		t.Run(tab, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/" + tab)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("viewer should get 404 on %s tab, got %d", tab, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestAdminCanAccessSidebarOnOtherUsersApp verifies the sidebar itself
+// is accessible to admins on apps they don't own.
+func TestAdminCanAccessSidebarOnOtherUsersApp(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin", auth.RoleAdmin)
+	srv.DB.CreateApp("admin-side-app", "someone-else")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/admin-side-app/sidebar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin should access sidebar, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	// Admin should see the Collaborators tab in the sidebar.
+	if !strings.Contains(body, "Collaborators") {
+		t.Error("admin should see Collaborators tab on other user's app")
+	}
+}
+
+// TestLogsWorkerTabRBACForCollaborator verifies a collaborator can
+// access the logs worker sub-tab.
+func TestLogsWorkerTabRBACForCollaborator(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "collab3", auth.RoleViewer)
+	app, _ := srv.DB.CreateApp("rbac-logw-app", "someone-else")
+	srv.DB.GrantAppAccess(app.ID, "collab3", "user", "collaborator", "someone-else")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/logs/worker/any-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("collaborator should access logs/worker tab, got %d", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Option D: Error and edge-case rendering tests
+// ---------------------------------------------------------------------------
+
+// TestOverviewTabNilActiveBundleShowsNone verifies the overview tab
+// renders "None" when there is no active bundle.
+func TestOverviewTabNilActiveBundleShowsNone(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("ov-nobundle", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/ov-nobundle/tab/overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "None") {
+		t.Error("expected 'None' for nil active bundle in overview")
+	}
+}
+
+// TestOverviewTabZeroWorkersAndSessions verifies the overview tab
+// renders zero counts correctly.
+func TestOverviewTabZeroWorkersAndSessions(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("ov-empty", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/ov-empty/tab/overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "0 active") {
+		t.Error("expected '0 active' for zero workers")
+	}
+	if !strings.Contains(body, "0 sessions") {
+		t.Error("expected '0 sessions' for zero sessions")
+	}
+	if !strings.Contains(body, "0 total views") {
+		t.Error("expected '0 total views' for zero views")
+	}
+}
+
+// TestSettingsTabNoTagsAvailable verifies settings renders correctly
+// when no tags exist at all (no tag chips, no add form).
+func TestSettingsTabNoTagsAvailable(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("set-notags", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/set-notags/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	// No individual tag chip spans should be present.
+	if strings.Contains(body, "tag-remove") {
+		t.Error("should not have tag remove buttons with no tags")
+	}
+	// No add-tag form should appear (no available tags).
+	if strings.Contains(body, "tag-add-form") {
+		t.Error("should not show tag-add-form when no tags are available")
+	}
+}
+
+// TestSettingsTabAllTagsApplied verifies the add-tag form is hidden
+// when every tag is already applied to the app.
+func TestSettingsTabAllTagsApplied(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("set-alltags", "owner")
+
+	tag, _ := srv.DB.CreateTag("only-tag")
+	srv.DB.AddAppTag(app.ID, tag.ID)
+
+	resp, err := http.Get(ts.URL + "/ui/apps/set-alltags/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	// Should have the tag chip.
+	if !strings.Contains(body, "only-tag") {
+		t.Error("expected applied tag 'only-tag'")
+	}
+	// No more available tags → no add form.
+	if strings.Contains(body, "tag-add-form") {
+		t.Error("should not show tag-add-form when all tags are applied")
+	}
+}
+
+// TestRuntimeTabEmptyWorkersShowsEmptyState verifies the empty state
+// message appears when there are no workers.
+func TestRuntimeTabEmptyWorkersShowsEmptyState(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("rt-empty", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/rt-empty/tab/runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "No active workers") {
+		t.Error("expected 'No active workers' empty state")
+	}
+	// Summary should show zero counts.
+	if !strings.Contains(body, "0 active sessions") {
+		t.Error("expected '0 active sessions' in summary")
+	}
+}
+
+// TestRuntimeTabAnonymousSessionDisplaysAnonymous verifies that a
+// session without a user sub displays "anonymous".
+func TestRuntimeTabAnonymousSessionDisplaysAnonymous(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("rt-anon", "owner")
+
+	srv.Workers.Set("w-anon", server.ActiveWorker{AppID: app.ID, StartedAt: time.Now()})
+	srv.Sessions.Set("s-anon", session.Entry{WorkerID: "w-anon", UserSub: "", LastAccess: time.Now()})
+
+	resp, err := http.Get(ts.URL + "/ui/apps/rt-anon/tab/runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "anonymous") {
+		t.Error("expected 'anonymous' display name for empty user sub")
+	}
+}
+
+// TestBundlesTabEmptyShowsEmptyState verifies the bundles empty state.
+func TestBundlesTabEmptyShowsEmptyState(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("bun-empty", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/bun-empty/tab/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "No bundles") {
+		t.Error("expected 'No bundles' empty state")
+	}
+	if strings.Contains(body, "Refresh dependencies") {
+		t.Error("should not show refresh button with no bundles")
+	}
+}
+
+// TestBundlesTabFailedBundleNoRollback verifies a failed bundle does
+// not show a rollback button.
+func TestBundlesTabFailedBundleNoRollback(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("bun-fail", "owner")
+
+	bid := "bun-fail-" + app.ID[:8]
+	srv.DB.CreateBundle(bid, app.ID, "owner", false)
+	srv.DB.UpdateBundleStatus(bid, "failed")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/bun-fail/tab/bundles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if strings.Contains(body, "Rollback") {
+		t.Error("failed bundle should not show Rollback button")
+	}
+	if !strings.Contains(body, "status-failed") {
+		t.Error("expected failed status badge")
+	}
+}
+
+// TestCollaboratorsTabEmptyGrantsShowsEmptyState verifies the empty
+// state when access type is ACL but no grants exist.
+func TestCollaboratorsTabEmptyGrantsShowsEmptyState(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RolePublisher)
+	app, _ := srv.DB.CreateApp("acl-empty-app", "owner")
+
+	acl := "acl"
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{AccessType: &acl})
+
+	resp, err := http.Get(ts.URL + "/ui/apps/" + app.Name + "/tab/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "No access grants") {
+		t.Error("expected 'No access grants' empty state")
+	}
+}
+
+// TestLogsTabNoWorkersShowsEmptyState verifies the logs tab empty state.
+func TestLogsTabNoWorkersShowsEmptyState(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	srv.DB.CreateApp("log-empty", "owner")
+
+	resp, err := http.Get(ts.URL + "/ui/apps/log-empty/tab/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "No workers") {
+		t.Error("expected 'No workers' empty state")
+	}
+}
+
+// TestSettingsTabStoppingStatusShowsDisabling verifies the settings tab
+// shows "Disabling..." when the app status is "stopping".
+func TestSettingsTabStoppingStatusShowsDisabling(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
+	app, _ := srv.DB.CreateApp("set-stopping", "owner")
+
+	// All workers draining → status "stopping".
+	srv.Workers.Set("w-stopping", server.ActiveWorker{AppID: app.ID, Draining: true, StartedAt: time.Now()})
+
+	resp, err := http.Get(ts.URL + "/ui/apps/set-stopping/tab/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Disabling...") {
+		t.Error("expected 'Disabling...' for stopping status")
+	}
+	if !strings.Contains(body, "status-stopping") {
+		t.Error("expected stopping status badge")
 	}
 }
