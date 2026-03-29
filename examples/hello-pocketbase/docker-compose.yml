@@ -78,7 +78,7 @@ services:
 
   # --- Blockyard: Shiny app hosting platform ---
   blockyard:
-    image: ghcr.io/cynkra/blockyard:latest
+    image: ghcr.io/cynkra/blockyard:main
     depends_on:
       init:
         condition: service_completed_successfully
