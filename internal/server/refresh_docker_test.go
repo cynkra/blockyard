@@ -1,4 +1,4 @@
-//go:build docker_test
+//go:build pak_test
 
 package server_test
 
@@ -71,7 +71,7 @@ func setupDockerServer(t *testing.T) *server.Server {
 		},
 		Proxy: config.ProxyConfig{
 			MaxWorkers:         10,
-			WorkerStartTimeout: config.Duration{Duration: 60 * time.Second},
+			WorkerStartTimeout: config.Duration{Duration: 2 * time.Second},
 			TransferTimeout:    config.Duration{Duration: 30 * time.Second},
 		},
 		Server: config.ServerConfig{Bind: ":8080"},
@@ -273,6 +273,31 @@ func TestRefreshAndRollback_Docker(t *testing.T) {
 		}
 	})
 
+	t.Run("refresh_unchanged", func(t *testing.T) {
+		// Run refresh again with the same DESCRIPTION. Since deps were
+		// already resolved in the previous subtest, the store-manifest
+		// should be identical and RunRefresh should return changed=false.
+		manifestPath := filepath.Join(bundlePaths.Unpacked, "manifest.json")
+		m, err := manifest.Read(manifestPath)
+		if err != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID, appRow.ID)
+		changed := srv.RunRefresh(context.Background(), appRow, m, sender)
+
+		status, _ := srv.Tasks.Status(taskID)
+		if status == task.Failed {
+			snap, _, _, _ := srv.Tasks.Subscribe(taskID)
+			t.Fatalf("refresh failed; task logs:\n%s", strings.Join(snap, "\n"))
+		}
+		if changed {
+			t.Error("expected no dependency change on second refresh with same DESCRIPTION")
+		}
+		t.Log("second refresh correctly detected unchanged dependencies")
+	})
+
 	t.Run("rollback_prev", func(t *testing.T) {
 		// After a refresh, store-manifest.json.prev should exist.
 		prevPath := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
@@ -335,5 +360,48 @@ func TestRefreshAndRollback_Docker(t *testing.T) {
 				srv.Backend.Stop(context.Background(), wid)
 			}
 		}
+	})
+
+	t.Run("refresh_bad_description", func(t *testing.T) {
+		// Create a second app whose DESCRIPTION imports a nonexistent
+		// package. pak should fail to resolve it, causing the build
+		// container to exit non-zero.
+		badBundleID := "bad-bundle"
+		badAppID := "bad-deps-app"
+
+		badPaths := srv.BundlePaths(badAppID, badBundleID)
+		os.MkdirAll(badPaths.Unpacked, 0o755)
+		os.WriteFile(filepath.Join(badPaths.Unpacked, "app.R"),
+			[]byte("library(shiny)\nshinyApp(ui, server)"), 0o644)
+		os.WriteFile(filepath.Join(badPaths.Unpacked, "DESCRIPTION"),
+			[]byte("Package: badapp\nVersion: 0.1.0\nImports:\n    this.package.does.not.exist.12345\n"), 0o644)
+		os.WriteFile(filepath.Join(badPaths.Unpacked, "manifest.json"),
+			[]byte(`{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"this.package.does.not.exist.12345"},"files":{"app.R":{"checksum":"abc"}}}`),
+			0o644)
+
+		badApp := &db.AppRow{
+			ID:           badAppID,
+			ActiveBundle: &badBundleID,
+		}
+
+		m, err := manifest.Read(filepath.Join(badPaths.Unpacked, "manifest.json"))
+		if err != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID, badAppID)
+		changed := srv.RunRefresh(context.Background(), badApp, m, sender)
+
+		status, _ := srv.Tasks.Status(taskID)
+		if status != task.Failed {
+			snap, _, _, _ := srv.Tasks.Subscribe(taskID)
+			t.Errorf("expected Failed for nonexistent package, got %d; logs:\n%s",
+				status, strings.Join(snap, "\n"))
+		}
+		if changed {
+			t.Error("expected no change when build fails with bad DESCRIPTION")
+		}
+		t.Log("refresh correctly failed for nonexistent package dependency")
 	})
 }

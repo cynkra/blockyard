@@ -78,12 +78,11 @@ If the app does not exist on the server yet, it is created automatically.
 **Example output:**
 
 ```
-Detected: DESCRIPTION with 3 dependencies
-Entrypoint: app.R
-
-  App:       dashboard
-  Files:     4
-  Pinned:    no
+Detected:
+  Name:        dashboard
+  Mode:        DESCRIPTION (entrypoint: app.R)
+  Deps:        3 packages
+  Repository:  https://cran.r-project.org
 
 Deploy? [Y/n] y
 
@@ -110,9 +109,9 @@ by init ./my-app --pin --repositories https://cran.r-project.org
 | `--pin`                 | Pin dependencies via `renv::snapshot()`             |
 | `--repositories <csv>`  | R package repository URLs (comma-separated)         |
 
-Returns an error if `manifest.json` already exists (validation only in that
-case). Does not support bare-script apps — at least a `DESCRIPTION` is
-required.
+If `manifest.json` already exists, validates it and exits successfully
+(no new file is written). Does not support bare-script apps — at least a
+`DESCRIPTION` is required.
 
 ---
 
@@ -346,28 +345,28 @@ Delete a tag (admin only). Cascades — the tag is also removed from all apps.
 by tags delete staging
 ```
 
-### `by tags <app> list`
+### `by tags app-list <app>`
 
 List tags attached to an app.
 
 ```bash
-by tags dashboard list
+by tags app-list dashboard
 ```
 
-### `by tags <app> add <tag>`
+### `by tags app-add <app> <tag>`
 
 Attach a tag to an app.
 
 ```bash
-by tags dashboard add production
+by tags app-add dashboard production
 ```
 
-### `by tags <app> remove <tag>`
+### `by tags app-remove <app> <tag>`
 
 Detach a tag from an app.
 
 ```bash
-by tags dashboard remove staging
+by tags app-remove dashboard staging
 ```
 
 ---

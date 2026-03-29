@@ -1,0 +1,29 @@
+<div class="log-viewer">
+    <div class="worker-list">
+        <h3>Workers</h3>
+        {{if .Workers}}
+        <table class="data-table">
+            <thead>
+                <tr><th>Worker</th><th>Status</th><th>Sessions</th><th>Since</th></tr>
+            </thead>
+            <tbody>
+            {{range .Workers}}
+            <tr class="worker-entry {{if eq .Status "active"}}worker-active{{end}}"
+                hx-get="/ui/apps/{{$.App.Name}}/tab/logs/worker/{{.ID}}"
+                hx-target="#log-content">
+                <td class="monospace">{{.ID | truncate}}</td>
+                <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
+                <td>{{.SessionCount}}</td>
+                <td>{{.StartedAt | timeAgo}}</td>
+            </tr>
+            {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <p class="empty-state">No workers.</p>
+        {{end}}
+    </div>
+    <div id="log-content" class="log-content">
+        <p class="log-placeholder">Select a worker to view logs.</p>
+    </div>
+</div>

@@ -98,13 +98,17 @@ During the build:
 You can monitor the build by streaming task logs:
 
 ```bash
-# With the CLI (by deploy --wait does this automatically)
-by logs my-app --follow
+# With the CLI (the easiest way — streams build logs automatically)
+by deploy ./my-app --wait
 
-# With curl
+# With curl (use the task_id from the bundle upload response)
 curl "$BLOCKYARD/api/v1/tasks/<task-id>/logs" \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+Note: `by logs` streams **worker** container logs (for a running app),
+not build logs. Use `by deploy --wait` or the task logs endpoint to
+follow the build.
 
 ## Accessing the app
 
@@ -117,13 +121,6 @@ http://<blockyard-host>/app/<app-name>/
 Blockyard spawns a worker container on the first request (cold start) and
 proxies HTTP and WebSocket traffic to it. A session cookie pins the user to
 the same worker for subsequent requests.
-
-You can also pre-start a worker via the API:
-
-```bash
-curl -X POST "$BLOCKYARD/api/v1/apps/<app-name>/start" \
-  -H "Authorization: Bearer $TOKEN"
-```
 
 ## Container security
 

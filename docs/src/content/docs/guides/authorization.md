@@ -82,11 +82,11 @@ For apps with `access_type = "acl"`, access is controlled via per-user
 grants. Each grant associates a user with an app at a specific
 permission level.
 
-| Grant level | What it allows |
+| Level | What it allows |
 |---|---|
-| **owner** | Full control: deploy bundles, change settings, delete the app, manage access grants. The user who created the app is automatically the owner. Admins can transfer ownership. |
-| **collaborator** | Deploy new bundles and change app settings. Cannot delete the app or manage who has access. |
-| **viewer** | Access and use the app. No management capabilities. |
+| **owner** | Full control: deploy bundles, change settings, delete the app, manage access grants. Ownership is automatic — the user who created the app is the owner. Ownership is not a grant level that can be assigned via the ACL API. |
+| **collaborator** | Deploy new bundles and change app settings. Cannot delete the app or manage who has access. Assignable via `POST /api/v1/apps/{id}/access`. |
+| **viewer** | Access and use the app. No management capabilities. Assignable via `POST /api/v1/apps/{id}/access`. |
 
 System admins have implicit owner-level access to all apps regardless
 of grants.
@@ -125,7 +125,7 @@ can do.
 
 | Header | Value |
 |---|---|
-| `X-Shiny-User` | The authenticated user's OIDC `sub`. Empty for anonymous access. |
+| `X-Shiny-User` | The authenticated user's display name (falls back to OIDC `sub` when no name is available). Empty for anonymous access. |
 | `X-Shiny-Access` | The user's effective access level for this specific app. |
 
 ### `X-Shiny-Access` Values

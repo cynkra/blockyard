@@ -170,6 +170,51 @@ func TestAppID(t *testing.T) {
 	}
 }
 
+func TestCompleteDoubleCall(t *testing.T) {
+	s := NewStore()
+	sender := s.Create("task-1", "")
+	sender.Write("line 1")
+
+	sender.Complete(Completed)
+	// Second call must not panic (channels already closed).
+	sender.Complete(Failed)
+
+	status, _ := s.Status("task-1")
+	if status != Completed {
+		t.Errorf("expected Completed after double-call, got %d", status)
+	}
+}
+
+func TestCompleteClosesAllSubscribers(t *testing.T) {
+	s := NewStore()
+	sender := s.Create("task-1", "")
+
+	_, live1, done1, _ := s.Subscribe("task-1")
+	_, live2, done2, _ := s.Subscribe("task-1")
+
+	sender.Complete(Completed)
+
+	// All live channels should be closed.
+	if _, ok := <-live1; ok {
+		t.Error("live1 should be closed")
+	}
+	if _, ok := <-live2; ok {
+		t.Error("live2 should be closed")
+	}
+
+	// Both done channels should be closed.
+	select {
+	case <-done1:
+	default:
+		t.Error("done1 should be closed")
+	}
+	select {
+	case <-done2:
+	default:
+		t.Error("done2 should be closed")
+	}
+}
+
 func TestCompleteFailed(t *testing.T) {
 	s := NewStore()
 	sender := s.Create("task-1", "")

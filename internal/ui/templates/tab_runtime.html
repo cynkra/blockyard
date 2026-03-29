@@ -1,0 +1,51 @@
+<div class="runtime-view">
+    <div class="runtime-controls">
+        <button class="btn btn-sm"
+                hx-get="/ui/apps/{{.App.Name}}/tab/runtime"
+                hx-target="#tab-content">Refresh</button>
+    </div>
+    {{if .Workers}}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Worker</th>
+                <th>Status</th>
+                <th>CPU</th>
+                <th>Memory</th>
+                <th>Sessions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Workers}}
+            <tr>
+                <td class="monospace">{{.ID | truncate}}</td>
+                <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
+                <td>{{printf "%.1f" .CPUPercent}}%</td>
+                <td>{{.MemoryUsageBytes | humanBytes}} / {{.MemoryLimitBytes | humanBytes}}</td>
+                <td>{{len .Sessions}}</td>
+            </tr>
+            {{if .Sessions}}
+            <tr class="worker-sessions-row">
+                <td colspan="5">
+                    <div class="worker-sessions">
+                        {{range .Sessions}}
+                        <span class="session-chip">
+                            {{.UserDisplayName}} ({{.StartedAt | timeAgo}})
+                        </span>
+                        {{end}}
+                    </div>
+                </td>
+            </tr>
+            {{end}}
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="empty-state">No active workers.</p>
+    {{end}}
+
+    <div class="runtime-summary">
+        <p>{{.ActiveSessions}} active sessions, {{.UniqueVisitors}} unique visitors</p>
+        <p>{{.TotalViews}} total views, {{.RecentViews}} last 7 days</p>
+    </div>
+</div>

@@ -1,0 +1,34 @@
+<div class="sidebar-header">
+    <h2>{{.App.Name}}</h2>
+    <a href="/app/{{.App.Name}}/" target="_blank" title="Open app">&#8599;</a>
+    <button onclick="closeSidebar()" aria-label="Close">&#10005;</button>
+</div>
+<nav class="sidebar-tabs">
+    <button class="tab active"
+            hx-get="/ui/apps/{{.App.Name}}/tab/overview"
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Overview</button>
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Settings</button>
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/runtime"
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Runtime</button>
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Bundles</button>
+    {{if .CanManageACL}}
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/collaborators"
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Collaborators</button>
+    {{end}}
+    <button class="tab"
+            hx-get="/ui/apps/{{.App.Name}}/tab/logs"
+            hx-target="#tab-content"
+            hx-on::after-request="setActiveTab(this)">Logs</button>
+</nav>
+<div id="tab-content">{{.OverviewHTML}}</div>

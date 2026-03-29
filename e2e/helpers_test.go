@@ -34,11 +34,27 @@ func composeUp(t *testing.T, composeFile string) {
 		t.Fatalf("abs path: %v", err)
 	}
 
+	// Base compose flags. When coverage is enabled, layer an override
+	// that sets GOCOVERDIR and bind-mounts the host coverage directory
+	// into the blockyard container.
+	composeFlags := []string{"compose", "-f", absPath}
+	if covDir != "" {
+		override, err := filepath.Abs("docker-compose.cover.yml")
+		if err != nil {
+			t.Fatalf("abs path (cover override): %v", err)
+		}
+		composeFlags = append(composeFlags, "-f", override)
+	}
+
 	run := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("docker", append([]string{"compose", "-f", absPath}, args...)...)
+		cmd := exec.Command("docker", append(composeFlags, args...)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		if covDir != "" {
+			cmd.Env = append(os.Environ(),
+				"E2E_GOCOVERDIR="+filepath.Join(covDir, "server"))
+		}
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("docker compose %v: %v", args, err)
 		}
@@ -48,12 +64,12 @@ func composeUp(t *testing.T, composeFile string) {
 	// containers torn down even if compose up fails.
 	t.Cleanup(func() {
 		if t.Failed() {
-			dump := exec.Command("docker", "compose", "-f", absPath, "logs", "--no-color")
+			dump := exec.Command("docker", append(composeFlags, "logs", "--no-color")...)
 			dump.Stdout = os.Stdout
 			dump.Stderr = os.Stderr
 			_ = dump.Run()
 		}
-		down := exec.Command("docker", "compose", "-f", absPath, "down", "-v", "--remove-orphans")
+		down := exec.Command("docker", append(composeFlags, "down", "-v", "--remove-orphans")...)
 		down.Stdout = os.Stdout
 		down.Stderr = os.Stderr
 		_ = down.Run()
@@ -202,10 +218,14 @@ func createPAT(t *testing.T, baseURL string, cookies []*http.Cookie) string {
 func runCLI(t *testing.T, serverURL, token string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(byBin, args...)
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"BLOCKYARD_URL="+serverURL,
 		"BLOCKYARD_TOKEN="+token,
 	)
+	if covDir != "" {
+		env = append(env, "GOCOVERDIR="+filepath.Join(covDir, "cli"))
+	}
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -233,10 +253,14 @@ func runCLIJSON(t *testing.T, serverURL, token string, v any, args ...string) {
 func runCLIFail(t *testing.T, serverURL, token string, args ...string) (stdout, stderr string) {
 	t.Helper()
 	cmd := exec.Command(byBin, args...)
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"BLOCKYARD_URL="+serverURL,
 		"BLOCKYARD_TOKEN="+token,
 	)
+	if covDir != "" {
+		env = append(env, "GOCOVERDIR="+filepath.Join(covDir, "cli"))
+	}
+	cmd.Env = env
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf

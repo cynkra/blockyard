@@ -42,12 +42,11 @@ The CLI detects your dependencies, bundles the directory, uploads it, and
 streams the build logs:
 
 ```
-Detected: DESCRIPTION with 3 dependencies
-Entrypoint: app.R
-
-  App:       my-app
-  Files:     2
-  Pinned:    no
+Detected:
+  Name:        my-app
+  Mode:        DESCRIPTION (entrypoint: app.R)
+  Deps:        3 packages
+  Repository:  https://cran.r-project.org
 
 Deploy? [Y/n] y
 
