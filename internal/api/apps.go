@@ -848,7 +848,8 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			srv.Workers.Delete(workerID)
 			srv.Registry.Delete(workerID)
 			srv.Backend.Stop(context.Background(), workerID) //nolint:errcheck // best-effort cleanup
-			serviceUnavailable(w, "worker failed to start: "+err.Error())
+			slog.Error("worker failed to start", "app_id", app.ID, "worker_id", workerID, "error", err)
+			serviceUnavailable(w, "worker failed to start")
 			return
 		}
 
