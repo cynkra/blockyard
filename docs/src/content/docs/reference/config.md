@@ -247,6 +247,24 @@ label = "OpenAI"
 | `id` | `string` | — | **Yes** | Unique identifier for the service (also used as the vault path segment) |
 | `label` | `string` | — | **Yes** | Human-readable label shown to users |
 
+## `[board_storage]` *(optional)*
+
+Enable board storage via PostgREST. Requires `database.driver = "postgres"` and
+`[openbao]` (for vault Identity OIDC tokens that PostgREST uses to enforce
+row-level security).
+
+```toml
+[board_storage]
+postgrest_url = "http://postgrest:3000"
+```
+
+| Field | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `postgrest_url` | `string` | — | **Yes** | URL of the PostgREST instance serving the board tables |
+
+When configured, workers receive a `POSTGREST_URL` environment variable
+pointing to this URL, allowing Shiny apps to store and retrieve board state.
+
 ## `[audit]` *(optional)*
 
 Enable append-only audit logging to a JSONL file.

@@ -171,6 +171,8 @@ Each line is a JSON object with the following fields:
 | `app.create` | App created |
 | `app.update` | App settings changed |
 | `app.delete` | App deleted |
+| `app.start` | Worker started for an app |
+| `app.stop` | App workers stopped |
 | `app.rollback` | App rolled back to a previous bundle |
 | `app.restore` | Soft-deleted app restored |
 | `bundle.upload` | Bundle uploaded |

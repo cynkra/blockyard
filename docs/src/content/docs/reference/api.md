@@ -301,7 +301,8 @@ Roll back a dependency refresh, restoring the previous package set.
 
 ```json
 {
-  "task_id": "t5678..."
+  "task_id": "t5678...",
+  "message": "refresh started"
 }
 ```
 
@@ -349,9 +350,10 @@ or higher permissions.
 }
 ```
 
-`workers[].status` is `"active"` or `"draining"`. `stats` may be `null` if
-container metrics are unavailable. Dead workers (recently exited) are
-included with an `ended_at` timestamp.
+`workers[].status` is `"active"`, `"draining"`, or `"ended"` (recently
+exited). `stats` may be `null` if container metrics are unavailable. Ended
+workers include an `ended_at` timestamp and remain visible for the
+`log_retention` window.
 
 ### `GET /api/v1/apps/{id}/sessions`
 
@@ -794,6 +796,21 @@ Same as above, for any sub-path within the app.
 
 ---
 
+## Rate limiting
+
+All endpoints are rate-limited per client IP. When a limit is exceeded the
+server returns `429 Too Many Requests`.
+
+| Route group | Limit |
+|---|---|
+| Authentication (`/login`, `/callback`, `/logout`) | 10 req/min |
+| Credential exchange (`/api/v1/credentials/vault`) | 20 req/min |
+| User profile (`/api/v1/users/me`) | 20 req/min |
+| General API (`/api/v1/*`) | 120 req/min |
+| Proxy (`/app/*`) | 200 req/min |
+
+---
+
 ## Errors
 
 All error responses use a consistent JSON shape:
@@ -813,6 +830,7 @@ All error responses use a consistent JSON shape:
 | `404` | Resource not found |
 | `409` | Conflict (e.g. duplicate app name) |
 | `413` | Bundle exceeds `max_bundle_size` |
+| `429` | Rate limit exceeded |
 | `500` | Internal server error |
 | `502` | Upstream service error (e.g. OpenBao login failure) |
 | `503` | Service unavailable (e.g. max workers reached, worker start timeout, app disabled) |

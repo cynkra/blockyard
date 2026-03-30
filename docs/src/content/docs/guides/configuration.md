@@ -119,6 +119,16 @@ Credentials are stored at `secret/data/users/{sub}/apikeys/{id}`.
 | `id` | *(required)* | Unique identifier (also the vault path segment) |
 | `label` | *(required)* | Human-readable label |
 
+### `[board_storage]` *(optional)*
+
+Enable board storage via PostgREST. Requires `database.driver = "postgres"` and `[openbao]`.
+
+| Field | Default | Description |
+|---|---|---|
+| `postgrest_url` | *(required)* | URL of the PostgREST instance (e.g. `http://postgrest:3000`) |
+
+Workers receive a `POSTGREST_URL` environment variable when this is configured.
+
 ### `[audit]` *(optional)*
 
 Enable append-only audit logging.
@@ -191,6 +201,10 @@ idle_worker_timeout  = "5m"
 # [[openbao.services]]
 # id    = "openai"
 # label = "OpenAI"
+
+# Optional: Board storage via PostgREST (requires postgres + openbao)
+# [board_storage]
+# postgrest_url = "http://postgrest:3000"
 
 # Optional: Audit logging
 # [audit]
