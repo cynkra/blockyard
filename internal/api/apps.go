@@ -655,7 +655,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Rolled back","type":"success"}}`)
+			w.Header().Set("HX-Trigger", `{"bundleRolledBack":"","showToast":{"message":"Rolled back","type":"success"}}`)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -275,7 +275,7 @@ func AddAppTag(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Tag added","type":"success"}}`)
+			w.Header().Set("HX-Trigger", `{"tagAdded":"","showToast":{"message":"Tag added","type":"success"}}`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -321,7 +321,7 @@ func RemoveAppTag(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Tag removed","type":"success"}}`)
+			w.Header().Set("HX-Trigger", `{"tagRemoved":"","showToast":{"message":"Tag removed","type":"success"}}`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}

@@ -103,7 +103,7 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Access granted","type":"success"}}`)
+			w.Header().Set("HX-Trigger", `{"accessGranted":"","showToast":{"message":"Access granted","type":"success"}}`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -206,7 +206,7 @@ func RevokeAccess(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Access revoked","type":"success"}}`)
+			w.Header().Set("HX-Trigger", `{"accessRevoked":"","showToast":{"message":"Access revoked","type":"success"}}`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
