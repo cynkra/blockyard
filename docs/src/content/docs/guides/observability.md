@@ -188,6 +188,7 @@ Each line is a JSON object with the following fields:
 | `app.stop` | App workers stopped |
 | `app.rollback` | App rolled back to a previous bundle |
 | `app.restore` | Soft-deleted app restored |
+| `app.rename` | App renamed (old name becomes an alias) |
 | `bundle.upload` | Bundle uploaded |
 | `bundle.restore.success` | Dependency restore completed |
 | `bundle.restore.fail` | Dependency restore failed |

@@ -124,7 +124,7 @@ List apps visible to the caller. Paginated with RBAC filtering.
 |---|---|---|---|
 | `search` | `string` | — | Search by app name or title |
 | `tag` | `string` | — | Filter by tag name |
-| `deleted` | `bool` | `false` | Show soft-deleted apps (admin only) |
+| `deleted` | `bool` | `false` | Show soft-deleted apps (admin only). When `true`, returns a bare JSON array instead of the paginated wrapper. |
 | `page` | `integer` | `1` | Page number |
 | `per_page` | `integer` | `25` | Items per page (clamped to 1–100) |
 
@@ -202,6 +202,7 @@ updated.
 
 ```json
 {
+  "name": "new-slug",
   "max_workers_per_app": 4,
   "max_sessions_per_worker": 1,
   "memory_limit": "512m",
@@ -214,6 +215,7 @@ updated.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
+| `name` | `string` | — | Rename the app (new URL-safe slug). Requires owner or admin. The old name is preserved as an alias so existing links continue to work. |
 | `max_workers_per_app` | `integer` | unlimited | Max concurrent workers (must be >= 1) |
 | `max_sessions_per_worker` | `integer` | `1` | Sessions per worker (must be >= 1). `1` means single-tenant containers. See [Credential Management](/guides/credentials/) for how this affects credential injection. |
 | `memory_limit` | `string` | none | Container memory limit (e.g. `"512m"`, `"2g"`) |
@@ -221,7 +223,7 @@ updated.
 | `access_type` | `string` | `"acl"` | `"acl"`, `"logged_in"`, or `"public"` (requires owner or admin) |
 | `title` | `string` | none | Human-readable title for the catalog |
 | `description` | `string` | none | Description for the catalog |
-| `pre_warmed_seats` | `integer` | `0` | Number of standby workers to keep pre-warmed |
+| `pre_warmed_seats` | `integer` | `0` | Number of standby workers to keep pre-warmed (max 10) |
 | `refresh_schedule` | `string` | none | Cron expression for automatic dependency refresh |
 
 **Response:** `200 OK` — updated app object.
@@ -691,6 +693,18 @@ Create a new tag. Admin only. Tag names follow the same rules as app names
 ```
 
 **Response:** `201 Created`
+
+### `PATCH /api/v1/tags/{tagID}`
+
+Rename a tag. Requires admin or publisher role.
+
+**Request body:**
+
+```json
+{ "name": "new-tag-name" }
+```
+
+**Response:** `200 OK` — updated tag object.
 
 ### `DELETE /api/v1/tags/{tagID}`
 

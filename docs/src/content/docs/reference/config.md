@@ -30,7 +30,7 @@ Environment variables take precedence over values in the TOML file.
 
 ```toml
 [server]
-bind             = "0.0.0.0:8080"
+bind             = "127.0.0.1:8080"
 shutdown_timeout = "30s"
 # management_bind = "127.0.0.1:9100"
 # log_level      = "info"
@@ -41,7 +41,7 @@ shutdown_timeout = "30s"
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `bind` | `string` | `0.0.0.0:8080` | No | Socket address to listen on |
+| `bind` | `string` | `127.0.0.1:8080` | No | Socket address to listen on |
 | `management_bind` | `string` | — | No | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Management listener](/guides/observability/#management-listener). |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
 | `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn` (or `warning`), `error`. |
@@ -63,8 +63,10 @@ socket          = "/var/run/docker.sock"
 image           = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port      = 3838
 pak_version     = "stable"
-# service_network = ""
-# store_retention = "0"
+# service_network      = ""
+# store_retention      = "0"
+# default_memory_limit = "2g"   # fallback per worker; omit = unlimited
+# default_cpu_limit    = 4.0    # fallback per worker; 0 = unlimited
 ```
 
 | Field | Type | Default | Required | Description |
@@ -75,6 +77,8 @@ pak_version     = "stable"
 | `pak_version` | `string` | `stable` | No | [pak](https://pak.r-lib.org/) release channel (`stable`, `rc`, or `devel`) |
 | `service_network` | `string` | — | No | Docker network whose containers are made reachable from workers. Used when apps need access to sidecar services (e.g. PocketBase, PostgREST). |
 | `store_retention` | `duration` | `0` | No | How long to keep unused entries in the shared package store. `0` (default) disables eviction — the store grows indefinitely. |
+| `default_memory_limit` | `string` | — | No | Fallback memory limit for workers when no per-app limit is set (e.g. `"2g"`). Empty or omitted means unlimited. |
+| `default_cpu_limit` | `float` | `0` | No | Fallback CPU limit for workers when no per-app limit is set (e.g. `4.0`). `0` means unlimited. |
 
 ## `[storage]`
 
@@ -121,9 +125,10 @@ max_workers          = 100
 log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
-# http_forward_timeout = "5m"
-# max_cpu_limit        = 16.0
-# transfer_timeout     = "60s"
+# http_forward_timeout  = "5m"
+# max_cpu_limit         = 16.0
+# transfer_timeout      = "60s"
+# session_max_lifetime  = "0"    # hard cap on session duration; 0 = unlimited
 ```
 
 | Field | Type | Default | Required | Description |
@@ -138,6 +143,7 @@ idle_worker_timeout  = "5m"
 | `http_forward_timeout` | `duration` | `5m` | No | Timeout for forwarding HTTP requests to worker containers |
 | `max_cpu_limit` | `float` | `16.0` | No | Maximum CPU limit that can be set per app (caps the `cpu_limit` field on `PATCH /api/v1/apps/{id}`) |
 | `transfer_timeout` | `duration` | `60s` | No | Timeout for transferring bundle files to worker containers |
+| `session_max_lifetime` | `duration` | `0` | No | Hard cap on session duration regardless of activity. `0` (default) means unlimited — sessions only end via idle timeout or worker shutdown. |
 
 ## `[oidc]` *(optional)*
 

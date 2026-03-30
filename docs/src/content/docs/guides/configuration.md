@@ -25,7 +25,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 
 | Field | Default | Description |
 |---|---|---|
-| `bind` | `0.0.0.0:8080` | Address and port the server listens on |
+| `bind` | `127.0.0.1:8080` | Address and port the server listens on |
 | `shutdown_timeout` | `30s` | Time to drain in-flight requests on shutdown |
 | `log_level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `management_bind` | — | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Observability](/guides/observability/#management-listener). |
@@ -43,6 +43,8 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `pak_version` | `stable` | [pak](https://pak.r-lib.org/) release channel (`stable`, `rc`, or `devel`) |
 | `service_network` | — | Docker network whose containers are reachable from workers |
 | `store_retention` | `0` | Package store eviction duration (`0` = disabled) |
+| `default_memory_limit` | — | Fallback memory limit for workers (e.g. `"2g"`). Applies when no per-app limit is set. |
+| `default_cpu_limit` | — | Fallback CPU limit for workers (e.g. `4.0`). Applies when no per-app limit is set. |
 
 ### `[storage]`
 
@@ -76,6 +78,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `http_forward_timeout` | `5m` | Timeout for forwarding HTTP requests to workers |
 | `max_cpu_limit` | `16.0` | Max CPU limit settable per app |
 | `transfer_timeout` | `60s` | Timeout for bundle transfers to workers |
+| `session_max_lifetime` | `0` | Hard cap on session duration. `0` (default) means unlimited — sessions only end via idle timeout or worker shutdown. |
 
 ### `[oidc]` *(optional)*
 
@@ -151,7 +154,7 @@ Enable Prometheus metrics and OpenTelemetry tracing.
 
 ```toml
 [server]
-bind             = "0.0.0.0:8080"
+bind             = "127.0.0.1:8080"
 shutdown_timeout = "30s"
 
 [docker]
