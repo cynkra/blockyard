@@ -475,7 +475,7 @@ if (rc != 0L) {
        "); store-manifest.json was not written")
 }
 `
-	return []string{"R", "--vanilla", "-e", rScript}
+	return []string{"Rscript", "--vanilla", "-e", rScript}
 }
 
 // BuildMounts returns the mount entries for the store-aware build container.
@@ -534,7 +534,7 @@ pak::lockfile_create(refs,
   lockfile = "/build-lib/pak.lock", lib = "/build-lib")
 pak::lockfile_install("/build-lib/pak.lock", lib = "/build-lib")
 `
-	return []string{"R", "--vanilla", "-e", rScript}
+	return []string{"Rscript", "--vanilla", "-e", rScript}
 }
 
 // legacyBuildMounts returns mount entries for the phase 2-5 build flow.

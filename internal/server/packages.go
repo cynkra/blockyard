@@ -221,7 +221,7 @@ if (rc != 0L) {
 		AppID:    p.AppID,
 		BundleID: "runtime-" + p.WorkerID + "-" + uuid.New().String()[:8],
 		Image:    p.Image,
-		Cmd:      []string{"R", "--vanilla", "-e", rScript},
+		Cmd:      []string{"Rscript", "--vanilla", "-e", rScript},
 		Mounts: []backend.MountEntry{
 			{Source: p.WorkerLibDir, Target: "/worker-lib", ReadOnly: true},
 			{Source: p.StagingDir, Target: "/staging", ReadOnly: false},

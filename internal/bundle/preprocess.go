@@ -42,7 +42,7 @@ func preProcess(ctx context.Context, be backend.Backend,
 		AppID:    p.AppID,
 		BundleID: p.BundleID + "-preprocess",
 		Image:    p.Image,
-		Cmd:      []string{"R", "--vanilla", "-e", rScript},
+		Cmd:      []string{"Rscript", "--vanilla", "-e", rScript},
 		Mounts: []backend.MountEntry{
 			{Source: p.Paths.Unpacked, Target: "/app", ReadOnly: true},
 			{Source: pakPath, Target: "/pak", ReadOnly: true},

@@ -87,7 +87,7 @@ func EnsureInstalled(ctx context.Context, be backend.Backend,
 		AppID:    "_system",
 		BundleID: "pak-install-" + uuid.New().String()[:8],
 		Image:    image,
-		Cmd:      []string{"R", "--vanilla", "-e", installCmd},
+		Cmd:      []string{"Rscript", "--vanilla", "-e", installCmd},
 		Mounts: []backend.MountEntry{
 			{Source: tmpDir, Target: "/pak-output", ReadOnly: false},
 		},
