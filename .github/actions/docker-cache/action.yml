@@ -13,15 +13,7 @@ inputs:
     required: true
   images:
     description: Space or newline separated list of Docker Hub images to cache.
-    required: false
-    default: >
-      alpine:3.21
-      curlimages/curl:latest
-      debian:bookworm-slim
-      dexidp/dex:v2.41.1
-      golang:1.25.8-bookworm
-      postgres:17
-      postgrest/postgrest:v12.2.3
+    required: true
 
 runs:
   using: composite
