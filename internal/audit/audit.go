@@ -33,6 +33,7 @@ const (
 	ActionTokenCreate       Action = "token.create"
 	ActionTokenRevoke       Action = "token.revoke"
 	ActionTokenRevokeAll    Action = "token.revoke_all"
+	ActionAppRename         Action = "app.rename"
 )
 
 // Entry is a single audit log record.

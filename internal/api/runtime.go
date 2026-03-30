@@ -438,7 +438,7 @@ func EnableApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", "appEnabled")
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"App enabled","type":"success"}}`)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -511,7 +511,7 @@ func DisableApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", "appDisabled")
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"App disabled","type":"success"}}`)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

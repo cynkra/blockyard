@@ -101,6 +101,16 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 	// appIDs above) — they may have pre_warmed_seats > 0 and need
 	// workers spawned from scratch.
 	preWarmApps(ctx, srv)
+
+	// App alias lifecycle: transition expired aliases to redirect phase,
+	// then clean up expired redirects. These are cheap queries (table
+	// is tiny) and this tick is the natural home for lifecycle housekeeping.
+	if err := srv.DB.TransitionExpiredAliases(); err != nil {
+		slog.Error("autoscaler: alias transition failed", "error", err)
+	}
+	if err := srv.DB.CleanupExpiredRedirects(); err != nil {
+		slog.Error("autoscaler: redirect cleanup failed", "error", err)
+	}
 }
 
 // evictUnhealthy checks each worker's health and evicts any that have

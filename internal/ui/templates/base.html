@@ -5,22 +5,87 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{block "title" .}}blockyard{{end}}</title>
+    <script>
+    (function() {
+        var t = localStorage.getItem('theme');
+        if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+        }
+    })();
+    </script>
     <link rel="stylesheet" href="/static/style.css">
     <script src="/static/htmx.min.js"></script>
 </head>
 <body>
+    <div id="toast-container" class="toast-container"></div>
+    <div id="session-expired-overlay" class="session-overlay hidden">
+        <div class="session-overlay-card">
+            <p>Your session has expired.</p>
+            <a href="/auth/login" class="btn btn-primary">Sign In</a>
+        </div>
+    </div>
     {{if .ActivePage}}
     <div class="page-layout">
-        <nav class="left-nav">
+        <nav class="left-nav" id="left-nav">
             <div class="left-nav-brand">blockyard</div>
-            <a href="/" class="left-nav-link {{if eq .ActivePage "apps"}}active{{end}}">Apps</a>
-            <a href="/deployments" class="left-nav-link {{if eq .ActivePage "deployments"}}active{{end}}">Deployment History</a>
+            <a href="/" class="left-nav-link {{if eq .ActivePage "apps"}}active{{end}}">
+                <svg viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+                <span class="link-text">Apps</span>
+            </a>
+            <a href="/deployments" class="left-nav-link {{if eq .ActivePage "deployments"}}active{{end}}">
+                <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+                <span class="link-text">History</span>
+            </a>
             {{if .OpenbaoEnabled}}
-            <a href="/api-keys" class="left-nav-link {{if eq .ActivePage "api-keys"}}active{{end}}">API Keys</a>
+            <a href="/api-keys" class="left-nav-link {{if eq .ActivePage "api-keys"}}active{{end}}">
+                <svg viewBox="0 0 24 24"><path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+                <span class="link-text">API Keys</span>
+            </a>
             {{end}}
-            <a href="/profile" class="left-nav-link {{if eq .ActivePage "profile"}}active{{end}}">Profile</a>
-            <div class="left-nav-version">{{.Version}}</div>
+            <a href="/profile" class="left-nav-link {{if eq .ActivePage "profile"}}active{{end}}">
+                <svg viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <span class="link-text">Profile</span>
+            </a>
+            <div class="left-nav-footer">
+                <a href="https://github.com/cynkra/blockyard" target="_blank" rel="noopener" class="left-nav-link">
+                    <svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+                    <span class="link-text">Docs</span>
+                </a>
+                <a href="/swagger/" target="_blank" class="left-nav-link">
+                    <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                    <span class="link-text">API</span>
+                </a>
+                <a href="/auth/logout" class="left-nav-link">
+                    <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+                    <span class="link-text">Sign Out</span>
+                </a>
+                <button class="dark-mode-toggle" onclick="toggleDarkMode()">
+                    <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+                    <svg class="icon-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+                    <span class="link-text">Dark mode</span>
+                </button>
+                <button class="left-nav-toggle" onclick="toggleNav()">
+                    <svg class="icon-collapse" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>
+                    <svg class="icon-expand" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg>
+                    <span class="link-text">Collapse</span>
+                </button>
+                <div class="left-nav-version"><span>{{.Version}}</span></div>
+            </div>
         </nav>
+        <script>
+        if (localStorage.getItem('nav-collapsed') === 'true') {
+            document.getElementById('left-nav').classList.add('collapsed');
+        }
+        function toggleNav() {
+            var nav = document.getElementById('left-nav');
+            nav.classList.toggle('collapsed');
+            localStorage.setItem('nav-collapsed', nav.classList.contains('collapsed'));
+        }
+        function toggleDarkMode() {
+            document.documentElement.classList.toggle('dark');
+            localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+        }
+        </script>
         <main class="main-content">
             <div class="container">
                 {{block "content" .}}{{end}}
@@ -32,6 +97,51 @@
         {{block "content" .}}{{end}}
     </div>
     {{end}}
+<script>
+/* Toast notification system */
+function showToast(message, type) {
+    var c = document.getElementById('toast-container');
+    if (!c) return;
+    var t = document.createElement('div');
+    t.className = 'toast toast-' + (type || 'info');
+    t.innerHTML = '<span>' + message + '</span><button onclick="this.parentElement.remove()">&times;</button>';
+    c.prepend(t);
+    while (c.children.length > 5) c.lastChild.remove();
+    setTimeout(function() { t.style.opacity = '0'; setTimeout(function() { t.remove(); }, 300); }, 4000);
+}
+document.addEventListener('showToast', function(e) {
+    if (e.detail) showToast(e.detail.message, e.detail.type);
+});
+document.body.addEventListener('htmx:responseError', function(e) {
+    showToast('Request failed (' + (e.detail.xhr ? e.detail.xhr.status : 'error') + ')', 'error');
+});
+
+/* Session expiry detection */
+document.body.addEventListener('htmx:beforeSwap', function(e) {
+    var xhr = e.detail.xhr;
+    if (xhr && (xhr.status === 401 || (xhr.responseURL && xhr.responseURL.indexOf('/login') !== -1))) {
+        e.detail.shouldSwap = false;
+        document.getElementById('session-expired-overlay').classList.remove('hidden');
+    }
+});
+
+/* Live relative timestamps */
+function updateTimeAgo() {
+    document.querySelectorAll('.time-ago').forEach(function(el) {
+        var ts = el.dataset.timestamp;
+        if (!ts) return;
+        var d = (Date.now() - new Date(ts).getTime()) / 1000;
+        var text;
+        if (d < 60) text = 'just now';
+        else if (d < 3600) { var m = Math.floor(d / 60); text = m === 1 ? '1 minute ago' : m + ' minutes ago'; }
+        else if (d < 86400) { var h = Math.floor(d / 3600); text = h === 1 ? '1 hour ago' : h + ' hours ago'; }
+        else { var dy = Math.floor(d / 86400); text = dy === 1 ? '1 day ago' : dy + ' days ago'; }
+        el.textContent = text;
+    });
+}
+setInterval(updateTimeAgo, 30000);
+document.body.addEventListener('htmx:afterSwap', updateTimeAgo);
+</script>
 </body>
 </html>
 {{end}}

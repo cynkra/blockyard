@@ -258,6 +258,7 @@ func NewRouter(srv *server.Server) http.Handler {
 		// Tag management
 		r.Get("/tags", ListTags(srv))
 		r.Post("/tags", CreateTag(srv))
+		r.Patch("/tags/{tagID}", RenameTag(srv))
 		r.Delete("/tags/{tagID}", DeleteTag(srv))
 
 		// App tag management

@@ -17,8 +17,10 @@
         </thead>
         <tbody>
         {{range .Workers}}
-            <tr>
-                <td class="monospace">{{.ID | truncate}}</td>
+            <tr style="cursor:pointer"
+                hx-get="/ui/apps/{{$.App.Name}}/tab/runtime/worker/{{.ID}}"
+                hx-target="#tab-content">
+                <td class="monospace" title="{{.ID}}">{{.ID | truncate}}</td>
                 <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
                 <td>{{printf "%.1f" .CPUPercent}}%</td>
                 <td>{{.MemoryUsageBytes | humanBytes}} / {{.MemoryLimitBytes | humanBytes}}</td>
@@ -30,7 +32,7 @@
                     <div class="worker-sessions">
                         {{range .Sessions}}
                         <span class="session-chip">
-                            {{.UserDisplayName}} ({{.StartedAt | timeAgo}})
+                            {{.UserDisplayName}} (<span class="time-ago" data-timestamp="{{.StartedAt}}">{{.StartedAt | timeAgo}}</span>)
                         </span>
                         {{end}}
                     </div>

@@ -278,6 +278,10 @@ func runRestore(p RestoreParams) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
+
+	// Persist build log regardless of outcome.
+	_ = p.DB.InsertBundleLog(p.BundleID, result.Logs)
+
 	if !result.Success {
 		slog.Error("build container failed",
 			"app_id", p.AppID, "bundle_id", p.BundleID,

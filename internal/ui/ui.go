@@ -124,6 +124,14 @@ var funcMap = template.FuncMap{
 	"subtract": func(a, b int) int {
 		return a - b
 	},
+	"contains": func(slice []string, val string) bool {
+		for _, s := range slice {
+			if s == val {
+				return true
+			}
+		}
+		return false
+	},
 }
 
 // New parses all embedded templates and prepares the static file server.
@@ -145,6 +153,7 @@ func New() *UI {
 		"tab_overview.html",
 		"tab_settings.html",
 		"tab_runtime.html",
+		"tab_runtime_worker.html",
 		"tab_bundles.html",
 		"tab_collaborators.html",
 		"tab_logs.html",
@@ -181,6 +190,10 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/ui/apps/{name}/tab/collaborators", ui.collaboratorsTab(srv))
 	r.Get("/ui/apps/{name}/tab/logs", ui.logsTab(srv))
 	r.Get("/ui/apps/{name}/tab/logs/worker/{wid}", ui.logsWorkerTab(srv))
+	r.Get("/ui/apps/{name}/tab/runtime/worker/{wid}", ui.workerDetailTab(srv))
+	r.Get("/ui/deployments/{bundleID}/logs", ui.deploymentLogFragment(srv))
+	r.Get("/ui/users/search", ui.searchUsersFragment(srv))
+	r.Post("/ui/apps/{name}/tags", ui.createAndAssignTag(srv))
 
 	r.Handle("/static/*", ui.static)
 }
@@ -202,16 +215,21 @@ type landingData struct {
 
 type appsData struct {
 	layoutData
-	UserRole  string
-	Search    string
-	ActiveTag string
-	AllTags   []db.TagRow
-	Apps      []catalogEntry
+	UserRole   string
+	Search     string
+	ActiveTags []string
+	TagMode    string // "and" or "or"
+	AllTags    []db.TagWithCount
+	Sort       string
+	SortDir    string
+	Apps       []catalogEntry
 }
 
 type deploymentsData struct {
 	layoutData
 	Search      string
+	Sort        string
+	SortDir     string
 	Deployments []deploymentEntry
 	Pagination  paginationData
 }
@@ -315,11 +333,20 @@ func (ui *UI) appsPage(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 
 		search := r.URL.Query().Get("search")
-		activeTag := r.URL.Query().Get("tag")
+		activeTags := r.URL.Query()["tag"]
+		tagMode := r.URL.Query().Get("tag_mode")
+		if tagMode == "" {
+			tagMode = "and"
+		}
+		sort := r.URL.Query().Get("sort")
+		sortDir := r.URL.Query().Get("dir")
 
 		params := db.CatalogParams{
 			Search:  search,
-			Tag:     activeTag,
+			Tags:    activeTags,
+			TagMode: tagMode,
+			Sort:    sort,
+			SortDir: sortDir,
 			Page:    1,
 			PerPage: 100,
 		}
@@ -334,7 +361,7 @@ func (ui *UI) appsPage(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		allTags, _ := srv.DB.ListTags()
+		allTags, _ := srv.DB.ListTagsWithCounts()
 		entries := buildCatalogEntries(apps, srv)
 
 		role := "none"
@@ -346,8 +373,11 @@ func (ui *UI) appsPage(srv *server.Server) http.HandlerFunc {
 			layoutData: baseLayout(srv, "apps"),
 			UserRole:   role,
 			Search:     search,
-			ActiveTag:  activeTag,
+			ActiveTags: activeTags,
+			TagMode:    tagMode,
 			AllTags:    allTags,
+			Sort:       sort,
+			SortDir:    sortDir,
 			Apps:       entries,
 		}
 
@@ -386,6 +416,8 @@ func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
 		caller := auth.CallerFromContext(r.Context())
 
 		search := r.URL.Query().Get("search")
+		sort := r.URL.Query().Get("sort")
+		sortDir := r.URL.Query().Get("dir")
 		page := 1
 		if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
 			page = p
@@ -393,6 +425,8 @@ func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
 
 		opts := db.DeploymentListOpts{
 			Search:  search,
+			Sort:    sort,
+			SortDir: sortDir,
 			Page:    page,
 			PerPage: deploymentsPerPage,
 		}
@@ -432,6 +466,8 @@ func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
 		data := deploymentsData{
 			layoutData:  baseLayout(srv, "deployments"),
 			Search:      search,
+			Sort:        sort,
+			SortDir:     sortDir,
 			Deployments: entries,
 			Pagination: paginationData{
 				Page:       page,

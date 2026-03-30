@@ -519,10 +519,11 @@ func TestAppsPageTagFilter(t *testing.T) {
 	defer resp.Body.Close()
 	body := readBody(t, resp)
 	if !strings.Contains(body, "finance") {
-		t.Error("expected tag name in dropdown")
+		t.Error("expected tag name in chip bar")
 	}
-	if !strings.Contains(body, "selected") {
-		t.Error("expected selected attribute on active tag")
+	// Active tag chip should have the "active" class.
+	if !strings.Contains(body, "active") {
+		t.Error("expected active class on selected tag chip")
 	}
 }
 
@@ -2466,7 +2467,7 @@ func TestOverviewTabZeroWorkersAndSessions(t *testing.T) {
 }
 
 // TestSettingsTabNoTagsAvailable verifies settings renders correctly
-// when no tags exist at all (no tag chips, no add form).
+// when no tags exist at all (no tag chips, but the combo form is visible).
 func TestSettingsTabNoTagsAvailable(t *testing.T) {
 	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
 	srv.DB.CreateApp("set-notags", "owner")
@@ -2482,14 +2483,14 @@ func TestSettingsTabNoTagsAvailable(t *testing.T) {
 	if strings.Contains(body, "tag-remove") {
 		t.Error("should not have tag remove buttons with no tags")
 	}
-	// No add-tag form should appear (no available tags).
-	if strings.Contains(body, "tag-add-form") {
-		t.Error("should not show tag-add-form when no tags are available")
+	// Combo form is always visible (allows creating new tags).
+	if !strings.Contains(body, "tag-add-form") {
+		t.Error("tag-add-form should always be visible")
 	}
 }
 
-// TestSettingsTabAllTagsApplied verifies the add-tag form is hidden
-// when every tag is already applied to the app.
+// TestSettingsTabAllTagsApplied verifies the tag form is always visible
+// (combo input supports both selecting and creating tags).
 func TestSettingsTabAllTagsApplied(t *testing.T) {
 	srv, ts := authServer(t, oidcConfig(), "owner", auth.RoleAdmin)
 	app, _ := srv.DB.CreateApp("set-alltags", "owner")
@@ -2508,9 +2509,9 @@ func TestSettingsTabAllTagsApplied(t *testing.T) {
 	if !strings.Contains(body, "only-tag") {
 		t.Error("expected applied tag 'only-tag'")
 	}
-	// No more available tags → no add form.
-	if strings.Contains(body, "tag-add-form") {
-		t.Error("should not show tag-add-form when all tags are applied")
+	// Form is always visible (allows creating new tags).
+	if !strings.Contains(body, "tag-add-form") {
+		t.Error("tag-add-form should always be visible")
 	}
 }
 

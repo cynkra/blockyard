@@ -135,7 +135,78 @@ func DeleteTag(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Tag deleted","type":"success"}}`)
+		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type renameTagRequest struct {
+	Name string `json:"name"`
+}
+
+// RenameTag updates a tag's name. Requires admin/publisher.
+//
+//	@Summary		Rename tag
+//	@Description	Update a tag's name. Requires admin or publisher role.
+//	@Tags			tags
+//	@Accept			json
+//	@Param			tagID	path	string				true	"Tag ID"
+//	@Param			body	body	renameTagRequest	true	"New tag name"
+//	@Success		200		{object}	tagResponse
+//	@Failure		400		{object}	errorResponse
+//	@Failure		404		{object}	errorResponse
+//	@Failure		409		{object}	errorResponse
+//	@Failure		500		{object}	errorResponse
+//	@Security		BearerAuth
+//	@Router			/tags/{tagID} [patch]
+func RenameTag(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageTags() {
+			notFound(w, "not found")
+			return
+		}
+
+		tagID := chi.URLParam(r, "tagID")
+		tag, err := srv.DB.GetTag(tagID)
+		if err != nil {
+			serverError(w, "get tag: "+err.Error())
+			return
+		}
+		if tag == nil {
+			notFound(w, "tag not found")
+			return
+		}
+
+		var body renameTagRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			badRequest(w, "invalid JSON body")
+			return
+		}
+		if body.Name == "" || len(body.Name) > 63 {
+			badRequest(w, "name must be 1-63 characters")
+			return
+		}
+
+		if err := srv.DB.RenameTag(tagID, body.Name); err != nil {
+			if db.IsUniqueConstraintError(err) {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(errorResponse{Error: "tag name already exists"})
+				return
+			}
+			serverError(w, "rename tag: "+err.Error())
+			return
+		}
+
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Tag renamed","type":"success"}}`)
+		}
+
+		tag.Name = body.Name
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tagResp(tag))
 	}
 }
 
@@ -204,7 +275,7 @@ func AddAppTag(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", "tagAdded")
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Tag added","type":"success"}}`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -250,7 +321,7 @@ func RemoveAppTag(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", "tagRemoved")
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"Tag removed","type":"success"}}`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}

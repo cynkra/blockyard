@@ -285,6 +285,8 @@ type DeploymentListOpts struct {
 	CallerRole string
 	Search     string
 	Status     string
+	Sort       string // column key, e.g. "app_name", "deployed_by", "date", "status"
+	SortDir    string // "asc" or "desc"
 	Page       int
 	PerPage    int
 }
@@ -562,6 +564,7 @@ func (db *DB) SetBundleDeployed(bundleID, deployedBy string) error {
 
 // AppUpdate holds optional fields for updating an app's configuration.
 type AppUpdate struct {
+	Name                 *string
 	MaxWorkersPerApp     *int
 	MaxSessionsPerWorker *int
 	MemoryLimit          *string
@@ -921,8 +924,12 @@ func (db *DB) ListAppTags(appID string) ([]TagRow, error) {
 type CatalogParams struct {
 	CallerSub  string
 	CallerRole string // "admin", "publisher", "viewer", or ""
-	Tag        string
+	Tag        string   // deprecated: use Tags
+	Tags       []string // multi-tag filter
+	TagMode    string   // "and" (default) or "or"
 	Search     string
+	Sort       string // column key, e.g. "name", "status", "last_deployed"
+	SortDir    string // "asc" or "desc"
 	Page       int
 	PerPage    int
 }
@@ -955,15 +962,40 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 		conditions = append(conditions, "apps.access_type = 'public'")
 	}
 
-	// Tag filter
-	if params.Tag != "" {
-		conditions = append(conditions,
-			`EXISTS (
-				SELECT 1 FROM app_tags
-				JOIN tags ON tags.id = app_tags.tag_id
-				WHERE app_tags.app_id = apps.id AND tags.name = ?
-			)`)
-		args = append(args, params.Tag)
+	// Tag filter — support both legacy single Tag and multi-tag Tags
+	tags := params.Tags
+	if len(tags) == 0 && params.Tag != "" {
+		tags = []string{params.Tag}
+	}
+	if len(tags) > 0 {
+		tagMode := strings.ToLower(params.TagMode)
+		if tagMode != "or" {
+			tagMode = "and"
+		}
+		placeholders := make([]string, len(tags))
+		for i, t := range tags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		inClause := strings.Join(placeholders, ", ")
+		if tagMode == "and" {
+			conditions = append(conditions, fmt.Sprintf(
+				`apps.id IN (
+					SELECT at2.app_id FROM app_tags at2
+					JOIN tags t2 ON at2.tag_id = t2.id
+					WHERE t2.name IN (%s)
+					GROUP BY at2.app_id
+					HAVING COUNT(DISTINCT t2.id) = ?
+				)`, inClause))
+			args = append(args, len(tags))
+		} else {
+			conditions = append(conditions, fmt.Sprintf(
+				`apps.id IN (
+					SELECT at2.app_id FROM app_tags at2
+					JOIN tags t2 ON at2.tag_id = t2.id
+					WHERE t2.name IN (%s)
+				)`, inClause))
+		}
 	}
 
 	// Search filter — wrap in LOWER() for cross-dialect case-insensitive matching
@@ -986,10 +1018,25 @@ func (db *DB) ListCatalog(params CatalogParams) ([]AppRow, int, error) {
 		return nil, 0, err
 	}
 
+	// Sort
+	orderBy := "apps.updated_at DESC"
+	catalogSortCols := map[string]string{
+		"name":          "apps.name",
+		"status":        "apps.enabled",
+		"last_deployed": "apps.updated_at",
+	}
+	if col, ok := catalogSortCols[params.Sort]; ok {
+		dir := "ASC"
+		if strings.EqualFold(params.SortDir, "desc") {
+			dir = "DESC"
+		}
+		orderBy = col + " " + dir + ", apps.id DESC"
+	}
+
 	// Fetch page
 	query := db.rebind(fmt.Sprintf(
-		`SELECT * FROM apps %s ORDER BY apps.updated_at DESC LIMIT ? OFFSET ?`,
-		where,
+		`SELECT * FROM apps %s ORDER BY %s LIMIT ? OFFSET ?`,
+		where, orderBy,
 	))
 	pageArgs := append(append([]any{}, args...), params.PerPage, (params.Page-1)*params.PerPage)
 
@@ -1348,6 +1395,22 @@ func (db *DB) ListDeployments(opts DeploymentListOpts) ([]DeploymentRow, int, er
 		page = 1
 	}
 
+	// Sort
+	orderBy := "b.deployed_at DESC"
+	deploySortCols := map[string]string{
+		"app_name":    "apps.name",
+		"deployed_by": "u.name",
+		"date":        "b.deployed_at",
+		"status":      "b.status",
+	}
+	if col, ok := deploySortCols[opts.Sort]; ok {
+		dir := "ASC"
+		if strings.EqualFold(opts.SortDir, "desc") {
+			dir = "DESC"
+		}
+		orderBy = col + " " + dir + ", b.id DESC"
+	}
+
 	query := db.rebind(fmt.Sprintf(
 		`SELECT b.app_id, apps.name AS app_name, b.id AS bundle_id,
 		        b.deployed_by, u.name AS deployed_by_name,
@@ -1356,8 +1419,8 @@ func (db *DB) ListDeployments(opts DeploymentListOpts) ([]DeploymentRow, int, er
 		 JOIN apps ON b.app_id = apps.id
 		 LEFT JOIN users u ON b.deployed_by = u.sub
 		 %s
-		 ORDER BY b.deployed_at DESC
-		 LIMIT ? OFFSET ?`, where))
+		 ORDER BY %s
+		 LIMIT ? OFFSET ?`, where, orderBy))
 	pageArgs := append(append([]any{}, args...), perPage, (page-1)*perPage)
 
 	var rows []DeploymentRow
@@ -1395,14 +1458,40 @@ func (db *DB) ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, 
 		conditions = append(conditions, "apps.access_type = 'public'")
 	}
 
-	if params.Tag != "" {
-		conditions = append(conditions,
-			`EXISTS (
-				SELECT 1 FROM app_tags
-				JOIN tags ON tags.id = app_tags.tag_id
-				WHERE app_tags.app_id = apps.id AND tags.name = ?
-			)`)
-		args = append(args, params.Tag)
+	// Tag filter — support both legacy single Tag and multi-tag Tags
+	relTags := params.Tags
+	if len(relTags) == 0 && params.Tag != "" {
+		relTags = []string{params.Tag}
+	}
+	if len(relTags) > 0 {
+		tagMode := strings.ToLower(params.TagMode)
+		if tagMode != "or" {
+			tagMode = "and"
+		}
+		placeholders := make([]string, len(relTags))
+		for i, t := range relTags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		inClause := strings.Join(placeholders, ", ")
+		if tagMode == "and" {
+			conditions = append(conditions, fmt.Sprintf(
+				`apps.id IN (
+					SELECT at2.app_id FROM app_tags at2
+					JOIN tags t2 ON at2.tag_id = t2.id
+					WHERE t2.name IN (%s)
+					GROUP BY at2.app_id
+					HAVING COUNT(DISTINCT t2.id) = ?
+				)`, inClause))
+			args = append(args, len(relTags))
+		} else {
+			conditions = append(conditions, fmt.Sprintf(
+				`apps.id IN (
+					SELECT at2.app_id FROM app_tags at2
+					JOIN tags t2 ON at2.tag_id = t2.id
+					WHERE t2.name IN (%s)
+				)`, inClause))
+		}
 	}
 
 	if params.Search != "" {
@@ -1465,12 +1554,27 @@ func (db *DB) ListCatalogWithRelation(params CatalogParams) ([]CatalogRow, int, 
 		page = 1
 	}
 
+	// Sort
+	orderBy := "apps.updated_at DESC"
+	catalogSortCols := map[string]string{
+		"name":          "apps.name",
+		"status":        "apps.enabled",
+		"last_deployed": "apps.updated_at",
+	}
+	if col, ok := catalogSortCols[params.Sort]; ok {
+		dir := "ASC"
+		if strings.EqualFold(params.SortDir, "desc") {
+			dir = "DESC"
+		}
+		orderBy = col + " " + dir + ", apps.id DESC"
+	}
+
 	query := db.rebind(fmt.Sprintf(
 		`SELECT apps.*, %s AS relation, %s AS tags
 		 FROM apps %s
-		 ORDER BY apps.updated_at DESC
+		 ORDER BY %s
 		 LIMIT ? OFFSET ?`,
-		relationExpr, tagsAgg, where,
+		relationExpr, tagsAgg, where, orderBy,
 	))
 	pageArgs := append(append([]any{}, args...), perPage, (page-1)*perPage)
 
@@ -1512,4 +1616,178 @@ func (db *DB) GetAppByNameIncludeDeleted(name string) (*AppRow, error) {
 		return nil, err
 	}
 	return &app, nil
+}
+
+// --- App aliases (renaming) ---
+
+// RenameApp renames an app within a single transaction. It validates the new
+// name, inserts the old name as an alias (2h TTL), and updates apps.name.
+func (db *DB) RenameApp(id, oldName, newName string) error {
+	tx, err := db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Check uniqueness against apps.name and active aliases.
+	var conflict int
+	err = tx.Get(&conflict, db.rebind(
+		`SELECT COUNT(*) FROM apps WHERE name = ? AND id != ? AND deleted_at IS NULL`),
+		newName, id)
+	if err != nil {
+		return fmt.Errorf("check app name: %w", err)
+	}
+	if conflict > 0 {
+		return fmt.Errorf("name %q is already in use", newName)
+	}
+	err = tx.Get(&conflict, db.rebind(
+		`SELECT COUNT(*) FROM app_aliases WHERE name = ? AND phase = 'alias'`),
+		newName)
+	if err != nil {
+		return fmt.Errorf("check alias name: %w", err)
+	}
+	if conflict > 0 {
+		return fmt.Errorf("name %q is currently reserved as an alias", newName)
+	}
+
+	// Insert alias for the old name (2h TTL).
+	aliasExpiry := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	_, err = tx.Exec(db.rebind(
+		`INSERT INTO app_aliases (app_id, name, phase, expires_at)
+		 VALUES (?, ?, 'alias', ?)
+		 ON CONFLICT (name) DO UPDATE SET app_id = ?, phase = 'alias', expires_at = ?`),
+		id, oldName, aliasExpiry, id, aliasExpiry)
+	if err != nil {
+		return fmt.Errorf("insert alias: %w", err)
+	}
+
+	// Update the app name.
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = tx.Exec(db.rebind(
+		`UPDATE apps SET name = ?, updated_at = ? WHERE id = ?`),
+		newName, now, id)
+	if err != nil {
+		return fmt.Errorf("update name: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// GetAppByAlias looks up an app via the alias table.
+// Returns (app, phase, err). Phase is "alias" or "redirect".
+func (db *DB) GetAppByAlias(name string) (*AppRow, string, error) {
+	var alias struct {
+		AppID string `db:"app_id"`
+		Phase string `db:"phase"`
+	}
+	err := db.DB.Get(&alias, db.rebind(
+		`SELECT app_id, phase FROM app_aliases WHERE name = ?`), name)
+	if err == sql.ErrNoRows {
+		return nil, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+
+	app, err := db.GetApp(alias.AppID)
+	if err != nil {
+		return nil, "", err
+	}
+	return app, alias.Phase, nil
+}
+
+// TransitionExpiredAliases moves alias-phase rows to redirect-phase (7d TTL).
+func (db *DB) TransitionExpiredAliases() error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	newExpiry := time.Now().UTC().Add(7 * 24 * time.Hour).Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`UPDATE app_aliases SET phase = 'redirect', expires_at = ?
+		 WHERE phase = 'alias' AND expires_at < ?`),
+		newExpiry, now)
+	return err
+}
+
+// CleanupExpiredRedirects deletes redirect-phase rows past their expiry.
+func (db *DB) CleanupExpiredRedirects() error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`DELETE FROM app_aliases WHERE phase = 'redirect' AND expires_at < ?`),
+		now)
+	return err
+}
+
+// --- Bundle logs ---
+
+// InsertBundleLog persists build output for a deployment.
+func (db *DB) InsertBundleLog(bundleID, output string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(db.rebind(
+		`INSERT INTO bundle_logs (bundle_id, output, created_at) VALUES (?, ?, ?)`),
+		bundleID, output, now)
+	return err
+}
+
+// GetBundleLog returns the stored build log for a bundle.
+func (db *DB) GetBundleLog(bundleID string) (string, error) {
+	var output string
+	err := db.DB.Get(&output, db.rebind(
+		`SELECT output FROM bundle_logs WHERE bundle_id = ?`), bundleID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return output, err
+}
+
+// --- User search ---
+
+// SearchUsers performs a case-insensitive substring match on name and email
+// for active users. Returns at most limit rows ordered by name.
+func (db *DB) SearchUsers(query string, limit int) ([]UserRow, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	like := "%" + escapeLike(query) + "%"
+	var users []UserRow
+	err := db.DB.Select(&users, db.rebind(
+		`SELECT * FROM users
+		 WHERE active = true
+		   AND (LOWER(name) LIKE LOWER(?) ESCAPE '\' OR LOWER(email) LIKE LOWER(?) ESCAPE '\')
+		 ORDER BY name ASC
+		 LIMIT ?`),
+		like, like, limit)
+	if err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+// --- Tag extensions ---
+
+// TagWithCount extends TagRow with an app count.
+type TagWithCount struct {
+	TagRow
+	AppCount int `db:"app_count"`
+}
+
+// ListTagsWithCounts returns all tags with the number of non-deleted apps using each.
+func (db *DB) ListTagsWithCounts() ([]TagWithCount, error) {
+	var tags []TagWithCount
+	err := db.DB.Select(&tags,
+		`SELECT t.id, t.name, t.created_at, COUNT(at.app_id) AS app_count
+		 FROM tags t
+		 LEFT JOIN app_tags at ON t.id = at.tag_id
+		 LEFT JOIN apps ON at.app_id = apps.id AND apps.deleted_at IS NULL
+		 GROUP BY t.id, t.name, t.created_at
+		 ORDER BY t.name`)
+	if err != nil {
+		return nil, err
+	}
+	return tags, nil
+}
+
+// RenameTag updates a tag's name. Returns an error on conflict.
+func (db *DB) RenameTag(id, newName string) error {
+	_, err := db.Exec(db.rebind(
+		`UPDATE tags SET name = ? WHERE id = ?`), newName, id)
+	return err
 }
