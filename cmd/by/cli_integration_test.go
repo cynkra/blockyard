@@ -1000,7 +1000,7 @@ func TestInit(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)\n"), 0o644)
 		os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(
-			`{"version":1,"mode":"shiny","entrypoint":"app.R","deps":{"type":"description"}}`+"\n"), 0o644)
+			`{"version":1,"metadata":{"appmode":"shiny","entrypoint":"app.R"},"files":{}}`+"\n"), 0o644)
 
 		r := runNoEnv(t, "init", dir)
 		assertExit(t, r, 0)
@@ -1032,7 +1032,7 @@ func TestInit(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)\n"), 0o644)
 		os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(
-			`{"version":1,"mode":"shiny","entrypoint":"app.R","deps":{"type":"description"}}`+"\n"), 0o644)
+			`{"version":1,"metadata":{"appmode":"shiny","entrypoint":"app.R"},"files":{}}`+"\n"), 0o644)
 
 		r := runNoEnv(t, "init", dir, "--json")
 		assertExit(t, r, 0)
