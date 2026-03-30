@@ -10,6 +10,8 @@ coverage:
 flags:
   unit:
     carryforward: true
+  cmd:
+    carryforward: true
   cli:
     carryforward: true
   docker:

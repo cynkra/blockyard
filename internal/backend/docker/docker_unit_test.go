@@ -132,6 +132,40 @@ func TestDetectMountModeNative(t *testing.T) {
 	}
 }
 
+func TestValidIptablesComment(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"blockyard-worker-abc123", true},
+		{"my_comment", true},
+		{"ABC", true},
+		{"a1-b2_c3", true},
+		{"", false},
+		{"has space", false},
+		{"semi;colon", false},
+		{"quo\"te", false},
+		{"back`tick", false},
+		{"pipe|char", false},
+		{"dollar$", false},
+	}
+
+	for _, tt := range tests {
+		got := validIptablesComment(tt.input)
+		if got != tt.want {
+			t.Errorf("validIptablesComment(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestDetectServerID_FromEnv(t *testing.T) {
+	t.Setenv("BLOCKYARD_SERVER_ID", "abc123def456")
+	got := detectServerID()
+	if got != "abc123def456" {
+		t.Errorf("detectServerID() = %q, want abc123def456", got)
+	}
+}
+
 func TestNetworkLabels(t *testing.T) {
 	labels := networkLabels("app-1", "worker-1")
 

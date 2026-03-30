@@ -4729,3 +4729,124 @@ func TestEnrollCredentialFormEncoded(t *testing.T) {
 		t.Fatalf("expected 503, got %d: %s", resp.StatusCode, b)
 	}
 }
+
+// --- Coverage gap: RevokeAccess happy path ---
+
+func TestRevokeAccessHappyPath(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "revoke-hp")
+	id := created["id"].(string)
+
+	srv.DB.UpsertUserWithRole("revokee", "r@test", "Revokee", "publisher")
+	srv.DB.GrantAppAccess(id, "revokee", "user", "viewer", "admin")
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id+"/access/user/revokee", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestRevokeAccessHXRequest(t *testing.T) {
+	srv, ts := testServer(t)
+	created := createApp(t, ts, "revoke-hx")
+	id := created["id"].(string)
+
+	srv.DB.UpsertUserWithRole("revokee-hx", "rhx@test", "Revokee", "publisher")
+	srv.DB.GrantAppAccess(id, "revokee-hx", "user", "viewer", "admin")
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id+"/access/user/revokee-hx", nil)
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	if !strings.Contains(resp.Header.Get("HX-Trigger"), "accessRevoked") {
+		t.Errorf("expected HX-Trigger to contain accessRevoked, got %q", resp.Header.Get("HX-Trigger"))
+	}
+}
+
+func TestRevokeAccessNotFound(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "revoke-nf")
+	id := created["id"].(string)
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id+"/access/user/nonexistent", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// --- Coverage gap: DeleteApp/RestoreApp HTMX branches ---
+
+func TestDeleteAppHXRequest(t *testing.T) {
+	_, ts := testServerWithSoftDelete(t)
+	created := createApp(t, ts, "del-hx")
+	id := created["id"].(string)
+
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	trigger := resp.Header.Get("HX-Trigger")
+	if !strings.Contains(trigger, "showToast") {
+		t.Errorf("expected HX-Trigger to contain showToast, got %q", trigger)
+	}
+}
+
+func TestRestoreAppHXRequest(t *testing.T) {
+	_, ts := testServerWithSoftDelete(t)
+	created := createApp(t, ts, "restore-hx")
+	id := created["id"].(string)
+
+	// Soft delete first.
+	req := authReq("DELETE", ts.URL+"/api/v1/apps/"+id, nil)
+	http.DefaultClient.Do(req)
+
+	// Restore with HX-Request.
+	req = authReq("POST", ts.URL+"/api/v1/apps/"+id+"/restore", nil)
+	req.Header.Set("HX-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	trigger := resp.Header.Get("HX-Trigger")
+	if !strings.Contains(trigger, "showToast") {
+		t.Errorf("expected HX-Trigger to contain showToast, got %q", trigger)
+	}
+}

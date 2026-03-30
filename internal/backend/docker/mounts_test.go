@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types/mount"
+
+	"github.com/cynkra/blockyard/internal/backend"
 )
 
 func TestMountConfig_WorkerMounts_NativeMode(t *testing.T) {
@@ -138,6 +140,198 @@ func TestPathIsPrefix(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("pathIsPrefix(%q, %q) = %v, want %v", tt.prefix, tt.target, got, tt.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TranslateMount
+// ---------------------------------------------------------------------------
+
+func TestTranslateMount_NativeMode(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
+
+	binds, mounts := mc.TranslateMount(backend.MountEntry{
+		Source: "/data/extra", Target: "/extra", ReadOnly: true,
+	})
+	if len(mounts) != 0 {
+		t.Fatalf("expected no mounts in native mode, got %d", len(mounts))
+	}
+	if len(binds) != 1 || binds[0] != "/data/extra:/extra:ro" {
+		t.Errorf("binds = %v", binds)
+	}
+
+	binds, _ = mc.TranslateMount(backend.MountEntry{
+		Source: "/data/rw", Target: "/rw", ReadOnly: false,
+	})
+	if len(binds) != 1 || binds[0] != "/data/rw:/rw" {
+		t.Errorf("rw binds = %v", binds)
+	}
+}
+
+func TestTranslateMount_BindMode(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeBind,
+		HostSource: "/host/data",
+		MountDest:  "/data",
+	}
+
+	binds, mounts := mc.TranslateMount(backend.MountEntry{
+		Source: "/data/extra", Target: "/extra", ReadOnly: true,
+	})
+	if len(mounts) != 0 {
+		t.Fatalf("expected no mounts in bind mode, got %d", len(mounts))
+	}
+	if len(binds) != 1 || binds[0] != "/host/data/extra:/extra:ro" {
+		t.Errorf("binds = %v", binds)
+	}
+
+	binds, _ = mc.TranslateMount(backend.MountEntry{
+		Source: "/data/rw", Target: "/rw", ReadOnly: false,
+	})
+	if len(binds) != 1 || binds[0] != "/host/data/rw:/rw" {
+		t.Errorf("rw binds = %v", binds)
+	}
+}
+
+func TestTranslateMount_VolumeMode(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeVolume,
+		VolumeName: "blockyard-data",
+		MountDest:  "/data",
+	}
+
+	binds, mounts := mc.TranslateMount(backend.MountEntry{
+		Source: "/data/extra", Target: "/extra", ReadOnly: true,
+	})
+	if len(binds) != 0 {
+		t.Fatalf("expected no binds in volume mode, got %d", len(binds))
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(mounts))
+	}
+	assertVolumeMount(t, mounts[0], "blockyard-data", "/extra", true, "extra")
+}
+
+// ---------------------------------------------------------------------------
+// WorkerMounts — expanded parameter coverage
+// ---------------------------------------------------------------------------
+
+func TestMountConfig_WorkerMounts_NativeMode_WithTransferAndToken(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
+
+	binds, mounts := mc.WorkerMounts(
+		"/data/bundles/app1/b1",
+		"/data/bundles/app1/b1_lib",
+		"",
+		"/data/transfer/app1",
+		"/data/tokens/app1",
+		"/app",
+	)
+	if len(mounts) != 0 {
+		t.Fatalf("expected no mounts in native mode, got %d", len(mounts))
+	}
+	if len(binds) != 4 {
+		t.Fatalf("expected 4 binds, got %d: %v", len(binds), binds)
+	}
+	if binds[2] != "/data/transfer/app1:/transfer" {
+		t.Errorf("transfer bind = %q", binds[2])
+	}
+	if binds[3] != "/data/tokens/app1:/var/run/blockyard:ro" {
+		t.Errorf("token bind = %q", binds[3])
+	}
+}
+
+func TestMountConfig_WorkerMounts_BindMode_WithTransferAndToken(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeBind,
+		HostSource: "/host/data",
+		MountDest:  "/data",
+	}
+
+	binds, mounts := mc.WorkerMounts(
+		"/data/bundles/app1/b1",
+		"/data/bundles/app1/b1_lib",
+		"",
+		"/data/transfer/app1",
+		"/data/tokens/app1",
+		"/app",
+	)
+	if len(mounts) != 0 {
+		t.Fatalf("expected no mounts in bind mode, got %d", len(mounts))
+	}
+	if len(binds) != 4 {
+		t.Fatalf("expected 4 binds, got %d: %v", len(binds), binds)
+	}
+	if binds[2] != "/host/data/transfer/app1:/transfer" {
+		t.Errorf("transfer bind = %q", binds[2])
+	}
+	if binds[3] != "/host/data/tokens/app1:/var/run/blockyard:ro" {
+		t.Errorf("token bind = %q", binds[3])
+	}
+}
+
+func TestMountConfig_WorkerMounts_VolumeMode_WithTransferAndToken(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeVolume,
+		VolumeName: "blockyard-data",
+		MountDest:  "/data",
+	}
+
+	binds, mounts := mc.WorkerMounts(
+		"/data/bundles/app1/b1",
+		"/data/bundles/app1/b1_lib",
+		"",
+		"/data/transfer/app1",
+		"/data/tokens/app1",
+		"/app",
+	)
+	if len(binds) != 0 {
+		t.Fatalf("expected no binds in volume mode, got %d", len(binds))
+	}
+	if len(mounts) != 4 {
+		t.Fatalf("expected 4 mounts, got %d", len(mounts))
+	}
+	assertVolumeMount(t, mounts[2], "blockyard-data", "/transfer", false, "transfer/app1")
+	assertVolumeMount(t, mounts[3], "blockyard-data", "/var/run/blockyard", true, "tokens/app1")
+}
+
+func TestMountConfig_WorkerMounts_WithLibDir(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
+
+	binds, _ := mc.WorkerMounts(
+		"/data/bundles/app1/b1",
+		"",
+		"/data/lib-store/app1",
+		"",
+		"",
+		"/app",
+	)
+	if len(binds) != 2 {
+		t.Fatalf("expected 2 binds, got %d: %v", len(binds), binds)
+	}
+	// libDir uses /blockyard-lib-store mount point.
+	if binds[1] != "/data/lib-store/app1:/blockyard-lib-store:ro" {
+		t.Errorf("lib bind = %q, want libDir mounted at /blockyard-lib-store", binds[1])
+	}
+}
+
+func TestMountConfig_WorkerMounts_LibDirOverridesLibraryPath(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
+
+	// When both libDir and libraryPath are set, libDir wins.
+	binds, _ := mc.WorkerMounts(
+		"/data/bundles/app1/b1",
+		"/data/bundles/app1/b1_lib",
+		"/data/lib-store/app1",
+		"",
+		"",
+		"/app",
+	)
+	if len(binds) != 2 {
+		t.Fatalf("expected 2 binds, got %d: %v", len(binds), binds)
+	}
+	if binds[1] != "/data/lib-store/app1:/blockyard-lib-store:ro" {
+		t.Errorf("lib bind = %q, libDir should take precedence", binds[1])
 	}
 }
 
