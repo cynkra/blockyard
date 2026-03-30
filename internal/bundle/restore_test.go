@@ -225,7 +225,7 @@ func TestBuildCommand(t *testing.T) {
 	if len(cmd) != 4 {
 		t.Fatalf("expected 4 parts, got %d", len(cmd))
 	}
-	if cmd[0] != "R" || cmd[1] != "--vanilla" || cmd[2] != "-e" {
+	if cmd[0] != "Rscript" || cmd[1] != "--vanilla" || cmd[2] != "-e" {
 		t.Errorf("prefix = %v", cmd[:3])
 	}
 	// The R script should reference the by-builder store commands.
