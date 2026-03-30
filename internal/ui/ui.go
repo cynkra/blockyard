@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -282,7 +283,7 @@ func requireAuth(w http.ResponseWriter, r *http.Request) *auth.AuthenticatedUser
 		return user
 	}
 	if r.Method == http.MethodGet {
-		http.Redirect(w, r, "/login?return_url="+r.URL.Path, http.StatusFound)
+		http.Redirect(w, r, "/login?return_url="+url.QueryEscape(r.URL.Path), http.StatusFound)
 	} else {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	}

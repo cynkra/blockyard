@@ -82,8 +82,17 @@ func DecodeSessionToken(token string, key *SigningKey) (*SessionTokenClaims, err
 		return nil, fmt.Errorf("unmarshal session token: %w", err)
 	}
 
-	if time.Now().Unix() > claims.Exp {
+	now := time.Now().Unix()
+	const clockSkew = 60 // allow 60s clock drift
+
+	if now > claims.Exp {
 		return nil, errors.New("session token expired")
+	}
+	if claims.Iat > now+clockSkew {
+		return nil, errors.New("session token issued in the future")
+	}
+	if claims.Exp <= claims.Iat {
+		return nil, errors.New("session token expiry before issuance")
 	}
 
 	return &claims, nil

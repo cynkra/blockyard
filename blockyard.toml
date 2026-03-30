@@ -1,5 +1,5 @@
 [server]
-bind             = "0.0.0.0:8080"
+bind             = "127.0.0.1:8080"
 shutdown_timeout = "30s"
 # management_bind = "127.0.0.1:9100"  # separate listener for /healthz, /readyz, /metrics
 # log_level      = "info"             # trace, debug, info, warn, error
@@ -10,6 +10,8 @@ socket     = "/var/run/docker.sock"
 image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838
 pak_version = "stable"
+# default_memory_limit = "2g"  # fallback memory limit per worker; 0 = unlimited
+# default_cpu_limit    = 4.0   # fallback CPU limit per worker; 0 = unlimited
 
 [storage]
 bundle_server_path = "/data/bundles"
@@ -28,6 +30,7 @@ max_workers          = 100
 log_retention        = "1h"
 session_idle_ttl     = "1h"
 idle_worker_timeout  = "5m"
+# session_max_lifetime = "0"  # hard cap on session duration; 0 = unlimited
 
 # Optional: OIDC authentication
 # When enabled, server.session_secret is required unless [openbao] is also

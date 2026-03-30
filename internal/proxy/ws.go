@@ -201,6 +201,15 @@ func shuttleWS(
 		}
 	}()
 
+	// Optional hard cap on session duration. When set, the connection
+	// is closed after the configured lifetime regardless of activity.
+	var lifetimeC <-chan time.Time
+	if maxLife := srv.Config.Proxy.SessionMaxLifetime.Duration; maxLife > 0 {
+		t := time.NewTimer(maxLife)
+		defer t.Stop()
+		lifetimeC = t.C
+	}
+
 	// Main select loop: shuttle messages between client and backend.
 	cacheBackend := false
 	for {
@@ -236,6 +245,11 @@ func shuttleWS(
 
 		case <-br.done:
 			// Backend reader exited (disconnect or error).
+			goto done
+
+		case <-lifetimeC:
+			// Session exceeded max lifetime — close both sides.
+			slog.Info("ws session max lifetime reached", "session_id", sessionID)
 			goto done
 		}
 	}

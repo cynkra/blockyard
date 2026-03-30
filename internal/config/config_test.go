@@ -44,7 +44,7 @@ func loadFromString(t *testing.T, content string) *Config {
 
 func TestParseMinimalConfig(t *testing.T) {
 	cfg := loadFromString(t, minimalTOML)
-	if cfg.Server.Bind != "0.0.0.0:8080" {
+	if cfg.Server.Bind != "127.0.0.1:8080" {
 		t.Errorf("expected default bind, got %q", cfg.Server.Bind)
 	}
 	if cfg.Proxy.MaxWorkers != 100 {

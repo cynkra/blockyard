@@ -391,9 +391,15 @@ func (d *DockerBackend) createWorkerContainer(
 		if mem, ok := ParseMemoryLimit(spec.MemoryLimit); ok {
 			resources.Memory = mem
 		}
+	} else if d.config.DefaultMemoryLimit != "" {
+		if mem, ok := ParseMemoryLimit(d.config.DefaultMemoryLimit); ok {
+			resources.Memory = mem
+		}
 	}
 	if spec.CPULimit > 0 {
 		resources.NanoCPUs = int64(spec.CPULimit * 1e9)
+	} else if d.config.DefaultCPULimit > 0 {
+		resources.NanoCPUs = int64(d.config.DefaultCPULimit * 1e9)
 	}
 	resources.PidsLimit = int64Ptr(512)
 
@@ -932,9 +938,24 @@ func (d *DockerBackend) RemoveResource(ctx context.Context, r backend.ManagedRes
 
 // --- Metadata endpoint protection ---
 
+// validIptablesComment checks that s is safe to use as an iptables --comment
+// value. Only alphanumerics, hyphens, and underscores are allowed.
+func validIptablesComment(s string) bool {
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
 // blockMetadataEndpoint blocks container access to the cloud metadata endpoint
 // (169.254.169.254) using iptables rules scoped to the worker network's subnet.
 func (d *DockerBackend) blockMetadataEndpoint(ctx context.Context, networkName, workerID string) error {
+	if !validIptablesComment(workerID) {
+		return fmt.Errorf("invalid worker ID for iptables comment: %q", workerID)
+	}
+
 	d.metaMu.Lock()
 	defer d.metaMu.Unlock()
 

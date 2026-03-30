@@ -14,8 +14,34 @@ jobs:
   server-image:
     uses: ./.github/workflows/server-image.yml
 
-  manifest:
+  scan-image:
     needs: server-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.31.0
+        with:
+          image-ref: ${{ env.IMAGE }}:build-linux-amd64
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Trivy results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  manifest:
+    needs: [server-image, scan-image]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

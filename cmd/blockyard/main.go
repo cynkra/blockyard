@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"syscall"
 
 	"github.com/cynkra/blockyard/internal/api"
@@ -250,8 +251,12 @@ func main() {
 	handler := api.NewRouter(srv)
 
 	httpServer := &http.Server{
-		Addr:    cfg.Server.Bind,
-		Handler: handler,
+		Addr:              cfg.Server.Bind,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Management listener (optional, for /healthz, /readyz, /metrics).
@@ -259,8 +264,12 @@ func main() {
 	if cfg.Server.ManagementBind != "" {
 		mgmtHandler := api.NewManagementRouter(srv)
 		mgmtServer = &http.Server{
-			Addr:    cfg.Server.ManagementBind,
-			Handler: mgmtHandler,
+			Addr:              cfg.Server.ManagementBind,
+			Handler:           mgmtHandler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
 	}
 

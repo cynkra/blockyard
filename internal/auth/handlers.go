@@ -52,12 +52,12 @@ func secureFlag(cfg *config.Config) string {
 }
 
 // randomHex generates a cryptographically random hex string of n bytes.
-func randomHex(n int) string {
+func randomHex(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand.Read failed: " + err.Error())
+		return "", fmt.Errorf("crypto/rand.Read: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 type oidcStatePayload struct {
@@ -127,17 +127,29 @@ func LoginHandler(deps *Deps) http.HandlerFunc {
 			return
 		}
 
-		state := randomHex(16)
-		nonce := randomHex(16)
+		state, err := randomHex(16)
+		if err != nil {
+			slog.Error("failed to generate OIDC state", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		nonce, err := randomHex(16)
+		if err != nil {
+			slog.Error("failed to generate OIDC nonce", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 
 		authURL := deps.OIDCClient.AuthCodeURL(state, nonce)
 
 		// Validate return_url to prevent open redirect attacks.
-		// Must be a path-only relative URL starting with "/" but not "//".
+		// Must be a path-only relative URL starting with "/" but not "//"
+		// or "/\" (browsers normalise backslash to slash).
 		returnURL := r.URL.Query().Get("return_url")
-		parsed, err := url.Parse(returnURL)
-		if err != nil || parsed.Host != "" || parsed.Scheme != "" ||
-			!strings.HasPrefix(returnURL, "/") || strings.HasPrefix(returnURL, "//") {
+		parsed, urlErr := url.Parse(returnURL)
+		if urlErr != nil || parsed.Host != "" || parsed.Scheme != "" ||
+			!strings.HasPrefix(returnURL, "/") || strings.HasPrefix(returnURL, "//") ||
+			strings.ContainsRune(returnURL, '\\') {
 			returnURL = "/"
 		}
 
