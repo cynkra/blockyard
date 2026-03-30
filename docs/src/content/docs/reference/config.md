@@ -123,7 +123,7 @@ health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 log_retention        = "1h"
-session_idle_ttl     = "1h"
+# session_idle_ttl     = "0"   # idle timeout for sessions and WebSocket connections; 0 = disabled
 idle_worker_timeout  = "5m"
 # http_forward_timeout  = "5m"
 # max_cpu_limit         = 16.0
@@ -138,7 +138,7 @@ idle_worker_timeout  = "5m"
 | `worker_start_timeout` | `duration` | `60s` | No | Max time to wait for a new worker to become healthy |
 | `max_workers` | `integer` | `100` | No | Global cap on concurrent worker containers |
 | `log_retention` | `duration` | `1h` | No | How long to keep worker log entries before cleanup |
-| `session_idle_ttl` | `duration` | `1h` | No | Time before an idle session is cleaned up |
+| `session_idle_ttl` | `duration` | `0` | No | Idle timeout for sessions and WebSocket connections. When non-zero, WebSocket connections with no application-level messages for this duration are closed, and stale session records are swept. `0` (default) means disabled. |
 | `idle_worker_timeout` | `duration` | `5m` | No | Time before an idle worker container is stopped |
 | `http_forward_timeout` | `duration` | `5m` | No | Timeout for forwarding HTTP requests to worker containers |
 | `max_cpu_limit` | `float` | `16.0` | No | Maximum CPU limit that can be set per app (caps the `cpu_limit` field on `PATCH /api/v1/apps/{id}`) |

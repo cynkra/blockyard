@@ -143,7 +143,7 @@ health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 log_retention        = "1h"
-session_idle_ttl     = "1h"
+# session_idle_ttl   = "0"
 idle_worker_timeout  = "5m"
 
 # Optional: OIDC authentication
