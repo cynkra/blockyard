@@ -101,6 +101,7 @@ Enable OpenBao credential management. Requires `[oidc]` to be configured.
 | `admin_token` | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `1h` | TTL for issued tokens |
 | `jwt_auth_path` | `jwt` | Auth method path in OpenBao |
+| `skip_policy_scope_check` | `false` | Skip vault policy scope verification during bootstrap. Useful when the OpenBao policy format differs from what Blockyard expects. |
 
 #### `[[openbao.services]]`
 

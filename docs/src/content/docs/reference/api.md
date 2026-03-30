@@ -161,12 +161,39 @@ draining). `relation` is the caller's relationship to the app (`"owner"`,
 
 ### `GET /api/v1/apps/{id}`
 
-Get a single app by ID. Returns app metadata including `enabled` and
-derived `status`. Workers are available via the
+Get a single app by ID or name. Returns full app metadata including the
+caller's `relation` to the app. Workers are available via the
 [runtime endpoint](#get-apiv1appsidruntime).
 
-**Response:** `200 OK` — app object with `status` (`"running"`, `"stopped"`,
-or `"stopping"`) and `enabled` field.
+**Response:** `200 OK`
+
+```json
+{
+  "id": "a1b2c3...",
+  "name": "my-dashboard",
+  "owner": "jane",
+  "access_type": "acl",
+  "active_bundle": "b1234...",
+  "max_workers_per_app": null,
+  "max_sessions_per_worker": 1,
+  "memory_limit": null,
+  "cpu_limit": null,
+  "title": "My Dashboard",
+  "description": "A sales analytics dashboard",
+  "pre_warmed_seats": 0,
+  "enabled": true,
+  "refresh_schedule": "",
+  "created_at": "2025-01-15T09:30:00Z",
+  "updated_at": "2025-01-15T09:30:00Z",
+  "status": "running",
+  "tags": ["production"],
+  "relation": "owner"
+}
+```
+
+`status` is `"running"`, `"stopped"`, or `"stopping"` (workers are
+draining). `relation` is the caller's relationship to the app (`"owner"`,
+`"collaborator"`, `"viewer"`, or `"admin"`).
 
 ### `PATCH /api/v1/apps/{id}`
 
@@ -289,7 +316,8 @@ from configured repositories without uploading a new bundle.
 
 ```json
 {
-  "task_id": "t5678..."
+  "task_id": "t5678...",
+  "message": "refresh started"
 }
 ```
 
@@ -302,7 +330,7 @@ Roll back a dependency refresh, restoring the previous package set.
 ```json
 {
   "task_id": "t5678...",
-  "message": "refresh started"
+  "message": "rollback started"
 }
 ```
 

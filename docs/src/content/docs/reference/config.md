@@ -47,7 +47,7 @@ shutdown_timeout = "30s"
 | `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn`, `error`. |
 | `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
-| `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
+| `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Each entry must be a valid CIDR. Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
 
 <Aside type="note">
   API authentication uses [Personal Access Tokens](/guides/authorization/#personal-access-tokens)
@@ -89,7 +89,7 @@ max_bundle_size       = 104857600
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `bundle_server_path` | `path` | `/data/bundles` | No | Directory for storing uploaded bundles |
+| `bundle_server_path` | `path` | `/data/bundles` | No | Directory for storing uploaded bundles. Must be writable. |
 | `bundle_worker_path` | `path` | `/app` | No | Mount point inside worker containers |
 | `bundle_retention` | `integer` | `50` | No | Max bundles kept per app (oldest pruned first) |
 | `max_bundle_size` | `integer` | `104857600` | No | Maximum bundle upload size in bytes (default 100 MB) |
@@ -107,7 +107,7 @@ path   = "/data/db/blockyard.db"
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `driver` | `string` | `sqlite` | No | Database driver: `sqlite` or `postgres` |
-| `path` | `path` | `/data/db/blockyard.db` | When `driver = "sqlite"` | Path to the SQLite database file (created if missing) |
+| `path` | `path` | `/data/db/blockyard.db` | When `driver = "sqlite"` | Path to the SQLite database file (created if missing). The parent directory must be writable. |
 | `url` | `string` | — | When `driver = "postgres"` | PostgreSQL connection string (e.g. `postgres://user:pass@host/dbname`) |
 
 ## `[proxy]`
@@ -209,7 +209,7 @@ jwt_auth_path = "jwt"
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `address` | `string` | — | **Yes** | OpenBao server address |
+| `address` | `string` | — | **Yes** | OpenBao server address (must start with `http://` or `https://`) |
 | `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via the `BLOCKYARD_OPENBAO_SECRET_ID` env var at bootstrap. |
 | `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Supports [vault references](#vault-references). Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
