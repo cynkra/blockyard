@@ -144,6 +144,19 @@ The service name is `blockyard`. Spans include `http.method`, `http.route`,
 and `http.status_code` attributes. Endpoints using `http://`, `localhost`,
 or `127.0.0.1` connect without TLS; all others use TLS.
 
+## Security headers
+
+All HTTP responses include the following security headers:
+
+| Header | Value |
+|---|---|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` (HTTPS only) |
+
+API endpoints additionally set `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Cache-Control: no-store`.
+
 ## Audit logging
 
 Enable append-only audit logging to a JSONL file:
@@ -171,6 +184,8 @@ Each line is a JSON object with the following fields:
 | `app.create` | App created |
 | `app.update` | App settings changed |
 | `app.delete` | App deleted |
+| `app.start` | Worker started for an app |
+| `app.stop` | App workers stopped |
 | `app.rollback` | App rolled back to a previous bundle |
 | `app.restore` | Soft-deleted app restored |
 | `bundle.upload` | Bundle uploaded |

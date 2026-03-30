@@ -164,6 +164,22 @@ by refresh my-app
 This triggers a background build that pulls the latest compatible package
 versions. Use `by refresh my-app --rollback` to revert to the previous set.
 
+### Automatic refresh
+
+You can schedule periodic dependency refreshes via the REST API using a
+standard 5-field cron expression:
+
+```bash
+curl -X PATCH "$BLOCKYARD/api/v1/apps/my-app" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"refresh_schedule": "0 3 * * 1"}'
+```
+
+This example refreshes every Monday at 03:00. To remove the schedule, set
+`refresh_schedule` to an empty string. See
+[`PATCH /api/v1/apps/{id}`](/reference/api/#patch-apiv1appsid) for details.
+
 ## Disabling an app
 
 You can temporarily take an app offline without deleting it:

@@ -347,7 +347,7 @@ by tags delete staging
 
 ### `by tags app-list <app>`
 
-List tags attached to an app.
+List tags attached to an app. Hidden from `by tags --help` but functional.
 
 ```bash
 by tags app-list dashboard
@@ -355,7 +355,7 @@ by tags app-list dashboard
 
 ### `by tags app-add <app> <tag>`
 
-Attach a tag to an app.
+Attach a tag to an app. Hidden from `by tags --help` but functional.
 
 ```bash
 by tags app-add dashboard production
@@ -363,7 +363,7 @@ by tags app-add dashboard production
 
 ### `by tags app-remove <app> <tag>`
 
-Detach a tag from an app.
+Detach a tag from an app. Hidden from `by tags --help` but functional.
 
 ```bash
 by tags app-remove dashboard staging
@@ -447,7 +447,7 @@ by users update "google-oauth2|def456" --active=false
 | Flag              | Description                                     |
 | ----------------- | ----------------------------------------------- |
 | `--role <string>` | Set role: `admin`, `publisher`, or `viewer`     |
-| `--active <bool>` | Enable or disable the user account              |
+| `--active <bool>` | Enable or disable the user account (default: `true`) |
 
 ---
 

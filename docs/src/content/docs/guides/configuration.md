@@ -101,6 +101,7 @@ Enable OpenBao credential management. Requires `[oidc]` to be configured.
 | `admin_token` | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `1h` | TTL for issued tokens |
 | `jwt_auth_path` | `jwt` | Auth method path in OpenBao |
+| `skip_policy_scope_check` | `false` | Skip vault policy scope verification during bootstrap. Useful when the OpenBao policy format differs from what Blockyard expects. |
 
 #### `[[openbao.services]]`
 
@@ -118,6 +119,16 @@ Credentials are stored at `secret/data/users/{sub}/apikeys/{id}`.
 |---|---|---|
 | `id` | *(required)* | Unique identifier (also the vault path segment) |
 | `label` | *(required)* | Human-readable label |
+
+### `[board_storage]` *(optional)*
+
+Enable board storage via PostgREST. Requires `database.driver = "postgres"` and `[openbao]`.
+
+| Field | Default | Description |
+|---|---|---|
+| `postgrest_url` | *(required)* | URL of the PostgREST instance (e.g. `http://postgrest:3000`) |
+
+Workers receive a `POSTGREST_URL` environment variable when this is configured.
 
 ### `[audit]` *(optional)*
 
@@ -191,6 +202,10 @@ idle_worker_timeout  = "5m"
 # [[openbao.services]]
 # id    = "openai"
 # label = "OpenAI"
+
+# Optional: Board storage via PostgREST (requires postgres + openbao)
+# [board_storage]
+# postgrest_url = "http://postgrest:3000"
 
 # Optional: Audit logging
 # [audit]

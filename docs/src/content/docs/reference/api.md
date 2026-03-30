@@ -126,7 +126,7 @@ List apps visible to the caller. Paginated with RBAC filtering.
 | `tag` | `string` | — | Filter by tag name |
 | `deleted` | `bool` | `false` | Show soft-deleted apps (admin only) |
 | `page` | `integer` | `1` | Page number |
-| `per_page` | `integer` | `25` | Items per page (max 100) |
+| `per_page` | `integer` | `25` | Items per page (clamped to 1–100) |
 
 **Response:** `200 OK`
 
@@ -161,12 +161,39 @@ draining). `relation` is the caller's relationship to the app (`"owner"`,
 
 ### `GET /api/v1/apps/{id}`
 
-Get a single app by ID. Returns app metadata including `enabled` and
-derived `status`. Workers are available via the
+Get a single app by ID or name. Returns full app metadata including the
+caller's `relation` to the app. Workers are available via the
 [runtime endpoint](#get-apiv1appsidruntime).
 
-**Response:** `200 OK` — app object with `status` (`"running"`, `"stopped"`,
-or `"stopping"`) and `enabled` field.
+**Response:** `200 OK`
+
+```json
+{
+  "id": "a1b2c3...",
+  "name": "my-dashboard",
+  "owner": "jane",
+  "access_type": "acl",
+  "active_bundle": "b1234...",
+  "max_workers_per_app": null,
+  "max_sessions_per_worker": 1,
+  "memory_limit": null,
+  "cpu_limit": null,
+  "title": "My Dashboard",
+  "description": "A sales analytics dashboard",
+  "pre_warmed_seats": 0,
+  "enabled": true,
+  "refresh_schedule": "",
+  "created_at": "2025-01-15T09:30:00Z",
+  "updated_at": "2025-01-15T09:30:00Z",
+  "status": "running",
+  "tags": ["production"],
+  "relation": "owner"
+}
+```
+
+`status` is `"running"`, `"stopped"`, or `"stopping"` (workers are
+draining). `relation` is the caller's relationship to the app (`"owner"`,
+`"collaborator"`, `"viewer"`, or `"admin"`).
 
 ### `PATCH /api/v1/apps/{id}`
 
@@ -289,7 +316,8 @@ from configured repositories without uploading a new bundle.
 
 ```json
 {
-  "task_id": "t5678..."
+  "task_id": "t5678...",
+  "message": "refresh started"
 }
 ```
 
@@ -301,7 +329,8 @@ Roll back a dependency refresh, restoring the previous package set.
 
 ```json
 {
-  "task_id": "t5678..."
+  "task_id": "t5678...",
+  "message": "rollback started"
 }
 ```
 
@@ -349,9 +378,10 @@ or higher permissions.
 }
 ```
 
-`workers[].status` is `"active"` or `"draining"`. `stats` may be `null` if
-container metrics are unavailable. Dead workers (recently exited) are
-included with an `ended_at` timestamp.
+`workers[].status` is `"active"`, `"draining"`, or `"ended"` (recently
+exited). `stats` may be `null` if container metrics are unavailable. Ended
+workers include an `ended_at` timestamp and remain visible for the
+`log_retention` window.
 
 ### `GET /api/v1/apps/{id}/sessions`
 
@@ -363,7 +393,7 @@ List sessions for an app. Requires collaborator or higher permissions.
 |---|---|---|---|
 | `user` | `string` | — | Filter by user sub |
 | `status` | `string` | — | Filter by status (`active`, `ended`) |
-| `limit` | `integer` | `50` | Max results (1–200) |
+| `limit` | `integer` | `50` | Max results (clamped to 1–200) |
 
 **Response:** `200 OK`
 
@@ -431,7 +461,7 @@ and pagination.
 | `search` | `string` | — | Search by app name |
 | `status` | `string` | — | Filter by bundle status (`ready`, `pending`, `failed`) |
 | `page` | `integer` | `1` | Page number |
-| `per_page` | `integer` | `25` | Items per page (max 100) |
+| `per_page` | `integer` | `25` | Items per page (clamped to 1–100) |
 
 **Response:** `200 OK`
 
@@ -794,6 +824,21 @@ Same as above, for any sub-path within the app.
 
 ---
 
+## Rate limiting
+
+All endpoints are rate-limited per client IP. When a limit is exceeded the
+server returns `429 Too Many Requests`.
+
+| Route group | Limit |
+|---|---|
+| Authentication (`/login`, `/callback`, `/logout`) | 10 req/min |
+| Credential exchange (`/api/v1/credentials/vault`) | 20 req/min |
+| User profile (`/api/v1/users/me`) | 20 req/min |
+| General API (`/api/v1/*`) | 120 req/min |
+| Proxy (`/app/*`) | 200 req/min |
+
+---
+
 ## Errors
 
 All error responses use a consistent JSON shape:
@@ -813,6 +858,7 @@ All error responses use a consistent JSON shape:
 | `404` | Resource not found |
 | `409` | Conflict (e.g. duplicate app name) |
 | `413` | Bundle exceeds `max_bundle_size` |
+| `429` | Rate limit exceeded |
 | `500` | Internal server error |
 | `502` | Upstream service error (e.g. OpenBao login failure) |
 | `503` | Service unavailable (e.g. max workers reached, worker start timeout, app disabled) |
