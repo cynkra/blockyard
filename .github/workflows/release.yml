@@ -22,7 +22,7 @@ jobs:
 
   server-image:
     needs: e2e
-    uses: ./.github/workflows/server-image.yml
+    uses: ./.github/workflows/server.yml
 
   scan-image:
     needs: server-image

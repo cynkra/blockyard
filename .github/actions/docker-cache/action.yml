@@ -1,0 +1,60 @@
+name: Cache Docker Hub images
+description: >
+  Load Docker Hub images from GH Actions cache, pulling only on cache miss.
+  Cache key is based on the image list content, so adding or changing an
+  image version invalidates the cache automatically.
+
+inputs:
+  username:
+    description: Docker Hub username
+    required: true
+  token:
+    description: Docker Hub token
+    required: true
+  images:
+    description: Space or newline separated list of Docker Hub images to cache.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: docker/login-action@v4
+      with:
+        username: ${{ inputs.username }}
+        password: ${{ inputs.token }}
+
+    - name: Resolve image list
+      id: images
+      shell: bash
+      run: |
+        list=$(echo "$INPUT" | xargs)
+        echo "list=$list" >> "$GITHUB_OUTPUT"
+        echo "hash=$(echo "$list" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      env:
+        INPUT: ${{ inputs.images }}
+
+    - uses: actions/cache@v4
+      id: cache
+      with:
+        path: /tmp/docker-cache
+        key: docker-hub-${{ steps.images.outputs.hash }}
+
+    - name: Load or pull images
+      shell: bash
+      run: |
+        if [ "$CACHE_HIT" = "true" ]; then
+          for f in /tmp/docker-cache/*.tar.zst; do
+            zstd -d "$f" --stdout | docker load
+          done
+        else
+          mkdir -p /tmp/docker-cache
+          for img in $IMAGES; do
+            echo "Pulling: $img"
+            docker pull "$img"
+            safe=$(echo "$img" | tr '/:' '-')
+            docker save "$img" | zstd -T0 -3 > "/tmp/docker-cache/${safe}.tar.zst"
+          done
+        fi
+      env:
+        IMAGES: ${{ steps.images.outputs.list }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}

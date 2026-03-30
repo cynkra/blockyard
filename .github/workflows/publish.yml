@@ -12,7 +12,7 @@ env:
 
 jobs:
   server-image:
-    uses: ./.github/workflows/server-image.yml
+    uses: ./.github/workflows/server.yml
 
   scan-image:
     needs: server-image
