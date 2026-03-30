@@ -43,14 +43,15 @@ func (c *WsCache) Cache(sessionID string, reader *backendReader, ttl time.Durati
 	timer := time.AfterFunc(ttl, func() {
 		c.mu.Lock()
 		entry, ok := c.entries[sessionID]
-		if ok && entry.reader == reader {
+		matched := ok && entry.reader == reader
+		if matched {
 			slog.Debug("wscache: TTL expired, removing entry",
 				"session_id", sessionID)
 			delete(c.entries, sessionID)
 		}
 		c.mu.Unlock()
 
-		if ok {
+		if matched {
 			onExpire()
 		}
 	})

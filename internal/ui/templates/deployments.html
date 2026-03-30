@@ -39,11 +39,11 @@
 {{if gt .TotalPages 1}}
 <nav class="pagination">
     {{if gt .Page 1}}
-    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}" class="btn btn-sm">&laquo; Prev</a>
+    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}{{if $.Sort}}&sort={{$.Sort}}{{end}}{{if $.SortDir}}&dir={{$.SortDir}}{{end}}" class="btn btn-sm">&laquo; Prev</a>
     {{end}}
     <span class="pagination-info">Page {{.Page}} of {{.TotalPages}}</span>
     {{if lt .Page .TotalPages}}
-    <a href="?page={{add .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}" class="btn btn-sm">Next &raquo;</a>
+    <a href="?page={{add .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}{{if $.Sort}}&sort={{$.Sort}}{{end}}{{if $.SortDir}}&dir={{$.SortDir}}{{end}}" class="btn btn-sm">Next &raquo;</a>
     {{end}}
 </nav>
 {{end}}

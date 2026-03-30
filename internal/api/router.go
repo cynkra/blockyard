@@ -169,6 +169,7 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Use(httprate.LimitByIP(10, time.Minute))
 		r.Get("/login", auth.LoginHandler(authDeps))
 		r.Get("/callback", auth.CallbackHandler(authDeps))
+		r.Get("/logout", auth.LogoutHandler(authDeps))
 		r.Post("/logout", auth.LogoutHandler(authDeps))
 	})
 
