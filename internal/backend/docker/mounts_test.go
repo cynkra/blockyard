@@ -117,9 +117,9 @@ func TestMountConfig_ToHostPath(t *testing.T) {
 		{"/data", "/host/path/data"},
 	}
 	for _, tt := range tests {
-		got := mc.toHostPath(tt.input)
+		got := mc.ToHostPath(tt.input)
 		if got != tt.want {
-			t.Errorf("toHostPath(%q) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("ToHostPath(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }

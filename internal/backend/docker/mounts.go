@@ -41,9 +41,9 @@ func (mc MountConfig) subpath(serverPath string) string {
 	return rel
 }
 
-// toHostPath translates a server-side path to the corresponding host path
+// ToHostPath translates a server-side path to the corresponding host path
 // by replacing the MountDest prefix with HostSource.
-func (mc MountConfig) toHostPath(serverPath string) string {
+func (mc MountConfig) ToHostPath(serverPath string) string {
 	rel := mc.subpath(serverPath)
 	if rel == "" {
 		return mc.HostSource
@@ -107,15 +107,15 @@ func (mc MountConfig) WorkerMounts(bundlePath, libraryPath, libDir, transferDir,
 	tp := transferDir
 	tkp := tokenDir
 	if mc.Mode == MountModeBind {
-		bp = mc.toHostPath(bundlePath)
+		bp = mc.ToHostPath(bundlePath)
 		if lp != "" {
-			lp = mc.toHostPath(lp)
+			lp = mc.ToHostPath(lp)
 		}
 		if tp != "" {
-			tp = mc.toHostPath(tp)
+			tp = mc.ToHostPath(tp)
 		}
 		if tkp != "" {
-			tkp = mc.toHostPath(tkp)
+			tkp = mc.ToHostPath(tkp)
 		}
 	}
 
@@ -148,7 +148,7 @@ func (mc MountConfig) TranslateMount(m backend.MountEntry) (
 		if !m.ReadOnly {
 			flag = ""
 		}
-		binds = append(binds, mc.toHostPath(m.Source)+":"+m.Target+flag)
+		binds = append(binds, mc.ToHostPath(m.Source)+":"+m.Target+flag)
 	default: // Native
 		flag := ":ro"
 		if !m.ReadOnly {
