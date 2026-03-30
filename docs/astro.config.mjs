@@ -1,11 +1,31 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { visit } from 'unist-util-visit';
+
+const BASE = '/blockyard';
+
+/** Rehype plugin: prepend base path to internal links in Markdown content. */
+function rehypeBaseLinks() {
+	return (tree) => {
+		visit(tree, 'element', (node) => {
+			if (node.tagName === 'a' && typeof node.properties.href === 'string') {
+				const href = node.properties.href;
+				if (href.startsWith('/') && !href.startsWith(BASE + '/')) {
+					node.properties.href = BASE + href;
+				}
+			}
+		});
+	};
+}
 
 // https://astro.build/config
 export default defineConfig({
 	site: 'https://cynkra.github.io',
-	base: '/blockyard',
+	base: BASE,
+	markdown: {
+		rehypePlugins: [rehypeBaseLinks],
+	},
 	integrations: [
 		starlight({
 			title: 'Blockyard',
