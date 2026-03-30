@@ -15,7 +15,8 @@
 {{if .AllTags}}
 <div class="tag-browser">
     {{range .AllTags}}
-    <a href="?{{if contains $.ActiveTags .Name}}{{else}}tag={{.Name}}&{{end}}{{range $.ActiveTags}}{{if ne . $.Search}}{{if ne . ""}}tag={{.}}&{{end}}{{end}}{{end}}{{if $.Search}}search={{$.Search}}&{{end}}tag_mode={{$.TagMode}}"
+    {{$tagName := .Name}}
+    <a href="?{{if contains $.ActiveTags .Name}}{{else}}tag={{.Name}}&{{end}}{{range $.ActiveTags}}{{if ne . $tagName}}{{if ne . ""}}tag={{.}}&{{end}}{{end}}{{end}}{{if $.Search}}search={{$.Search}}&{{end}}tag_mode={{$.TagMode}}"
        class="tag-browser-chip {{if contains $.ActiveTags .Name}}active{{end}}">
         {{.Name}}<span class="tag-count">{{.AppCount}}</span>
     </a>
