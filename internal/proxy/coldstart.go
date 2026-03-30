@@ -228,6 +228,23 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		}
 	}
 
+	// cleanupLocal releases resources created in this function that are
+	// not yet tracked by EvictWorker (token refresher, dirs, pkg lib).
+	cleanupLocal := func() {
+		if cancelToken != nil {
+			cancelToken()
+		}
+		if transferDir != "" {
+			_ = os.RemoveAll(transferDir)
+		}
+		if tokDir != "" {
+			_ = os.RemoveAll(tokDir)
+		}
+		if libDir != "" && srv.PkgStore != nil {
+			_ = srv.PkgStore.CleanupWorkerLib(wid)
+		}
+	}
+
 	spec := backend.WorkerSpec{
 		AppID:       app.ID,
 		WorkerID:    wid,
@@ -249,12 +266,14 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	}
 
 	if err := srv.Backend.Spawn(spawnCtx, spec); err != nil {
+		cleanupLocal()
 		return "", "", fmt.Errorf("spawn worker: %w", err)
 	}
 
 	a, err := srv.Backend.Addr(spawnCtx, wid)
 	if err != nil {
 		srv.Backend.Stop(spawnCtx, wid) //nolint:errcheck // best-effort cleanup
+		cleanupLocal()
 		return "", "", fmt.Errorf("resolve worker address: %w", err)
 	}
 
@@ -277,6 +296,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		srv.Workers.Delete(wid)
 		srv.Registry.Delete(wid)
 		srv.Backend.Stop(context.Background(), wid) //nolint:errcheck // best-effort cleanup
+		cleanupLocal()
 		return "", "", err
 	}
 	coldStartElapsed := time.Since(coldStartBegin)

@@ -1120,9 +1120,27 @@ func deleteIptablesRulesByComment(comment string) {
 }
 
 // CleanupOrphanMetadataRules removes all blockyard iptables rules left over
-// from previous runs. Called at server startup.
+// from previous runs. Called at server startup. Uses prefix matching
+// (without closing quote) so that all per-worker rules are matched.
 func CleanupOrphanMetadataRules() {
-	deleteIptablesRulesByComment("blockyard-")
+	out, err := exec.Command("iptables", "-S", "DOCKER-USER").Output()
+	if err != nil {
+		return
+	}
+	needle := `--comment "blockyard-`
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		rule := strings.TrimPrefix(line, "-A DOCKER-USER ")
+		if rule == line {
+			continue
+		}
+		args := append([]string{"-D", "DOCKER-USER"}, strings.Fields(rule)...)
+		if err := exec.Command("iptables", args...).Run(); err != nil {
+			slog.Warn("failed to delete orphan iptables rule", "error", err)
+		}
+	}
 }
 
 func int64Ptr(v int64) *int64 { return &v }
