@@ -16,10 +16,13 @@ on:
           - TestHelloPocketbase
           - TestHelloPostgrest
 
+permissions:
+  contents: read
+
 jobs:
   run:
     name: ${{ matrix.example }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -50,7 +53,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           docker pull dexidp/dex:v2.41.1
-          docker pull ghcr.io/openbao/openbao:latest
+          docker pull ghcr.io/openbao/openbao:2.5.2
           docker pull ghcr.io/rocker-org/r-ver:4.4.3
           docker pull postgres:17
           docker pull postgrest/postgrest:v12.2.3
@@ -80,6 +83,7 @@ jobs:
           name: coverage-e2e-${{ matrix.test }}
           path: coverage-e2e-*.out
           if-no-files-found: ignore
+          retention-days: 1
       - name: Dump compose logs on failure
         if: failure()
         run: |
@@ -89,7 +93,8 @@ jobs:
   e2e:
     if: always()
     needs: [run]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - if: needs.run.result != 'success'
         run: |
@@ -100,7 +105,8 @@ jobs:
   coverage:
     if: github.event_name == 'merge_group'
     needs: [run]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -169,6 +175,8 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         run: |
           curl -fsSL https://cli.codecov.io/latest/linux/codecov -o ./codecov
+          curl -fsSL https://cli.codecov.io/latest/linux/codecov.SHA256SUM -o ./codecov.SHA256SUM
+          sha256sum -c codecov.SHA256SUM
           chmod +x ./codecov
           for f in coverage-*.out; do
             [ -f "$f" ] || continue

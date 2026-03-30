@@ -22,7 +22,7 @@ services:
 
   # --- OpenBao: secrets management ---
   openbao:
-    image: ghcr.io/openbao/openbao:latest
+    image: ghcr.io/openbao/openbao:2.5.2
     command: ["server", "-dev", "-dev-root-token-id=root-dev-token", "-dev-listen-address=0.0.0.0:8200"]
     environment:
       BAO_DEV_ROOT_TOKEN_ID: root-dev-token
