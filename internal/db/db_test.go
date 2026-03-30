@@ -2192,4 +2192,400 @@ func TestGetAppIncludeDeleted(t *testing.T) {
 	})
 }
 
-// --- GetAppIncludeDeleted tests ---
+// --- RenameApp tests ---
+
+func TestRenameAppSuccess(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("old-name", "admin")
+
+		err := db.RenameApp(app.ID, "old-name", "new-name")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// App should have the new name.
+		fetched, err := db.GetApp(app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched.Name != "new-name" {
+			t.Errorf("expected new-name, got %q", fetched.Name)
+		}
+
+		// Old name should exist as an alias.
+		aliasApp, phase, err := db.GetAppByAlias("old-name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if aliasApp == nil {
+			t.Fatal("expected alias to resolve to the app")
+		}
+		if aliasApp.ID != app.ID {
+			t.Errorf("expected alias to point to %s, got %s", app.ID, aliasApp.ID)
+		}
+		if phase != "alias" {
+			t.Errorf("expected phase=alias, got %q", phase)
+		}
+	})
+}
+
+func TestRenameAppConflict(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("app-one", "admin")
+		db.CreateApp("app-two", "admin")
+
+		// Renaming app-one to app-two should fail (name already in use).
+		err := db.RenameApp(app1.ID, "app-one", "app-two")
+		if err == nil {
+			t.Fatal("expected error for name conflict")
+		}
+		if !strings.Contains(err.Error(), "already in use") {
+			t.Errorf("expected 'already in use' error, got: %v", err)
+		}
+	})
+}
+
+func TestRenameAppAliasConflict(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app1, _ := db.CreateApp("first", "admin")
+		app2, _ := db.CreateApp("second", "admin")
+
+		// Rename first -> renamed-first, creating alias "first".
+		err := db.RenameApp(app1.ID, "first", "renamed-first")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Renaming second -> first should fail because "first" is an active alias.
+		err = db.RenameApp(app2.ID, "second", "first")
+		if err == nil {
+			t.Fatal("expected error for alias conflict")
+		}
+		if !strings.Contains(err.Error(), "reserved as an alias") {
+			t.Errorf("expected 'reserved as an alias' error, got: %v", err)
+		}
+	})
+}
+
+// --- GetAppByAlias tests ---
+
+func TestGetAppByAlias(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("original", "admin")
+		db.RenameApp(app.ID, "original", "renamed")
+
+		// Alias lookup should resolve to the app.
+		fetched, phase, err := db.GetAppByAlias("original")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched == nil {
+			t.Fatal("expected app from alias lookup")
+		}
+		if fetched.ID != app.ID {
+			t.Errorf("expected app ID %s, got %s", app.ID, fetched.ID)
+		}
+		if phase != "alias" {
+			t.Errorf("expected phase=alias, got %q", phase)
+		}
+	})
+}
+
+func TestGetAppByAliasUnknown(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		fetched, phase, err := db.GetAppByAlias("nonexistent-alias")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched != nil {
+			t.Error("expected nil for unknown alias")
+		}
+		if phase != "" {
+			t.Errorf("expected empty phase, got %q", phase)
+		}
+	})
+}
+
+// --- TransitionExpiredAliases tests ---
+
+func TestTransitionExpiredAliases(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("trans-app", "admin")
+
+		// Insert an alias that expired in the past.
+		pastExpiry := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
+		_, err := db.Exec(db.rebind(
+			`INSERT INTO app_aliases (app_id, name, phase, expires_at)
+			 VALUES (?, ?, 'alias', ?)`),
+			app.ID, "old-alias", pastExpiry)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Insert an alias that has not expired.
+		futureExpiry := time.Now().UTC().Add(1 * time.Hour).Format(time.RFC3339)
+		_, err = db.Exec(db.rebind(
+			`INSERT INTO app_aliases (app_id, name, phase, expires_at)
+			 VALUES (?, ?, 'alias', ?)`),
+			app.ID, "fresh-alias", futureExpiry)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := db.TransitionExpiredAliases(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Expired alias should now be in redirect phase.
+		_, phase, err := db.GetAppByAlias("old-alias")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if phase != "redirect" {
+			t.Errorf("expected phase=redirect for expired alias, got %q", phase)
+		}
+
+		// Fresh alias should remain in alias phase.
+		_, phase, err = db.GetAppByAlias("fresh-alias")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if phase != "alias" {
+			t.Errorf("expected phase=alias for fresh alias, got %q", phase)
+		}
+	})
+}
+
+// --- CleanupExpiredRedirects tests ---
+
+func TestCleanupExpiredRedirects(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("cleanup-app", "admin")
+
+		// Insert an expired redirect.
+		pastExpiry := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
+		_, err := db.Exec(db.rebind(
+			`INSERT INTO app_aliases (app_id, name, phase, expires_at)
+			 VALUES (?, ?, 'redirect', ?)`),
+			app.ID, "expired-redirect", pastExpiry)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Insert a non-expired redirect.
+		futureExpiry := time.Now().UTC().Add(1 * time.Hour).Format(time.RFC3339)
+		_, err = db.Exec(db.rebind(
+			`INSERT INTO app_aliases (app_id, name, phase, expires_at)
+			 VALUES (?, ?, 'redirect', ?)`),
+			app.ID, "valid-redirect", futureExpiry)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := db.CleanupExpiredRedirects(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Expired redirect should be gone.
+		fetched, _, err := db.GetAppByAlias("expired-redirect")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched != nil {
+			t.Error("expected expired redirect to be deleted")
+		}
+
+		// Non-expired redirect should remain.
+		fetched, phase, err := db.GetAppByAlias("valid-redirect")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched == nil {
+			t.Error("expected non-expired redirect to remain")
+		}
+		if phase != "redirect" {
+			t.Errorf("expected phase=redirect, got %q", phase)
+		}
+	})
+}
+
+// --- BundleLog tests ---
+
+func TestInsertAndGetBundleLog(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		app, _ := db.CreateApp("log-app", "admin")
+		db.CreateBundle("log-b1", app.ID, "", false)
+
+		logOutput := "Step 1: installing packages\nStep 2: building image\nDone."
+		if err := db.InsertBundleLog("log-b1", logOutput); err != nil {
+			t.Fatal(err)
+		}
+
+		fetched, err := db.GetBundleLog("log-b1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched != logOutput {
+			t.Errorf("expected log output %q, got %q", logOutput, fetched)
+		}
+	})
+}
+
+func TestGetBundleLogMissing(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		output, err := db.GetBundleLog("nonexistent-bundle")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if output != "" {
+			t.Errorf("expected empty string for missing bundle log, got %q", output)
+		}
+	})
+}
+
+// --- SearchUsers tests ---
+
+func TestSearchUsers(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		db.UpsertUser("su-1", "alice@example.com", "Alice Smith")
+		db.UpsertUser("su-2", "bob@example.com", "Bob Jones")
+		db.UpsertUser("su-3", "charlie@example.com", "Charlie Smith")
+
+		// Search by name substring.
+		users, err := db.SearchUsers("Smith", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) != 2 {
+			t.Errorf("expected 2 users matching 'Smith', got %d", len(users))
+		}
+
+		// Search by email substring.
+		users, err = db.SearchUsers("bob@", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) != 1 {
+			t.Errorf("expected 1 user matching 'bob@', got %d", len(users))
+		}
+		if len(users) > 0 && users[0].Sub != "su-2" {
+			t.Errorf("expected su-2, got %q", users[0].Sub)
+		}
+
+		// Limit controls result count.
+		users, err = db.SearchUsers("example.com", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) != 2 {
+			t.Errorf("expected 2 users (limited), got %d", len(users))
+		}
+
+		// No matches.
+		users, err = db.SearchUsers("zzz-no-match", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) != 0 {
+			t.Errorf("expected 0 users, got %d", len(users))
+		}
+	})
+}
+
+// --- ListTagsWithCounts tests ---
+
+func TestListTagsWithCounts(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		tag1, _ := db.CreateTag("prod")
+		tag2, _ := db.CreateTag("staging")
+		tag3, _ := db.CreateTag("empty-tag")
+
+		app1, _ := db.CreateApp("twc-app-1", "admin")
+		app2, _ := db.CreateApp("twc-app-2", "admin")
+
+		db.AddAppTag(app1.ID, tag1.ID)
+		db.AddAppTag(app2.ID, tag1.ID)
+		db.AddAppTag(app1.ID, tag2.ID)
+		// tag3 has no apps
+
+		tags, err := db.ListTagsWithCounts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tags) != 3 {
+			t.Fatalf("expected 3 tags, got %d", len(tags))
+		}
+
+		// Build a lookup by name for easy assertions.
+		counts := make(map[string]int)
+		for _, tg := range tags {
+			counts[tg.Name] = tg.AppCount
+		}
+
+		if counts["prod"] != 2 {
+			t.Errorf("expected prod count=2, got %d", counts["prod"])
+		}
+		if counts["staging"] != 1 {
+			t.Errorf("expected staging count=1, got %d", counts["staging"])
+		}
+		if counts["empty-tag"] != 0 {
+			t.Errorf("expected empty-tag count=0, got %d", counts["empty-tag"])
+		}
+
+		// Deleted apps should not count.
+		db.SoftDeleteApp(app1.ID)
+		tags, err = db.ListTagsWithCounts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts = make(map[string]int)
+		for _, tg := range tags {
+			counts[tg.Name] = tg.AppCount
+		}
+		if counts["prod"] != 1 {
+			t.Errorf("after delete: expected prod count=1, got %d", counts["prod"])
+		}
+		if counts["staging"] != 0 {
+			t.Errorf("after delete: expected staging count=0, got %d", counts["staging"])
+		}
+
+		_ = tag3 // used above
+	})
+}
+
+// --- RenameTag tests ---
+
+func TestRenameTag(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		tag, _ := db.CreateTag("old-tag")
+
+		err := db.RenameTag(tag.ID, "new-tag")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		fetched, err := db.GetTag(tag.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched.Name != "new-tag" {
+			t.Errorf("expected new-tag, got %q", fetched.Name)
+		}
+	})
+}
+
+func TestRenameTagUniqueConflict(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		tag1, _ := db.CreateTag("tag-alpha")
+		db.CreateTag("tag-beta")
+
+		// Renaming tag-alpha to tag-beta should violate unique constraint.
+		err := db.RenameTag(tag1.ID, "tag-beta")
+		if err == nil {
+			t.Fatal("expected unique constraint error")
+		}
+		if !IsUniqueConstraintError(err) {
+			t.Errorf("expected unique constraint error, got: %v", err)
+		}
+	})
+}

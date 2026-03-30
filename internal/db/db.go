@@ -1750,7 +1750,7 @@ func (db *DB) SearchUsers(query string, limit int) ([]UserRow, error) {
 	var users []UserRow
 	err := db.DB.Select(&users, db.rebind(
 		`SELECT * FROM users
-		 WHERE active = true
+		 WHERE active = 1
 		   AND (LOWER(name) LIKE LOWER(?) ESCAPE '\' OR LOWER(email) LIKE LOWER(?) ESCAPE '\')
 		 ORDER BY name ASC
 		 LIMIT ?`),
@@ -1773,7 +1773,7 @@ type TagWithCount struct {
 func (db *DB) ListTagsWithCounts() ([]TagWithCount, error) {
 	var tags []TagWithCount
 	err := db.DB.Select(&tags,
-		`SELECT t.id, t.name, t.created_at, COUNT(at.app_id) AS app_count
+		`SELECT t.id, t.name, t.created_at, COUNT(apps.id) AS app_count
 		 FROM tags t
 		 LEFT JOIN app_tags at ON t.id = at.tag_id
 		 LEFT JOIN apps ON at.app_id = apps.id AND apps.deleted_at IS NULL
