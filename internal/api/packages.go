@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/cynkra/blockyard/internal/server"
@@ -22,8 +23,9 @@ func PostPackages(srv *server.Server) http.HandlerFunc {
 
 		result, err := srv.InstallPackage(r.Context(), appID, workerID, req)
 		if err != nil {
+			slog.Error("package install failed", "worker_id", workerID, "error", err)
 			writeJSON(w, http.StatusInternalServerError,
-				server.PackageResponse{Status: "error", Message: err.Error()})
+				server.PackageResponse{Status: "error", Message: "internal error"})
 			return
 		}
 
