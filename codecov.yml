@@ -9,28 +9,20 @@ coverage:
 
 flags:
   unit:
-    paths: [internal/]
     carryforward: true
   cli:
-    paths: [cmd/by/, internal/]
     carryforward: true
   docker:
-    paths: [internal/]
     carryforward: true
   idp:
-    paths: [internal/auth/]
     carryforward: true
   openbao:
-    paths: [internal/integration/]
     carryforward: true
   pak:
-    paths: [internal/]
     carryforward: true
   ui:
-    paths: [internal/ui/]
     carryforward: true
   e2e:
-    paths: [cmd/blockyard/, cmd/by/, internal/]
     carryforward: true
 
 ignore:
