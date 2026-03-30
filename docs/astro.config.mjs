@@ -29,6 +29,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'Blockyard',
+			customCss: ['./src/styles/custom.css'],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/cynkra/blockyard' }],
 			sidebar: [
 				{
