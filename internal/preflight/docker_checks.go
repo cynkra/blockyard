@@ -79,7 +79,7 @@ func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
 			Message:  fmt.Sprintf("failed to create temp dir: %v", err),
 		}
 	}
-	defer os.RemoveAll(tmpDir)
+	defer os.RemoveAll(tmpDir) //nolint:errcheck // best-effort cleanup
 
 	// Build the mount for the temp directory using the same mount
 	// translation the backend uses for worker containers.
@@ -276,7 +276,7 @@ func checkMetadataBlocking(serverID string) *Result {
 
 // ensureImage pulls a Docker image if it is not already present locally.
 func ensureImage(ctx context.Context, cli *client.Client, img string) error {
-	_, _, err := cli.ImageInspectWithRaw(ctx, img)
+	_, err := cli.ImageInspect(ctx, img)
 	if err == nil {
 		return nil
 	}
