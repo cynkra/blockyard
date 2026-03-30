@@ -20,8 +20,46 @@ permissions:
   contents: read
 
 jobs:
+  images:
+    name: Pull Docker Hub images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: docker/login-action@v4
+        if: github.event_name != 'pull_request'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Pull and bundle Docker Hub images
+        if: github.event_name != 'pull_request'
+        run: |
+          docker pull alpine:3.21
+          docker pull curlimages/curl:latest
+          docker pull debian:bookworm-slim
+          docker pull dexidp/dex:v2.41.1
+          docker pull golang:1.25.8-bookworm
+          docker pull postgres:17
+          docker pull postgrest/postgrest:v12.2.3
+          docker save \
+            alpine:3.21 \
+            curlimages/curl:latest \
+            debian:bookworm-slim \
+            dexidp/dex:v2.41.1 \
+            golang:1.25.8-bookworm \
+            postgres:17 \
+            postgrest/postgrest:v12.2.3 \
+          | zstd -T0 -3 > /tmp/images.tar.zst
+      - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
+        with:
+          name: docker-images
+          path: /tmp/images.tar.zst
+          retention-days: 1
+          compression-level: 0
+
   run:
     name: ${{ matrix.example }}
+    needs: [images]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
@@ -41,22 +79,22 @@ jobs:
         if: github.event_name != 'pull_request'
         with:
           go-version-file: go.mod
-      - uses: docker/login-action@v4
+      - uses: actions/download-artifact@v8
         if: github.event_name != 'pull_request'
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          name: docker-images
+          path: /tmp
+      - name: Load Docker Hub images
+        if: github.event_name != 'pull_request'
+        run: zstd -d /tmp/images.tar.zst --stdout | docker load
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request'
         run: docker build -t ghcr.io/cynkra/blockyard:latest --build-arg COVER=1 -f docker/server.Dockerfile .
-      - name: Pre-pull images used by examples
+      - name: Pull GHCR images used by examples
         if: github.event_name != 'pull_request'
         run: |
-          docker pull dexidp/dex:v2.41.1
           docker pull ghcr.io/openbao/openbao:2.5.2
           docker pull ghcr.io/rocker-org/r-ver:4.4.3
-          docker pull postgres:17
-          docker pull postgrest/postgrest:v12.2.3
       - name: Block cloud metadata endpoint for containers
         if: github.event_name != 'pull_request'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
