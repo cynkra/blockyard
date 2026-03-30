@@ -447,7 +447,7 @@ by users update "google-oauth2|def456" --active=false
 | Flag              | Description                                     |
 | ----------------- | ----------------------------------------------- |
 | `--role <string>` | Set role: `admin`, `publisher`, or `viewer`     |
-| `--active <bool>` | Enable or disable the user account              |
+| `--active <bool>` | Enable or disable the user account (default: `true`) |
 
 ---
 

@@ -126,7 +126,7 @@ List apps visible to the caller. Paginated with RBAC filtering.
 | `tag` | `string` | — | Filter by tag name |
 | `deleted` | `bool` | `false` | Show soft-deleted apps (admin only) |
 | `page` | `integer` | `1` | Page number |
-| `per_page` | `integer` | `25` | Items per page (max 100) |
+| `per_page` | `integer` | `25` | Items per page (clamped to 1–100) |
 
 **Response:** `200 OK`
 
@@ -393,7 +393,7 @@ List sessions for an app. Requires collaborator or higher permissions.
 |---|---|---|---|
 | `user` | `string` | — | Filter by user sub |
 | `status` | `string` | — | Filter by status (`active`, `ended`) |
-| `limit` | `integer` | `50` | Max results (1–200) |
+| `limit` | `integer` | `50` | Max results (clamped to 1–200) |
 
 **Response:** `200 OK`
 
@@ -461,7 +461,7 @@ and pagination.
 | `search` | `string` | — | Search by app name |
 | `status` | `string` | — | Filter by bundle status (`ready`, `pending`, `failed`) |
 | `page` | `integer` | `1` | Page number |
-| `per_page` | `integer` | `25` | Items per page (max 100) |
+| `per_page` | `integer` | `25` | Items per page (clamped to 1–100) |
 
 **Response:** `200 OK`
 

@@ -44,7 +44,7 @@ shutdown_timeout = "30s"
 | `bind` | `string` | `0.0.0.0:8080` | No | Socket address to listen on |
 | `management_bind` | `string` | — | No | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Management listener](/guides/observability/#management-listener). |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
-| `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn`, `error`. |
+| `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn` (or `warning`), `error`. |
 | `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 | `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Each entry must be a valid CIDR. Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
