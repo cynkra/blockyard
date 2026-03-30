@@ -21,6 +21,9 @@ on:
           - pak
           - ui
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -28,7 +31,8 @@ concurrency:
 jobs:
   unit:
     if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'unit')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17
@@ -70,9 +74,11 @@ jobs:
         with:
           name: coverage-unit
           path: coverage-unit.out
+          retention-days: 1
 
   cli:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'cli')
     steps:
@@ -89,9 +95,11 @@ jobs:
         with:
           name: coverage-cli
           path: coverage-cli.out
+          retention-days: 1
 
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'docker')
     steps:
@@ -103,15 +111,17 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - run: docker pull alpine:latest
+      - run: docker pull alpine:3.21
       - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/... ./internal/backend/docker/... ./internal/proxy/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker
           path: coverage-docker.out
+          retention-days: 1
 
   pak:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'pak')
     steps:
@@ -129,9 +139,11 @@ jobs:
         with:
           name: coverage-pak
           path: coverage-pak.out
+          retention-days: 1
 
   idp:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'idp')
     steps:
@@ -145,9 +157,11 @@ jobs:
         with:
           name: coverage-idp
           path: coverage-idp.out
+          retention-days: 1
 
   openbao:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'openbao')
     steps:
@@ -155,15 +169,17 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: docker pull ghcr.io/openbao/openbao:latest
+      - run: docker pull ghcr.io/openbao/openbao:2.5.2
       - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./internal/... ./internal/integration/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-openbao
           path: coverage-openbao.out
+          retention-days: 1
 
   ui:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'ui')
     steps:
@@ -176,9 +192,11 @@ jobs:
         with:
           name: coverage-ui
           path: coverage-ui.out
+          retention-days: 1
 
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     if: github.event_name != 'merge_group' && github.event_name != 'push' && inputs.job == ''
     needs: [unit, cli, docker, idp, openbao, pak, ui]
     steps:

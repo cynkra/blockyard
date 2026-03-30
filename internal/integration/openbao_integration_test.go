@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	openbaoImage = "ghcr.io/openbao/openbao:latest"
+	openbaoImage = "ghcr.io/openbao/openbao:2.5.2"
 )
 
 var (

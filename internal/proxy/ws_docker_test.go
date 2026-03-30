@@ -158,7 +158,7 @@ func buildWSEchoBinary(t *testing.T) string {
 func dockerTestConfig() *config.DockerConfig {
 	return &config.DockerConfig{
 		Socket:    "/var/run/docker.sock",
-		Image:     "alpine:latest",
+		Image:     "alpine:3.21",
 		ShinyPort: 8080,
 		PakVersion: "stable",
 	}
@@ -182,7 +182,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
-			Image:     "alpine:latest",
+			Image:     "alpine:3.21",
 			ShinyPort: 8080,
 		},
 		Storage: config.StorageConfig{
@@ -228,7 +228,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	spec := backend.WorkerSpec{
 		AppID:       app.ID,
 		WorkerID:    workerID,
-		Image:       "alpine:latest",
+		Image:       "alpine:3.21",
 		Cmd:         []string{"/wsecho-bin"},
 		BundlePath:  tmp,
 		LibraryPath: "",
