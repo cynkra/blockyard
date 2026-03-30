@@ -31,7 +31,7 @@ func (srv *Server) RunRefresh(
 	status := task.Completed
 	defer func() { sender.Complete(status) }()
 
-	sender.Write("refreshing dependencies...")
+	sender.Write("Refreshing dependencies...")
 
 	bsp := srv.Config.Storage.BundleServerPath
 
@@ -41,14 +41,16 @@ func (srv *Server) RunRefresh(
 		srv.Config.Docker.PakVersion,
 		filepath.Join(bsp, ".pak-cache"))
 	if err != nil {
-		sender.Write(fmt.Sprintf("ensure pak: %v", err))
+		sender.Write("Failed to set up build tools.")
+		slog.Error("refresh: ensure pak", "error", err)
 		status = task.Failed
 		return false
 	}
 	builderPath, err := buildercache.EnsureCached(
 		filepath.Join(bsp, ".by-builder-cache"), srv.Version)
 	if err != nil {
-		sender.Write(fmt.Sprintf("ensure by-builder: %v", err))
+		sender.Write("Failed to set up build tools.")
+		slog.Error("refresh: ensure by-builder", "error", err)
 		status = task.Failed
 		return false
 	}
@@ -80,12 +82,13 @@ func (srv *Server) RunRefresh(
 
 	result, err := srv.Backend.Build(ctx, spec)
 	if err != nil {
-		sender.Write(fmt.Sprintf("refresh build: %v", err))
+		sender.Write("Dependency resolution failed.")
+		slog.Error("refresh: build", "error", err)
 		status = task.Failed
 		return false
 	}
 	if !result.Success {
-		sender.Write(fmt.Sprintf("refresh failed (exit %d)", result.ExitCode))
+		sender.Write(fmt.Sprintf("Dependency resolution failed (exit %d).", result.ExitCode))
 		status = task.Failed
 		return false
 	}
@@ -111,7 +114,8 @@ func (srv *Server) RunRefresh(
 	}
 
 	if err := copyFile(newManifestSrc, newManifestDst); err != nil {
-		sender.Write(fmt.Sprintf("persist new store-manifest: %v", err))
+		sender.Write("Failed to save updated dependency manifest.")
+		slog.Error("refresh: persist store-manifest", "error", err)
 		status = task.Failed
 		return false
 	}
@@ -124,12 +128,12 @@ func (srv *Server) RunRefresh(
 		changed = true
 	}
 	if !changed {
-		sender.Write("dependencies unchanged — no action needed")
+		sender.Write("Dependencies unchanged — no action needed.")
 		return false
 	}
 
 	// 7. Graceful drain: spawn new worker, drain old ones.
-	sender.Write("dependencies updated — spawning new worker...")
+	sender.Write("Dependencies updated — spawning new worker...")
 	srv.drainAndReplace(ctx, app, newManifestDst, sender)
 	return true
 }
@@ -144,7 +148,8 @@ func (srv *Server) drainAndReplace(
 ) {
 	storeManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
 	if err != nil {
-		sender.Write("error reading store-manifest: " + err.Error())
+		sender.Write("Failed to read dependency manifest.")
+		slog.Error("refresh: read store-manifest", "error", err)
 		return
 	}
 
@@ -153,11 +158,12 @@ func (srv *Server) drainAndReplace(
 	newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
 	missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
 	if err != nil {
-		sender.Write("error assembling library: " + err.Error())
+		sender.Write("Failed to prepare package library.")
+		slog.Error("refresh: assemble library", "error", err)
 		return
 	}
 	if len(missing) > 0 {
-		sender.Write(fmt.Sprintf("warning: %d packages missing from store", len(missing)))
+		sender.Write(fmt.Sprintf("Warning: %d packages missing from cache.", len(missing)))
 	}
 
 	// Mark old workers as draining BEFORE spawning the new one,
@@ -165,18 +171,20 @@ func (srv *Server) drainAndReplace(
 	oldWorkers := srv.Workers.ForApp(app.ID)
 	for _, oldID := range oldWorkers {
 		srv.Workers.SetDraining(oldID)
-		sender.Write(fmt.Sprintf("draining worker %s", oldID[:8]))
+		sender.Write(fmt.Sprintf("Stopping previous worker (%s)...", oldID[:8]))
 	}
 
 	spec := srv.defaultWorkerSpec(app.ID, newWorkerID, newLibDir, *app.ActiveBundle)
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {
-		sender.Write("error spawning new worker: " + err.Error())
+		sender.Write("Failed to start new worker.")
+		slog.Error("refresh: spawn worker", "error", err)
 		return
 	}
 
 	addr, err := srv.Backend.Addr(ctx, newWorkerID)
 	if err != nil {
-		sender.Write("error resolving new worker address: " + err.Error())
+		sender.Write("Failed to start new worker.")
+		slog.Error("refresh: resolve worker address", "error", err)
 		return
 	}
 
@@ -201,11 +209,12 @@ func (srv *Server) drainAndReplace(
 	}
 
 	if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
-		sender.Write("new worker not healthy: " + err.Error())
+		sender.Write(fmt.Sprintf("New worker (%s) failed health check.", newWorkerID[:8]))
+		slog.Error("refresh: worker health check", "worker_id", newWorkerID, "error", err)
 		return
 	}
 
-	sender.Write(fmt.Sprintf("new worker %s ready, old workers draining", newWorkerID[:8]))
+	sender.Write(fmt.Sprintf("New worker (%s) ready.", newWorkerID[:8]))
 }
 
 // storeManifestsChanged compares two store-manifest files.
@@ -245,10 +254,11 @@ func (srv *Server) RunRollback(
 
 	switch target {
 	case "build":
-		sender.Write("rolling back dependencies to original build...")
+		sender.Write("Rolling back dependencies to original build...")
 		buildManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.build")
 		if err := copyFile(buildManifest, currentManifest); err != nil {
-			sender.Write(fmt.Sprintf("restore build manifest: %v", err))
+			sender.Write("Failed to restore original dependencies.")
+			slog.Error("refresh rollback: restore build manifest", "error", err)
 			status = task.Failed
 			return
 		}
@@ -256,11 +266,12 @@ func (srv *Server) RunRollback(
 		os.Remove(filepath.Join(bundlePaths.Base, "store-manifest.json.prev")) //nolint:errcheck
 
 	default:
-		sender.Write("rolling back dependencies to previous refresh...")
+		sender.Write("Rolling back dependencies to previous refresh...")
 		prevManifest := filepath.Join(bundlePaths.Base, "store-manifest.json.prev")
 		// Promote prev to current, discard the bad manifest.
 		if err := os.Rename(prevManifest, currentManifest); err != nil {
-			sender.Write(fmt.Sprintf("promote prev manifest: %v", err))
+			sender.Write("Failed to restore previous dependencies.")
+			slog.Error("refresh rollback: promote prev manifest", "error", err)
 			status = task.Failed
 			return
 		}

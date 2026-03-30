@@ -64,7 +64,7 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 					"app_id", params.AppID,
 					"bundle_id", params.BundleID,
 					"panic", r)
-				params.Sender.Write(fmt.Sprintf("FATAL: restore task panicked: %v", r))
+				params.Sender.Write("FATAL: an unexpected error occurred during build.")
 				params.Sender.Complete(task.Failed)
 				telemetry.BundleRestoresFailed.Inc()
 				if params.AuditLog != nil {
@@ -147,7 +147,7 @@ func runRestore(p RestoreParams) error {
 		context.Background(), p.Backend,
 		p.Image, p.PakVersion, pakCachePath)
 	if err != nil {
-		return fmt.Errorf("ensure pak: %w", err)
+		return fmt.Errorf("set up build tools: %w", err)
 	}
 	// Only cache by-builder when the package store is available.
 	var builderPath string
@@ -159,7 +159,7 @@ func runRestore(p RestoreParams) error {
 		builderPath, err = buildercache.EnsureCached(
 			builderCachePath, p.BuilderVersion)
 		if err != nil {
-			return fmt.Errorf("ensure by-builder: %w", err)
+			return fmt.Errorf("set up build tools: %w", err)
 		}
 	}
 
@@ -182,7 +182,7 @@ func runRestore(p RestoreParams) error {
 			}
 			p.Sender.Write(fmt.Sprintf("build mode: %s", m.BuildMode()))
 		} else {
-			p.Sender.Write("build mode: bare scripts (scan_deps)")
+			p.Sender.Write("build mode: auto-detected from scripts")
 		}
 	} else {
 		// Legacy: bare scripts need preProcess container, manifest
@@ -298,13 +298,13 @@ func runRestore(p RestoreParams) error {
 		manifestSrc := filepath.Join(buildDir, "store-manifest.json")
 		manifestDst := filepath.Join(p.Paths.Base, "store-manifest.json")
 		if err := copyFile(manifestSrc, manifestDst); err != nil {
-			return fmt.Errorf("persist store-manifest: %w", err)
+			return fmt.Errorf("save dependency manifest: %w", err)
 		}
 
 		// Persist immutable baseline from the original deploy.
 		buildManifest := filepath.Join(p.Paths.Base, "store-manifest.json.build")
 		if err := copyFile(manifestSrc, buildManifest); err != nil {
-			return fmt.Errorf("persist build store-manifest: %w", err)
+			return fmt.Errorf("save dependency manifest: %w", err)
 		}
 
 		// pak.lock — debug/audit artifact; extraction failure is non-fatal.
