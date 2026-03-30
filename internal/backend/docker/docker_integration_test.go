@@ -777,6 +777,32 @@ func TestListManagedIncludesNetworks(t *testing.T) {
 	}
 }
 
+func TestContainerStats(t *testing.T) {
+	ctx := context.Background()
+	b, err := New(ctx, testConfig(), t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	workerID, _ := testSpawn(t, b, []string{"sleep", "300"})
+
+	b.mu.Lock()
+	ws := b.workers[workerID]
+	b.mu.Unlock()
+
+	stats, err := b.ContainerStats(ctx, ws.containerID)
+	if err != nil {
+		t.Fatalf("ContainerStats: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("ContainerStats returned nil")
+	}
+	if stats.MemoryLimitBytes == 0 {
+		t.Error("expected non-zero memory limit")
+	}
+	t.Logf("CPU=%.2f%%, Mem=%d/%d", stats.CPUPercent, stats.MemoryUsageBytes, stats.MemoryLimitBytes)
+}
+
 func TestParseMemoryLimitEdgeCases(t *testing.T) {
 	tests := []struct {
 		input  string

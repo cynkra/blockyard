@@ -977,3 +977,79 @@ func TestCLI_Refresh(t *testing.T) {
 		}
 	})
 }
+
+// ── Init command ───────────────────────────────────────────────────
+
+func TestInit(t *testing.T) {
+	t.Run("new manifest from DESCRIPTION", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)\n"), 0o644)
+		os.WriteFile(filepath.Join(dir, "DESCRIPTION"), []byte(
+			"Package: myapp\nTitle: Test\nType: ShinyApp\nDepends: shiny\n"), 0o644)
+
+		r := runNoEnv(t, "init", dir)
+		assertExit(t, r, 0)
+		assertContains(t, r.Stdout, "Wrote manifest.json")
+
+		if _, err := os.Stat(filepath.Join(dir, "manifest.json")); err != nil {
+			t.Error("manifest.json not created")
+		}
+	})
+
+	t.Run("existing manifest", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)\n"), 0o644)
+		os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(
+			`{"version":1,"metadata":{"appmode":"shiny","entrypoint":"app.R"},"files":{}}`+"\n"), 0o644)
+
+		r := runNoEnv(t, "init", dir)
+		assertExit(t, r, 0)
+		assertContains(t, r.Stdout, "already exists")
+	})
+
+	t.Run("nonexistent directory", func(t *testing.T) {
+		r := runNoEnv(t, "init", "/no/such/path")
+		if r.ExitCode == 0 {
+			t.Error("expected non-zero exit for nonexistent dir")
+		}
+	})
+
+	t.Run("json output", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)\n"), 0o644)
+		os.WriteFile(filepath.Join(dir, "DESCRIPTION"), []byte(
+			"Package: myapp\nTitle: Test\nType: ShinyApp\nDepends: shiny\n"), 0o644)
+
+		r := runNoEnv(t, "init", dir, "--json")
+		assertExit(t, r, 0)
+		j := r.jsonMap()
+		if j["status"] != "created" {
+			t.Errorf("status = %v, want created", j["status"])
+		}
+	})
+
+	t.Run("json output existing", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)\n"), 0o644)
+		os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(
+			`{"version":1,"metadata":{"appmode":"shiny","entrypoint":"app.R"},"files":{}}`+"\n"), 0o644)
+
+		r := runNoEnv(t, "init", dir, "--json")
+		assertExit(t, r, 0)
+		j := r.jsonMap()
+		if j["status"] != "exists" {
+			t.Errorf("status = %v, want exists", j["status"])
+		}
+	})
+
+	t.Run("bare scripts error", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "app.R"), []byte("library(shiny)\n"), 0o644)
+
+		r := runNoEnv(t, "init", dir)
+		if r.ExitCode == 0 {
+			t.Error("expected non-zero exit for bare scripts")
+		}
+		assertContains(t, r.Stderr, "cannot generate manifest from bare scripts")
+	})
+}
