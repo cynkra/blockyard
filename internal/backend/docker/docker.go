@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
@@ -30,6 +31,37 @@ import (
 
 // Compile-time interface check.
 var _ backend.Backend = (*DockerBackend)(nil)
+
+// dockerClient abstracts the Docker API methods used by DockerBackend,
+// enabling unit tests to supply a mock instead of a real daemon connection.
+// The concrete *client.Client satisfies this interface.
+type dockerClient interface {
+	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
+	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
+	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
+	ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error)
+	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
+	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
+	ContainerStatsOneShot(ctx context.Context, containerID string) (container.StatsResponseReader, error)
+	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
+	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
+	ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
+	ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error)
+	NetworkConnect(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error
+	NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
+	NetworkDisconnect(ctx context.Context, networkID, containerID string, force bool) error
+	NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
+	NetworkList(ctx context.Context, options network.ListOptions) ([]network.Summary, error)
+	NetworkRemove(ctx context.Context, networkID string) error
+}
+
+// cmdRunner executes a system command and returns its combined output.
+// The default uses exec.CommandContext; tests can substitute a mock.
+type cmdRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
 
 // workerState holds per-worker internal state that callers never see.
 // The Backend interface deals only in string worker IDs; this struct
@@ -51,10 +83,11 @@ const (
 
 // DockerBackend implements backend.Backend using the Docker Engine API.
 type DockerBackend struct {
-	client   *client.Client
+	client   dockerClient
 	serverID string // own container ID; empty = native mode
 	config   *config.DockerConfig
 	mountCfg MountConfig
+	runCmd   cmdRunner
 
 	mu      sync.Mutex
 	workers map[string]*workerState // keyed by worker ID
@@ -96,12 +129,13 @@ func New(ctx context.Context, cfg *config.DockerConfig, bundleServerPath string)
 		serverID: serverID,
 		config:   cfg,
 		mountCfg: mountCfg,
+		runCmd:   defaultCmdRunner,
 		workers:  make(map[string]*workerState),
 	}, nil
 }
 
 // Client returns the underlying Docker API client.
-func (d *DockerBackend) Client() *client.Client { return d.client }
+func (d *DockerBackend) Client() *client.Client { return d.client.(*client.Client) }
 
 // MountCfg returns the auto-detected mount configuration.
 func (d *DockerBackend) MountCfg() MountConfig { return d.mountCfg }
@@ -991,13 +1025,13 @@ func (d *DockerBackend) blockMetadataEndpoint(ctx context.Context, networkName, 
 
 	// Try inserting iptables rule
 	comment := "blockyard-" + workerID
-	insertErr := exec.CommandContext(ctx, "iptables",
+	_, insertErr := d.runCmd(ctx, "iptables",
 		"-I", "DOCKER-USER",
 		"-s", subnet,
 		"-d", "169.254.169.254/32",
 		"-j", "DROP",
 		"-m", "comment", "--comment", comment,
-	).Run()
+	)
 
 	if insertErr == nil {
 		slog.Debug("metadata endpoint blocked", "worker_id", workerID, "subnet", subnet)
@@ -1032,7 +1066,7 @@ func (d *DockerBackend) blockMetadataEndpoint(ctx context.Context, networkName, 
 func (d *DockerBackend) hostBlocksMetadataEndpoint() bool {
 	if d.serverID == "" {
 		// Native mode: check iptables DOCKER-USER chain directly
-		return DockerUserBlocksMetadata()
+		return d.dockerUserBlocksMetadata()
 	}
 
 	// Container mode: TCP connect test
@@ -1045,13 +1079,24 @@ func (d *DockerBackend) hostBlocksMetadataEndpoint() bool {
 }
 
 // DockerUserBlocksMetadata checks if the DOCKER-USER iptables chain contains a
-// DROP rule for 169.254.169.254. Tries both direct iptables and sudo iptables.
+// DROP rule for 169.254.169.254. Exported for use by preflight checks that run
+// before a DockerBackend exists.
 func DockerUserBlocksMetadata() bool {
+	return dockerUserBlocksMetadataWithRunner(defaultCmdRunner)
+}
+
+// dockerUserBlocksMetadata is the testable version that uses d.runCmd.
+func (d *DockerBackend) dockerUserBlocksMetadata() bool {
+	return dockerUserBlocksMetadataWithRunner(d.runCmd)
+}
+
+func dockerUserBlocksMetadataWithRunner(run cmdRunner) bool {
+	ctx := context.Background()
 	for _, args := range [][]string{
 		{"iptables", "-S", "DOCKER-USER"},
 		{"sudo", "iptables", "-S", "DOCKER-USER"},
 	} {
-		out, err := exec.Command(args[0], args[1:]...).Output()
+		out, err := run(ctx, args[0], args[1:]...)
 		if err != nil {
 			continue
 		}
@@ -1075,13 +1120,13 @@ func (d *DockerBackend) insertMetadataRule(ctx context.Context, networkName, wor
 	subnet := info.IPAM.Config[0].Subnet
 
 	comment := "blockyard-" + workerID
-	if err := exec.CommandContext(ctx, "iptables",
+	if _, err := d.runCmd(ctx, "iptables",
 		"-I", "DOCKER-USER",
 		"-s", subnet,
 		"-d", "169.254.169.254/32",
 		"-j", "DROP",
 		"-m", "comment", "--comment", comment,
-	).Run(); err != nil {
+	); err != nil {
 		return fmt.Errorf("insert iptables rule: %w", err)
 	}
 
@@ -1098,15 +1143,20 @@ func (d *DockerBackend) unblockMetadataForWorker(workerID string) {
 		return
 	}
 	comment := "blockyard-" + workerID
-	deleteIptablesRulesByComment(comment)
+	d.deleteIptablesRulesByComment(comment)
 }
 
 // deleteIptablesRulesByComment uses `iptables -S DOCKER-USER` to find rules
 // containing the given comment string, then deletes them with `iptables -D`.
 // The comment must match as a complete --comment argument (quoted in the -S
 // output), not as an arbitrary substring.
-func deleteIptablesRulesByComment(comment string) {
-	out, err := exec.Command("iptables", "-S", "DOCKER-USER").Output()
+func (d *DockerBackend) deleteIptablesRulesByComment(comment string) {
+	ctx := context.Background()
+	deleteIptablesRulesByCommentWithRunner(ctx, d.runCmd, comment)
+}
+
+func deleteIptablesRulesByCommentWithRunner(ctx context.Context, run cmdRunner, comment string) {
+	out, err := run(ctx, "iptables", "-S", "DOCKER-USER")
 	if err != nil {
 		return
 	}
@@ -1122,7 +1172,7 @@ func deleteIptablesRulesByComment(comment string) {
 			continue // didn't have the expected prefix
 		}
 		args := append([]string{"-D", "DOCKER-USER"}, strings.Fields(rule)...)
-		if err := exec.Command("iptables", args...).Run(); err != nil {
+		if _, err := run(ctx, "iptables", args...); err != nil {
 			slog.Warn("failed to delete iptables rule", "comment", comment, "error", err)
 		}
 	}
@@ -1132,7 +1182,11 @@ func deleteIptablesRulesByComment(comment string) {
 // from previous runs. Called at server startup. Uses prefix matching
 // (without closing quote) so that all per-worker rules are matched.
 func CleanupOrphanMetadataRules() {
-	out, err := exec.Command("iptables", "-S", "DOCKER-USER").Output()
+	cleanupOrphanMetadataRulesWithRunner(context.Background(), defaultCmdRunner)
+}
+
+func cleanupOrphanMetadataRulesWithRunner(ctx context.Context, run cmdRunner) {
+	out, err := run(ctx, "iptables", "-S", "DOCKER-USER")
 	if err != nil {
 		return
 	}
@@ -1146,7 +1200,7 @@ func CleanupOrphanMetadataRules() {
 			continue
 		}
 		args := append([]string{"-D", "DOCKER-USER"}, strings.Fields(rule)...)
-		if err := exec.Command("iptables", args...).Run(); err != nil {
+		if _, err := run(ctx, "iptables", args...); err != nil {
 			slog.Warn("failed to delete orphan iptables rule", "error", err)
 		}
 	}

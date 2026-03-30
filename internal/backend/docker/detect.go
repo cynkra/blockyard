@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-
-	"github.com/docker/docker/client"
 )
 
 // detectMountMode inspects the server's own container to determine how
@@ -21,7 +19,7 @@ import (
 //  4. If type=volume → store volume name and destination.
 //  5. If type=bind → store host source path and destination.
 //  6. If no covering mount is found → error.
-func detectMountMode(ctx context.Context, cli *client.Client, serverID, dataPath string) (MountConfig, error) {
+func detectMountMode(ctx context.Context, cli dockerClient, serverID, dataPath string) (MountConfig, error) {
 	if serverID == "" {
 		slog.Info("mount auto-detect: native mode (no container)")
 		return MountConfig{Mode: MountModeNative}, nil
