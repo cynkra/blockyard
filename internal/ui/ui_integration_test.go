@@ -150,9 +150,9 @@ func TestAllProtectedRoutesRedirect(t *testing.T) {
 		path      string
 		returnURL string
 	}{
-		{"/deployments", "return_url=/deployments"},
-		{"/api-keys", "return_url=/api-keys"},
-		{"/profile", "return_url=/profile"},
+		{"/deployments", "return_url=%2Fdeployments"},
+		{"/api-keys", "return_url=%2Fapi-keys"},
+		{"/profile", "return_url=%2Fprofile"},
 	}
 
 	for _, rt := range routes {

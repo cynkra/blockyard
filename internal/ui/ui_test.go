@@ -749,8 +749,8 @@ func TestDeploymentsPageRequiresAuth(t *testing.T) {
 	if !strings.Contains(loc, "/login") {
 		t.Errorf("expected redirect to /login, got %q", loc)
 	}
-	if !strings.Contains(loc, "return_url=/deployments") {
-		t.Errorf("expected return_url=/deployments in redirect, got %q", loc)
+	if !strings.Contains(loc, "return_url=%2Fdeployments") {
+		t.Errorf("expected return_url=%%2Fdeployments in redirect, got %q", loc)
 	}
 }
 
@@ -1015,8 +1015,8 @@ func TestProfilePageRequiresAuth(t *testing.T) {
 	if !strings.Contains(loc, "/login") {
 		t.Errorf("expected redirect to /login, got %q", loc)
 	}
-	if !strings.Contains(loc, "return_url=/profile") {
-		t.Errorf("expected return_url=/profile in redirect, got %q", loc)
+	if !strings.Contains(loc, "return_url=%2Fprofile") {
+		t.Errorf("expected return_url=%%2Fprofile in redirect, got %q", loc)
 	}
 }
 

@@ -12,4 +12,4 @@ EXPOSE 8090
 
 # Create the superuser before starting the server so the API is
 # immediately usable by the init container.
-CMD ["sh", "-c", "pocketbase superuser upsert ${PB_ADMIN_EMAIL:-admin@pocketbase.local} ${PB_ADMIN_PASSWORD:-pb-admin-dev-password} && exec pocketbase serve --http=0.0.0.0:8090"]
+CMD ["sh", "-c", "pocketbase superuser upsert \"${PB_ADMIN_EMAIL:-admin@pocketbase.local}\" \"${PB_ADMIN_PASSWORD:-pb-admin-dev-password}\" && exec pocketbase serve --http=0.0.0.0:8090"]

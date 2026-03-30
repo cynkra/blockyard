@@ -51,12 +51,14 @@ type ServerConfig struct {
 }
 
 type DockerConfig struct {
-	Socket         string   `toml:"socket"`
-	Image          string   `toml:"image"`
-	ShinyPort      int      `toml:"shiny_port"`
-	PakVersion     string   `toml:"pak_version"`     // "stable" (default), or pinned version
-	ServiceNetwork string   `toml:"service_network"` // Docker network whose containers are made reachable from workers
-	StoreRetention Duration `toml:"store_retention"`  // 0 = disabled (store grows indefinitely)
+	Socket             string   `toml:"socket"`
+	Image              string   `toml:"image"`
+	ShinyPort          int      `toml:"shiny_port"`
+	PakVersion         string   `toml:"pak_version"`           // "stable" (default), or pinned version
+	ServiceNetwork     string   `toml:"service_network"`       // Docker network whose containers are made reachable from workers
+	StoreRetention     Duration `toml:"store_retention"`        // 0 = disabled (store grows indefinitely)
+	DefaultMemoryLimit string   `toml:"default_memory_limit"`  // fallback memory limit for workers (e.g. "2g"); 0 = unlimited
+	DefaultCPULimit    float64  `toml:"default_cpu_limit"`     // fallback CPU limit for workers (e.g. 4.0); 0 = unlimited
 }
 
 type StorageConfig struct {
@@ -83,7 +85,8 @@ type ProxyConfig struct {
 	IdleWorkerTimeout  Duration `toml:"idle_worker_timeout"`
 	HTTPForwardTimeout Duration `toml:"http_forward_timeout"`
 	MaxCPULimit        *float64 `toml:"max_cpu_limit"`
-	TransferTimeout    Duration `toml:"transfer_timeout"` // default 60s when unset
+	TransferTimeout    Duration `toml:"transfer_timeout"`    // default 60s when unset
+	SessionMaxLifetime Duration `toml:"session_max_lifetime"` // 0 = unlimited (default); hard cap on session duration
 }
 
 type OidcConfig struct {
@@ -149,7 +152,7 @@ func Load(path string) (*Config, error) {
 
 func applyDefaults(cfg *Config) {
 	if cfg.Server.Bind == "" {
-		cfg.Server.Bind = "0.0.0.0:8080"
+		cfg.Server.Bind = "127.0.0.1:8080"
 	}
 	if cfg.Server.ShutdownTimeout.Duration == 0 {
 		cfg.Server.ShutdownTimeout.Duration = 30 * time.Second
