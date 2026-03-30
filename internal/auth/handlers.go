@@ -296,8 +296,13 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 		}
 
 		secure := secureFlag(deps.Config)
+		// SameSite=Lax is required here — Strict breaks the OIDC redirect
+		// chain (IdP → /callback → return URL) because browsers won't send
+		// a Strict cookie on the first navigation back from the IdP.
+		// CSRF is already mitigated by the state/nonce parameters verified
+		// above, so Lax provides equivalent protection for this flow.
 		sessionCookie := fmt.Sprintf(
-			"blockyard_session=%s; Path=/; HttpOnly; SameSite=Strict%s; Max-Age=%d",
+			"blockyard_session=%s; Path=/; HttpOnly; SameSite=Lax%s; Max-Age=%d",
 			cookieValue, secure, cookieMaxAge,
 		)
 
