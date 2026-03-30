@@ -162,7 +162,12 @@ func NewRouter(srv *server.Server) http.Handler {
 	})
 
 	// Swagger UI — serves OpenAPI spec and interactive documentation.
-	r.Get("/swagger/*", httpSwagger.WrapHandler)
+	// Gated behind API auth to prevent unauthenticated mapping of the
+	// API surface.
+	r.Group(func(r chi.Router) {
+		r.Use(APIAuth(srv))
+		r.Get("/swagger/*", httpSwagger.WrapHandler)
+	})
 
 	// Auth endpoints — strict rate limit to prevent brute-force.
 	r.Group(func(r chi.Router) {
