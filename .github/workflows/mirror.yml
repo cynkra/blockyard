@@ -14,14 +14,20 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        image:
-          - alpine:3.21
-          - debian:bookworm-slim
-          - dexidp/dex:v2.41.1
-          - golang:1.25.8-bookworm
-          - postgres:17
-          - postgrest/postgrest:v12.2.3
+        include:
+          - source: alpine:3.21
+            target: alpine:3.21
+          - source: debian:bookworm-slim
+            target: debian:bookworm-slim
+          - source: dexidp/dex:v2.41.1
+            target: dex:v2.41.1
+          - source: golang:1.25.8-bookworm
+            target: golang:1.25.8-bookworm
+          - source: postgres:17
+            target: postgres:17
+          - source: postgrest/postgrest:v12.2.3
+            target: postgrest:v12.2.3
     steps:
       - uses: imjasonh/setup-crane@v0.4
       - run: crane auth login ghcr.io -u ${{ github.actor }} -p '${{ secrets.GITHUB_TOKEN }}'
-      - run: crane copy docker.io/${{ matrix.image }} ghcr.io/cynkra/mirror/${{ matrix.image }}
+      - run: crane copy docker.io/${{ matrix.source }} ghcr.io/cynkra/mirror/${{ matrix.target }}
