@@ -6,11 +6,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var version = "dev"
+
 func main() {
 	root := &cobra.Command{
-		Use:   "by",
-		Short: "Blockyard CLI",
-		Long:  "Command-line client for the Blockyard deployment platform.",
+		Use:     "by",
+		Short:   "Blockyard CLI",
+		Long:    "Command-line client for the Blockyard deployment platform.",
+		Version: version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -36,6 +39,7 @@ func main() {
 		refreshCmd(),
 		logsCmd(),
 		usersCmd(),
+		selfUpdateCmd(),
 	)
 
 	// Aliases: create full copies so flags work correctly.

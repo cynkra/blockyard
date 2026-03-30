@@ -220,11 +220,11 @@ jobs:
           EXT=""; if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
             -ldflags "-s -w" \
-            -o blockyard-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/blockyard
+            -o by-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/by
       - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: blockyard-${{ matrix.goos }}-${{ matrix.goarch }}*
+          path: by-${{ matrix.goos }}-${{ matrix.goarch }}*
           retention-days: 7
 
   coverage:

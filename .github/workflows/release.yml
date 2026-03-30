@@ -89,15 +89,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
+          # Server (Linux only)
+          - cmd: blockyard
+            goos: linux
             goarch: amd64
-          - goos: linux
+          - cmd: blockyard
+            goos: linux
             goarch: arm64
-          - goos: darwin
+          # CLI client (all platforms)
+          - cmd: by
+            goos: linux
             goarch: amd64
-          - goos: darwin
+          - cmd: by
+            goos: linux
             goarch: arm64
-          - goos: windows
+          - cmd: by
+            goos: darwin
+            goarch: amd64
+          - cmd: by
+            goos: darwin
+            goarch: arm64
+          - cmd: by
+            goos: windows
             goarch: amd64
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -114,12 +127,12 @@ jobs:
           EXT=""; if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
             -ldflags "-s -w -X main.version=${VERSION}" \
-            -o blockyard-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/blockyard
+            -o ${{ matrix.cmd }}-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/${{ matrix.cmd }}
 
       - uses: actions/upload-artifact@v7
         with:
-          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: blockyard-${{ matrix.goos }}-${{ matrix.goarch }}*
+          name: binary-${{ matrix.cmd }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ matrix.cmd }}-${{ matrix.goos }}-${{ matrix.goarch }}*
           retention-days: 1
 
   github-release:
@@ -136,4 +149,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: blockyard-*
+          files: |
+            blockyard-*
+            by-*
