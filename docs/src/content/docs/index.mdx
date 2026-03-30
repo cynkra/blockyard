@@ -6,15 +6,15 @@ hero:
   tagline: Deploy and run Shiny applications in isolated containers with zero configuration.
   actions:
     - text: Get Started
-      link: /getting-started/overview/
+      link: /blockyard/getting-started/overview/
       icon: right-arrow
     - text: CLI Reference
-      link: /reference/cli/
+      link: /blockyard/reference/cli/
       icon: open-book
       variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 ## Why Blockyard?
 
@@ -39,4 +39,12 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 		Deploy from your terminal with `by deploy` or script with
 		the REST API. One config file. One binary.
 	</Card>
+</CardGrid>
+
+## Documentation
+
+<CardGrid>
+	<LinkCard title="Getting Started" description="Installation and first deployment." href="/blockyard/getting-started/overview/" />
+	<LinkCard title="Guides" description="Configuration, authorization, and operations." href="/blockyard/guides/deploying/" />
+	<LinkCard title="Reference" description="CLI commands, REST API, and configuration file." href="/blockyard/reference/cli/" />
 </CardGrid>
