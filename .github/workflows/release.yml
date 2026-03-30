@@ -29,12 +29,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      packages: read
       security-events: write
     steps:
       - uses: actions/checkout@v6
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.31.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.SERVER_IMAGE }}:build-linux-amd64
           format: sarif

@@ -273,13 +273,33 @@ func runCLIFail(t *testing.T, serverURL, token string, args ...string) (stdout, 
 }
 
 // waitForAppStatus polls `by get <app> --json` until the app reaches
-// the desired status or the timeout expires.
+// the desired status or the timeout expires. Transient CLI errors
+// (e.g. connection refused while the server is restarting) are
+// tolerated during polling.
 func waitForAppStatus(t *testing.T, serverURL, token, app, wantStatus string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		cmd := exec.Command(byBin, "get", app, "--json")
+		env := append(os.Environ(),
+			"BLOCKYARD_URL="+serverURL,
+			"BLOCKYARD_TOKEN="+token,
+		)
+		if covDir != "" {
+			env = append(env, "GOCOVERDIR="+filepath.Join(covDir, "cli"))
+		}
+		cmd.Env = env
+		out, err := cmd.Output()
+		if err != nil {
+			// Transient error — retry.
+			time.Sleep(2 * time.Second)
+			continue
+		}
 		var info map[string]any
-		runCLIJSON(t, serverURL, token, &info, "get", app)
+		if json.Unmarshal(out, &info) != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
 		if s, _ := info["status"].(string); s == wantStatus {
 			return
 		}
