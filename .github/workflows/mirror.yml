@@ -1,0 +1,27 @@
+name: Mirror Docker Hub images
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Monday 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        image:
+          - alpine:3.21
+          - debian:bookworm-slim
+          - dexidp/dex:v2.41.1
+          - golang:1.25.8-bookworm
+          - postgres:17
+          - postgrest/postgrest:v12.2.3
+    steps:
+      - uses: imjasonh/setup-crane@v0.4
+      - run: crane auth login ghcr.io -u ${{ github.actor }} -p '${{ secrets.GITHUB_TOKEN }}'
+      - run: crane copy docker.io/${{ matrix.image }} ghcr.io/cynkra/mirror/${{ matrix.image }}
