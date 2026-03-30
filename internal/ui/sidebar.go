@@ -98,6 +98,22 @@ type logWorkerViewData struct {
 	HistoricalLogs string
 }
 
+type workerDetailTabData struct {
+	App              *db.AppRow
+	WorkerID         string
+	Status           string
+	Uptime           string
+	CPUPercent       float64
+	MemoryUsageBytes uint64
+	Sessions         []workerDetailSession
+}
+
+type workerDetailSession struct {
+	ID              string
+	UserDisplayName string
+	StartedAt       string
+}
+
 // --- Shared helpers ---
 
 // uiResolveApp looks up an app by UUID first, then by name.
@@ -523,6 +539,200 @@ func (ui *UI) logsWorkerTab(srv *server.Server) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html")
 		if err := ui.fragments["tab_logs_worker.html"].Execute(w, data); err != nil {
 			fmt.Fprintf(w, `<p class="error-message">Failed to load logs.</p>`)
+		}
+	}
+}
+
+func (ui *UI) workerDetailTab(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		app, _ := ui.resolveAppForFragment(srv, w, r, authz.RelationContentCollaborator)
+		if app == nil {
+			return
+		}
+
+		workerID := chi.URLParam(r, "wid")
+		if workerID == "" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		aw, ok := srv.Workers.Get(workerID)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		status := "active"
+		if aw.Draining {
+			status = "draining"
+		}
+
+		uptime := time.Since(aw.StartedAt).Truncate(time.Second).String()
+
+		var cpuPercent float64
+		var memoryUsageBytes uint64
+		stats, err := srv.Backend.ContainerStats(context.Background(), workerID)
+		if err == nil && stats != nil {
+			cpuPercent = stats.CPUPercent
+			memoryUsageBytes = stats.MemoryUsageBytes
+		}
+
+		// Sessions for this worker.
+		entries := srv.Sessions.EntriesForWorker(workerID)
+		var sessions []workerDetailSession
+		for sid, entry := range entries {
+			displayName := entry.UserSub
+			if displayName != "" {
+				if u, err := srv.DB.GetUser(entry.UserSub); err == nil && u != nil && u.Name != "" {
+					displayName = u.Name
+				}
+			} else {
+				displayName = "anonymous"
+			}
+			startedAt := entry.LastAccess.UTC().Format(time.RFC3339)
+			sessions = append(sessions, workerDetailSession{
+				ID:              sid,
+				UserDisplayName: displayName,
+				StartedAt:       startedAt,
+			})
+		}
+
+		data := workerDetailTabData{
+			App:              app,
+			WorkerID:         workerID,
+			Status:           status,
+			Uptime:           uptime,
+			CPUPercent:       cpuPercent,
+			MemoryUsageBytes: memoryUsageBytes,
+			Sessions:         sessions,
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["tab_runtime_worker.html"].Execute(w, data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+func (ui *UI) deploymentLogFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := requireAuth(w, r)
+		if user == nil {
+			return
+		}
+
+		bundleID := chi.URLParam(r, "bundleID")
+		if bundleID == "" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		logOutput, err := srv.DB.GetBundleLog(bundleID)
+		if err != nil || logOutput == "" {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<p class="empty-state">No build log available</p>`)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<pre class="log-output">%s</pre>`, template.HTMLEscapeString(logOutput))
+	}
+}
+
+func (ui *UI) searchUsersFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := requireAuth(w, r)
+		if user == nil {
+			return
+		}
+
+		q := r.URL.Query().Get("q")
+		if q == "" {
+			w.Header().Set("Content-Type", "text/html")
+			return
+		}
+
+		users, err := srv.DB.SearchUsers(q, 10)
+		if err != nil {
+			w.Header().Set("Content-Type", "text/html")
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		for _, u := range users {
+			fmt.Fprintf(w,
+				`<div class="autocomplete-item" data-value="%s"><span class="autocomplete-name">%s</span><span class="autocomplete-email">%s</span></div>`,
+				template.HTMLEscapeString(u.Sub),
+				template.HTMLEscapeString(u.Name),
+				template.HTMLEscapeString(u.Email),
+			)
+		}
+	}
+}
+
+func (ui *UI) createAndAssignTag(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		app, _ := ui.resolveAppForFragment(srv, w, r, authz.RelationContentCollaborator)
+		if app == nil {
+			return
+		}
+
+		name := strings.TrimSpace(r.FormValue("name"))
+		if name == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `<p class="error-message">Tag name is required.</p>`)
+			return
+		}
+
+		// Find existing tag by name, or create a new one.
+		var tagID string
+		allTags, _ := srv.DB.ListTags()
+		for _, t := range allTags {
+			if strings.EqualFold(t.Name, name) {
+				tagID = t.ID
+				break
+			}
+		}
+		if tagID == "" {
+			tag, err := srv.DB.CreateTag(name)
+			if err != nil {
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			tagID = tag.ID
+		}
+
+		if err := srv.DB.AddAppTag(app.ID, tagID); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Re-render the settings tab.
+		tags, _ := srv.DB.ListAppTags(app.ID)
+		refreshedAllTags, _ := srv.DB.ListTags()
+
+		appliedIDs := make(map[string]bool, len(tags))
+		for _, t := range tags {
+			appliedIDs[t.ID] = true
+		}
+		var available []db.TagRow
+		for _, t := range refreshedAllTags {
+			if !appliedIDs[t.ID] {
+				available = append(available, t)
+			}
+		}
+
+		data := settingsTabData{
+			App:           app,
+			Status:        computeAppStatus(srv, app),
+			Tags:          tags,
+			AvailableTags: available,
+			ActiveBundle:  getActiveBundle(srv, app),
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["tab_settings.html"].Execute(w, data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}
 }

@@ -15,20 +15,21 @@
 <table class="data-table">
     <thead>
         <tr>
-            <th>App</th>
+            <th class="sortable-header"><a href="?sort=app_name&dir={{if and (eq .Sort "app_name") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{if .Search}}&search={{urlquery .Search}}{{end}}">App{{if eq .Sort "app_name"}} {{if eq .SortDir "asc"}}<svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>{{else}}<svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>{{end}}{{end}}</a></th>
             <th>Bundle</th>
-            <th>Deployed by</th>
-            <th>Deployed</th>
-            <th>Status</th>
+            <th class="sortable-header"><a href="?sort=deployed_by&dir={{if and (eq .Sort "deployed_by") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{if .Search}}&search={{urlquery .Search}}{{end}}">Deployed by{{if eq .Sort "deployed_by"}} {{if eq .SortDir "asc"}}<svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>{{else}}<svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>{{end}}{{end}}</a></th>
+            <th class="sortable-header"><a href="?sort=date&dir={{if and (eq .Sort "date") (eq .SortDir "desc")}}asc{{else}}desc{{end}}{{if .Search}}&search={{urlquery .Search}}{{end}}">Deployed{{if or (eq .Sort "date") (eq .Sort "")}} {{if eq .SortDir "asc"}}<svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>{{else}}<svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>{{end}}{{end}}</a></th>
+            <th class="sortable-header"><a href="?sort=status&dir={{if and (eq .Sort "status") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{if .Search}}&search={{urlquery .Search}}{{end}}">Status{{if eq .Sort "status"}} {{if eq .SortDir "asc"}}<svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>{{else}}<svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>{{end}}{{end}}</a></th>
         </tr>
     </thead>
     <tbody>
     {{range .Deployments}}
-        <tr>
+        <tr class="deployment-row" style="cursor:pointer"
+            onclick="toggleDeploymentLog(this, '{{.BundleID}}')">
             <td>{{.AppName}}</td>
-            <td class="monospace">{{.BundleID | truncate}}</td>
+            <td class="monospace" title="{{.BundleID}}">{{.BundleID | truncate}}</td>
             <td>{{.DeployedByName}}</td>
-            <td>{{.DeployedAt | timeAgo}}</td>
+            <td><span class="time-ago" data-timestamp="{{deref .DeployedAt}}">{{.DeployedAt | timeAgo}}</span></td>
             <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
         </tr>
     {{end}}
@@ -47,6 +48,24 @@
 </nav>
 {{end}}
 {{end}}
+
+<script>
+function toggleDeploymentLog(row, bundleID) {
+    var next = row.nextElementSibling;
+    if (next && next.classList.contains('log-detail-row')) {
+        next.remove();
+        return;
+    }
+    var tr = document.createElement('tr');
+    tr.className = 'log-detail-row';
+    var td = document.createElement('td');
+    td.colSpan = 5;
+    td.innerHTML = '<p class="empty-state">Loading...</p>';
+    tr.appendChild(td);
+    row.after(tr);
+    htmx.ajax('GET', '/ui/deployments/' + bundleID + '/logs', {target: td, swap: 'innerHTML'});
+}
+</script>
 {{else}}
 <p class="empty-state">No deployments found.</p>
 {{end}}

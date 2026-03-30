@@ -63,6 +63,24 @@ func Handler(srv *server.Server) http.Handler {
 				return
 			}
 		}
+		// 2. Try alias table (rename fallback).
+		if app == nil {
+			var phase string
+			app, phase, err = srv.DB.GetAppByAlias(appName)
+			if err != nil {
+				slog.Error("proxy: db error", "app", appName, "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if app != nil && phase == "redirect" {
+				newPath := "/app/" + app.Name + "/"
+				if rest := chi.URLParam(r, "*"); rest != "" {
+					newPath += rest
+				}
+				http.Redirect(w, r, newPath, http.StatusMovedPermanently)
+				return
+			}
+		}
 		if app == nil {
 			http.Error(w, "app not found", http.StatusNotFound)
 			return

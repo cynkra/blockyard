@@ -3875,8 +3875,8 @@ func TestEnableAppHXRequest(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 
-	if resp.Header.Get("HX-Trigger") != "appEnabled" {
-		t.Errorf("expected HX-Trigger=appEnabled, got %q", resp.Header.Get("HX-Trigger"))
+	if !strings.Contains(resp.Header.Get("HX-Trigger"), "appEnabled") {
+		t.Errorf("expected HX-Trigger to contain appEnabled, got %q", resp.Header.Get("HX-Trigger"))
 	}
 }
 
@@ -3899,8 +3899,8 @@ func TestDisableAppHXRequest(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	if resp.Header.Get("HX-Trigger") != "appDisabled" {
-		t.Errorf("expected HX-Trigger=appDisabled, got %q", resp.Header.Get("HX-Trigger"))
+	if !strings.Contains(resp.Header.Get("HX-Trigger"), "appDisabled") {
+		t.Errorf("expected HX-Trigger to contain appDisabled, got %q", resp.Header.Get("HX-Trigger"))
 	}
 }
 
@@ -3951,8 +3951,8 @@ func TestGrantAccessHXRequest(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 
-	if resp.Header.Get("HX-Trigger") != "accessGranted" {
-		t.Errorf("expected HX-Trigger=accessGranted, got %q", resp.Header.Get("HX-Trigger"))
+	if !strings.Contains(resp.Header.Get("HX-Trigger"), "accessGranted") {
+		t.Errorf("expected HX-Trigger to contain accessGranted, got %q", resp.Header.Get("HX-Trigger"))
 	}
 }
 
@@ -4078,8 +4078,8 @@ func TestAddAppTagHXRequest(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 
-	if resp.Header.Get("HX-Trigger") != "tagAdded" {
-		t.Errorf("expected HX-Trigger=tagAdded, got %q", resp.Header.Get("HX-Trigger"))
+	if !strings.Contains(resp.Header.Get("HX-Trigger"), "tagAdded") {
+		t.Errorf("expected HX-Trigger to contain tagAdded, got %q", resp.Header.Get("HX-Trigger"))
 	}
 }
 
@@ -4104,8 +4104,8 @@ func TestRemoveAppTagHXRequest(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
 	}
 
-	if resp.Header.Get("HX-Trigger") != "tagRemoved" {
-		t.Errorf("expected HX-Trigger=tagRemoved, got %q", resp.Header.Get("HX-Trigger"))
+	if !strings.Contains(resp.Header.Get("HX-Trigger"), "tagRemoved") {
+		t.Errorf("expected HX-Trigger to contain tagRemoved, got %q", resp.Header.Get("HX-Trigger"))
 	}
 }
 

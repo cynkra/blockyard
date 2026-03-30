@@ -10,7 +10,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='title']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -24,7 +24,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='description']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -45,18 +45,59 @@
             </span>
             {{end}}
         </div>
-        {{if .AvailableTags}}
         <form class="tag-add-form"
-              hx-post="/api/v1/apps/{{.App.ID}}/tags"
-              hx-swap="none">
-            <select name="tag_id">
-                {{range .AvailableTags}}
-                <option value="{{.ID}}">{{.Name}}</option>
-                {{end}}
-            </select>
+              hx-post="/ui/apps/{{.App.Name}}/tags"
+              hx-target="#tab-content"
+              hx-swap="innerHTML">
+            <div class="autocomplete-wrap">
+                <input type="text" name="name" placeholder="Add or create tag..."
+                       autocomplete="off"
+                       oninput="filterTagSuggestions(this)"
+                       onfocus="this.nextElementSibling.classList.remove('hidden')"
+                       onblur="setTimeout(function(){document.querySelector('.tag-suggest')?.classList.add('hidden')},200)">
+                <div class="autocomplete-list tag-suggest hidden">
+                    {{range .AvailableTags}}
+                    <div class="autocomplete-item tag-option" data-name="{{.Name}}"
+                         onmousedown="selectTagOption(this)">{{.Name}}</div>
+                    {{end}}
+                    <div class="autocomplete-item tag-create hidden" onmousedown="selectTagOption(this)"></div>
+                </div>
+            </div>
             <button type="submit" class="btn btn-sm">Add</button>
         </form>
-        {{end}}
+        <script>
+        function filterTagSuggestions(input) {
+            var val = input.value.toLowerCase().trim();
+            var list = input.nextElementSibling;
+            var options = list.querySelectorAll('.tag-option');
+            var createEl = list.querySelector('.tag-create');
+            var anyMatch = false;
+            var exactMatch = false;
+            options.forEach(function(opt) {
+                var name = opt.dataset.name.toLowerCase();
+                if (val === '' || name.indexOf(val) !== -1) {
+                    opt.classList.remove('hidden');
+                    anyMatch = true;
+                    if (name === val) exactMatch = true;
+                } else {
+                    opt.classList.add('hidden');
+                }
+            });
+            if (val && !exactMatch) {
+                createEl.textContent = 'Create "' + input.value.trim() + '"';
+                createEl.dataset.name = input.value.trim();
+                createEl.classList.remove('hidden');
+            } else {
+                createEl.classList.add('hidden');
+            }
+            list.classList.remove('hidden');
+        }
+        function selectTagOption(el) {
+            var input = el.closest('.autocomplete-wrap').querySelector('input');
+            input.value = el.dataset.name;
+            el.closest('.autocomplete-list').classList.add('hidden');
+        }
+        </script>
     </div>
 
     <h3>Resource Configuration</h3>
@@ -73,7 +114,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='memory_limit']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
         <span class="field-error" id="memory-limit-error"></span>
@@ -89,7 +130,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='cpu_limit']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -104,7 +145,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='max_workers_per_app']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -119,7 +160,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='max_sessions_per_worker']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -134,7 +175,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='pre_warmed_seats']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -153,7 +194,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='refresh_schedule']"
                     hx-target="next .field-feedback"
-                    hx-swap="innerHTML">&#10003;</button>
+                    hx-swap="innerHTML"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -178,6 +219,22 @@
     </div>
 
     <div class="danger-zone">
+        <div class="field-group">
+            <label for="rename-app">Rename app</label>
+            <p class="field-description">Changes the app URL. The old name redirects for 7 days.</p>
+            <div class="field-row">
+                <input type="text" id="rename-app" name="name"
+                       value="{{.App.Name}}"
+                       data-original="{{.App.Name}}"
+                       oninput="toggleSaveBtn(this)">
+                <button class="btn btn-danger btn-sm hidden"
+                        hx-patch="/api/v1/apps/{{.App.ID}}"
+                        hx-include="[name='name']"
+                        hx-confirm="Rename {{.App.Name}} to this new name? The old name will redirect for 7 days."
+                        hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }"
+                        onclick="this.classList.add('hidden')">Rename</button>
+            </div>
+        </div>
         <button class="btn btn-danger"
                 hx-delete="/api/v1/apps/{{.App.ID}}"
                 hx-confirm="Delete {{.App.Name}}? This can be undone within 30 days."

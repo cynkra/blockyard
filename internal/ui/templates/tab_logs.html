@@ -11,10 +11,10 @@
             <tr class="worker-entry {{if eq .Status "active"}}worker-active{{end}}"
                 hx-get="/ui/apps/{{$.App.Name}}/tab/logs/worker/{{.ID}}"
                 hx-target="#log-content">
-                <td class="monospace">{{.ID | truncate}}</td>
+                <td class="monospace" title="{{.ID}}">{{.ID | truncate}}</td>
                 <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
                 <td>{{.SessionCount}}</td>
-                <td>{{.StartedAt | timeAgo}}</td>
+                <td><span class="time-ago" data-timestamp="{{.StartedAt}}">{{.StartedAt | timeAgo}}</span></td>
             </tr>
             {{end}}
             </tbody>

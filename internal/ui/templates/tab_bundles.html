@@ -16,12 +16,12 @@
         {{range .Bundles}}
         <tr>
             <td class="monospace">
-                {{.ID | truncate}}
+                <span title="{{.ID}}">{{.ID | truncate}}</span>
                 {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}
                 <span class="status-badge status-ready">active</span>
                 {{end}}
             </td>
-            <td>{{.UploadedAt | timeAgo}}</td>
+            <td><span class="time-ago" data-timestamp="{{.UploadedAt}}">{{.UploadedAt | timeAgo}}</span></td>
             <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
             <td>
                 {{if and (eq .Status "ready") (or (not $.ActiveBundle) (ne .ID $.ActiveBundle.ID))}}

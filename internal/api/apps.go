@@ -86,7 +86,16 @@ func resolveApp(database *db.DB, id string) (*db.AppRow, error) {
 	if app != nil {
 		return app, nil
 	}
-	return database.GetAppByName(id)
+	app, err = database.GetAppByName(id)
+	if err != nil {
+		return nil, err
+	}
+	if app != nil {
+		return app, nil
+	}
+	// Try alias table as a final fallback (supports app renames).
+	app, _, err = database.GetAppByAlias(id)
+	return app, err
 }
 
 // resolveAppRelation loads an app + ACL grants, evaluates the caller's
@@ -301,6 +310,7 @@ func GetApp(srv *server.Server) http.HandlerFunc {
 }
 
 type updateAppRequest struct {
+	Name                 *string  `json:"name"`
 	MaxWorkersPerApp     *int     `json:"max_workers_per_app"`
 	MaxSessionsPerWorker *int     `json:"max_sessions_per_worker"`
 	MemoryLimit          *string  `json:"memory_limit"`
@@ -418,6 +428,32 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			}
 		}
 
+		// Handle rename separately — it has its own transaction.
+		if body.Name != nil && *body.Name != app.Name {
+			if !relation.CanManageACL() { // owner or admin only
+				notFound(w, "app not found")
+				return
+			}
+			newName := *body.Name
+			if err := validateAppName(newName); err != nil {
+				badRequest(w, err.Error())
+				return
+			}
+			oldName := app.Name
+			if err := srv.DB.RenameApp(app.ID, oldName, newName); err != nil {
+				if db.IsUniqueConstraintError(err) {
+					badRequest(w, "name already in use")
+					return
+				}
+				serverError(w, "rename app: "+err.Error())
+				return
+			}
+			if srv.AuditLog != nil {
+				srv.AuditLog.Emit(auditEntry(r, audit.ActionAppRename, app.ID,
+					map[string]any{"old_name": oldName, "new_name": newName}))
+			}
+		}
+
 		update := db.AppUpdate{
 			MaxWorkersPerApp:     body.MaxWorkersPerApp,
 			MaxSessionsPerWorker: body.MaxSessionsPerWorker,
@@ -506,6 +542,7 @@ func DeleteApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"App deleted","type":"success"}}`)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -618,7 +655,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		if r.Header.Get("HX-Request") != "" {
-			w.Header().Set("HX-Trigger", "bundleRolledBack")
+			w.Header().Set("HX-Trigger", `{"bundleRolledBack":"","showToast":{"message":"Rolled back","type":"success"}}`)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -687,6 +724,10 @@ func RestoreApp(srv *server.Server) http.HandlerFunc {
 		if srv.AuditLog != nil {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppRestore, app.ID,
 				map[string]any{"name": app.Name}))
+		}
+
+		if r.Header.Get("HX-Request") != "" {
+			w.Header().Set("HX-Trigger", `{"showToast":{"message":"App restored","type":"success"}}`)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

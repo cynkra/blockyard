@@ -8,21 +8,36 @@
     <form method="GET" action="/" class="search-form">
         <input type="search" name="search" value="{{.Search}}"
                placeholder="Search apps..." class="search-input" aria-label="Search apps">
-        {{if .AllTags}}
-        <select name="tag" aria-label="Filter by tag">
-            <option value="">All tags</option>
-            {{range .AllTags}}
-            <option value="{{.Name}}" {{if eq .Name $.ActiveTag}}selected{{end}}>
-                {{.Name}}
-            </option>
-            {{end}}
-        </select>
-        {{end}}
         <button type="submit" class="btn">Search</button>
     </form>
 </div>
 
+{{if .AllTags}}
+<div class="tag-browser">
+    {{range .AllTags}}
+    <a href="?{{if contains $.ActiveTags .Name}}{{else}}tag={{.Name}}&{{end}}{{range $.ActiveTags}}{{if ne . $.Search}}{{if ne . ""}}tag={{.}}&{{end}}{{end}}{{end}}{{if $.Search}}search={{$.Search}}&{{end}}tag_mode={{$.TagMode}}"
+       class="tag-browser-chip {{if contains $.ActiveTags .Name}}active{{end}}">
+        {{.Name}}<span class="tag-count">{{.AppCount}}</span>
+    </a>
+    {{end}}
+    {{if gt (len .ActiveTags) 1}}
+    <span class="tag-mode-toggle">
+        {{if eq .TagMode "and"}}<span>AND</span> | <a href="?{{range .ActiveTags}}tag={{.}}&{{end}}tag_mode=or{{if .Search}}&search={{.Search}}{{end}}">OR</a>
+        {{else}}<a href="?{{range .ActiveTags}}tag={{.}}&{{end}}tag_mode=and{{if .Search}}&search={{.Search}}{{end}}">AND</a> | <span>OR</span>{{end}}
+    </span>
+    {{end}}
+</div>
+{{end}}
+
 {{if .Apps}}
+<div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem">
+    <div class="sort-controls">
+        Sort by:
+        <a href="?sort=name&dir={{if and (eq .Sort "name") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if eq .Sort "name"}}active{{end}}">Name</a> |
+        <a href="?sort=status&dir={{if and (eq .Sort "status") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if eq .Sort "status"}}active{{end}}">Status</a> |
+        <a href="?sort=last_deployed&dir={{if and (eq .Sort "last_deployed") (eq .SortDir "desc")}}asc{{else}}desc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if or (eq .Sort "last_deployed") (eq .Sort "")}}active{{end}}">Last deployed</a>
+    </div>
+</div>
 <section class="app-grid">
     {{range .Apps}}
     <a href="/app/{{.Name}}/" class="app-card">
@@ -76,7 +91,7 @@ function setActiveTab(btn) {
 }
 
 function toggleSaveBtn(input) {
-    var saveBtn = input.closest('.field-row').querySelector('.field-save');
+    var saveBtn = input.closest('.field-row').querySelector('.field-save, .btn');
     if (!saveBtn) return;
     if (input.value !== input.dataset.original) {
         saveBtn.classList.remove('hidden');
@@ -110,13 +125,6 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
 document.body.addEventListener('htmx:beforeSwap', function(e) {
     if (e.detail.target.id === 'tab-content' && typeof stopLogs === 'function') {
         stopLogs();
-    }
-});
-
-document.body.addEventListener('htmx:responseError', function(e) {
-    var target = e.detail.target;
-    if (target) {
-        target.innerHTML = '<p class="error-message">Something went wrong. Try again.</p>';
     }
 });
 </script>

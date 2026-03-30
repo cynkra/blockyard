@@ -1,0 +1,40 @@
+<div class="worker-detail">
+    <div class="worker-detail-header">
+        <a class="btn-link" hx-get="/ui/apps/{{.App.Name}}/tab/runtime" hx-target="#tab-content">&larr; Back to workers</a>
+    </div>
+    <div class="worker-detail-stats">
+        <div class="worker-detail-stat">
+            <label>Worker ID</label>
+            <p class="monospace">{{.WorkerID}} <button class="copy-btn" onclick="navigator.clipboard.writeText('{{.WorkerID}}')">Copy</button></p>
+        </div>
+        <div class="worker-detail-stat">
+            <label>Status</label>
+            <p><span class="status-badge status-{{.Status}}">{{.Status}}</span></p>
+        </div>
+        <div class="worker-detail-stat">
+            <label>Uptime</label>
+            <p>{{.Uptime}}</p>
+        </div>
+        <div class="worker-detail-stat">
+            <label>CPU / Memory</label>
+            <p>{{printf "%.1f" .CPUPercent}}% / {{.MemoryUsageBytes | humanBytes}}</p>
+        </div>
+    </div>
+    {{if .Sessions}}
+    <h4>Connected Sessions</h4>
+    <table class="data-table">
+        <thead><tr><th>User</th><th>Started</th><th>Session ID</th></tr></thead>
+        <tbody>
+        {{range .Sessions}}
+        <tr>
+            <td>{{.UserDisplayName}}</td>
+            <td class="time-ago" data-timestamp="{{.StartedAt}}">{{.StartedAt | timeAgo}}</td>
+            <td class="monospace" title="{{.ID}}">{{.ID | truncate}}</td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p class="empty-state">No connected sessions.</p>
+    {{end}}
+</div>
