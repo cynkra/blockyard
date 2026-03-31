@@ -22,7 +22,7 @@ flags:
     carryforward: true
   ui:
     carryforward: true
-  e2e:
+  ex:
     carryforward: true
 
 ignore:

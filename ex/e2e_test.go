@@ -1,6 +1,6 @@
-//go:build e2e
+//go:build ex
 
-package e2e_test
+package ex_test
 
 import (
 	"fmt"

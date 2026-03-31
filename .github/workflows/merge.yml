@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       test:
-        description: "Run a single e2e test (leave empty for all)"
+        description: "Run a single example test (leave empty for all)"
         type: choice
         options:
           - ""
@@ -67,26 +67,26 @@ jobs:
       - name: Prepare coverage directory
         if: github.event_name != 'pull_request'
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
-      - name: Run e2e tests
+      - name: Run example tests
         if: github.event_name != 'pull_request'
-        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
+        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags ex -run ${{ matrix.test }} -timeout 20m ./ex/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
           E2E_PULL_POLICY: never
-      - name: Convert e2e coverage data
+      - name: Convert example coverage data
         if: github.event_name != 'pull_request'
         run: |
           for sub in cli server; do
             dir="/tmp/e2e-coverage/$sub"
             if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-              go tool covdata textfmt -i="$dir" -o="coverage-e2e-${sub}-${{ matrix.test }}.out"
+              go tool covdata textfmt -i="$dir" -o="coverage-ex-${sub}-${{ matrix.test }}.out"
             fi
           done
       - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
         with:
-          name: coverage-e2e-${{ matrix.test }}
-          path: coverage-e2e-*.out
+          name: coverage-ex-${{ matrix.test }}
+          path: coverage-ex-*.out
           if-no-files-found: ignore
           retention-days: 1
       - name: Dump compose logs on failure
@@ -95,17 +95,65 @@ jobs:
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
 
+  playwright:
+    name: Playwright
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: ./.github/actions/docker-cache
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          token: ${{ secrets.DOCKERHUB_TOKEN }}
+          images: >
+            dexidp/dex:v2.41.1
+            alpine:3.23
+            golang:1.25.8-bookworm
+      - name: Build blockyard image from source
+        run: docker build -t ghcr.io/cynkra/blockyard:latest -f docker/server.Dockerfile .
+      - name: Pull GHCR images
+        run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
+      - name: Block cloud metadata endpoint
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
+      - name: Start services
+        run: docker compose -f examples/hello-shiny/docker-compose.yml up -d --wait
+      - name: Deploy hello app
+        run: bash examples/hello-shiny/deploy.sh
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run Playwright tests
+        working-directory: e2e
+        run: npx playwright test
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 7
+      - name: Dump compose logs on failure
+        if: failure()
+        run: |
+          docker compose -f examples/hello-shiny/docker-compose.yml logs --no-color 2>/dev/null || true
+          docker compose -f examples/hello-shiny/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
+
   e2e:
     if: always()
-    needs: [run]
+    needs: [run, playwright]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - if: needs.run.result != 'success'
+      - if: needs.run.result != 'success' || needs.playwright.result != 'success'
         run: |
-          echo "::error::e2e failed (run result: ${{ needs.run.result }})"
+          echo "::error::Tests failed (run: ${{ needs.run.result }}, playwright: ${{ needs.playwright.result }})"
           exit 1
-      - run: echo "All e2e tests passed."
+      - run: echo "All tests passed."
 
   coverage:
     if: github.event_name == 'merge_group'
@@ -146,16 +194,16 @@ jobs:
       # Download e2e coverage artifacts from this workflow.
       - uses: actions/download-artifact@v8
         with:
-          pattern: coverage-e2e-*
+          pattern: coverage-ex-*
           merge-multiple: true
 
       # Aggregate all per-test e2e files into a single coverage-e2e.out.
-      - name: Aggregate e2e coverage
+      - name: Aggregate example coverage
         run: |
-          files=$(ls coverage-e2e-*.out 2>/dev/null || true)
+          files=$(ls coverage-ex-*.out 2>/dev/null || true)
           [ -z "$files" ] && exit 0
-          head -1 $(echo "$files" | head -1) > coverage-e2e.out
-          tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-e2e.out
+          head -1 $(echo "$files" | head -1) > coverage-ex.out
+          tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-ex.out
           rm -f $files
 
       - name: List coverage files
