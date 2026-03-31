@@ -132,7 +132,11 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	taskID := uuid.New().String()
 	sender := srv.Tasks.Create(taskID, app.ID)
 
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer restoreCancel()
+
 	bundle.SpawnRestore(bundle.RestoreParams{
+		Ctx:          restoreCtx,
 		Backend:      srv.Backend,
 		DB:           srv.DB,
 		Tasks:        srv.Tasks,
@@ -153,7 +157,7 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Minute):
+	case <-restoreCtx.Done():
 		t.Fatal("restore timed out after 5 minutes")
 	}
 

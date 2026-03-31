@@ -24,6 +24,7 @@ import (
 
 // RestoreParams holds everything the restore goroutine needs.
 type RestoreParams struct {
+	Ctx              context.Context // optional; defaults to context.Background()
 	Backend          backend.Backend
 	DB               *db.DB
 	Tasks            *task.Store
@@ -130,6 +131,11 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 }
 
 func runRestore(p RestoreParams) error {
+	ctx := p.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// 1. Update status to "building"
 	if err := p.DB.UpdateBundleStatus(p.BundleID, "building"); err != nil {
 		return fmt.Errorf("update status: %w", err)
@@ -144,7 +150,7 @@ func runRestore(p RestoreParams) error {
 		pakCachePath = filepath.Join(p.BasePath, ".pak-cache")
 	}
 	pakPath, err := pakcache.EnsureInstalled(
-		context.Background(), p.Backend,
+		ctx, p.Backend,
 		p.Image, p.PakVersion, pakCachePath)
 	if err != nil {
 		return fmt.Errorf("set up build tools: %w", err)
@@ -189,7 +195,7 @@ func runRestore(p RestoreParams) error {
 		// needs .pak-refs/.pak-repos text files.
 		if m == nil {
 			p.Sender.Write("scanning scripts for dependencies...")
-			if err := preProcess(context.Background(), p.Backend, pakPath, p); err != nil {
+			if err := preProcess(ctx, p.Backend, pakPath, p); err != nil {
 				return fmt.Errorf("preprocess: %w", err)
 			}
 			m, err = resolveManifest(p.Paths.Unpacked)
@@ -274,7 +280,7 @@ func runRestore(p RestoreParams) error {
 		}
 	}
 
-	result, err := p.Backend.Build(context.Background(), spec)
+	result, err := p.Backend.Build(ctx, spec)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
