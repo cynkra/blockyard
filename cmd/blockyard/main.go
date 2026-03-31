@@ -95,7 +95,7 @@ func main() {
 
 	// Initialize package store.
 	storePath := filepath.Join(cfg.Storage.BundleServerPath, ".pkg-store")
-	if err := os.MkdirAll(storePath, 0o755); err != nil {
+	if err := os.MkdirAll(storePath, 0o755); err != nil { //nolint:gosec // G301: package store dir, not secrets
 		slog.Error("failed to create package store", "error", err)
 		os.Exit(1)
 	}
