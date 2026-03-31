@@ -20,7 +20,6 @@ on:
           - openbao
           - pak
           - ui
-          - binaries
 
 permissions:
   contents: read
@@ -190,42 +189,6 @@ jobs:
           name: coverage-ui
           path: coverage-ui.out
           retention-days: 1
-
-  binaries:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    needs: [unit]
-    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'binaries')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Build binary
-        run: |
-          EXT=""; if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
-            -ldflags "-s -w" \
-            -o by-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/by
-      - uses: actions/upload-artifact@v7
-        with:
-          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: by-${{ matrix.goos }}-${{ matrix.goarch }}*
-          retention-days: 7
 
   coverage:
     runs-on: ubuntu-24.04
