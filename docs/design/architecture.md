@@ -44,16 +44,16 @@ IDs to network addresses. Both are concrete in-memory structs for v0 (map +
 `sync.RWMutex`). Load balancing (v1) sits on top — it picks a worker and
 writes the mapping; the stores just hold the data.
 
-When v4 needs PostgreSQL-backed implementations for multi-node HA, extracting
-an interface in Go is a low-cost refactor — define the interface at the call
-site and the existing struct already satisfies it.
+v3 extracts interfaces and adds Redis-backed implementations — needed for
+rolling updates (two servers sharing state during the overlap) and reused
+in v4 for multi-node HA. See [update.md](update.md) for the full design.
 
 ## Task Store
 
 An in-memory task store manages restore tasks. It provides a create/subscribe
 pattern: background restore goroutines write log lines; HTTP handlers read
-buffered output and optionally follow live lines via a channel. Same interface
-extraction story as session/worker routing for v4 HA.
+buffered output and optionally follow live lines via a channel. Same
+interface extraction story as session/worker routing (v3).
 
 ## Network Isolation
 
@@ -302,24 +302,36 @@ On SIGTERM the server shuts down cleanly in this order:
 7. **Flush and close** — flush structured logs and audit log, close the DB
    connection
 
-All active user sessions are killed on shutdown. This is intentional — a
-server restart is a rare, disruptive operational event, not a rolling update.
+All active user sessions are killed on SIGTERM shutdown. This is the
+default behavior for operators who are not using rolling updates.
 
 No hot reload. Config changes require a restart.
 
+### Drain Mode (v3)
+
+`SIGUSR1` triggers an alternative shutdown path for rolling updates.
+Health endpoints (`/healthz`, `/readyz`) return 503 immediately — this
+is the proxy-agnostic cutover signal. In-flight requests drain, background
+goroutines stop, but workers and networks are left intact for the new
+server to adopt via Redis. See [update.md](update.md) for the full
+rolling update design.
+
+`SIGTERM` retains the full-shutdown behavior described above. `docker
+stop` sends SIGTERM, so operators who are not using rolling updates are
+unaffected.
+
 ### State on Restart
 
-The server makes no attempt to recover or reconnect to containers after a
-restart — clean or otherwise.
+**Without Redis (default):** the server makes no attempt to recover or
+reconnect to containers after a restart. Clean shutdown removes all
+containers and networks. Unclean shutdown (crash, OOM kill) leaves
+orphans; startup cleanup removes them. All sessions are lost.
 
-**Clean shutdown:** all containers and networks are stopped and removed before
-exit. Next startup begins with an empty slate.
-
-**Unclean shutdown** (crash, OOM kill, power loss): containers may still be
-running on the host. Orphan cleanup on startup removes them. End state is the
-same as a clean shutdown.
-
-In both cases all active user sessions are lost. Simplicity over resilience.
+**With Redis (v3):** session routing and worker state are in Redis, not
+in-memory. After a drain-mode shutdown, the new server finds existing
+workers via Redis and resumes serving. After an unclean shutdown, the
+new server reconciles Redis state against Docker (evicting workers that
+no longer exist). Sessions survive across server restarts.
 
 ## Database Schema
 

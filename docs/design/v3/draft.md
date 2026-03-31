@@ -1,9 +1,72 @@
 # blockyard v3 — Draft Notes
 
-v3 has two tracks: the lightweight process backend (the headline feature)
-and deferred single-node features that didn't make the v2 cut. The process
-backend is the architectural work; the deferred items are scoped extensions
-to the existing Docker deployment.
+v3 has two tracks: **operations** (rolling updates, Redis shared state,
+interface extraction) and **runtime** (process backend, pre-fork worker
+model, deferred single-node features). The operations track runs first —
+once v2 is deployed, low-friction updates are immediately needed, and the
+shared state layer directly serves v4 clustering.
+
+## Operations Track
+
+### Rolling Updates
+
+Zero-downtime server updates for production deployments. The full design
+is in [update.md](../update.md). Summary of the approach:
+
+**Two update paths** depending on infrastructure:
+
+- **Basic** (no prerequisites): `docker compose pull && docker compose
+  up -d`. Workers die, sessions restart. The existing behavior,
+  documented rather than orchestrated.
+- **Rolling** (requires Redis + reverse proxy with Docker service
+  discovery): `by admin update`. Old and new server containers overlap,
+  share routing state via Redis, and the proxy shifts traffic based on
+  health checks. Zero downtime, workers survive.
+
+**Key components:**
+
+- **Redis shared state** — session store, worker registry, and worker
+  map move behind Go interfaces with in-memory (default) and Redis
+  implementations. Redis enables the overlap: both servers read/write
+  the same state. This is the same shared state layer v4 needs for
+  multi-replica Kubernetes deployments.
+
+- **Interface extraction** — `SessionStore`, `WorkerRegistry`, and
+  `WorkerMap` become interfaces defined at call sites. Mechanical
+  refactor — existing concrete types already satisfy the shapes. Moved
+  forward from v4 because rolling updates need it now.
+
+- **Worker token persistence** — the HMAC signing key moves from
+  ephemeral to persistent. Primary storage in OpenBao; file-based
+  fallback on the data volume.
+
+- **Drain mode** — `SIGUSR1` triggers a new shutdown path: health
+  endpoints return 503 (proxy-agnostic cutover signal), in-flight
+  requests drain, but workers are left alive. `SIGTERM` retains the
+  existing full-shutdown behavior.
+
+- **`by admin update`** — CLI command orchestrating the full flow: pull,
+  backup, start new container, wait ready, drain old, clean up. Falls
+  back to printing manual compose commands when Redis is absent.
+
+- **Health-check-aware shutdown** — even on the basic path (SIGTERM),
+  the server returns 503 on health endpoints before draining. Any
+  health-check-aware proxy benefits, even without service discovery.
+
+### Client-Server Version Negotiation (#70)
+
+Server exposes its version via a response header or endpoint. CLI checks
+compatibility on connect and warns/errors on mismatch. Compatibility
+policy: CLI major version must match server major version.
+
+### Update Notifications (#71)
+
+Server periodically checks GitHub Releases API and surfaces available
+updates in logs and/or the health endpoint. CLI checks on invocation
+(throttled to once per day) and prints a one-line notice. Both respect
+the update channel (stable vs main).
+
+## Runtime Track
 
 ## Process Backend
 
