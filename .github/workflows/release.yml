@@ -23,6 +23,8 @@ jobs:
   server-image:
     needs: e2e
     uses: ./.github/workflows/server.yml
+    with:
+      version: ${{ github.ref_name }}
 
   scan-image:
     needs: server-image
