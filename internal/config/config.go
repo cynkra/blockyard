@@ -331,9 +331,8 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 					fv.Set(reflect.ValueOf(&f))
 				}
 			case reflect.Int:
-				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-					v := int(n)
-					fv.Set(reflect.ValueOf(&v))
+				if n, err := strconv.Atoi(val); err == nil {
+					fv.Set(reflect.ValueOf(&n))
 				}
 			case reflect.Int64:
 				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
