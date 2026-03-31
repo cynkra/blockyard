@@ -33,17 +33,13 @@ func selfUpdateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			jsonOutput := jsonFlag(cmd)
 
-			if version == "dev" {
-				exitErrorf(jsonOutput, "self-update is not available for dev builds")
-			}
-
 			latest, err := fetchLatestRelease()
 			if err != nil {
 				exitError(jsonOutput, fmt.Errorf("fetch latest release: %w", err))
 			}
 
 			latestVersion := strings.TrimPrefix(latest.TagName, "v")
-			if latestVersion == version {
+			if version != "dev" && latestVersion == version {
 				if jsonOutput {
 					printJSON(map[string]any{
 						"current_version": version,
