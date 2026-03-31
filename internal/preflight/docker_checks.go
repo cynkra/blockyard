@@ -12,10 +12,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
@@ -98,14 +97,14 @@ func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
 	}
 
 	// Start a container that sleeps, bind-mounting the empty dir read-only.
-	resp, err := deps.Client.ContainerCreate(ctx,
-		&container.Config{
+	resp, err := deps.Client.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
 			Image: deps.Config.Image,
 			Cmd:   []string{"sleep", "30"},
 		},
-		hostCfg,
-		nil, nil, containerName,
-	)
+		HostConfig: hostCfg,
+		Name:       containerName,
+	})
 	if err != nil {
 		return &Result{
 			Name:     "ro_bind_visibility",
@@ -113,9 +112,9 @@ func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
 			Message:  fmt.Sprintf("failed to create test container: %v", err),
 		}
 	}
-	defer deps.Client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true}) //nolint:errcheck
+	defer deps.Client.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true}) //nolint:errcheck
 
-	if err := deps.Client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+	if _, err := deps.Client.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
 		return &Result{
 			Name:     "ro_bind_visibility",
 			Severity: SeverityError,
@@ -282,12 +281,12 @@ func ensureImage(ctx context.Context, cli *client.Client, img string) error {
 	}
 
 	slog.Info("preflight: pulling image", "image", img)
-	reader, err := cli.ImagePull(ctx, img, image.PullOptions{})
+	pullResp, err := cli.ImagePull(ctx, img, client.ImagePullOptions{})
 	if err != nil {
 		return fmt.Errorf("pull %s: %w", img, err)
 	}
-	defer reader.Close()
-	if _, err := io.Copy(io.Discard, reader); err != nil {
+	defer pullResp.Close()
+	if _, err := io.Copy(io.Discard, pullResp); err != nil {
 		return fmt.Errorf("pull %s: %w", img, err)
 	}
 	return nil
@@ -302,22 +301,28 @@ func runEphemeralContainer(
 	hostCfg *container.HostConfig,
 	name string,
 ) (string, int, error) {
-	resp, err := cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, name)
+	resp, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config:     cfg,
+		HostConfig: hostCfg,
+		Name:       name,
+	})
 	if err != nil {
 		return "", -1, fmt.Errorf("create container: %w", err)
 	}
-	defer cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true}) //nolint:errcheck
+	defer cli.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true}) //nolint:errcheck
 
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+	if _, err := cli.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
 		return "", -1, fmt.Errorf("start container: %w", err)
 	}
 
-	waitCh, errCh := cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	waitResult := cli.ContainerWait(ctx, resp.ID, client.ContainerWaitOptions{
+		Condition: container.WaitConditionNotRunning,
+	})
 	select {
-	case result := <-waitCh:
+	case result := <-waitResult.Result:
 		output, _ := containerLogs(ctx, cli, resp.ID)
 		return output, int(result.StatusCode), nil
-	case err := <-errCh:
+	case err := <-waitResult.Error:
 		return "", -1, fmt.Errorf("wait: %w", err)
 	case <-ctx.Done():
 		return "", -1, ctx.Err()
@@ -327,7 +332,7 @@ func runEphemeralContainer(
 // containerExec runs a command inside a running container and returns
 // stdout, exit code, and any error.
 func containerExec(ctx context.Context, cli *client.Client, containerID string, cmd []string) (string, int, error) {
-	exec, err := cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+	execResult, err := cli.ExecCreate(ctx, containerID, client.ExecCreateOptions{
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -336,7 +341,7 @@ func containerExec(ctx context.Context, cli *client.Client, containerID string, 
 		return "", -1, err
 	}
 
-	attach, err := cli.ContainerExecAttach(ctx, exec.ID, container.ExecAttachOptions{})
+	attach, err := cli.ExecAttach(ctx, execResult.ID, client.ExecAttachOptions{})
 	if err != nil {
 		return "", -1, err
 	}
@@ -348,7 +353,7 @@ func containerExec(ctx context.Context, cli *client.Client, containerID string, 
 		_ = err
 	}
 
-	inspect, err := cli.ContainerExecInspect(ctx, exec.ID)
+	inspect, err := cli.ExecInspect(ctx, execResult.ID, client.ExecInspectOptions{})
 	if err != nil {
 		return stdout.String(), -1, err
 	}
@@ -358,7 +363,7 @@ func containerExec(ctx context.Context, cli *client.Client, containerID string, 
 
 // containerLogs fetches the combined stdout/stderr of a stopped container.
 func containerLogs(ctx context.Context, cli *client.Client, containerID string) (string, error) {
-	reader, err := cli.ContainerLogs(ctx, containerID, container.LogsOptions{
+	reader, err := cli.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 	})

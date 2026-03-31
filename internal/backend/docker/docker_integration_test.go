@@ -14,9 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/client"
 	"github.com/google/uuid"
 
 	"github.com/cynkra/blockyard/internal/backend"
@@ -238,8 +237,8 @@ func TestNetworkIsolation(t *testing.T) {
 	b.mu.Unlock()
 
 	ip2 := strings.Split(addr2, ":")[0]
-	execResp, err := rawClient(t, b).ContainerExecCreate(ctx, ws1.containerID,
-		container.ExecOptions{
+	execResp, err := rawClient(t, b).ExecCreate(ctx, ws1.containerID,
+		client.ExecCreateOptions{
 			Cmd: []string{"sh", "-c", fmt.Sprintf(
 				"wget -q -O /dev/null --timeout=2 http://%s:%d/ 2>&1 || exit 1",
 				ip2, 8080,
@@ -250,12 +249,12 @@ func TestNetworkIsolation(t *testing.T) {
 		t.Fatalf("ExecCreate: %v", err)
 	}
 
-	if err := rawClient(t, b).ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+	if _, err := rawClient(t, b).ExecStart(ctx, execResp.ID, client.ExecStartOptions{}); err != nil {
 		t.Fatalf("ExecStart: %v", err)
 	}
 
 	time.Sleep(3 * time.Second)
-	inspect, err := rawClient(t, b).ContainerExecInspect(ctx, execResp.ID)
+	inspect, err := rawClient(t, b).ExecInspect(ctx, execResp.ID, client.ExecInspectOptions{})
 	if err != nil {
 		t.Fatalf("ExecInspect: %v", err)
 	}
@@ -296,8 +295,8 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 	ws := b.workers[workerID]
 	b.mu.Unlock()
 
-	execResp, err := rawClient(t, b).ContainerExecCreate(ctx, ws.containerID,
-		container.ExecOptions{
+	execResp, err := rawClient(t, b).ExecCreate(ctx, ws.containerID,
+		client.ExecCreateOptions{
 			Cmd: []string{"wget", "--spider", "--timeout=2",
 				"http://169.254.169.254/"},
 		},
@@ -306,12 +305,12 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 		t.Fatalf("ExecCreate: %v", err)
 	}
 
-	if err := rawClient(t, b).ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+	if _, err := rawClient(t, b).ExecStart(ctx, execResp.ID, client.ExecStartOptions{}); err != nil {
 		t.Fatalf("ExecStart: %v", err)
 	}
 
 	time.Sleep(3 * time.Second)
-	inspect, err := rawClient(t, b).ContainerExecInspect(ctx, execResp.ID)
+	inspect, err := rawClient(t, b).ExecInspect(ctx, execResp.ID, client.ExecInspectOptions{})
 	if err != nil {
 		t.Fatalf("ExecInspect: %v", err)
 	}
@@ -531,14 +530,14 @@ func TestSpawnWithMemoryLimit(t *testing.T) {
 	ws := b.workers[workerID]
 	b.mu.Unlock()
 
-	info, err := b.client.ContainerInspect(ctx, ws.containerID)
+	cResult, err := b.client.ContainerInspect(ctx, ws.containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		t.Fatalf("ContainerInspect: %v", err)
 	}
 
 	expectedBytes := int64(64 * 1024 * 1024)
-	if info.HostConfig.Memory != expectedBytes {
-		t.Fatalf("expected memory limit %d bytes, got %d", expectedBytes, info.HostConfig.Memory)
+	if cResult.Container.HostConfig.Memory != expectedBytes {
+		t.Fatalf("expected memory limit %d bytes, got %d", expectedBytes, cResult.Container.HostConfig.Memory)
 	}
 }
 
@@ -572,14 +571,14 @@ func TestSpawnWithCPULimit(t *testing.T) {
 	ws := b.workers[workerID]
 	b.mu.Unlock()
 
-	info, err := b.client.ContainerInspect(ctx, ws.containerID)
+	cResult, err := b.client.ContainerInspect(ctx, ws.containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		t.Fatalf("ContainerInspect: %v", err)
 	}
 
 	expectedNanoCPUs := int64(0.5 * 1e9)
-	if info.HostConfig.NanoCPUs != expectedNanoCPUs {
-		t.Fatalf("expected NanoCPUs %d, got %d", expectedNanoCPUs, info.HostConfig.NanoCPUs)
+	if cResult.Container.HostConfig.NanoCPUs != expectedNanoCPUs {
+		t.Fatalf("expected NanoCPUs %d, got %d", expectedNanoCPUs, cResult.Container.HostConfig.NanoCPUs)
 	}
 }
 
@@ -615,8 +614,8 @@ func TestSpawnWithEnvVars(t *testing.T) {
 	ws := b.workers[workerID]
 	b.mu.Unlock()
 
-	execResp, err := rawClient(t, b).ContainerExecCreate(ctx, ws.containerID,
-		container.ExecOptions{
+	execResp, err := rawClient(t, b).ExecCreate(ctx, ws.containerID,
+		client.ExecCreateOptions{
 			Cmd:          []string{"sh", "-c", "echo $TEST_VAR"},
 			AttachStdout: true,
 		},
@@ -625,7 +624,7 @@ func TestSpawnWithEnvVars(t *testing.T) {
 		t.Fatalf("ExecCreate: %v", err)
 	}
 
-	attachResp, err := rawClient(t, b).ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	attachResp, err := rawClient(t, b).ExecAttach(ctx, execResp.ID, client.ExecAttachOptions{})
 	if err != nil {
 		t.Fatalf("ExecAttach: %v", err)
 	}

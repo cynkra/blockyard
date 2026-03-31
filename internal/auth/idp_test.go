@@ -16,10 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
+	"net/netip"
+
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/config"
@@ -42,7 +43,7 @@ var containerID string
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "docker client: %v\n", err)
 		os.Exit(1)
@@ -50,13 +51,13 @@ func TestMain(m *testing.M) {
 	defer cli.Close()
 
 	// Pull image (may already be cached from CI pre-pull step).
-	reader, err := cli.ImagePull(ctx, keycloakImage, image.PullOptions{})
+	pullResp, err := cli.ImagePull(ctx, keycloakImage, client.ImagePullOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "image pull: %v\n", err)
 		os.Exit(1)
 	}
-	io.Copy(io.Discard, reader)
-	reader.Close()
+	io.Copy(io.Discard, pullResp)
+	pullResp.Close()
 
 	// Resolve the absolute path to the realm import file.
 	realmFile, err := filepath.Abs("testdata/blockyard-test-realm.json")
@@ -66,48 +67,48 @@ func TestMain(m *testing.M) {
 	}
 
 	// Create Keycloak container.
-	kcPort := nat.Port("8080/tcp")
-	resp, err := cli.ContainerCreate(ctx,
-		&container.Config{
+	kcPort := network.MustParsePort("8080/tcp")
+	resp, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
 			Image: keycloakImage,
 			Cmd:   []string{"start-dev", "--import-realm", "--health-enabled=true"},
 			Env: []string{
 				"KEYCLOAK_ADMIN=admin",
 				"KEYCLOAK_ADMIN_PASSWORD=admin",
 			},
-			ExposedPorts: nat.PortSet{kcPort: struct{}{}},
+			ExposedPorts: network.PortSet{kcPort: struct{}{}},
 			Labels:       map[string]string{"blockyard-test": "idp"},
 		},
-		&container.HostConfig{
-			PortBindings: nat.PortMap{
-				kcPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "0"}},
+		HostConfig: &container.HostConfig{
+			PortBindings: network.PortMap{
+				kcPort: []network.PortBinding{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "0"}},
 			},
 			Binds: []string{
 				realmFile + ":/opt/keycloak/data/import/blockyard-test-realm.json:ro",
 			},
 		},
-		nil, nil, "blockyard-idp-test",
-	)
+		Name: "blockyard-idp-test",
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "container create: %v\n", err)
 		os.Exit(1)
 	}
 	containerID = resp.ID
 
-	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+	if _, err := cli.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
 		fmt.Fprintf(os.Stderr, "container start: %v\n", err)
-		cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		cli.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 		os.Exit(1)
 	}
 
 	// Get the mapped port.
-	inspect, err := cli.ContainerInspect(ctx, containerID)
+	cResult, err := cli.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "container inspect: %v\n", err)
 		cleanup(ctx, cli)
 		os.Exit(1)
 	}
-	bindings := inspect.NetworkSettings.Ports[kcPort]
+	bindings := cResult.Container.NetworkSettings.Ports[kcPort]
 	if len(bindings) == 0 {
 		fmt.Fprintf(os.Stderr, "no port bindings for %s\n", kcPort)
 		cleanup(ctx, cli)
@@ -137,7 +138,7 @@ func TestMain(m *testing.M) {
 	if !ready {
 		fmt.Fprintf(os.Stderr, "keycloak did not become ready within 120s\n")
 		// Dump container logs for debugging.
-		if logReader, logErr := cli.ContainerLogs(ctx, containerID, container.LogsOptions{
+		if logReader, logErr := cli.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 			ShowStdout: true, ShowStderr: true,
 		}); logErr == nil {
 			fmt.Fprintf(os.Stderr, "--- keycloak container logs ---\n")
@@ -156,8 +157,8 @@ func TestMain(m *testing.M) {
 
 func cleanup(ctx context.Context, cli *client.Client) {
 	timeout := 10
-	cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
-	cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+	cli.ContainerStop(ctx, containerID, client.ContainerStopOptions{Timeout: &timeout})
+	cli.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 }
 
 // noRedirectClient returns an HTTP client that never follows redirects.
