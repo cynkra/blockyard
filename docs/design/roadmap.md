@@ -35,11 +35,13 @@ required to call the product useful. v2 adds single-node production
 completeness (CLI, scale-to-zero, pre-warming, build pipeline
 modernization with pak, a content-addressable package store, board
 storage via PostgreSQL + PostgREST + vault Identity OIDC, cold-start
-loading page). v3 adds a pre-fork worker model for the Docker backend (per-user forked
-processes with CoW memory sharing and post-fork sandboxing), the
-lightweight process backend, and deferred single-node features (data
-mounts, Docker daemon hardening, multiple execution environment images,
-UI branding). v4 adds Kubernetes for multi-node scaling.
+loading page). v3 has two tracks: operations (rolling updates via Redis
+shared state, interface extraction for session/worker stores, `by admin
+update` CLI command) and runtime (pre-fork worker model for the Docker
+backend, lightweight process backend, deferred single-node features).
+The operations track runs first — it enables low-friction iteration on
+deployed v2 instances and front-loads the shared state layer needed for
+v4 clustering. v4 adds Kubernetes for multi-node scaling.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
 interface (Docker vs. process vs. Kubernetes). This abstraction is worth its
@@ -211,10 +213,9 @@ plane protected by a single static bearer token in config.
 
 - **Session and worker routing.** Cookie-based session pinning. A session store
   maps session IDs to worker IDs; a worker registry maps worker IDs to network
-  addresses. These start as concrete in-memory structs for v0. When v2 needs
-  PostgreSQL-backed implementations for HA, extracting an interface is a
-  low-cost refactor — define the interface at the call site and any struct with
-  matching methods already satisfies it.
+  addresses. These start as concrete in-memory structs for v0. v3 extracts
+  interfaces and adds Redis-backed implementations for rolling updates;
+  v4 reuses the same shared state layer for multi-node HA.
 
   On first request to `/app/{name}/`, the proxy sets a session cookie containing
   a generated session ID. Subsequent requests — including WebSocket reconnects
@@ -672,13 +673,58 @@ existing Docker deployment. No Kubernetes dependency.
   per-worker hard-linked library views. See [v2 plan](v2/plan.md) for the
   full design.
 
-### v3: Process Backend + Deferred Single-Node Features
+### v3: Operations, Process Backend + Deferred Single-Node Features
 
-A lightweight alternative to Docker for single-host deployments, plus
-features deferred from v2: data mounts, Docker daemon hardening, multiple
-execution environment images, and UI branding / customization.
+Two tracks. The **operations track** adds rolling updates with zero
+downtime — Redis-backed shared state for session/worker routing,
+interface extraction for the in-memory stores, a drain mode for graceful
+server handoff, and the `by admin update` CLI command. This work runs
+first: once v2 is deployed, low-friction updates are immediately needed,
+and the shared state layer directly serves v4 clustering. The **runtime
+track** adds the pre-fork worker model, the lightweight process backend,
+and deferred single-node features.
 
 ---
+
+- **Rolling updates.** Zero-downtime server updates via `by admin update`.
+  Requires Redis and a reverse proxy with Docker service discovery. Old
+  and new server containers run simultaneously during the update; the
+  proxy routes based on container health checks. The old server enters
+  drain mode (health endpoints return 503, in-flight requests complete,
+  workers left alive), the proxy shifts traffic to the new server, and
+  the old server exits. Workers survive the transition — they continue
+  serving existing sessions under the new server. See
+  [update.md](update.md) for the full design. Related: #70
+  (client-server version negotiation), #71 (update notifications).
+
+- **Redis shared state.** Session store, worker registry, and worker map
+  move behind Go interfaces with two implementations: in-memory (default,
+  zero dependencies) and Redis (required for rolling updates). Redis
+  enables the update overlap — both old and new servers read and write
+  the same routing state. The same shared state layer is reused in v4
+  for multi-replica Kubernetes deployments.
+
+- **Interface extraction.** `SessionStore`, `WorkerRegistry`, and
+  `WorkerMap` become interfaces defined at the call sites. The existing
+  concrete types already satisfy the interface shapes — extraction is a
+  mechanical refactor. Redis implementations use GET/SET/HSET with TTLs.
+
+- **Worker token persistence.** The HMAC signing key for worker tokens
+  moves from ephemeral (regenerated on every startup) to persistent.
+  Primary storage in OpenBao (`secret/data/blockyard/worker-signing-key`);
+  file-based fallback on the data volume when OpenBao is not configured.
+
+- **Drain mode.** A new shutdown path triggered by `SIGUSR1`. Health
+  endpoints return 503 immediately (the proxy-agnostic cutover signal),
+  in-flight requests drain, background goroutines stop, but workers and
+  networks are left intact. `SIGTERM` retains the existing full-shutdown
+  behavior. Deployments without rolling updates are unaffected.
+
+- **`by admin update` command.** CLI command that orchestrates the full
+  rolling update flow: pull new image, back up database, start new
+  container, wait for readiness, signal old server to drain, wait for
+  exit, clean up. Detects absence of Redis and falls back to printing
+  manual `docker compose` commands.
 
 - **Pre-fork worker model.** An enhancement to the Docker backend's
   multi-session mode. Instead of multiplexing sessions onto a shared R
@@ -737,7 +783,9 @@ execution environment images, and UI branding / customization.
 
 ### v4: Kubernetes and Multi-Node
 
-The Kubernetes backend and the architectural refactors it triggers.
+The Kubernetes backend. Interface extraction and Redis shared state are
+already in place from v3 — v4 builds on that foundation for multi-replica
+deployments.
 
 ---
 
@@ -745,10 +793,6 @@ The Kubernetes backend and the architectural refactors it triggers.
   `k8s.io/client-go` to create Deployments (long-lived apps) and Jobs (tasks).
   Involves pod specs, service creation for routing, PVC management for shared
   caches, and pod status polling.
-
-- **Interface extraction.** `SessionStore`, `WorkerRegistry`, and `TaskStore`
-  become interfaces with swappable implementations (in-memory for single-node,
-  PostgreSQL-backed for multi-node HA).
 
 - **Backend package extraction.** Extract separate Go packages for each backend
   implementation if build-tag sprawl warrants it.
