@@ -73,7 +73,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `worker_start_timeout` | `60s` | Max time to wait for a worker to become healthy |
 | `max_workers` | `100` | Maximum number of concurrent worker containers |
 | `log_retention` | `1h` | How long to keep worker log entries before cleanup |
-| `session_idle_ttl` | `1h` | Time before an idle session is cleaned up |
+| `session_idle_ttl` | `0` | Idle timeout for sessions and WebSocket connections. When non-zero, idle WebSocket connections are closed and stale sessions are swept. `0` = disabled. |
 | `idle_worker_timeout` | `5m` | Time before an idle worker container is stopped |
 | `http_forward_timeout` | `5m` | Timeout for forwarding HTTP requests to workers |
 | `max_cpu_limit` | `16.0` | Max CPU limit settable per app |
@@ -180,7 +180,7 @@ health_interval      = "15s"
 worker_start_timeout = "60s"
 max_workers          = 100
 log_retention        = "1h"
-session_idle_ttl     = "1h"
+# session_idle_ttl   = "0"
 idle_worker_timeout  = "5m"
 
 # Optional: OIDC authentication

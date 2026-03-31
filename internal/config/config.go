@@ -199,9 +199,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Proxy.LogRetention.Duration == 0 {
 		cfg.Proxy.LogRetention.Duration = 1 * time.Hour
 	}
-	if cfg.Proxy.SessionIdleTTL.Duration == 0 {
-		cfg.Proxy.SessionIdleTTL.Duration = 1 * time.Hour
-	}
+	// session_idle_ttl defaults to 0 (disabled). When non-zero, idle
+	// WebSocket connections are closed and stale session records are
+	// swept after this duration of inactivity.
 	if cfg.Proxy.IdleWorkerTimeout.Duration == 0 {
 		cfg.Proxy.IdleWorkerTimeout.Duration = 5 * time.Minute
 	}

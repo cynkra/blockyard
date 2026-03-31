@@ -134,6 +134,11 @@ func (br *backendReader) Close() {
 // reader is cached and later handed to the next shuttleWS instance
 // without concurrent-reader races or message loss.
 //
+// When session_idle_ttl > 0, an idle timer closes the connection if
+// no application-level messages are exchanged within the configured
+// duration. Ping/pong frames are handled internally by coder/websocket
+// and do not reset the timer.
+//
 // All Read/Write calls use context.Background() because the
 // coder/websocket library closes connections when a Read's context
 // is cancelled (via setupReadTimeout → c.close()).
@@ -210,6 +215,25 @@ func shuttleWS(
 		lifetimeC = t.C
 	}
 
+	// Optional idle timeout. When set, the connection is closed if no
+	// application-level messages are exchanged within the duration.
+	// Ping/pong frames are handled by coder/websocket internally and
+	// never appear here, so only real user activity resets the timer.
+	idleTTL := srv.Config.Proxy.SessionIdleTTL.Duration
+	var idleC <-chan time.Time
+	var idleTimer *time.Timer
+	if idleTTL > 0 {
+		idleTimer = time.NewTimer(idleTTL)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
+
+	// Rate-limit Touch calls to avoid lock contention on the session
+	// store. LastAccess may be up to touchInterval stale, which is
+	// fine for a sweep running on 15s ticks with TTLs in minutes/hours.
+	const touchInterval = 30 * time.Second
+	lastTouch := time.Now()
+
 	// Main select loop: shuttle messages between client and backend.
 	cacheBackend := false
 	for {
@@ -227,6 +251,13 @@ func shuttleWS(
 				slog.Debug("ws backend write failed", "error", err)
 				goto done
 			}
+			if idleTimer != nil {
+				idleTimer.Reset(idleTTL)
+			}
+			if time.Since(lastTouch) > touchInterval {
+				srv.Sessions.Touch(sessionID)
+				lastTouch = time.Now()
+			}
 
 		case msg := <-br.msgs:
 			slog.Log(context.Background(), config.LevelTrace,
@@ -236,6 +267,13 @@ func shuttleWS(
 				slog.Debug("ws client write failed", "error", err)
 				cacheBackend = true
 				goto done
+			}
+			if idleTimer != nil {
+				idleTimer.Reset(idleTTL)
+			}
+			if time.Since(lastTouch) > touchInterval {
+				srv.Sessions.Touch(sessionID)
+				lastTouch = time.Now()
 			}
 
 		case <-clientDone:
@@ -250,6 +288,12 @@ func shuttleWS(
 		case <-lifetimeC:
 			// Session exceeded max lifetime — close both sides.
 			slog.Info("ws session max lifetime reached", "session_id", sessionID)
+			goto done
+
+		case <-idleC:
+			// No application-level messages for session_idle_ttl — close.
+			slog.Info("ws session idle timeout", "session_id", sessionID,
+				"idle_ttl", idleTTL)
 			goto done
 		}
 	}
