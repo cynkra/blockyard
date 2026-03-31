@@ -957,7 +957,7 @@ func TestEnsureImage_AlreadyPresent(t *testing.T) {
 		},
 	}
 	d := newTestBackend(mock)
-	if err := d.ensureImage(context.Background(), "alpine:3.21"); err != nil {
+	if err := d.ensureImage(context.Background(), "registry.example/img:v1"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -970,14 +970,14 @@ func TestEnsureImage_PullsWhenMissing(t *testing.T) {
 		},
 		imagePullFn: func(_ context.Context, ref string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
 			pulled = true
-			if ref != "alpine:3.21" {
-				t.Errorf("pulled %q, want alpine:3.21", ref)
+			if ref != "registry.example/img:v1" {
+				t.Errorf("pulled %q, want registry.example/img:v1", ref)
 			}
 			return mockPullResponse{io.NopCloser(strings.NewReader(""))}, nil
 		},
 	}
 	d := newTestBackend(mock)
-	if err := d.ensureImage(context.Background(), "alpine:3.21"); err != nil {
+	if err := d.ensureImage(context.Background(), "registry.example/img:v1"); err != nil {
 		t.Fatal(err)
 	}
 	if !pulled {
@@ -995,7 +995,7 @@ func TestEnsureImage_PullFails(t *testing.T) {
 		},
 	}
 	d := newTestBackend(mock)
-	err := d.ensureImage(context.Background(), "alpine:3.21")
+	err := d.ensureImage(context.Background(), "registry.example/img:v1")
 	if err == nil {
 		t.Fatal("expected error")
 	}
