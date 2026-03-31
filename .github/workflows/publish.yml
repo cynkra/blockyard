@@ -5,14 +5,83 @@ on:
     branches: [main]
 
 permissions:
+  contents: write
   packages: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: true
 
 env:
   IMAGE: ghcr.io/cynkra/blockyard
 
 jobs:
+  cli-binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: |
+          VERSION="main+$(git rev-parse --short HEAD)"
+          EXT=""; if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o by-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/by
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: by-${{ matrix.goos }}-${{ matrix.goarch }}*
+          retention-days: 1
+
+  cli-release:
+    needs: cli-binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+
+      - name: Upsert main pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="main+$(git rev-parse --short HEAD)"
+          gh release delete main --cleanup-tag --yes 2>/dev/null || true
+          gh release create main \
+            --title "${VERSION}" \
+            --notes "Built from main at $(git rev-parse HEAD)" \
+            --prerelease \
+            by-*
+
   server-image:
     uses: ./.github/workflows/server.yml
+    with:
+      version: main
 
   scan-image:
     needs: server-image

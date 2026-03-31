@@ -20,7 +20,6 @@ on:
           - openbao
           - pak
           - ui
-          - binaries
 
 permissions:
   contents: read
@@ -69,8 +68,7 @@ jobs:
       - uses: golangci/golangci-lint-action@v7
       - name: Check for known vulnerabilities
         run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
-      - run: go test -coverprofile=coverage-unit.out -coverpkg=./internal/... ./internal/...
-      - run: go test ./cmd/...
+      - run: go test -coverprofile=coverage-unit.out -coverpkg=./internal/...,./cmd/by/... ./internal/... ./cmd/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-unit
@@ -113,7 +111,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
           images: alpine:3.21
-      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/... ./internal/backend/docker/... ./internal/proxy/...
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/proxy/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker
@@ -131,7 +129,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
-      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/... ./internal/backend/docker/... ./internal/server/...
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/server/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-pak
@@ -149,7 +147,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: docker pull quay.io/keycloak/keycloak:26.0
-      - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./internal/... ./internal/auth/...
+      - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./internal/...,./cmd/by/... ./internal/auth/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-idp
@@ -167,7 +165,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: docker pull ghcr.io/openbao/openbao:2.5.2
-      - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./internal/... ./internal/integration/...
+      - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./internal/...,./cmd/by/... ./internal/integration/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-openbao
@@ -184,48 +182,12 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go test -tags ui_test -coverprofile=coverage-ui.out -coverpkg=./internal/... ./internal/ui/...
+      - run: go test -tags ui_test -coverprofile=coverage-ui.out -coverpkg=./internal/...,./cmd/by/... ./internal/ui/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-ui
           path: coverage-ui.out
           retention-days: 1
-
-  binaries:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    needs: [unit]
-    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'binaries')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Build binary
-        run: |
-          EXT=""; if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
-            -ldflags "-s -w" \
-            -o blockyard-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/blockyard
-      - uses: actions/upload-artifact@v7
-        with:
-          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: blockyard-${{ matrix.goos }}-${{ matrix.goarch }}*
-          retention-days: 7
 
   coverage:
     runs-on: ubuntu-24.04
