@@ -264,7 +264,9 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		if closeErr := out.Close(); closeErr != nil {
+			err = fmt.Errorf("%w (close: %w)", err, closeErr)
+		}
 		os.Remove(tmp)
 		return err
 	}

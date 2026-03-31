@@ -95,7 +95,11 @@ func (l *Log) Run(ctx context.Context, path string) {
 		slog.Error("failed to open audit log", "path", path, "error", err)
 		return
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Error("failed to close audit log", "path", path, "error", err)
+		}
+	}()
 
 	enc := json.NewEncoder(f)
 
