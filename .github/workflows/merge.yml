@@ -97,13 +97,15 @@ jobs:
     name: e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v6
+        if: github.event_name != 'pull_request'
       - uses: actions/setup-node@v4
+        if: github.event_name != 'pull_request'
         with:
           node-version: 22
       - uses: ./.github/actions/docker-cache
+        if: github.event_name != 'pull_request'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -112,23 +114,30 @@ jobs:
             alpine:3.23
             golang:1.25.8-bookworm
       - name: Build blockyard image from source
+        if: github.event_name != 'pull_request'
         run: docker build -t ghcr.io/cynkra/blockyard:latest --build-arg COVER=1 -f docker/server.Dockerfile .
       - name: Pull GHCR images
+        if: github.event_name != 'pull_request'
         run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - name: Block cloud metadata endpoint
+        if: github.event_name != 'pull_request'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Prepare coverage directory
+        if: github.event_name != 'pull_request'
         run: mkdir -p /tmp/playwright-coverage
       - name: Start services
+        if: github.event_name != 'pull_request'
         run: |
           E2E_GOCOVERDIR=/tmp/playwright-coverage \
           docker compose -f examples/hello-shiny/docker-compose.yml \
                          -f tests/examples/docker-compose.cover.yml \
                          up -d --wait
       - uses: actions/setup-go@v6
+        if: github.event_name != 'pull_request'
         with:
           go-version-file: go.mod
       - name: Build CLI and deploy hello app
+        if: github.event_name != 'pull_request'
         run: |
           go build -o /tmp/by ./cmd/by
 
@@ -146,11 +155,13 @@ jobs:
           BLOCKYARD_URL=http://localhost:8080 BLOCKYARD_TOKEN="$TOKEN" \
             /tmp/by deploy examples/hello-shiny/app --yes --wait --name hello
       - name: Install Playwright
+        if: github.event_name != 'pull_request'
         working-directory: tests/e2e
         run: |
           npm ci
           npx playwright install --with-deps chromium
       - name: Run Playwright tests
+        if: github.event_name != 'pull_request'
         working-directory: tests/e2e
         run: npx playwright test
       - name: Stop services and flush coverage
