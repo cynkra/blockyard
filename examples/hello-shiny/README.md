@@ -45,13 +45,12 @@ No manual browser interaction is needed for deployment.
 
 ## Architecture
 
-```
-Browser
-  │
-  ├── http://localhost:8080   → blockyard (Shiny apps + API)
-  └── http://localhost:5556   → Dex (OIDC login redirect)
-
-blockyard ──OIDC──→ dex:5556   (discovery, token exchange, JWKS via Docker DNS)
+```mermaid
+graph TD
+    browser["Browser"]
+    browser -->|":8080"| by["blockyard<br>Shiny apps + API"]
+    browser -->|":5556"| dex["Dex<br>OIDC login"]
+    by -->|"OIDC"| dex
 ```
 
 ## Services

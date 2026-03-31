@@ -61,18 +61,12 @@ plan including migration files, vault setup, and example updates.
 
 ### Architecture
 
-```
-blockr (R app)
-  │
-  ├── 1. Vault token from X-Blockyard-Vault-Token (existing flow)
-  ├── 2. GET /identity/oidc/token/postgrest → vault-signed JWT
-  ├── 3. Authorization: Bearer <vault-issued JWT>
-  │
-  ▼
-PostgREST ──JWKS──→ OpenBao (/identity/oidc/.well-known/keys)
-  │
-  ▼
-PostgreSQL (RLS enforces per-user scoping + sharing)
+```mermaid
+graph TD
+    blockr["blockr (R app)"] -->|"1. Vault token (existing flow)<br>2. Request vault-signed JWT"| vault["OpenBao"]
+    blockr -->|"3. Bearer vault-issued JWT"| pgrst["PostgREST"]
+    pgrst -->|"JWKS"| vault
+    pgrst --> pg["PostgreSQL<br>(RLS enforces per-user scoping + sharing)"]
 ```
 
 Blockyard is not in this path. The R app talks directly to vault
@@ -639,10 +633,13 @@ changes between browsers.
 
 [yws]: https://github.com/yjs/y-websocket
 
-```
-Browser A (Yjs)  ←—ws—→  y-websocket  ←—ws—→  Browser B (Yjs)
-      ↕ Shiny msg               │                  ↕ Shiny msg
-  R session A              persistence          R session B
+```mermaid
+graph LR
+    BA["Browser A (Yjs)"] <-->|"ws"| YWS["y-websocket"]
+    YWS <-->|"ws"| BB["Browser B (Yjs)"]
+    BA <-->|"Shiny msg"| RA["R session A"]
+    BB <-->|"Shiny msg"| RB["R session B"]
+    YWS --- P["persistence"]
 ```
 
 Outgoing: user edits a parameter → R sends a granular operation to

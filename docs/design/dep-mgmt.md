@@ -29,76 +29,25 @@ and let the server figure it out). blockyard's scan mode is novel.
 
 ## Architecture Overview
 
-```
-                        CLI (user's machine)             Server
-                        ────────────────────             ──────
+```mermaid
+graph TD
+    subgraph CLI ["CLI (user's machine)"]
+        P1["Pinned, metadata exists<br>manifest.json or renv.lock → manifest (Go)"]
+        P2["Pinned, generate metadata<br>--pin, renv::snapshot() → manifest (R)"]
+        U1["Unpinned, metadata exists<br>DESCRIPTION → unpinned manifest (Go)"]
+        U2["Unpinned, bare scripts<br>scripts only, no R needed"]
+    end
 
-                        ┌──────────────────┐
- PINNED, metadata       │ manifest.json    │   bundle
- already exists         │ exists           │─────────────────────┐
-                        │ (or renv.lock    │   + manifest.json   │
-                        │  → manifest, Go) │                     │
-                        └──────────────────┘                     │
-                                                                 │
-                        ┌──────────────────┐                     │
- PINNED, generate       │ bare scripts     │   bundle            │
- metadata               │ + --pin flag     │─────────────────────┤
-                        │                  │   + manifest.json   │
-                        │ renv::snapshot() │                     │
-                        │ → lockfile       │                     │
-                        │ → manifest (Go)  │                     │
-                        │ (requires R)     │                     │
-                        └──────────────────┘                     │
-                                                                 │
-                        ┌──────────────────┐                     │
- UNPINNED, metadata     │ DESCRIPTION      │   bundle            │
- already exists         │ exists           │─────────────────────┤
-                        │                  │   + manifest.json   │
-                        │ CLI builds       │   (unpinned shape:  │
-                        │ unpinned manifest│    description +    │
-                        │ (no R needed)    │    repositories)    │
-                        └──────────────────┘                     │
-                                                                 │
-                        ┌──────────────────┐                     │
- UNPINNED, generate     │ bare scripts     │   bundle            │
- metadata               │ only             │─────────────────────┤
-                        │                  │   (scripts only)    │
-                        │ (no R needed)    │                     │
-                        └──────────────────┘                     │
-                                                                 │
-                                                                 ▼
-                                                  ┌────────────────────────┐
-                                                  │ Build pipeline         │
-                                                  │                        │
-                                                  │ manifest.json present? │
-                                                  │  has packages?         │
-                                                  │   yes → install from   │
-                                                  │         refs (pinned)  │
-                                                  │   no  → resolve via    │
-                                                  │         pak (unpinned) │
-                                                  │         (use repos     │
-                                                  │          from manifest)│
-                                                  │  no manifest →         │
-                                                  │   scan scripts         │
-                                                  │   → DESCRIPTION        │
-                                                  │   → resolve via pak    │
-                                                  │     (unpinned)         │
-                                                  │         ↓              │
-                                                  │   ingest → store       │
-                                                  └────────────────────────┘
-                                                            │
-                                                            ▼
-                                                  ┌────────────────────┐
-                                                  │ Package store      │
-                                                  │ (content-addressed)│
-                                                  └────────────────────┘
-                                                            │
-                                                      hard links
-                                                            ▼
-                                                  ┌────────────────────┐
-                                                  │ Worker container   │
-                                                  │ /lib (rw)          │
-                                                  └────────────────────┘
+    P1 -->|"bundle + manifest.json"| Build
+    P2 -->|"bundle + manifest.json"| Build
+    U1 -->|"bundle + unpinned manifest"| Build
+    U2 -->|"bundle, scripts only"| Build
+
+    subgraph Server
+        Build["Build pipeline<br>manifest with packages → install from refs (pinned)<br>manifest w/o packages → resolve via pak (unpinned)<br>no manifest → scan → DESCRIPTION → pak"]
+        Build --> Store["Package store (content-addressed)"]
+        Store -->|"hard links"| Worker["Worker container /lib (rw)"]
+    end
 ```
 
 Two dependency modes, four input cases:
@@ -1361,37 +1310,22 @@ conflicts caused by tool mismatch or time drift are eliminated.
 The transfer is driven entirely by the API response — no separate
 signaling mechanism is needed.
 
-```
- Worker A (old)              Server              Worker B (new)
- ──────────────              ──────              ──────────────
- 1. POST /api/v1/packages
-        ────────────▸ 2. Detect version conflict
-                         Copy lockfile to
-                         transfer dir (host side)
-                      3. Respond with
-                         {"status": "transfer",
-                          "transfer_path": "/transfer"}
-                         (container-side path)
- 4. blockr serializes
-    board to JSON at
-    /transfer/board.json.tmp
- 5. Atomic rename:
-    board.json.tmp →
-    board.json
-        ────────────▸ 6. Server polls host-side
-                         transfer dir for
-                         board.json (stat() call,
-                         ~100ms interval)
-                      7. Spawn Worker B with
-                         updated library view,
-                         mount old transfer dir (ro)
-                                   ────────────▸ 8. Worker B reads
-                                                    /transfer/board.json,
-                                                    restores board
-                      9. Reroute traffic
-                         A → B
-                     10. Drain & stop A
-                     11. Clean up transfer dir
+```mermaid
+sequenceDiagram
+    participant A as Worker A (old)
+    participant S as Server
+    participant B as Worker B (new)
+
+    A->>S: 1. POST /api/v1/packages
+    S->>S: 2. Detect version conflict, copy lockfile to transfer dir
+    S-->>A: 3. Respond {status: "transfer", transfer_path: "/transfer"}
+    A->>A: 4. Serialize board to /transfer/board.json.tmp
+    A->>A: 5. Atomic rename → board.json
+    S->>S: 6. Poll host-side transfer dir for board.json
+    S->>B: 7. Spawn with updated library, mount transfer dir (ro)
+    B->>B: 8. Read /transfer/board.json, restore board
+    S->>S: 9. Reroute traffic A → B
+    S->>S: 10. Drain & stop A, clean up transfer dir
 ```
 
 **We do NOT serialize the R session.** blockr has built-in board

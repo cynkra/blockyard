@@ -434,26 +434,17 @@ individual Pods in the same namespace (or a dedicated worker namespace).
 Build tasks (dependency restore) run as Jobs. The server uses
 `k8s.io/client-go` to manage all worker resources.
 
-```
-┌─────────────────────────────────────────────────────┐
-│ Kubernetes cluster                                  │
-│                                                     │
-│  ┌──────────────┐     ┌──────────┐  ┌──────────┐   │
-│  │  blockyard   │────▶│ worker   │  │ worker   │   │
-│  │  server Pod  │     │ Pod      │  │ Pod      │   │
-│  │              │────▶│ (app-A)  │  │ (app-B)  │   │
-│  └──────┬───────┘     └──────────┘  └──────────┘   │
-│         │                                           │
-│         │  k8s API     ┌──────────┐                 │
-│         └─────────────▶│ build    │                 │
-│                        │ Job      │                 │
-│                        └──────────┘                 │
-│                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐ │
-│  │ PVC      │  │ Postgres │  │ Redis (optional)  │ │
-│  │ (bundles)│  │          │  │                    │ │
-│  └──────────┘  └──────────┘  └───────────────────┘ │
-└─────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph cluster ["Kubernetes cluster"]
+        server["blockyard server Pod"]
+        server --> wA["worker Pod (app-A)"]
+        server --> wB["worker Pod (app-B)"]
+        server -->|"k8s API"| job["build Job"]
+        pvc["PVC (bundles)"]
+        pg["Postgres"]
+        redis["Redis (optional)"]
+    end
 ```
 
 ### Backend interface mapping

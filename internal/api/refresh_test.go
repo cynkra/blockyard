@@ -118,6 +118,16 @@ func TestPostRefresh_UnpinnedStartsTask(t *testing.T) {
 	if result["task_id"] == "" {
 		t.Error("expected task_id in response")
 	}
+
+	// Wait for the background refresh task to complete before test cleanup.
+	if taskID := result["task_id"]; taskID != "" {
+		for i := 0; i < 50; i++ {
+			time.Sleep(50 * time.Millisecond)
+			if s, ok := srv.Tasks.Status(taskID); ok && s != 0 { // not Running
+				break
+			}
+		}
+	}
 }
 
 func TestPostRefreshRollback_NoActiveBundle(t *testing.T) {
