@@ -165,7 +165,7 @@ echo "    Restore complete!"
 # -- Start the app ------------------------------------------------------------
 
 echo "==> Starting app..."
-auth -X POST "${BASE_URL}/api/v1/apps/${APP_ID}/start" > /dev/null
+auth -X POST "${BASE_URL}/api/v1/apps/${APP_ID}/start" > /dev/null 2>&1 || true
 
 echo ""
 echo "Done! Open ${BASE_URL}/app/${APP_NAME}/ in your browser."
