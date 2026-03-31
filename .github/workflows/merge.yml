@@ -55,7 +55,7 @@ jobs:
             postgrest/postgrest:v12.2.3
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request'
-        run: docker build -t ghcr.io/cynkra/blockyard:latest --build-arg COVER=1 -f docker/server.Dockerfile .
+        run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 -f docker/server.Dockerfile .
       - name: Pull GHCR images used by examples
         if: github.event_name != 'pull_request'
         run: |
@@ -69,9 +69,10 @@ jobs:
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
       - name: Run e2e tests
         if: github.event_name != 'pull_request'
-        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
+        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
+          E2E_PULL_POLICY: never
       - name: Convert e2e coverage data
         if: github.event_name != 'pull_request'
         run: |

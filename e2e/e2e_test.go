@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 	// Build the blockyard image from source so tests exercise current code.
 	buildArgs := []string{"build",
 		"-t", "ghcr.io/cynkra/blockyard:latest",
+		"-t", "ghcr.io/cynkra/blockyard:main",
 		"-f", "docker/server.Dockerfile"}
 	if covDir != "" {
 		buildArgs = append(buildArgs, "--build-arg", "COVER=1")
