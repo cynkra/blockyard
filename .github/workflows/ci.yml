@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/dependency-review-action@v4
         with:
-          fail-on-severity: critical,high
+          fail-on-severity: high
 
   unit:
     if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'unit')
