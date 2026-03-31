@@ -56,18 +56,18 @@ backing services:
 
 ## Architecture
 
-```
-Browser
-  │
-  ├── http://localhost:8080   → blockyard (Shiny apps + API)
-  ├── http://localhost:5556   → Dex (OIDC login redirect)
-  └── http://localhost:8090   → PocketBase (board storage API + admin UI)
+```mermaid
+graph TD
+    browser["Browser"]
+    browser -->|":8080"| by["blockyard<br>Shiny apps + API"]
+    browser -->|":5556"| dex["Dex<br>OIDC login"]
+    browser -->|":8090"| pb["PocketBase<br>board storage + admin UI"]
 
-blockyard ──OIDC──→ dex:5556         (discovery, token exchange, JWKS via Docker DNS)
-blockyard ──HTTP──→ openbao:8200     (credential storage, JWT→vault token exchange)
-openbao   ──JWKS──→ dex:5556         (JWT signature verification via Docker DNS)
-worker    ──HTTP──→ openbao:8200     (read user secrets via service network)
-worker    ──HTTP──→ pocketbase:8090  (board storage via service network)
+    by -->|"OIDC"| dex
+    by -->|"HTTP"| bao["OpenBao"]
+    bao -->|"JWKS"| dex
+    worker["worker"] -->|"HTTP"| bao
+    worker -->|"HTTP"| pb
 ```
 
 ### Service network

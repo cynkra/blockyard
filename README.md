@@ -18,20 +18,14 @@ Blockyard acts as a container-orchestrated reverse proxy and application server.
 
 ## Architecture
 
-```
-Client Request
-      │
-      ▼
-  ┌────────┐     ┌──────┐     ┌──────────┐     ┌──────────────────┐
-  │  Chi   │────▶│ Auth │────▶│  Reverse │────▶│  Shiny Container │
-  │ Router │     │(OIDC)│     │  Proxy   │     │  (per session)   │
-  └────────┘     └──────┘     └──────────┘     └──────────────────┘
-      │                                               │
-      ▼                                               ▼
-  ┌────────┐                                    ┌──────────┐
-  │SQLite/ │  (app & bundle metadata)           │ OpenBao  │ (credentials)
-  │Postgres│
-  └────────┘                                    └──────────┘
+```mermaid
+graph LR
+    Client[Client Request] --> Router[Chi Router]
+    Router --> Auth["Auth (OIDC)"]
+    Auth --> Proxy[Reverse Proxy]
+    Proxy --> Shiny["Shiny Container<br>(per session)"]
+    Router --> DB["SQLite/Postgres<br>(app & bundle metadata)"]
+    Shiny --> Bao["OpenBao<br>(credentials)"]
 ```
 
 The server is generic over a `Backend` interface, allowing the Docker runtime to be swapped for a mock backend during testing.
