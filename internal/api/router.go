@@ -106,6 +106,19 @@ func securityHeaders(externalURL string) func(http.Handler) http.Handler {
 	}
 }
 
+// versionHeader sets the X-Blockyard-Version response header so that
+// clients can detect incompatible server versions.
+func versionHeader(version string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if version != "" {
+				w.Header().Set("X-Blockyard-Version", version)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // apiCSP sets a strict Content-Security-Policy for JSON API endpoints
 // where no HTML rendering occurs, and prevents caching of sensitive
 // API responses by intermediate proxies and browsers.
@@ -129,6 +142,9 @@ func NewRouter(srv *server.Server) http.Handler {
 
 	// Global security headers (HSTS when HTTPS).
 	r.Use(securityHeaders(srv.Config.Server.ExternalURL))
+
+	// Advertise server version to clients.
+	r.Use(versionHeader(srv.Version))
 
 	// OpenTelemetry tracing middleware (only when configured).
 	if srv.Config.Telemetry != nil && srv.Config.Telemetry.OTLPEndpoint != "" {

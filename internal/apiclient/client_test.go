@@ -343,6 +343,144 @@ func TestCheckResponse_ErrorWithoutMessage(t *testing.T) {
 	}
 }
 
+func TestParseMajor(t *testing.T) {
+	tests := []struct {
+		version string
+		want    int
+	}{
+		{"v1.2.3", 1},
+		{"v2.0.0", 2},
+		{"1.2.3", 1},
+		{"0.1.0", 0},
+		{"v10.0.0-rc1", 10},
+		{"dev", -1},
+		{"main+abc123", -1},
+		{"", -1},
+	}
+	for _, tt := range tests {
+		if got := parseMajor(tt.version); got != tt.want {
+			t.Errorf("parseMajor(%q) = %d, want %d", tt.version, got, tt.want)
+		}
+	}
+}
+
+func TestVersionMismatchWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Blockyard-Version", "v2.1.0")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	c := New(srv.URL, "tok")
+	c.Version = "v1.3.0"
+	c.Stderr = &buf
+
+	resp, err := c.Get("/test")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+
+	if !strings.Contains(buf.String(), "major version mismatch") {
+		t.Errorf("expected mismatch warning, got %q", buf.String())
+	}
+}
+
+func TestVersionMismatchWarning_OnlyOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Blockyard-Version", "v2.0.0")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	c := New(srv.URL, "tok")
+	c.Version = "v1.0.0"
+	c.Stderr = &buf
+
+	for range 3 {
+		resp, err := c.Get("/test")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	// Warning should appear exactly once.
+	if n := strings.Count(buf.String(), "major version mismatch"); n != 1 {
+		t.Errorf("expected 1 warning, got %d in %q", n, buf.String())
+	}
+}
+
+func TestVersionCompatible_NoWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Blockyard-Version", "v1.5.0")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	c := New(srv.URL, "tok")
+	c.Version = "v1.3.0"
+	c.Stderr = &buf
+
+	resp, err := c.Get("/test")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+
+	if buf.Len() > 0 {
+		t.Errorf("expected no warning, got %q", buf.String())
+	}
+}
+
+func TestVersionCheck_NoHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	c := New(srv.URL, "tok")
+	c.Version = "v1.0.0"
+	c.Stderr = &buf
+
+	resp, err := c.Get("/test")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+
+	if buf.Len() > 0 {
+		t.Errorf("expected no warning, got %q", buf.String())
+	}
+}
+
+func TestVersionCheck_DevVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Blockyard-Version", "v1.0.0")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	c := New(srv.URL, "tok")
+	c.Version = "dev"
+	c.Stderr = &buf
+
+	resp, err := c.Get("/test")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+
+	if buf.Len() > 0 {
+		t.Errorf("expected no warning for dev version, got %q", buf.String())
+	}
+}
+
 func TestBuildQuery(t *testing.T) {
 	got := BuildQuery("/api/v1/apps", map[string]string{
 		"search": "hello",
