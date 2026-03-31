@@ -13,10 +13,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const releaseURL = "https://api.github.com/repos/cynkra/blockyard/releases/latest"
+const apiBase = "https://api.github.com/repos/cynkra/blockyard"
 
 type githubRelease struct {
 	TagName string        `json:"tag_name"`
+	Name    string        `json:"name"`
 	Assets  []githubAsset `json:"assets"`
 }
 
@@ -26,28 +27,47 @@ type githubAsset struct {
 }
 
 func selfUpdateCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "self-update",
 		Short: "Update by to the latest release",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			jsonOutput := jsonFlag(cmd)
 
-			latest, err := fetchLatestRelease()
-			if err != nil {
-				exitError(jsonOutput, fmt.Errorf("fetch latest release: %w", err))
+			channel, _ := cmd.Flags().GetString("channel")
+			if channel == "" {
+				channel = inferChannel()
 			}
 
-			latestVersion := strings.TrimPrefix(latest.TagName, "v")
-			if version != "dev" && latestVersion == version {
+			var latest *githubRelease
+			var latestVersion string
+			var err error
+
+			switch channel {
+			case "main":
+				latest, err = fetchReleaseByTag("main")
+				if err != nil {
+					exitError(jsonOutput, fmt.Errorf("fetch main release: %w", err))
+				}
+				latestVersion = latest.Name
+			default:
+				latest, err = fetchLatestStableRelease()
+				if err != nil {
+					exitError(jsonOutput, fmt.Errorf("fetch latest release: %w", err))
+				}
+				latestVersion = strings.TrimPrefix(latest.TagName, "v")
+			}
+
+			if latestVersion == version {
 				if jsonOutput {
 					printJSON(map[string]any{
 						"current_version": version,
 						"latest_version":  latestVersion,
+						"channel":         channel,
 						"status":          "up_to_date",
 					})
 				} else {
-					fmt.Printf("Already up to date (v%s).\n", version)
+					fmt.Printf("Already up to date (%s).\n", version)
 				}
 				return nil
 			}
@@ -87,14 +107,24 @@ func selfUpdateCmd() *cobra.Command {
 				printJSON(map[string]any{
 					"previous_version": version,
 					"current_version":  latestVersion,
+					"channel":          channel,
 					"status":           "updated",
 				})
 			} else {
-				fmt.Printf("Updated v%s -> v%s\n", version, latestVersion)
+				fmt.Printf("Updated %s -> %s\n", version, latestVersion)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().String("channel", "", `update channel: "stable" or "main" (default: infer from current version)`)
+	return cmd
+}
+
+func inferChannel() string {
+	if strings.HasPrefix(version, "main+") {
+		return "main"
+	}
+	return "stable"
 }
 
 func selfUpdateBinaryName() string {
@@ -105,8 +135,16 @@ func selfUpdateBinaryName() string {
 	return name
 }
 
-func fetchLatestRelease() (*githubRelease, error) {
-	req, err := http.NewRequest("GET", releaseURL, nil)
+func fetchLatestStableRelease() (*githubRelease, error) {
+	return fetchRelease(apiBase + "/releases/latest")
+}
+
+func fetchReleaseByTag(tag string) (*githubRelease, error) {
+	return fetchRelease(apiBase + "/releases/tags/" + tag)
+}
+
+func fetchRelease(url string) (*githubRelease, error) {
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
