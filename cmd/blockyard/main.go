@@ -30,6 +30,7 @@ import (
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
+	"github.com/cynkra/blockyard/internal/update"
 )
 
 var version = "dev"
@@ -332,6 +333,12 @@ func main() {
 	go func() {
 		defer bgWg.Done()
 		ops.SpawnSoftDeleteSweeper(bgCtx, srv)
+	}()
+
+	bgWg.Add(1)
+	go func() {
+		defer bgWg.Done()
+		update.SpawnChecker(bgCtx, version, srv)
 	}()
 
 	// Store eviction sweeper.
