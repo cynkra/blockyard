@@ -125,8 +125,26 @@ jobs:
           docker compose -f examples/hello-shiny/docker-compose.yml \
                          -f tests/examples/docker-compose.cover.yml \
                          up -d --wait
-      - name: Deploy hello app
-        run: bash examples/hello-shiny/deploy.sh
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build CLI and deploy hello app
+        run: |
+          go build -o /tmp/by ./cmd/by
+
+          # Automated OIDC login to obtain a PAT (same flow as deploy.sh).
+          COOKIE_JAR=$(mktemp)
+          LOGIN_PAGE=$(curl -sS -L -c "$COOKIE_JAR" -b "$COOKIE_JAR" -w '\n%{url_effective}' http://localhost:8080/login)
+          FORM_ACTION=$(echo "$LOGIN_PAGE" | sed '$d' | grep -o 'action="[^"]*"' | head -1 | cut -d'"' -f2 | sed 's/&amp;/\&/g')
+          [[ "$FORM_ACTION" == /* ]] && FORM_ACTION="http://localhost:5556${FORM_ACTION}"
+          curl -sS -L -c "$COOKIE_JAR" -b "$COOKIE_JAR" -d "login=demo@example.com&password=password" "$FORM_ACTION" > /dev/null
+          TOKEN=$(curl -sS -b "$COOKIE_JAR" -X POST -H "Content-Type: application/json" \
+            -d '{"name":"playwright-ci","expires_in":"1h"}' \
+            http://localhost:8080/api/v1/users/me/tokens | grep -o '"token":"[^"]*' | cut -d'"' -f4)
+          rm -f "$COOKIE_JAR"
+
+          BLOCKYARD_URL=http://localhost:8080 BLOCKYARD_TOKEN="$TOKEN" \
+            /tmp/by deploy examples/hello-shiny/app --yes --wait --name hello
       - name: Install Playwright
         working-directory: tests/e2e
         run: |
@@ -135,10 +153,6 @@ jobs:
       - name: Run Playwright tests
         working-directory: tests/e2e
         run: npx playwright test
-      - uses: actions/setup-go@v6
-        if: always()
-        with:
-          go-version-file: go.mod
       - name: Stop services and flush coverage
         if: always()
         run: docker compose -f examples/hello-shiny/docker-compose.yml stop blockyard
