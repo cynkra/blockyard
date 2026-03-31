@@ -93,8 +93,8 @@ jobs:
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
 
-  playwright:
-    name: Playwright
+  e2e:
+    name: e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request'
@@ -147,13 +147,13 @@ jobs:
         run: |
           dir="/tmp/playwright-coverage"
           if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-            go tool covdata textfmt -i="$dir" -o="coverage-examples-server-Playwright.out"
+            go tool covdata textfmt -i="$dir" -o="coverage-e2e.out"
           fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: coverage-examples-Playwright
-          path: coverage-examples-*.out
+          name: coverage-e2e
+          path: coverage-e2e-*.out
           if-no-files-found: ignore
           retention-days: 1
       - uses: actions/upload-artifact@v7
@@ -168,21 +168,21 @@ jobs:
           docker compose -f examples/hello-shiny/docker-compose.yml logs --no-color 2>/dev/null || true
           docker compose -f examples/hello-shiny/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
 
-  e2e:
+  examples:
     if: always()
-    needs: [run, playwright]
+    needs: [run]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      - if: needs.run.result != 'success'
         run: |
-          echo "::error::Tests failed (run: ${{ needs.run.result }}, playwright: ${{ needs.playwright.result }})"
+          echo "::error::Example tests failed (run: ${{ needs.run.result }})"
           exit 1
-      - run: echo "All tests passed."
+      - run: echo "All example tests passed."
 
   coverage:
     if: github.event_name == 'merge_group'
-    needs: [run, playwright]
+    needs: [run, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -216,19 +216,19 @@ jobs:
             rm -rf ci-coverage
           fi
 
-      # Download e2e coverage artifacts from this workflow.
+      # Download test coverage artifacts from this workflow.
       - uses: actions/download-artifact@v8
         with:
-          pattern: coverage-examples-*
+          pattern: coverage-*
           merge-multiple: true
 
-      # Aggregate all per-test e2e files into a single coverage-e2e.out.
+      # Aggregate per-matrix example files into a single coverage-examples.out.
       - name: Aggregate example coverage
         run: |
           files=$(ls coverage-examples-*.out 2>/dev/null || true)
           [ -z "$files" ] && exit 0
-          head -1 $(echo "$files" | head -1) > coverage-ex.out
-          tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-ex.out
+          head -1 $(echo "$files" | head -1) > coverage-examples.out
+          tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-examples.out
           rm -f $files
 
       - name: List coverage files

@@ -24,6 +24,8 @@ flags:
     carryforward: true
   examples:
     carryforward: true
+  e2e:
+    carryforward: true
 
 ignore:
   - "internal/testutil/**"          # test helpers only
