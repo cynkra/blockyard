@@ -60,7 +60,7 @@ type dockerClient interface {
 type cmdRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	return exec.CommandContext(ctx, name, args...).Output()
 }
 
 // workerState holds per-worker internal state that callers never see.
