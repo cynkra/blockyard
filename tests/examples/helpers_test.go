@@ -1,6 +1,6 @@
-//go:build e2e
+//go:build examples
 
-package e2e_test
+package examples_test
 
 import (
 	"bytes"

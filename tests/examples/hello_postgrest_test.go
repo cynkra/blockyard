@@ -1,6 +1,6 @@
-//go:build e2e
+//go:build examples
 
-package e2e_test
+package examples_test
 
 import (
 	"encoding/json"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestHelloPostgrest(t *testing.T) {
-	composeUp(t, "../examples/hello-postgrest/docker-compose.yml")
+	composeUp(t, "../../examples/hello-postgrest/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"
 	dexURL := "http://localhost:5556"
@@ -89,7 +89,7 @@ func TestHelloPostgrest(t *testing.T) {
 		cookies1 = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token1 = createPAT(t, baseURL, cookies1)
 
-		appDir := copyAppDir(t, "../examples/hello-postgrest/app")
+		appDir := copyAppDir(t, "../../examples/hello-postgrest/app")
 
 		var result map[string]any
 		runCLIJSON(t, baseURL, token1, &result,
