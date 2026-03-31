@@ -3,11 +3,94 @@
 package e2e_test
 
 import (
+	"io"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestHelloShinyBrowserLogin verifies the full OIDC login flow using a single
+// cookie-jar-enabled HTTP client, simulating a real browser. This catches
+// issues where the session cookie is set in the callback response but not
+// properly sent (or recognised) on the subsequent redirect — a scenario
+// that manual cookie injection in the other e2e tests cannot detect.
+func TestHelloShinyBrowserLogin(t *testing.T) {
+	composeUp(t, "../examples/hello-shiny/docker-compose.yml")
+
+	baseURL := "http://localhost:8080"
+	dexURL := "http://localhost:5556"
+
+	waitForHealth(t, baseURL, 60*time.Second)
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookie jar: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	// Step 1: GET /login — follows redirects to the Dex login form.
+	resp, err := client.Get(baseURL + "/login")
+	if err != nil {
+		t.Fatalf("GET /login: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	matches := formActionRe.FindSubmatch(body)
+	if matches == nil {
+		t.Fatalf("no form action on Dex login page (status %d)", resp.StatusCode)
+	}
+	formAction := strings.ReplaceAll(string(matches[1]), "&amp;", "&")
+	if strings.HasPrefix(formAction, "/") {
+		formAction = dexURL + formAction
+	}
+
+	// Step 2: POST credentials → Dex authenticates → redirects to
+	// /callback → callback sets session cookie → redirects to /.
+	// The jar-enabled client follows the entire chain automatically.
+	resp, err = client.PostForm(formAction, url.Values{
+		"login":    {dexEmail1},
+		"password": {dexPassword},
+	})
+	if err != nil {
+		t.Fatalf("POST dex login: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// After the full redirect chain we must land on the authenticated
+	// apps page, NOT the unauthenticated landing page.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("final status after login: got %d, want 200", resp.StatusCode)
+	}
+	page := string(body)
+	if strings.Contains(page, `class="sign-in"`) {
+		t.Fatal("login redirect chain landed on landing page (sign-in button present) — session cookie not recognised")
+	}
+	if !strings.Contains(page, `class="left-nav"`) {
+		t.Fatal("login redirect chain did not produce authenticated page (left-nav missing)")
+	}
+
+	// Step 3: Visit / again using the same client. The jar must
+	// automatically send the session cookie without manual injection.
+	resp, err = client.Get(baseURL + "/")
+	if err != nil {
+		t.Fatalf("GET / (post-login): %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	page = string(body)
+	if strings.Contains(page, `class="sign-in"`) {
+		t.Fatal("second visit to / shows landing page — session cookie not persisted in jar")
+	}
+	if !strings.Contains(page, `class="left-nav"`) {
+		t.Fatal("second visit to / not authenticated (left-nav missing)")
+	}
+}
 
 func TestHelloShiny(t *testing.T) {
 	composeUp(t, "../examples/hello-shiny/docker-compose.yml")
