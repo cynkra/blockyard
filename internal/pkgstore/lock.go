@@ -20,13 +20,13 @@ func (s *Store) LockPath(pkg, sourceHash string) string {
 // removed and re-attempted.
 func (s *Store) Acquire(ctx context.Context, pkg, sourceHash string, staleThreshold time.Duration) error {
 	lockDir := s.LockPath(pkg, sourceHash)
-	_ = os.MkdirAll(filepath.Dir(lockDir), 0o755)
+	_ = os.MkdirAll(filepath.Dir(lockDir), 0o755) //nolint:gosec // G301: lock dir, not secrets
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("lock acquisition cancelled for %s: %w", pkg, err)
 		}
-		if err := os.Mkdir(lockDir, 0o755); err == nil {
+		if err := os.Mkdir(lockDir, 0o755); err == nil { //nolint:gosec // G301: lock dir, not secrets
 			return nil // acquired
 		}
 		// Check for stale lock.
@@ -36,7 +36,7 @@ func (s *Store) Acquire(ctx context.Context, pkg, sourceHash string, staleThresh
 			continue
 		}
 		// Wait with jittered backoff.
-		jitter := time.Duration(500+rand.IntN(1500)) * time.Millisecond
+		jitter := time.Duration(500+rand.IntN(1500)) * time.Millisecond //nolint:gosec // G404: retry jitter, not security-sensitive
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("lock acquisition cancelled for %s: %w", pkg, ctx.Err())

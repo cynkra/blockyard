@@ -37,7 +37,7 @@ func NewBundlePaths(base, appID, bundleID string) Paths {
 // the archive path. Creates the app directory if needed.
 func WriteArchive(paths Paths, r io.Reader) error {
 	appDir := filepath.Dir(paths.Archive)
-	if err := os.MkdirAll(appDir, 0o755); err != nil {
+	if err := os.MkdirAll(appDir, 0o755); err != nil { //nolint:gosec // G301: app bundle dir, not secrets
 		return fmt.Errorf("create app dir: %w", err)
 	}
 
@@ -93,7 +93,7 @@ func UnpackArchive(paths Paths) error {
 	}
 	defer gz.Close()
 
-	if err := os.MkdirAll(paths.Unpacked, 0o755); err != nil {
+	if err := os.MkdirAll(paths.Unpacked, 0o755); err != nil { //nolint:gosec // G301: unpack dir, not secrets
 		return fmt.Errorf("create unpack dir: %w", err)
 	}
 
@@ -108,7 +108,7 @@ func UnpackArchive(paths Paths) error {
 			return fmt.Errorf("tar next: %w", err)
 		}
 
-		target := filepath.Join(paths.Unpacked, hdr.Name)
+		target := filepath.Join(paths.Unpacked, hdr.Name) //nolint:gosec // G305: zip-slip protected by filepath.Rel check below
 
 		// Prevent path traversal
 		rel, err := filepath.Rel(paths.Unpacked, target)
@@ -118,14 +118,14 @@ func UnpackArchive(paths Paths) error {
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := os.MkdirAll(target, 0o755); err != nil { //nolint:gosec // G301: tar entry dir, not secrets
 				return fmt.Errorf("mkdir %s: %w", target, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // G301: tar parent dir, not secrets
 				return fmt.Errorf("mkdir parent %s: %w", target, err)
 			}
-			out, err := os.Create(target)
+			out, err := os.Create(target) //nolint:gosec // G304: tar entry path validated by filepath.Rel above
 			if err != nil {
 				return fmt.Errorf("create %s: %w", target, err)
 			}
@@ -162,7 +162,7 @@ func ValidateEntrypoint(paths Paths) error {
 
 // CreateLibraryDir creates the output directory for dependency restoration.
 func CreateLibraryDir(paths Paths) error {
-	return os.MkdirAll(paths.Library, 0o755)
+	return os.MkdirAll(paths.Library, 0o755) //nolint:gosec // G301: R library dir, not secrets
 }
 
 // DeleteFiles removes a bundle's archive, unpacked dir, and library dir.

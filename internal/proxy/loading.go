@@ -41,8 +41,8 @@ func serveLoadingPage(w http.ResponseWriter, app *db.AppRow, appName string, srv
 
 	if err := loadingTmpl.Execute(w, loadingData{
 		AppName:   displayName(app),
-		ReadyURL:  template.JSStr(readyPath),
-		AppURL:    template.JSStr(appPath),
+		ReadyURL:  template.JSStr(readyPath), //nolint:gosec // G203: server-controlled URL path, not user input
+		AppURL:    template.JSStr(appPath),  //nolint:gosec // G203: server-controlled URL path, not user input
 		TimeoutMs: clientTimeout.Milliseconds(),
 	}); err != nil {
 		slog.Warn("loading page: template execute failed", "error", err)

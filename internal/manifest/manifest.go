@@ -151,7 +151,7 @@ func (p Package) Validate() error {
 
 // Read loads and validates a manifest from a JSON file.
 func Read(path string) (*Manifest, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads app manifest from managed path
 	if err != nil {
 		return nil, err
 	}
@@ -216,5 +216,5 @@ func (m *Manifest) Write(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o644) //nolint:gosec // G306: app manifest, not secrets
 }

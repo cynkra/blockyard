@@ -489,7 +489,7 @@ func DisableApp(srv *server.Server) http.HandlerFunc {
 		// Drain workers (same logic as the old StopApp).
 		workerIDs := srv.Workers.MarkDraining(app.ID)
 		if len(workerIDs) > 0 {
-			go func() {
+			go func() { //nolint:gosec // G118: intentional background task, outlives request
 				deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
 				for {
 					remaining := srv.Sessions.CountForWorkers(workerIDs)

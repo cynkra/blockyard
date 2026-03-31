@@ -34,7 +34,7 @@ func serviceUnavailable(w http.ResponseWriter, msg string) {
 }
 
 func serverError(w http.ResponseWriter, detail string) {
-	slog.Error("internal server error", "detail", detail)
+	slog.Error("internal server error", "detail", detail) //nolint:gosec // G706: slog structured logging handles this
 	writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 

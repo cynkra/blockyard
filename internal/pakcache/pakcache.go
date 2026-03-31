@@ -60,7 +60,7 @@ func EnsureInstalled(ctx context.Context, be backend.Backend,
 		}
 	}
 
-	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+	if err := os.MkdirAll(cachePath, 0o755); err != nil { //nolint:gosec // G301: package cache dir, not secrets
 		return "", fmt.Errorf("create pak cache dir: %w", err)
 	}
 

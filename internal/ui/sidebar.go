@@ -235,7 +235,7 @@ func (ui *UI) sidebarHandler(srv *server.Server) http.HandlerFunc {
 		data := sidebarData{
 			App:          app,
 			CanManageACL: relation.CanManageACL(),
-			OverviewHTML: template.HTML(buf.String()),
+			OverviewHTML: template.HTML(buf.String()), //nolint:gosec // G203: markdown rendered from server-controlled DESCRIPTION file
 		}
 
 		w.Header().Set("Content-Type", "text/html")
@@ -677,7 +677,7 @@ func (ui *UI) createAndAssignTag(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		name := strings.TrimSpace(r.FormValue("name"))
+		name := strings.TrimSpace(r.FormValue("name")) //nolint:gosec // G120: auth-gated endpoint, bounded tag name
 		if name == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, `<p class="error-message">Tag name is required.</p>`)

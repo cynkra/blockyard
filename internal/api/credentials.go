@@ -86,7 +86,7 @@ func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 				userSession.AccessToken,
 			)
 			if loginErr != nil {
-				slog.Warn("credential exchange: vault login failed",
+				slog.Warn("credential exchange: vault login failed", //nolint:gosec // G706: slog structured logging handles this
 					"sub", claims.Sub, "error", loginErr)
 				writeError(w, http.StatusBadGateway, "vault_error",
 					"Failed to obtain vault token")

@@ -57,7 +57,7 @@ type dockerClient interface {
 type cmdRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	return exec.CommandContext(ctx, name, args...).Output() //nolint:gosec // G204: controlled docker exec calls
 }
 
 // workerState holds per-worker internal state that callers never see.
@@ -144,7 +144,7 @@ func (d *DockerBackend) ServerID() string { return d.serverID }
 func detectServerID() string {
 	// 1. Explicit env var
 	if id := os.Getenv("BLOCKYARD_SERVER_ID"); id != "" {
-		slog.Info("server ID from env", "container_id", id)
+		slog.Info("server ID from env", "container_id", id) //nolint:gosec // G706: slog structured logging handles this
 		return id
 	}
 

@@ -346,7 +346,7 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
 			// htmx sends form-encoded by default.
-			if err := r.ParseForm(); err != nil {
+			if err := r.ParseForm(); err != nil { //nolint:gosec // G120: auth-gated endpoint
 				badRequest(w, "invalid form data")
 				return
 			}
@@ -577,7 +577,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		var body rollbackRequest
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			_ = r.ParseForm()
+			_ = r.ParseForm() //nolint:gosec // G120: auth-gated endpoint
 			body.BundleID = r.FormValue("bundle_id")
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -619,7 +619,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		slog.Info("rolling back app",
+		slog.Info("rolling back app", //nolint:gosec // G706: slog structured logging handles this
 			"app_id", app.ID, "name", app.Name,
 			"target_bundle", body.BundleID, "caller", caller.Sub)
 
@@ -635,7 +635,7 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 		if err := srv.DB.SetBundleDeployed(body.BundleID, caller.Sub); err != nil {
-			slog.Warn("rollback: failed to update deployment tracking",
+			slog.Warn("rollback: failed to update deployment tracking", //nolint:gosec // G706: slog structured logging handles this
 				"bundle_id", body.BundleID, "error", err)
 		}
 
@@ -902,7 +902,7 @@ func StopApp(srv *server.Server) http.HandlerFunc {
 		sender.Write(fmt.Sprintf("draining %d workers", len(workerIDs)))
 
 		// Drain in background — caller polls GET /tasks/{taskID}/logs.
-		go drainWorkers(srv, app.ID, workerIDs, sender)
+		go drainWorkers(srv, app.ID, workerIDs, sender) //nolint:gosec // G118: intentional background drain, outlives request
 
 		if srv.AuditLog != nil {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppStop, app.ID,
@@ -1013,7 +1013,7 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 
 		// Write buffered lines
 		for _, line := range snapshot {
-			fmt.Fprintf(w, "%s\n", line)
+			fmt.Fprintf(w, "%s\n", line) //nolint:gosec // G705: text/plain SSE stream, not HTML
 		}
 		if canFlush {
 			flusher.Flush()

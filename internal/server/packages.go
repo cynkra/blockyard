@@ -293,7 +293,7 @@ func (srv *Server) linkNewPackages(
 			os.RemoveAll(destPath) //nolint:errcheck
 		}
 
-		out, err := exec.Command("cp", "-al", storePath, destPath).CombinedOutput()
+		out, err := exec.Command("cp", "-al", storePath, destPath).CombinedOutput() //nolint:gosec // G204: controlled cp hardlink for package store
 		if err != nil {
 			return fmt.Errorf("link %s: %s: %w", pkg, out, err)
 		}

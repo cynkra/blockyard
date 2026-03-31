@@ -245,8 +245,8 @@ func AddAppTag(srv *server.Server) http.HandlerFunc {
 		var body addAppTagRequest
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			_ = r.ParseForm()
-			body.TagID = r.FormValue("tag_id")
+			_ = r.ParseForm()                    //nolint:gosec // G120: auth-gated endpoint
+			body.TagID = r.FormValue("tag_id") //nolint:gosec // G120: auth-gated endpoint
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				badRequest(w, "invalid JSON body")

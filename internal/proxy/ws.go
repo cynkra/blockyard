@@ -176,7 +176,7 @@ func shuttleWS(
 			HTTPHeader: forwardClientHeaders(r),
 		})
 		if dialErr != nil {
-			slog.Warn("ws backend dial failed",
+			slog.Warn("ws backend dial failed", //nolint:gosec // G706: slog structured logging handles this
 				"addr", addr, "error", dialErr)
 			clientConn.Close(websocket.StatusInternalError,
 				"backend connect failed")
@@ -189,7 +189,7 @@ func shuttleWS(
 	// Client reader goroutine.
 	clientMsgs := make(chan wsMsg)
 	clientDone := make(chan struct{})
-	go func() {
+	go func() { //nolint:gosec // G118: intentional background relay, outlives request
 		defer close(clientDone)
 		for {
 			typ, data, err := clientConn.Read(context.Background())
@@ -287,12 +287,12 @@ func shuttleWS(
 
 		case <-lifetimeC:
 			// Session exceeded max lifetime — close both sides.
-			slog.Info("ws session max lifetime reached", "session_id", sessionID)
+			slog.Info("ws session max lifetime reached", "session_id", sessionID) //nolint:gosec // G706: slog structured logging handles this
 			goto done
 
 		case <-idleC:
 			// No application-level messages for session_idle_ttl — close.
-			slog.Info("ws session idle timeout", "session_id", sessionID,
+			slog.Info("ws session idle timeout", "session_id", sessionID, //nolint:gosec // G706: slog structured logging handles this
 				"idle_ttl", idleTTL)
 			goto done
 		}
@@ -304,7 +304,7 @@ done:
 		// possible reconnect within the TTL.
 		clientConn.CloseNow()
 
-		slog.Debug("ws client disconnected, caching backend",
+		slog.Debug("ws client disconnected, caching backend", //nolint:gosec // G706: slog structured logging handles this
 			"session_id", sessionID)
 		cache.Cache(sessionID, br,
 			srv.Config.Proxy.WsCacheTTL.Duration, func() {
@@ -324,7 +324,7 @@ done:
 			})
 	} else {
 		// Backend disconnected — close both sides.
-		slog.Debug("ws backend disconnected",
+		slog.Debug("ws backend disconnected", //nolint:gosec // G706: slog structured logging handles this
 			"session_id", sessionID)
 		clientConn.Close(websocket.StatusGoingAway, "backend disconnected")
 		br.Close()

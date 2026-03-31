@@ -59,10 +59,10 @@ func GrantAccess(srv *server.Server) http.HandlerFunc {
 		var body grantRequest
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			_ = r.ParseForm()
-			body.Principal = r.FormValue("principal")
-			body.Kind = r.FormValue("kind")
-			body.Role = r.FormValue("role")
+			_ = r.ParseForm() //nolint:gosec // G120: auth-gated endpoint, bounded role value
+			body.Principal = r.FormValue("principal") //nolint:gosec // G120: auth-gated endpoint
+			body.Kind = r.FormValue("kind")         //nolint:gosec // G120: auth-gated endpoint
+			body.Role = r.FormValue("role") //nolint:gosec // G120: auth-gated endpoint, bounded role value
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				badRequest(w, "invalid request body")

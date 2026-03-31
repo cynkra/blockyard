@@ -54,7 +54,7 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 		// Generate IDs
 		bundleID := uuid.New().String()
 		taskID := uuid.New().String()
-		slog.Info("bundle upload started", "app_id", appID, "bundle_id", bundleID)
+		slog.Info("bundle upload started", "app_id", appID, "bundle_id", bundleID) //nolint:gosec // G706: slog structured logging handles this
 
 		// Stream archive to disk
 		paths := bundle.NewBundlePaths(srv.Config.Storage.BundleServerPath, app.ID, bundleID)
@@ -142,7 +142,7 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 				map[string]any{"bundle_id": bundleID}))
 		}
 
-		slog.Info("bundle upload accepted, restore spawned",
+		slog.Info("bundle upload accepted, restore spawned", //nolint:gosec // G706: slog structured logging handles this
 			"app_id", appID, "bundle_id", bundleID, "task_id", taskID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)

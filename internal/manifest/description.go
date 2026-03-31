@@ -14,7 +14,7 @@ func FromDescription(
 	files map[string]FileInfo,
 	repos []Repository,
 ) (*Manifest, error) {
-	data, err := os.ReadFile(descPath)
+	data, err := os.ReadFile(descPath) //nolint:gosec // G304: reads app DESCRIPTION from managed path
 	if err != nil {
 		return nil, fmt.Errorf("read DESCRIPTION: %w", err)
 	}

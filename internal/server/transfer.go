@@ -203,7 +203,7 @@ func (srv *Server) defaultWorkerSpec(
 ) backend.WorkerSpec {
 	hostPaths := srv.BundlePaths(appID, bundleID)
 	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", workerID)
-	_ = os.MkdirAll(transferDir, 0o755)
+	_ = os.MkdirAll(transferDir, 0o755) //nolint:gosec // G301: transfer dir, not secrets
 
 	return backend.WorkerSpec{
 		AppID:    appID,
@@ -252,14 +252,14 @@ func (srv *Server) waitHealthy(ctx context.Context, workerID string) error {
 
 // copyFile copies src to dst using a temporary file + rename for atomicity.
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) //nolint:gosec // G304: opens bundle file from managed path
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
 	tmp := dst + ".tmp"
-	out, err := os.Create(tmp)
+	out, err := os.Create(tmp) //nolint:gosec // G304: creates transfer temp file at managed path
 	if err != nil {
 		return err
 	}

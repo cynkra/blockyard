@@ -102,7 +102,7 @@ func TaskLogs(srv *server.Server) http.HandlerFunc {
 
 		// Write buffered lines
 		for _, line := range snapshot {
-			fmt.Fprintf(w, "%s\n", line)
+			fmt.Fprintf(w, "%s\n", line) //nolint:gosec // G705: text/plain SSE stream, not HTML
 		}
 		if canFlush {
 			flusher.Flush()
