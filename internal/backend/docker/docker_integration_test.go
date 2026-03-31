@@ -15,12 +15,25 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/google/uuid"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
 )
+
+// rawClient extracts the concrete *client.Client from a DockerBackend.
+// Only needed in integration tests that call Docker exec APIs not on
+// the dockerClient interface.
+func rawClient(t *testing.T, d *DockerBackend) *client.Client {
+	t.Helper()
+	c, ok := d.client.(*client.Client)
+	if !ok {
+		t.Fatal("expected *client.Client behind dockerClient interface")
+	}
+	return c
+}
 
 func testConfig() *config.DockerConfig {
 	return &config.DockerConfig{
@@ -225,7 +238,7 @@ func TestNetworkIsolation(t *testing.T) {
 	b.mu.Unlock()
 
 	ip2 := strings.Split(addr2, ":")[0]
-	execResp, err := b.client.ContainerExecCreate(ctx, ws1.containerID,
+	execResp, err := rawClient(t, b).ContainerExecCreate(ctx, ws1.containerID,
 		container.ExecOptions{
 			Cmd: []string{"sh", "-c", fmt.Sprintf(
 				"wget -q -O /dev/null --timeout=2 http://%s:%d/ 2>&1 || exit 1",
@@ -237,12 +250,12 @@ func TestNetworkIsolation(t *testing.T) {
 		t.Fatalf("ExecCreate: %v", err)
 	}
 
-	if err := b.client.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+	if err := rawClient(t, b).ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
 		t.Fatalf("ExecStart: %v", err)
 	}
 
 	time.Sleep(3 * time.Second)
-	inspect, err := b.client.ContainerExecInspect(ctx, execResp.ID)
+	inspect, err := rawClient(t, b).ContainerExecInspect(ctx, execResp.ID)
 	if err != nil {
 		t.Fatalf("ExecInspect: %v", err)
 	}
@@ -283,7 +296,7 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 	ws := b.workers[workerID]
 	b.mu.Unlock()
 
-	execResp, err := b.client.ContainerExecCreate(ctx, ws.containerID,
+	execResp, err := rawClient(t, b).ContainerExecCreate(ctx, ws.containerID,
 		container.ExecOptions{
 			Cmd: []string{"wget", "--spider", "--timeout=2",
 				"http://169.254.169.254/"},
@@ -293,12 +306,12 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 		t.Fatalf("ExecCreate: %v", err)
 	}
 
-	if err := b.client.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+	if err := rawClient(t, b).ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
 		t.Fatalf("ExecStart: %v", err)
 	}
 
 	time.Sleep(3 * time.Second)
-	inspect, err := b.client.ContainerExecInspect(ctx, execResp.ID)
+	inspect, err := rawClient(t, b).ContainerExecInspect(ctx, execResp.ID)
 	if err != nil {
 		t.Fatalf("ExecInspect: %v", err)
 	}
@@ -602,7 +615,7 @@ func TestSpawnWithEnvVars(t *testing.T) {
 	ws := b.workers[workerID]
 	b.mu.Unlock()
 
-	execResp, err := b.client.ContainerExecCreate(ctx, ws.containerID,
+	execResp, err := rawClient(t, b).ContainerExecCreate(ctx, ws.containerID,
 		container.ExecOptions{
 			Cmd:          []string{"sh", "-c", "echo $TEST_VAR"},
 			AttachStdout: true,
@@ -612,7 +625,7 @@ func TestSpawnWithEnvVars(t *testing.T) {
 		t.Fatalf("ExecCreate: %v", err)
 	}
 
-	attachResp, err := b.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	attachResp, err := rawClient(t, b).ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
 	if err != nil {
 		t.Fatalf("ExecAttach: %v", err)
 	}
