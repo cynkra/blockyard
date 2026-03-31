@@ -131,10 +131,13 @@ func UnpackArchive(paths Paths) error {
 			}
 			remaining := maxDecompressedSize - totalWritten
 			n, copyErr := io.Copy(out, io.LimitReader(tr, remaining+1))
-			out.Close()
+			closeErr := out.Close()
 			totalWritten += n
 			if copyErr != nil {
 				return fmt.Errorf("write %s: %w", target, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("close %s: %w", target, closeErr)
 			}
 			if totalWritten > maxDecompressedSize {
 				return fmt.Errorf("decompressed content exceeds %d byte limit", maxDecompressedSize)
