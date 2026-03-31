@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cynkra/blockyard/internal/audit"
@@ -71,6 +72,10 @@ type Server struct {
 	// Version is the server version string, set at build time.
 	Version string
 
+	// UpdateAvailable stores the latest available version string when
+	// a newer release is detected. Nil means no update or not yet checked.
+	UpdateAvailable atomic.Pointer[string]
+
 	// RestoreWG is used in tests to wait for background restore goroutines
 	// to complete before cleanup. Nil in production.
 	RestoreWG *sync.WaitGroup
@@ -79,6 +84,16 @@ type Server struct {
 	// directly from server. Set during initialization in main().
 	EvictWorkerFn    func(ctx context.Context, srv *Server, workerID string)
 	SpawnLogCaptureFn func(ctx context.Context, srv *Server, workerID, appID string)
+}
+
+// SetUpdateAvailable records that a newer version is available.
+func (srv *Server) SetUpdateAvailable(v string) {
+	srv.UpdateAvailable.Store(&v)
+}
+
+// GetVersion returns the running server version.
+func (srv *Server) GetVersion() string {
+	return srv.Version
 }
 
 // workerInstallMu returns a per-worker mutex, creating one if needed.

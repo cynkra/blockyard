@@ -1,30 +1,16 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
+	"github.com/cynkra/blockyard/internal/update"
 	"github.com/spf13/cobra"
 )
-
-var apiBase = "https://api.github.com/repos/cynkra/blockyard"
-
-type githubRelease struct {
-	TagName string        `json:"tag_name"`
-	Name    string        `json:"name"`
-	Assets  []githubAsset `json:"assets"`
-}
-
-type githubAsset struct {
-	Name string `json:"name"`
-	URL  string `json:"url"` // API URL — use with Accept: application/octet-stream
-}
 
 func selfUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -36,26 +22,29 @@ func selfUpdateCmd() *cobra.Command {
 
 			channel, _ := cmd.Flags().GetString("channel")
 			if channel == "" {
-				channel = inferChannel()
+				channel = update.InferChannel(version)
 			}
 
-			var latest *githubRelease
+			var latest *update.GitHubRelease
 			var latestVersion string
 			var err error
 
 			switch channel {
 			case "main":
-				latest, err = fetchReleaseByTag("main")
+				latest, err = update.FetchReleaseByTag("main")
 				if err != nil {
 					exitError(jsonOutput, fmt.Errorf("fetch main release: %w", err))
 				}
 				latestVersion = latest.Name
 			default:
-				latest, err = fetchLatestStableRelease()
+				latest, err = update.FetchLatestStableRelease()
 				if err != nil {
 					exitError(jsonOutput, fmt.Errorf("fetch latest release: %w", err))
 				}
-				latestVersion = strings.TrimPrefix(latest.TagName, "v")
+				latestVersion = latest.TagName
+				if len(latestVersion) > 0 && latestVersion[0] == 'v' {
+					latestVersion = latestVersion[1:]
+				}
 			}
 
 			if latestVersion == version {
@@ -120,13 +109,6 @@ func selfUpdateCmd() *cobra.Command {
 	return cmd
 }
 
-func inferChannel() string {
-	if strings.HasPrefix(version, "main+") {
-		return "main"
-	}
-	return "stable"
-}
-
 func selfUpdateBinaryName() string {
 	name := fmt.Sprintf("by-%s-%s", runtime.GOOS, runtime.GOARCH)
 	if runtime.GOOS == "windows" {
@@ -135,46 +117,13 @@ func selfUpdateBinaryName() string {
 	return name
 }
 
-func fetchLatestStableRelease() (*githubRelease, error) {
-	return fetchRelease(apiBase + "/releases/latest")
-}
-
-func fetchReleaseByTag(tag string) (*githubRelease, error) {
-	return fetchRelease(apiBase + "/releases/tags/" + tag)
-}
-
-func fetchRelease(url string) (*githubRelease, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	addGitHubAuth(req)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned %s", resp.Status)
-	}
-
-	var rel githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return nil, err
-	}
-	return &rel, nil
-}
-
 func downloadAsset(apiURL, dst string) error {
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
-	addGitHubAuth(req)
+	update.AddGitHubAuth(req)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -186,7 +135,7 @@ func downloadAsset(apiURL, dst string) error {
 		return fmt.Errorf("download returned %s", resp.Status)
 	}
 
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // G302: self-update binary needs exec permission
 	if err != nil {
 		return err
 	}
@@ -197,10 +146,4 @@ func downloadAsset(apiURL, dst string) error {
 		return copyErr
 	}
 	return closeErr
-}
-
-func addGitHubAuth(req *http.Request) {
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
 }

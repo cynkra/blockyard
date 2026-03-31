@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/cynkra/blockyard/internal/update"
 )
 
 func TestInferChannel(t *testing.T) {
@@ -22,12 +24,9 @@ func TestInferChannel(t *testing.T) {
 		{"main+0000000", "main"},
 	}
 	for _, tt := range tests {
-		old := version
-		version = tt.version
-		got := inferChannel()
-		version = old
+		got := update.InferChannel(tt.version)
 		if got != tt.want {
-			t.Errorf("inferChannel() with version=%q: got %q, want %q", tt.version, got, tt.want)
+			t.Errorf("InferChannel(%q) = %q, want %q", tt.version, got, tt.want)
 		}
 	}
 }
@@ -44,10 +43,10 @@ func TestSelfUpdateBinaryName(t *testing.T) {
 }
 
 func TestFetchRelease(t *testing.T) {
-	rel := githubRelease{
+	rel := update.GitHubRelease{
 		TagName: "v0.0.3",
 		Name:    "0.0.3",
-		Assets: []githubAsset{
+		Assets: []update.GitHubAsset{
 			{Name: "by-linux-amd64", URL: "https://example.com/by-linux-amd64"},
 		},
 	}
@@ -56,7 +55,7 @@ func TestFetchRelease(t *testing.T) {
 		case "/releases/latest":
 			json.NewEncoder(w).Encode(rel)
 		case "/releases/tags/main":
-			json.NewEncoder(w).Encode(githubRelease{
+			json.NewEncoder(w).Encode(update.GitHubRelease{
 				TagName: "main",
 				Name:    "main+abc1234",
 				Assets:  rel.Assets,
@@ -67,12 +66,12 @@ func TestFetchRelease(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	old := apiBase
-	apiBase = srv.URL
-	defer func() { apiBase = old }()
+	old := update.APIBase
+	update.APIBase = srv.URL
+	defer func() { update.APIBase = old }()
 
 	t.Run("stable", func(t *testing.T) {
-		got, err := fetchLatestStableRelease()
+		got, err := update.FetchLatestStableRelease()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -82,7 +81,7 @@ func TestFetchRelease(t *testing.T) {
 	})
 
 	t.Run("main", func(t *testing.T) {
-		got, err := fetchReleaseByTag("main")
+		got, err := update.FetchReleaseByTag("main")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +91,7 @@ func TestFetchRelease(t *testing.T) {
 	})
 
 	t.Run("not_found", func(t *testing.T) {
-		_, err := fetchReleaseByTag("nonexistent")
+		_, err := update.FetchReleaseByTag("nonexistent")
 		if err == nil {
 			t.Fatal("expected error for missing release")
 		}
@@ -127,16 +126,16 @@ func TestDownloadAsset(t *testing.T) {
 
 func TestSelfUpdateCmd_AlreadyUpToDate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(githubRelease{
+		json.NewEncoder(w).Encode(update.GitHubRelease{
 			TagName: "v0.0.3",
 			Name:    "0.0.3",
 		})
 	}))
 	defer srv.Close()
 
-	oldAPI := apiBase
-	apiBase = srv.URL
-	defer func() { apiBase = oldAPI }()
+	oldAPI := update.APIBase
+	update.APIBase = srv.URL
+	defer func() { update.APIBase = oldAPI }()
 
 	oldVersion := version
 	version = "0.0.3"

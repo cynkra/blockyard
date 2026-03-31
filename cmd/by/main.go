@@ -16,6 +16,25 @@ func main() {
 		Version: version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// Skip update notice for self-update and when --json is set.
+			if cmd.Name() == "self-update" {
+				return
+			}
+			if v, _ := cmd.Flags().GetBool("json"); v {
+				return
+			}
+			startUpdateCheck()
+		},
+		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			if cmd.Name() == "self-update" {
+				return
+			}
+			if v, _ := cmd.Flags().GetBool("json"); v {
+				return
+			}
+			finishUpdateCheck()
+		},
 	}
 
 	root.PersistentFlags().Bool("json", false, "Output machine-readable JSON")
