@@ -1,4 +1,4 @@
-FROM golang:1.25.8-bookworm AS builder
+FROM golang:1.26.1-alpine AS builder
 
 ENV GOTOOLCHAIN=local
 WORKDIR /src
