@@ -24,7 +24,7 @@ import (
 func pakTestConfig() *config.DockerConfig {
 	return &config.DockerConfig{
 		Socket:     "/var/run/docker.sock",
-		Image:      "alpine:3.21",
+		Image:      "alpine:3.23",
 		ShinyPort:  8080,
 		PakVersion: "stable",
 	}

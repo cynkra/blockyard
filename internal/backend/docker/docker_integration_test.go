@@ -25,7 +25,7 @@ import (
 func testConfig() *config.DockerConfig {
 	return &config.DockerConfig{
 		Socket:     "/var/run/docker.sock",
-		Image:      "alpine:3.21",
+		Image:      "alpine:3.23",
 		ShinyPort:  8080,
 		PakVersion: "stable",
 	}
@@ -43,7 +43,7 @@ func TestSpawnAndStop(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -88,7 +88,7 @@ func TestHealthCheckNoListener(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -120,7 +120,7 @@ func TestOrphanCleanup(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -186,7 +186,7 @@ func TestNetworkIsolation(t *testing.T) {
 		return backend.WorkerSpec{
 			AppID:       "test-app",
 			WorkerID:    id,
-			Image:       "alpine:3.21",
+			Image:       "alpine:3.23",
 			Cmd:         []string{"sleep", "300"},
 			BundlePath:  "/tmp",
 			LibraryPath: "",
@@ -263,7 +263,7 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -314,7 +314,7 @@ func testSpawn(t *testing.T, b *DockerBackend, cmd []string) (string, backend.Wo
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         cmd,
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -419,7 +419,7 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.21",
+		Image:    "alpine:3.23",
 		Cmd:      []string{"false"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -454,7 +454,7 @@ func TestBuildWithProductionImage(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.21",
+		Image:    "alpine:3.23",
 		Cmd:      []string{"true"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -499,7 +499,7 @@ func TestSpawnWithMemoryLimit(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -540,7 +540,7 @@ func TestSpawnWithCPULimit(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -581,7 +581,7 @@ func TestSpawnWithEnvVars(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -644,7 +644,7 @@ func TestBuildLogWriter(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.21",
+		Image:    "alpine:3.23",
 		Cmd:      []string{"true"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -686,7 +686,7 @@ func TestBuildExitCodeOnFailure(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.21",
+		Image:    "alpine:3.23",
 		Cmd:      []string{"false"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -720,7 +720,7 @@ func TestSpawnAndHealthCheckWithListener(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.21",
+		Image:       "alpine:3.23",
 		Cmd: []string{"sh", "-c",
 			"while true; do echo -e 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok' | nc -l -p 8080; done",
 		},
