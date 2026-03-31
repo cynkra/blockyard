@@ -69,7 +69,7 @@ jobs:
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
       - name: Run example tests
         if: github.event_name != 'pull_request'
-        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags ex -run ${{ matrix.test }} -timeout 20m ./tests/ex/...
+        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
           E2E_PULL_POLICY: never
@@ -79,14 +79,14 @@ jobs:
           for sub in cli server; do
             dir="/tmp/e2e-coverage/$sub"
             if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-              go tool covdata textfmt -i="$dir" -o="coverage-ex-${sub}-${{ matrix.test }}.out"
+              go tool covdata textfmt -i="$dir" -o="coverage-examples-${sub}-${{ matrix.test }}.out"
             fi
           done
       - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
         with:
-          name: coverage-ex-${{ matrix.test }}
-          path: coverage-ex-*.out
+          name: coverage-examples-${{ matrix.test }}
+          path: coverage-examples-*.out
           if-no-files-found: ignore
           retention-days: 1
       - name: Dump compose logs on failure
@@ -194,13 +194,13 @@ jobs:
       # Download e2e coverage artifacts from this workflow.
       - uses: actions/download-artifact@v8
         with:
-          pattern: coverage-ex-*
+          pattern: coverage-examples-*
           merge-multiple: true
 
       # Aggregate all per-test e2e files into a single coverage-e2e.out.
       - name: Aggregate example coverage
         run: |
-          files=$(ls coverage-ex-*.out 2>/dev/null || true)
+          files=$(ls coverage-examples-*.out 2>/dev/null || true)
           [ -z "$files" ] && exit 0
           head -1 $(echo "$files" | head -1) > coverage-ex.out
           tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-ex.out

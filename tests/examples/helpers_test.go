@@ -1,6 +1,6 @@
-//go:build ex
+//go:build examples
 
-package ex_test
+package examples_test
 
 import (
 	"bytes"
