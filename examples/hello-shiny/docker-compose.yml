@@ -31,7 +31,6 @@ services:
       # OIDC (Dex)
       BLOCKYARD_SERVER_EXTERNAL_URL: http://localhost:8080
       BLOCKYARD_SERVER_SESSION_SECRET: dev-session-secret-not-for-production
-      BLOCKYARD_SERVER_LOG_LEVEL: debug
       BLOCKYARD_OIDC_ISSUER_URL: http://localhost:5556
       BLOCKYARD_OIDC_ISSUER_DISCOVERY_URL: http://dex:5556
       BLOCKYARD_OIDC_CLIENT_ID: blockyard
