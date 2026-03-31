@@ -135,7 +135,7 @@ func downloadAsset(apiURL, dst string) error {
 		return fmt.Errorf("download returned %s", resp.Status)
 	}
 
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // G302: self-update binary needs exec permission
 	if err != nil {
 		return err
 	}
