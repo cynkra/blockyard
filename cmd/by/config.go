@@ -11,7 +11,9 @@ func mustClient(jsonOutput bool) *apiclient.Client {
 	if err != nil {
 		exitError(jsonOutput, err)
 	}
-	return apiclient.New(serverURL, token)
+	c := apiclient.New(serverURL, token)
+	c.Version = version
+	return c
 }
 
 // mustStreamingClient creates a streaming client from resolved credentials.
@@ -20,5 +22,7 @@ func mustStreamingClient(jsonOutput bool) *apiclient.Client {
 	if err != nil {
 		exitError(jsonOutput, err)
 	}
-	return apiclient.NewStreaming(serverURL, token)
+	c := apiclient.NewStreaming(serverURL, token)
+	c.Version = version
+	return c
 }

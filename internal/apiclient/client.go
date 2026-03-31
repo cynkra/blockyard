@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +19,17 @@ type Client struct {
 	BaseURL    string
 	Token      string
 	HTTPClient *http.Client
+
+	// Version is the CLI version. When set, the client checks the
+	// X-Blockyard-Version response header on the first request and
+	// warns on major-version mismatch.
+	Version string
+
+	// Stderr is the writer for version-mismatch warnings.
+	// Defaults to os.Stderr when nil.
+	Stderr io.Writer
+
+	checkVersion sync.Once
 }
 
 // New creates an API client with a 30-second timeout.
@@ -64,7 +78,12 @@ func (c *Client) Do(method, path string, body io.Reader, contentType string) (*h
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	return c.HTTPClient.Do(req)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	c.warnVersionMismatch(resp)
+	return resp, nil
 }
 
 func (c *Client) Get(path string) (*http.Response, error) {
@@ -127,6 +146,47 @@ func ReadBodyRaw(resp *http.Response) ([]byte, error) {
 		return nil, err
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// warnVersionMismatch prints a one-time warning to stderr if the server's
+// major version differs from the client's.
+func (c *Client) warnVersionMismatch(resp *http.Response) {
+	if c.Version == "" {
+		return
+	}
+	c.checkVersion.Do(func() {
+		sv := resp.Header.Get("X-Blockyard-Version")
+		if sv == "" {
+			return
+		}
+		cm := parseMajor(c.Version)
+		sm := parseMajor(sv)
+		if cm < 0 || sm < 0 {
+			return // non-semver (e.g. "dev"), skip check
+		}
+		if cm != sm {
+			w := c.Stderr
+			if w == nil {
+				w = os.Stderr
+			}
+			fmt.Fprintf(w, "Warning: by %s may be incompatible with server %s (major version mismatch)\n",
+				c.Version, sv)
+		}
+	})
+}
+
+// parseMajor extracts the major version number from a semver-like string.
+// Returns -1 for non-numeric versions like "dev".
+func parseMajor(v string) int {
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexByte(v, '.'); i >= 0 {
+		v = v[:i]
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // BuildQuery builds a URL path with query parameters.
