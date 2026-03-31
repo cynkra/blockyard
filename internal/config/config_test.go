@@ -559,6 +559,7 @@ func TestValidationDefersSessionSecretWithOpenbao(t *testing.T) {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	toml := fmt.Sprintf(`
 [server]
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -594,6 +595,7 @@ func TestValidationRejectsBothAdminTokenAndRoleID(t *testing.T) {
 	toml := fmt.Sprintf(`
 [server]
 session_secret = "my-session-secret"
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -630,6 +632,7 @@ func TestParseOpenbaoRoleID(t *testing.T) {
 	toml := fmt.Sprintf(`
 [server]
 session_secret = "my-session-secret"
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -690,6 +693,7 @@ path = %q
 [proxy]
 `, bundlePath, dbPath)
 
+	t.Setenv("BLOCKYARD_SERVER_EXTERNAL_URL", "https://example.com")
 	t.Setenv("BLOCKYARD_OIDC_ISSUER_URL", "https://env-idp.example.com")
 	t.Setenv("BLOCKYARD_OIDC_CLIENT_ID", "env-client")
 	t.Setenv("BLOCKYARD_OIDC_CLIENT_SECRET", "env-secret")
@@ -771,6 +775,7 @@ func openbaoTOML(t *testing.T) string {
 [server]
 
 session_secret = "my-session-secret"
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -877,6 +882,7 @@ func TestOpenbaoAutoConstructFromEnvVars(t *testing.T) {
 	t.Setenv("BLOCKYARD_OPENBAO_ADDRESS", "https://env-bao.example.com")
 	t.Setenv("BLOCKYARD_OPENBAO_ADMIN_TOKEN", "hvs.env-token")
 	// Also need OIDC for openbao validation to pass.
+	t.Setenv("BLOCKYARD_SERVER_EXTERNAL_URL", "https://example.com")
 	t.Setenv("BLOCKYARD_OIDC_ISSUER_URL", "https://idp.example.com")
 	t.Setenv("BLOCKYARD_OIDC_CLIENT_ID", "my-client")
 	t.Setenv("BLOCKYARD_OIDC_CLIENT_SECRET", "my-secret")
@@ -1169,6 +1175,7 @@ func boardStorageTOML(t *testing.T) string {
 	bundlePath := filepath.Join(dir, "bundles")
 	return fmt.Sprintf(`
 [server]
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -1216,6 +1223,7 @@ func TestBoardStorageAutoConstructFromEnvVars(t *testing.T) {
 	bundlePath := filepath.Join(dir, "bundles")
 	toml := fmt.Sprintf(`
 [server]
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -1253,6 +1261,7 @@ func TestValidationRejectsBoardStorageWithoutPostgres(t *testing.T) {
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
 	toml := fmt.Sprintf(`
 [server]
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -1317,6 +1326,7 @@ func TestValidationRejectsBoardStorageEmptyURL(t *testing.T) {
 	bundlePath := filepath.Join(dir, "bundles")
 	toml := fmt.Sprintf(`
 [server]
+external_url = "https://example.com"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -1441,5 +1451,18 @@ path = "` + filepath.ToSlash(filepath.Join(tmp, "db", "test.db")) + `"
 	}
 	if !strings.Contains(err.Error(), "CIDR") {
 		t.Errorf("expected CIDR error, got: %v", err)
+	}
+}
+
+func TestValidationRejectsOidcWithoutExternalURL(t *testing.T) {
+	toml := strings.Replace(oidcTOML(t),
+		`external_url = "https://example.com"`,
+		``, 1)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "external_url") {
+		t.Errorf("expected external_url error, got: %v", err)
 	}
 }

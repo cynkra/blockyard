@@ -46,8 +46,9 @@ type ServerConfig struct {
 	SessionSecret   *Secret  `toml:"session_secret"`   // required when [oidc] is set
 	ExternalURL     string   `toml:"external_url"`
 	ShutdownTimeout Duration `toml:"shutdown_timeout"`
-	LogLevel        string   `toml:"log_level"`         // debug, info, warn, error (default: info)
-	TrustedProxies  []string `toml:"trusted_proxies"`   // CIDRs whose X-Forwarded-For to trust (e.g. ["10.0.0.0/8"])
+	LogLevel             string   `toml:"log_level"`              // debug, info, warn, error (default: info)
+	TrustedProxies       []string `toml:"trusted_proxies"`        // CIDRs whose X-Forwarded-For to trust (e.g. ["10.0.0.0/8"])
+	SkipDockerPreflight  bool     `toml:"skip_docker_preflight"`  // skip Docker-dependent preflight checks at startup
 }
 
 type DockerConfig struct {
@@ -403,6 +404,9 @@ func validate(cfg *Config) error {
 	}
 
 	if cfg.OIDC != nil {
+		if cfg.Server.ExternalURL == "" {
+			return fmt.Errorf("config: server.external_url is required when [oidc] is configured")
+		}
 		if cfg.OIDC.IssuerURL == "" {
 			return fmt.Errorf("config: oidc.issuer_url must not be empty")
 		}

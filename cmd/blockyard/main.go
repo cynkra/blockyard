@@ -20,11 +20,13 @@ import (
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/docker"
+	"github.com/cynkra/blockyard/internal/buildercache"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/pkgstore"
+	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
@@ -63,6 +65,14 @@ func main() {
 	}
 	slog.Info("loaded config", logAttrs...)
 
+	// ── Preflight: config-only checks ──
+	configReport := preflight.RunConfigChecks(cfg)
+	configReport.Log()
+	if configReport.HasErrors() {
+		slog.Error("preflight config checks failed")
+		os.Exit(1)
+	}
+
 	// Initialize backend
 	be, err := docker.New(context.Background(), &cfg.Docker, cfg.Storage.BundleServerPath)
 	if err != nil {
@@ -91,6 +101,33 @@ func main() {
 	srv.PkgStore = pkgstore.NewStore(storePath)
 	if platform := pkgstore.RecoverPlatform(storePath); platform != "" {
 		srv.PkgStore.SetPlatform(platform)
+	}
+
+	// ── Preflight: Docker-dependent checks ──
+	if !cfg.Server.SkipDockerPreflight {
+		builderBin, builderErr := buildercache.EnsureCached(
+			filepath.Join(cfg.Storage.BundleServerPath, ".by-builder-cache"), version)
+		if builderErr != nil {
+			slog.Warn("preflight: could not cache by-builder, skipping builder check",
+				"error", builderErr)
+			builderBin = ""
+		}
+
+		preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		dockerReport := preflight.RunDockerChecks(preflightCtx, preflight.DockerDeps{
+			Client:     be.Client(),
+			ServerID:   be.ServerID(),
+			MountCfg:   be.MountCfg(),
+			Config:     &cfg.Docker,
+			StorePath:  storePath,
+			BuilderBin: builderBin,
+		})
+		preflightCancel()
+		dockerReport.Log()
+		if dockerReport.HasErrors() {
+			slog.Error("preflight Docker checks failed")
+			os.Exit(1)
+		}
 	}
 
 	// Generate ephemeral HMAC key for worker tokens.

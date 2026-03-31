@@ -100,6 +100,15 @@ func New(ctx context.Context, cfg *config.DockerConfig, bundleServerPath string)
 	}, nil
 }
 
+// Client returns the underlying Docker API client.
+func (d *DockerBackend) Client() *client.Client { return d.client }
+
+// MountCfg returns the auto-detected mount configuration.
+func (d *DockerBackend) MountCfg() MountConfig { return d.mountCfg }
+
+// ServerID returns the container ID of the server, or empty in native mode.
+func (d *DockerBackend) ServerID() string { return d.serverID }
+
 // --- Server ID detection ---
 
 func detectServerID() string {
@@ -1023,7 +1032,7 @@ func (d *DockerBackend) blockMetadataEndpoint(ctx context.Context, networkName, 
 func (d *DockerBackend) hostBlocksMetadataEndpoint() bool {
 	if d.serverID == "" {
 		// Native mode: check iptables DOCKER-USER chain directly
-		return dockerUserBlocksMetadata()
+		return DockerUserBlocksMetadata()
 	}
 
 	// Container mode: TCP connect test
@@ -1035,9 +1044,9 @@ func (d *DockerBackend) hostBlocksMetadataEndpoint() bool {
 	return false // reachable = not blocked
 }
 
-// dockerUserBlocksMetadata checks if the DOCKER-USER iptables chain contains a
+// DockerUserBlocksMetadata checks if the DOCKER-USER iptables chain contains a
 // DROP rule for 169.254.169.254. Tries both direct iptables and sudo iptables.
-func dockerUserBlocksMetadata() bool {
+func DockerUserBlocksMetadata() bool {
 	for _, args := range [][]string{
 		{"iptables", "-S", "DOCKER-USER"},
 		{"sudo", "iptables", "-S", "DOCKER-USER"},
