@@ -69,7 +69,7 @@ jobs:
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
       - name: Run example tests
         if: github.event_name != 'pull_request'
-        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags ex -run ${{ matrix.test }} -timeout 20m ./ex/...
+        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags ex -run ${{ matrix.test }} -timeout 20m ./tests/ex/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
           E2E_PULL_POLICY: never
@@ -124,18 +124,18 @@ jobs:
       - name: Deploy hello app
         run: bash examples/hello-shiny/deploy.sh
       - name: Install Playwright
-        working-directory: e2e
+        working-directory: tests/e2e
         run: |
           npm ci
           npx playwright install --with-deps chromium
       - name: Run Playwright tests
-        working-directory: e2e
+        working-directory: tests/e2e
         run: npx playwright test
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-report
-          path: e2e/playwright-report/
+          path: tests/e2e/playwright-report/
           retention-days: 7
       - name: Dump compose logs on failure
         if: failure()
