@@ -5,139 +5,153 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
+	"net/netip"
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/jsonstream"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
 )
+
+// mockPullResponse satisfies client.ImagePullResponse for tests.
+type mockPullResponse struct {
+	io.ReadCloser
+}
+
+func (m mockPullResponse) JSONMessages(_ context.Context) iter.Seq2[jsonstream.Message, error] {
+	return nil
+}
+
+func (m mockPullResponse) Wait(_ context.Context) error {
+	return nil
+}
 
 // --- mock dockerClient ---
 
 // mockDockerClient implements dockerClient. Only the methods under test need
 // real implementations; the rest panic so unexpected calls surface immediately.
 type mockDockerClient struct {
-	containerInspectFn  func(ctx context.Context, id string) (container.InspectResponse, error)
-	containerListFn     func(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
-	containerRemoveFn   func(ctx context.Context, containerID string, options container.RemoveOptions) error
-	containerStopFn     func(ctx context.Context, containerID string, options container.StopOptions) error
-	imageInspectFn      func(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
-	imagePullFn         func(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error)
-	networkConnectFn    func(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error
-	networkCreateFn     func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
-	networkDisconnectFn func(ctx context.Context, networkID, containerID string, force bool) error
-	networkInspectFn    func(ctx context.Context, id string, opts network.InspectOptions) (network.Inspect, error)
-	networkListFn       func(ctx context.Context, options network.ListOptions) ([]network.Summary, error)
-	networkRemoveFn     func(ctx context.Context, networkID string) error
+	containerInspectFn  func(ctx context.Context, id string, opts client.ContainerInspectOptions) (client.ContainerInspectResult, error)
+	containerListFn     func(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error)
+	containerRemoveFn   func(ctx context.Context, containerID string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
+	containerStopFn     func(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error)
+	imageInspectFn      func(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error)
+	imagePullFn         func(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
+	networkConnectFn    func(ctx context.Context, networkID string, options client.NetworkConnectOptions) (client.NetworkConnectResult, error)
+	networkCreateFn     func(ctx context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error)
+	networkDisconnectFn func(ctx context.Context, networkID string, options client.NetworkDisconnectOptions) (client.NetworkDisconnectResult, error)
+	networkInspectFn    func(ctx context.Context, id string, opts client.NetworkInspectOptions) (client.NetworkInspectResult, error)
+	networkListFn       func(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error)
+	networkRemoveFn     func(ctx context.Context, networkID string, options client.NetworkRemoveOptions) (client.NetworkRemoveResult, error)
 }
 
-func (m *mockDockerClient) ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error) {
+func (m *mockDockerClient) ContainerCreate(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ContainerInspect(ctx context.Context, id string) (container.InspectResponse, error) {
+func (m *mockDockerClient) ContainerInspect(ctx context.Context, id string, opts client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
 	if m.containerInspectFn != nil {
-		return m.containerInspectFn(ctx, id)
+		return m.containerInspectFn(ctx, id, opts)
 	}
 	panic("ContainerInspect not implemented")
 }
 
-func (m *mockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+func (m *mockDockerClient) ContainerList(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error) {
 	if m.containerListFn != nil {
 		return m.containerListFn(ctx, options)
 	}
 	panic("ContainerList not implemented")
 }
 
-func (m *mockDockerClient) ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error) {
+func (m *mockDockerClient) ContainerLogs(context.Context, string, client.ContainerLogsOptions) (client.ContainerLogsResult, error) {
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error {
+func (m *mockDockerClient) ContainerRemove(ctx context.Context, containerID string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
 	if m.containerRemoveFn != nil {
 		return m.containerRemoveFn(ctx, containerID, options)
 	}
 	panic("ContainerRemove not implemented")
 }
 
-func (m *mockDockerClient) ContainerStart(context.Context, string, container.StartOptions) error {
+func (m *mockDockerClient) ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error) {
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ContainerStatsOneShot(context.Context, string) (container.StatsResponseReader, error) {
+func (m *mockDockerClient) ContainerStats(context.Context, string, client.ContainerStatsOptions) (client.ContainerStatsResult, error) {
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error {
+func (m *mockDockerClient) ContainerStop(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error) {
 	if m.containerStopFn != nil {
 		return m.containerStopFn(ctx, containerID, options)
 	}
 	panic("ContainerStop not implemented")
 }
 
-func (m *mockDockerClient) ContainerWait(context.Context, string, container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+func (m *mockDockerClient) ContainerWait(context.Context, string, client.ContainerWaitOptions) client.ContainerWaitResult {
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (image.InspectResponse, error) {
+func (m *mockDockerClient) ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error) {
 	if m.imageInspectFn != nil {
 		return m.imageInspectFn(ctx, imageID, opts...)
 	}
 	panic("ImageInspect not implemented")
 }
 
-func (m *mockDockerClient) ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error) {
+func (m *mockDockerClient) ImagePull(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error) {
 	if m.imagePullFn != nil {
 		return m.imagePullFn(ctx, refStr, options)
 	}
 	panic("ImagePull not implemented")
 }
 
-func (m *mockDockerClient) NetworkConnect(ctx context.Context, networkID, containerID string, cfg *network.EndpointSettings) error {
+func (m *mockDockerClient) NetworkConnect(ctx context.Context, networkID string, options client.NetworkConnectOptions) (client.NetworkConnectResult, error) {
 	if m.networkConnectFn != nil {
-		return m.networkConnectFn(ctx, networkID, containerID, cfg)
+		return m.networkConnectFn(ctx, networkID, options)
 	}
 	panic("NetworkConnect not implemented")
 }
 
-func (m *mockDockerClient) NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+func (m *mockDockerClient) NetworkCreate(ctx context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
 	if m.networkCreateFn != nil {
 		return m.networkCreateFn(ctx, name, options)
 	}
 	panic("NetworkCreate not implemented")
 }
 
-func (m *mockDockerClient) NetworkDisconnect(ctx context.Context, networkID, containerID string, force bool) error {
+func (m *mockDockerClient) NetworkDisconnect(ctx context.Context, networkID string, options client.NetworkDisconnectOptions) (client.NetworkDisconnectResult, error) {
 	if m.networkDisconnectFn != nil {
-		return m.networkDisconnectFn(ctx, networkID, containerID, force)
+		return m.networkDisconnectFn(ctx, networkID, options)
 	}
 	panic("NetworkDisconnect not implemented")
 }
 
-func (m *mockDockerClient) NetworkInspect(ctx context.Context, id string, opts network.InspectOptions) (network.Inspect, error) {
+func (m *mockDockerClient) NetworkInspect(ctx context.Context, id string, opts client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
 	if m.networkInspectFn != nil {
 		return m.networkInspectFn(ctx, id, opts)
 	}
 	panic("NetworkInspect not implemented")
 }
 
-func (m *mockDockerClient) NetworkList(ctx context.Context, options network.ListOptions) ([]network.Summary, error) {
+func (m *mockDockerClient) NetworkList(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error) {
 	if m.networkListFn != nil {
 		return m.networkListFn(ctx, options)
 	}
 	panic("NetworkList not implemented")
 }
 
-func (m *mockDockerClient) NetworkRemove(ctx context.Context, networkID string) error {
+func (m *mockDockerClient) NetworkRemove(ctx context.Context, networkID string, options client.NetworkRemoveOptions) (client.NetworkRemoveResult, error) {
 	if m.networkRemoveFn != nil {
-		return m.networkRemoveFn(ctx, networkID)
+		return m.networkRemoveFn(ctx, networkID, options)
 	}
 	panic("NetworkRemove not implemented")
 }
@@ -337,12 +351,12 @@ func TestNetworkLabels(t *testing.T) {
 
 func TestDetectMountMode_Volume(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				Mounts: []container.MountPoint{
 					{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data"},
 				},
-			}, nil
+			}}, nil
 		},
 	}
 	cfg, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
@@ -362,12 +376,12 @@ func TestDetectMountMode_Volume(t *testing.T) {
 
 func TestDetectMountMode_Bind(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				Mounts: []container.MountPoint{
 					{Type: mount.TypeBind, Source: "/host/data", Destination: "/data"},
 				},
-			}, nil
+			}}, nil
 		},
 	}
 	cfg, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
@@ -384,13 +398,13 @@ func TestDetectMountMode_Bind(t *testing.T) {
 
 func TestDetectMountMode_LongestPrefixWins(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				Mounts: []container.MountPoint{
 					{Type: mount.TypeBind, Source: "/host/root", Destination: "/"},
 					{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data"},
 				},
-			}, nil
+			}}, nil
 		},
 	}
 	cfg, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
@@ -404,12 +418,12 @@ func TestDetectMountMode_LongestPrefixWins(t *testing.T) {
 
 func TestDetectMountMode_NoMatchingMount(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				Mounts: []container.MountPoint{
 					{Type: mount.TypeVolume, Name: "other", Destination: "/other"},
 				},
-			}, nil
+			}}, nil
 		},
 	}
 	_, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
@@ -420,8 +434,8 @@ func TestDetectMountMode_NoMatchingMount(t *testing.T) {
 
 func TestDetectMountMode_InspectError(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{}, errors.New("connection refused")
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{}, errors.New("connection refused")
 		},
 	}
 	_, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
@@ -444,30 +458,30 @@ func TestConnectServiceContainers_ConnectsWithAliases(t *testing.T) {
 	var connected []string
 
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, id string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
+		networkInspectFn: func(_ context.Context, id string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
 				Containers: map[string]network.EndpointResource{
 					"db-container":    {},
 					"redis-container": {},
 				},
-			}, nil
+			}}, nil
 		},
-		containerInspectFn: func(_ context.Context, id string) (container.InspectResponse, error) {
+		containerInspectFn: func(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
 			aliases := map[string][]string{
 				"db-container":    {"postgres", "db"},
 				"redis-container": {"redis"},
 			}
-			return container.InspectResponse{
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				NetworkSettings: &container.NetworkSettings{
 					Networks: map[string]*network.EndpointSettings{
 						"svc-net": {Aliases: aliases[id]},
 					},
 				},
-			}, nil
+			}}, nil
 		},
-		networkConnectFn: func(_ context.Context, networkID, containerID string, cfg *network.EndpointSettings) error {
-			connected = append(connected, containerID)
-			return nil
+		networkConnectFn: func(_ context.Context, _ string, opts client.NetworkConnectOptions) (client.NetworkConnectResult, error) {
+			connected = append(connected, opts.Container)
+			return client.NetworkConnectResult{}, nil
 		},
 	}
 
@@ -486,24 +500,24 @@ func TestConnectServiceContainers_SkipsServerContainer(t *testing.T) {
 	var connected []string
 
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
 				Containers: map[string]network.EndpointResource{
 					"server-id":   {},
 					"db-container": {},
 				},
-			}, nil
+			}}, nil
 		},
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				NetworkSettings: &container.NetworkSettings{
 					Networks: map[string]*network.EndpointSettings{},
 				},
-			}, nil
+			}}, nil
 		},
-		networkConnectFn: func(_ context.Context, _, containerID string, _ *network.EndpointSettings) error {
-			connected = append(connected, containerID)
-			return nil
+		networkConnectFn: func(_ context.Context, _ string, opts client.NetworkConnectOptions) (client.NetworkConnectResult, error) {
+			connected = append(connected, opts.Container)
+			return client.NetworkConnectResult{}, nil
 		},
 	}
 
@@ -523,27 +537,27 @@ func TestConnectServiceContainers_InspectErrorSkipsContainer(t *testing.T) {
 	var connected []string
 
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
 				Containers: map[string]network.EndpointResource{
 					"bad-container":  {},
 					"good-container": {},
 				},
-			}, nil
+			}}, nil
 		},
-		containerInspectFn: func(_ context.Context, id string) (container.InspectResponse, error) {
+		containerInspectFn: func(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
 			if id == "bad-container" {
-				return container.InspectResponse{}, errors.New("gone")
+				return client.ContainerInspectResult{}, errors.New("gone")
 			}
-			return container.InspectResponse{
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				NetworkSettings: &container.NetworkSettings{
 					Networks: map[string]*network.EndpointSettings{},
 				},
-			}, nil
+			}}, nil
 		},
-		networkConnectFn: func(_ context.Context, _, containerID string, _ *network.EndpointSettings) error {
-			connected = append(connected, containerID)
-			return nil
+		networkConnectFn: func(_ context.Context, _ string, opts client.NetworkConnectOptions) (client.NetworkConnectResult, error) {
+			connected = append(connected, opts.Container)
+			return client.NetworkConnectResult{}, nil
 		},
 	}
 
@@ -561,8 +575,8 @@ func TestConnectServiceContainers_InspectErrorSkipsContainer(t *testing.T) {
 
 func TestConnectServiceContainers_NetworkInspectError(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{}, errors.New("network not found")
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{}, errors.New("network not found")
 		},
 	}
 
@@ -579,12 +593,12 @@ func TestConnectServiceContainers_NetworkInspectError(t *testing.T) {
 
 func TestInsertMetadataRule_Success(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
-				IPAM: network.IPAM{
-					Config: []network.IPAMConfig{{Subnet: "172.18.0.0/16"}},
-				},
-			}, nil
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
+				Network: network.Network{IPAM: network.IPAM{
+					Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.18.0.0/16")}},
+				}},
+			}}, nil
 		},
 	}
 
@@ -619,8 +633,8 @@ func TestInsertMetadataRule_Success(t *testing.T) {
 
 func TestInsertMetadataRule_NoIPAM(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{IPAM: network.IPAM{}}, nil
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{Network: network.Network{IPAM: network.IPAM{}}}}, nil
 		},
 	}
 	d := newTestBackend(mock)
@@ -632,8 +646,8 @@ func TestInsertMetadataRule_NoIPAM(t *testing.T) {
 
 func TestInsertMetadataRule_NetworkInspectError(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{}, errors.New("not found")
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{}, errors.New("not found")
 		},
 	}
 	d := newTestBackend(mock)
@@ -645,12 +659,12 @@ func TestInsertMetadataRule_NetworkInspectError(t *testing.T) {
 
 func TestInsertMetadataRule_IptablesFails(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
-				IPAM: network.IPAM{
-					Config: []network.IPAMConfig{{Subnet: "172.18.0.0/16"}},
-				},
-			}, nil
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
+				Network: network.Network{IPAM: network.IPAM{
+					Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.18.0.0/16")}},
+				}},
+			}}, nil
 		},
 	}
 	runner := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
@@ -668,12 +682,12 @@ func TestInsertMetadataRule_IptablesFails(t *testing.T) {
 
 func TestBlockMetadataEndpoint_FirstCall_IptablesSucceeds(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
-				IPAM: network.IPAM{
-					Config: []network.IPAMConfig{{Subnet: "172.18.0.0/16"}},
-				},
-			}, nil
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
+				Network: network.Network{IPAM: network.IPAM{
+					Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.18.0.0/16")}},
+				}},
+			}}, nil
 		},
 	}
 	runner := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
@@ -692,12 +706,12 @@ func TestBlockMetadataEndpoint_FirstCall_IptablesSucceeds(t *testing.T) {
 
 func TestBlockMetadataEndpoint_FirstCall_IptablesFailsHostBlocks(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
-				IPAM: network.IPAM{
-					Config: []network.IPAMConfig{{Subnet: "172.18.0.0/16"}},
-				},
-			}, nil
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
+				Network: network.Network{IPAM: network.IPAM{
+					Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.18.0.0/16")}},
+				}},
+			}}, nil
 		},
 	}
 
@@ -724,12 +738,12 @@ func TestBlockMetadataEndpoint_FirstCall_IptablesFailsHostBlocks(t *testing.T) {
 
 func TestBlockMetadataEndpoint_FirstCall_NothingWorks(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
-				IPAM: network.IPAM{
-					Config: []network.IPAMConfig{{Subnet: "172.18.0.0/16"}},
-				},
-			}, nil
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
+				Network: network.Network{IPAM: network.IPAM{
+					Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.18.0.0/16")}},
+				}},
+			}}, nil
 		},
 	}
 	runner := func(_ context.Context, _ string, _ ...string) ([]byte, error) {
@@ -746,12 +760,12 @@ func TestBlockMetadataEndpoint_FirstCall_NothingWorks(t *testing.T) {
 
 func TestBlockMetadataEndpoint_SubsequentCall_Blocked(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
-				IPAM: network.IPAM{
-					Config: []network.IPAMConfig{{Subnet: "172.18.0.0/16"}},
-				},
-			}, nil
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
+				Network: network.Network{IPAM: network.IPAM{
+					Config: []network.IPAMConfig{{Subnet: netip.MustParsePrefix("172.18.0.0/16")}},
+				}},
+			}}, nil
 		},
 	}
 
@@ -938,8 +952,8 @@ func TestCleanupOrphanRules_NoOrphans(t *testing.T) {
 
 func TestEnsureImage_AlreadyPresent(t *testing.T) {
 	mock := &mockDockerClient{
-		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
-			return image.InspectResponse{}, nil
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{}, nil
 		},
 	}
 	d := newTestBackend(mock)
@@ -951,15 +965,15 @@ func TestEnsureImage_AlreadyPresent(t *testing.T) {
 func TestEnsureImage_PullsWhenMissing(t *testing.T) {
 	var pulled bool
 	mock := &mockDockerClient{
-		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
-			return image.InspectResponse{}, errors.New("not found")
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{}, errors.New("not found")
 		},
-		imagePullFn: func(_ context.Context, ref string, _ image.PullOptions) (io.ReadCloser, error) {
+		imagePullFn: func(_ context.Context, ref string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
 			pulled = true
 			if ref != "alpine:3.21" {
 				t.Errorf("pulled %q, want alpine:3.21", ref)
 			}
-			return io.NopCloser(strings.NewReader("")), nil
+			return mockPullResponse{io.NopCloser(strings.NewReader(""))}, nil
 		},
 	}
 	d := newTestBackend(mock)
@@ -973,10 +987,10 @@ func TestEnsureImage_PullsWhenMissing(t *testing.T) {
 
 func TestEnsureImage_PullFails(t *testing.T) {
 	mock := &mockDockerClient{
-		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
-			return image.InspectResponse{}, errors.New("not found")
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{}, errors.New("not found")
 		},
-		imagePullFn: func(_ context.Context, _ string, _ image.PullOptions) (io.ReadCloser, error) {
+		imagePullFn: func(_ context.Context, _ string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
 			return nil, errors.New("registry unavailable")
 		},
 	}
@@ -999,17 +1013,17 @@ func TestDisconnectServiceContainers_DisconnectsExceptServer(t *testing.T) {
 	var disconnected []string
 
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
 				Containers: map[string]network.EndpointResource{
 					"server-id":    {},
 					"db-container": {},
 				},
-			}, nil
+			}}, nil
 		},
-		networkDisconnectFn: func(_ context.Context, _, containerID string, _ bool) error {
-			disconnected = append(disconnected, containerID)
-			return nil
+		networkDisconnectFn: func(_ context.Context, _ string, opts client.NetworkDisconnectOptions) (client.NetworkDisconnectResult, error) {
+			disconnected = append(disconnected, opts.Container)
+			return client.NetworkDisconnectResult{}, nil
 		},
 	}
 
@@ -1025,8 +1039,8 @@ func TestDisconnectServiceContainers_DisconnectsExceptServer(t *testing.T) {
 
 func TestDisconnectServiceContainers_NetworkInspectError(t *testing.T) {
 	mock := &mockDockerClient{
-		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
-			return network.Inspect{}, errors.New("not found")
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{}, errors.New("not found")
 		},
 	}
 
@@ -1042,12 +1056,12 @@ func TestDisconnectServiceContainers_NetworkInspectError(t *testing.T) {
 func TestCreateNetwork_HappyPath(t *testing.T) {
 	var createdName string
 	mock := &mockDockerClient{
-		networkCreateFn: func(_ context.Context, name string, opts network.CreateOptions) (network.CreateResponse, error) {
+		networkCreateFn: func(_ context.Context, name string, opts client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
 			createdName = name
 			if opts.Driver != "bridge" {
 				t.Errorf("expected bridge driver, got %q", opts.Driver)
 			}
-			return network.CreateResponse{ID: "net-new-id"}, nil
+			return client.NetworkCreateResult{ID: "net-new-id"}, nil
 		},
 	}
 
@@ -1066,8 +1080,8 @@ func TestCreateNetwork_HappyPath(t *testing.T) {
 
 func TestCreateNetwork_Error(t *testing.T) {
 	mock := &mockDockerClient{
-		networkCreateFn: func(_ context.Context, _ string, _ network.CreateOptions) (network.CreateResponse, error) {
-			return network.CreateResponse{}, errors.New("quota exceeded")
+		networkCreateFn: func(_ context.Context, _ string, _ client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
+			return client.NetworkCreateResult{}, errors.New("quota exceeded")
 		},
 	}
 
@@ -1082,14 +1096,14 @@ func TestCreateNetwork_Error(t *testing.T) {
 
 func TestAddr_HappyPath(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				NetworkSettings: &container.NetworkSettings{
 					Networks: map[string]*network.EndpointSettings{
-						"blockyard-w1": {IPAddress: "172.18.0.2"},
+						"blockyard-w1": {IPAddress: netip.MustParseAddr("172.18.0.2")},
 					},
 				},
-			}, nil
+			}}, nil
 		},
 	}
 
@@ -1119,8 +1133,8 @@ func TestAddr_UnknownWorker(t *testing.T) {
 
 func TestAddr_InspectError(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{}, errors.New("gone")
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{}, errors.New("gone")
 		},
 	}
 
@@ -1135,8 +1149,8 @@ func TestAddr_InspectError(t *testing.T) {
 
 func TestAddr_NoNetworkSettings(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{NetworkSettings: nil}, nil
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{NetworkSettings: nil}}, nil
 		},
 	}
 
@@ -1151,14 +1165,14 @@ func TestAddr_NoNetworkSettings(t *testing.T) {
 
 func TestAddr_NotOnExpectedNetwork(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				NetworkSettings: &container.NetworkSettings{
 					Networks: map[string]*network.EndpointSettings{
-						"other-net": {IPAddress: "172.18.0.2"},
+						"other-net": {IPAddress: netip.MustParseAddr("172.18.0.2")},
 					},
 				},
-			}, nil
+			}}, nil
 		},
 	}
 
@@ -1173,14 +1187,14 @@ func TestAddr_NotOnExpectedNetwork(t *testing.T) {
 
 func TestAddr_EmptyIP(t *testing.T) {
 	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
-			return container.InspectResponse{
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
 				NetworkSettings: &container.NetworkSettings{
 					Networks: map[string]*network.EndpointSettings{
-						"blockyard-w1": {IPAddress: ""},
+						"blockyard-w1": {},
 					},
 				},
-			}, nil
+			}}, nil
 		},
 	}
 
@@ -1199,17 +1213,17 @@ func TestStop_HappyPath(t *testing.T) {
 	var stopped, removed, netRemoved bool
 
 	mock := &mockDockerClient{
-		containerStopFn: func(_ context.Context, _ string, _ container.StopOptions) error {
+		containerStopFn: func(_ context.Context, _ string, _ client.ContainerStopOptions) (client.ContainerStopResult, error) {
 			stopped = true
-			return nil
+			return client.ContainerStopResult{}, nil
 		},
-		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
+		containerRemoveFn: func(_ context.Context, _ string, _ client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
 			removed = true
-			return nil
+			return client.ContainerRemoveResult{}, nil
 		},
-		networkRemoveFn: func(_ context.Context, _ string) error {
+		networkRemoveFn: func(_ context.Context, _ string, _ client.NetworkRemoveOptions) (client.NetworkRemoveResult, error) {
 			netRemoved = true
-			return nil
+			return client.NetworkRemoveResult{}, nil
 		},
 	}
 
@@ -1256,16 +1270,16 @@ func TestStop_ContainerStopErrorStillCleansUp(t *testing.T) {
 	var removeCalled, netRemoveCalled bool
 
 	mock := &mockDockerClient{
-		containerStopFn: func(_ context.Context, _ string, _ container.StopOptions) error {
-			return errors.New("timeout")
+		containerStopFn: func(_ context.Context, _ string, _ client.ContainerStopOptions) (client.ContainerStopResult, error) {
+			return client.ContainerStopResult{}, errors.New("timeout")
 		},
-		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
+		containerRemoveFn: func(_ context.Context, _ string, _ client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
 			removeCalled = true
-			return nil
+			return client.ContainerRemoveResult{}, nil
 		},
-		networkRemoveFn: func(_ context.Context, _ string) error {
+		networkRemoveFn: func(_ context.Context, _ string, _ client.NetworkRemoveOptions) (client.NetworkRemoveResult, error) {
 			netRemoveCalled = true
-			return nil
+			return client.NetworkRemoveResult{}, nil
 		},
 	}
 
@@ -1294,20 +1308,20 @@ func TestStop_DisconnectsServer(t *testing.T) {
 	var serverDisconnected bool
 
 	mock := &mockDockerClient{
-		containerStopFn: func(_ context.Context, _ string, _ container.StopOptions) error {
-			return nil
+		containerStopFn: func(_ context.Context, _ string, _ client.ContainerStopOptions) (client.ContainerStopResult, error) {
+			return client.ContainerStopResult{}, nil
 		},
-		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
-			return nil
+		containerRemoveFn: func(_ context.Context, _ string, _ client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+			return client.ContainerRemoveResult{}, nil
 		},
-		networkDisconnectFn: func(_ context.Context, _, containerID string, _ bool) error {
-			if containerID == "server-id" {
+		networkDisconnectFn: func(_ context.Context, _ string, opts client.NetworkDisconnectOptions) (client.NetworkDisconnectResult, error) {
+			if opts.Container == "server-id" {
 				serverDisconnected = true
 			}
-			return nil
+			return client.NetworkDisconnectResult{}, nil
 		},
-		networkRemoveFn: func(_ context.Context, _ string) error {
-			return nil
+		networkRemoveFn: func(_ context.Context, _ string, _ client.NetworkRemoveOptions) (client.NetworkRemoveResult, error) {
+			return client.NetworkRemoveResult{}, nil
 		},
 	}
 
@@ -1333,15 +1347,15 @@ func TestStop_DisconnectsServer(t *testing.T) {
 
 func TestListManaged_ReturnsContainersAndNetworks(t *testing.T) {
 	mock := &mockDockerClient{
-		containerListFn: func(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
-			return []container.Summary{
+		containerListFn: func(_ context.Context, _ client.ContainerListOptions) (client.ContainerListResult, error) {
+			return client.ContainerListResult{Items: []container.Summary{
 				{ID: "ctr-1", Labels: map[string]string{"dev.blockyard/managed": "true"}},
-			}, nil
+			}}, nil
 		},
-		networkListFn: func(_ context.Context, _ network.ListOptions) ([]network.Summary, error) {
-			return []network.Summary{
-				{ID: "net-1", Labels: map[string]string{"dev.blockyard/managed": "true"}},
-			}, nil
+		networkListFn: func(_ context.Context, _ client.NetworkListOptions) (client.NetworkListResult, error) {
+			return client.NetworkListResult{Items: []network.Summary{
+				{Network: network.Network{ID: "net-1", Labels: map[string]string{"dev.blockyard/managed": "true"}}},
+			}}, nil
 		},
 	}
 
@@ -1364,8 +1378,8 @@ func TestListManaged_ReturnsContainersAndNetworks(t *testing.T) {
 
 func TestListManaged_ContainerListError(t *testing.T) {
 	mock := &mockDockerClient{
-		containerListFn: func(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
-			return nil, errors.New("docker down")
+		containerListFn: func(_ context.Context, _ client.ContainerListOptions) (client.ContainerListResult, error) {
+			return client.ContainerListResult{}, errors.New("docker down")
 		},
 	}
 
@@ -1378,11 +1392,11 @@ func TestListManaged_ContainerListError(t *testing.T) {
 
 func TestListManaged_NetworkListError(t *testing.T) {
 	mock := &mockDockerClient{
-		containerListFn: func(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
-			return nil, nil
+		containerListFn: func(_ context.Context, _ client.ContainerListOptions) (client.ContainerListResult, error) {
+			return client.ContainerListResult{}, nil
 		},
-		networkListFn: func(_ context.Context, _ network.ListOptions) ([]network.Summary, error) {
-			return nil, errors.New("docker down")
+		networkListFn: func(_ context.Context, _ client.NetworkListOptions) (client.NetworkListResult, error) {
+			return client.NetworkListResult{}, errors.New("docker down")
 		},
 	}
 
@@ -1398,9 +1412,9 @@ func TestListManaged_NetworkListError(t *testing.T) {
 func TestRemoveResource_Container(t *testing.T) {
 	var removedID string
 	mock := &mockDockerClient{
-		containerRemoveFn: func(_ context.Context, id string, _ container.RemoveOptions) error {
+		containerRemoveFn: func(_ context.Context, id string, _ client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
 			removedID = id
-			return nil
+			return client.ContainerRemoveResult{}, nil
 		},
 	}
 
@@ -1420,9 +1434,9 @@ func TestRemoveResource_Container(t *testing.T) {
 func TestRemoveResource_Network(t *testing.T) {
 	var removedID string
 	mock := &mockDockerClient{
-		networkRemoveFn: func(_ context.Context, id string) error {
+		networkRemoveFn: func(_ context.Context, id string, _ client.NetworkRemoveOptions) (client.NetworkRemoveResult, error) {
 			removedID = id
-			return nil
+			return client.NetworkRemoveResult{}, nil
 		},
 	}
 

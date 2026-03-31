@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/moby/moby/client"
 )
 
 // detectMountMode inspects the server's own container to determine how
@@ -25,7 +27,7 @@ func detectMountMode(ctx context.Context, cli dockerClient, serverID, dataPath s
 		return MountConfig{Mode: MountModeNative}, nil
 	}
 
-	info, err := cli.ContainerInspect(ctx, serverID)
+	cResult, err := cli.ContainerInspect(ctx, serverID, client.ContainerInspectOptions{})
 	if err != nil {
 		return MountConfig{}, fmt.Errorf("mount auto-detect: inspect container %s: %w", serverID, err)
 	}
@@ -35,7 +37,7 @@ func detectMountMode(ctx context.Context, cli dockerClient, serverID, dataPath s
 	var bestCfg MountConfig
 	found := false
 
-	for _, m := range info.Mounts {
+	for _, m := range cResult.Container.Mounts {
 		dest := m.Destination
 		if !pathIsPrefix(dest, dataPath) {
 			continue

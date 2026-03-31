@@ -16,14 +16,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
@@ -36,23 +33,23 @@ var _ backend.Backend = (*DockerBackend)(nil)
 // enabling unit tests to supply a mock instead of a real daemon connection.
 // The concrete *client.Client satisfies this interface.
 type dockerClient interface {
-	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
-	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
-	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
-	ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error)
-	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
-	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
-	ContainerStatsOneShot(ctx context.Context, containerID string) (container.StatsResponseReader, error)
-	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
-	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
-	ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
-	ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error)
-	NetworkConnect(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error
-	NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
-	NetworkDisconnect(ctx context.Context, networkID, containerID string, force bool) error
-	NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
-	NetworkList(ctx context.Context, options network.ListOptions) ([]network.Summary, error)
-	NetworkRemove(ctx context.Context, networkID string) error
+	ContainerCreate(ctx context.Context, options client.ContainerCreateOptions) (client.ContainerCreateResult, error)
+	ContainerInspect(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error)
+	ContainerList(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error)
+	ContainerLogs(ctx context.Context, containerID string, options client.ContainerLogsOptions) (client.ContainerLogsResult, error)
+	ContainerRemove(ctx context.Context, containerID string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
+	ContainerStart(ctx context.Context, containerID string, options client.ContainerStartOptions) (client.ContainerStartResult, error)
+	ContainerStats(ctx context.Context, containerID string, options client.ContainerStatsOptions) (client.ContainerStatsResult, error)
+	ContainerStop(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error)
+	ContainerWait(ctx context.Context, containerID string, options client.ContainerWaitOptions) client.ContainerWaitResult
+	ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error)
+	ImagePull(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
+	NetworkConnect(ctx context.Context, networkID string, options client.NetworkConnectOptions) (client.NetworkConnectResult, error)
+	NetworkCreate(ctx context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error)
+	NetworkDisconnect(ctx context.Context, networkID string, options client.NetworkDisconnectOptions) (client.NetworkDisconnectResult, error)
+	NetworkInspect(ctx context.Context, networkID string, options client.NetworkInspectOptions) (client.NetworkInspectResult, error)
+	NetworkList(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error)
+	NetworkRemove(ctx context.Context, networkID string, options client.NetworkRemoveOptions) (client.NetworkRemoveResult, error)
 }
 
 // cmdRunner executes a system command and returns its combined output.
@@ -100,15 +97,14 @@ type DockerBackend struct {
 // whether the server is running inside a container, and auto-detecting
 // how the data directory is mounted.
 func New(ctx context.Context, cfg *config.DockerConfig, bundleServerPath string) (*DockerBackend, error) {
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost("unix://"+cfg.Socket),
-		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
 
-	if _, err := cli.Ping(ctx); err != nil {
+	if _, err := cli.Ping(ctx, client.PingOptions{}); err != nil {
 		return nil, fmt.Errorf("docker ping: %w", err)
 	}
 
@@ -248,14 +244,14 @@ func (d *DockerBackend) ensureImage(ctx context.Context, img string) error {
 	}
 
 	slog.Info("pulling image", "image", img)
-	reader, err := d.client.ImagePull(ctx, img, image.PullOptions{})
+	pullResp, err := d.client.ImagePull(ctx, img, client.ImagePullOptions{})
 	if err != nil {
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}
-	defer reader.Close()
+	defer pullResp.Close()
 
 	// Must consume the reader for the pull to complete.
-	if _, err := io.Copy(io.Discard, reader); err != nil {
+	if _, err := io.Copy(io.Discard, pullResp); err != nil {
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}
 
@@ -309,7 +305,7 @@ func (d *DockerBackend) createNetwork(
 	ctx context.Context,
 	name, appID, workerID string,
 ) (string, error) {
-	resp, err := d.client.NetworkCreate(ctx, name, network.CreateOptions{
+	resp, err := d.client.NetworkCreate(ctx, name, client.NetworkCreateOptions{
 		Driver: "bridge",
 		Labels: networkLabels(appID, workerID),
 	})
@@ -320,15 +316,20 @@ func (d *DockerBackend) createNetwork(
 }
 
 func (d *DockerBackend) joinNetwork(ctx context.Context, containerID, networkName string, aliases []string) error {
-	var epConfig *network.EndpointSettings
+	opts := client.NetworkConnectOptions{Container: containerID}
 	if len(aliases) > 0 {
-		epConfig = &network.EndpointSettings{Aliases: aliases}
+		opts.EndpointConfig = &network.EndpointSettings{Aliases: aliases}
 	}
-	return d.client.NetworkConnect(ctx, networkName, containerID, epConfig)
+	_, err := d.client.NetworkConnect(ctx, networkName, opts)
+	return err
 }
 
 func (d *DockerBackend) disconnectNetwork(ctx context.Context, containerID, networkName string) error {
-	return d.client.NetworkDisconnect(ctx, networkName, containerID, true)
+	_, err := d.client.NetworkDisconnect(ctx, networkName, client.NetworkDisconnectOptions{
+		Container: containerID,
+		Force:     true,
+	})
+	return err
 }
 
 // connectServiceContainers inspects the configured service network and
@@ -340,25 +341,25 @@ func (d *DockerBackend) connectServiceContainers(ctx context.Context, workerNetw
 		return nil
 	}
 
-	info, err := d.client.NetworkInspect(ctx, svcNet, network.InspectOptions{})
+	netResult, err := d.client.NetworkInspect(ctx, svcNet, client.NetworkInspectOptions{})
 	if err != nil {
 		return fmt.Errorf("inspect service network %s: %w", svcNet, err)
 	}
 
-	for containerID := range info.Containers {
+	for containerID := range netResult.Network.Containers {
 		if containerID == d.serverID {
 			continue // server joins with "blockyard" alias separately
 		}
 
 		// Get DNS aliases from the service network endpoint.
 		var aliases []string
-		cInfo, err := d.client.ContainerInspect(ctx, containerID)
+		cResult, err := d.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 		if err != nil {
 			slog.Warn("service network: cannot inspect container, skipping",
 				"container_id", containerID, "error", err)
 			continue
 		}
-		if ep, ok := cInfo.NetworkSettings.Networks[svcNet]; ok && ep != nil {
+		if ep, ok := cResult.Container.NetworkSettings.Networks[svcNet]; ok && ep != nil {
 			aliases = ep.Aliases
 		}
 
@@ -384,14 +385,14 @@ func (d *DockerBackend) disconnectServiceContainers(ctx context.Context, workerN
 		return
 	}
 
-	info, err := d.client.NetworkInspect(ctx, svcNet, network.InspectOptions{})
+	netResult, err := d.client.NetworkInspect(ctx, svcNet, client.NetworkInspectOptions{})
 	if err != nil {
 		slog.Warn("service network: cannot inspect for disconnect",
 			"service_network", svcNet, "error", err)
 		return
 	}
 
-	for containerID := range info.Containers {
+	for containerID := range netResult.Network.Containers {
 		if containerID == d.serverID {
 			continue
 		}
@@ -446,14 +447,14 @@ func (d *DockerBackend) createWorkerContainer(
 	}
 	resources.PidsLimit = int64Ptr(512)
 
-	resp, err := d.client.ContainerCreate(ctx,
-		&container.Config{
+	resp, err := d.client.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
 			Image:  spec.Image,
 			Cmd:    spec.Cmd,
 			Env:    env,
 			Labels: workerLabels(spec),
 		},
-		&container.HostConfig{
+		HostConfig: &container.HostConfig{
 			NetworkMode:    container.NetworkMode(networkName),
 			Binds:          binds,
 			Mounts:         mounts,
@@ -463,9 +464,8 @@ func (d *DockerBackend) createWorkerContainer(
 			ReadonlyRootfs: true,
 			Resources:      resources,
 		},
-		nil, nil,
-		containerName,
-	)
+		Name: containerName,
+	})
 	if err != nil {
 		return "", fmt.Errorf("create container %s: %w", containerName, err)
 	}
@@ -507,7 +507,7 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 	// 3. Block metadata endpoint (iptables)
 	slog.Debug("spawn: blocking metadata endpoint", "worker_id", spec.WorkerID)
 	if err := d.blockMetadataEndpoint(ctx, networkName, spec.WorkerID); err != nil {
-		_ = d.client.NetworkRemove(ctx, networkID)
+		_, _ = d.client.NetworkRemove(ctx, networkID, client.NetworkRemoveOptions{})
 		return fmt.Errorf("spawn: metadata block: %w", err)
 	}
 
@@ -517,7 +517,7 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 	containerID, err := d.createWorkerContainer(ctx, spec, networkName)
 	if err != nil {
 		d.unblockMetadataForWorker(spec.WorkerID)
-		_ = d.client.NetworkRemove(ctx, networkID)
+		_, _ = d.client.NetworkRemove(ctx, networkID, client.NetworkRemoveOptions{})
 		return fmt.Errorf("spawn: %w", err)
 	}
 
@@ -526,9 +526,9 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 		slog.Debug("spawn: connecting service containers",
 			"worker_id", spec.WorkerID, "service_network", d.config.ServiceNetwork)
 		if err := d.connectServiceContainers(ctx, networkName); err != nil {
-			_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+			_, _ = d.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 			d.unblockMetadataForWorker(spec.WorkerID)
-			_ = d.client.NetworkRemove(ctx, networkID)
+			_, _ = d.client.NetworkRemove(ctx, networkID, client.NetworkRemoveOptions{})
 			return fmt.Errorf("spawn: %w", err)
 		}
 	}
@@ -539,23 +539,23 @@ func (d *DockerBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) erro
 			"worker_id", spec.WorkerID, "server_id", d.serverID)
 		if err := d.joinNetwork(ctx, d.serverID, networkName, []string{"blockyard"}); err != nil {
 			d.disconnectServiceContainers(ctx, networkName)
-			_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+			_, _ = d.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 			d.unblockMetadataForWorker(spec.WorkerID)
-			_ = d.client.NetworkRemove(ctx, networkID)
+			_, _ = d.client.NetworkRemove(ctx, networkID, client.NetworkRemoveOptions{})
 			return fmt.Errorf("spawn: %w", err)
 		}
 	}
 
 	// 7. Start the container
 	slog.Debug("spawn: starting container", "worker_id", spec.WorkerID, "container_id", containerID)
-	if err := d.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+	if _, err := d.client.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
 		if d.serverID != "" {
 			_ = d.disconnectNetwork(ctx, d.serverID, networkName)
 		}
 		d.disconnectServiceContainers(ctx, networkName)
-		_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		_, _ = d.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 		d.unblockMetadataForWorker(spec.WorkerID)
-		_ = d.client.NetworkRemove(ctx, networkID)
+		_, _ = d.client.NetworkRemove(ctx, networkID, client.NetworkRemoveOptions{})
 		return fmt.Errorf("spawn: start container: %w", err)
 	}
 
@@ -585,12 +585,13 @@ func (d *DockerBackend) verifyResourceLimits(
 	containerID string,
 	spec backend.WorkerSpec,
 ) {
-	info, err := d.client.ContainerInspect(ctx, containerID)
+	cResult, err := d.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		slog.Warn("spawn: failed to verify resource limits",
 			"worker_id", spec.WorkerID, "error", err)
 		return
 	}
+	info := cResult.Container
 
 	if spec.MemoryLimit != "" {
 		expected, ok := ParseMemoryLimit(spec.MemoryLimit)
@@ -631,7 +632,7 @@ func (d *DockerBackend) Stop(ctx context.Context, id string) error {
 
 	// 1. Stop the container (10s timeout)
 	timeout := 10
-	if err := d.client.ContainerStop(ctx, ws.containerID, container.StopOptions{
+	if _, err := d.client.ContainerStop(ctx, ws.containerID, client.ContainerStopOptions{
 		Timeout: &timeout,
 	}); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("stop container: %w", err)
@@ -639,7 +640,7 @@ func (d *DockerBackend) Stop(ctx context.Context, id string) error {
 	}
 
 	// 2. Remove the container
-	if err := d.client.ContainerRemove(ctx, ws.containerID, container.RemoveOptions{
+	if _, err := d.client.ContainerRemove(ctx, ws.containerID, client.ContainerRemoveOptions{
 		Force: true,
 	}); err != nil {
 		slog.Warn("failed to remove container", "worker_id", id, "error", err)
@@ -659,7 +660,7 @@ func (d *DockerBackend) Stop(ctx context.Context, id string) error {
 	d.unblockMetadataForWorker(id)
 
 	// 6. Remove the network
-	if err := d.client.NetworkRemove(ctx, ws.networkName); err != nil {
+	if _, err := d.client.NetworkRemove(ctx, ws.networkName, client.NetworkRemoveOptions{}); err != nil {
 		slog.Warn("failed to remove network", "worker_id", id, "error", err)
 	}
 
@@ -692,7 +693,7 @@ func (d *DockerBackend) Logs(ctx context.Context, id string) (backend.LogStream,
 		return backend.LogStream{}, fmt.Errorf("logs: unknown worker %s", id)
 	}
 
-	reader, err := d.client.ContainerLogs(ctx, ws.containerID, container.LogsOptions{
+	reader, err := d.client.ContainerLogs(ctx, ws.containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
@@ -732,10 +733,11 @@ func (d *DockerBackend) Addr(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("addr: unknown worker %s", id)
 	}
 
-	info, err := d.client.ContainerInspect(ctx, ws.containerID)
+	cResult, err := d.client.ContainerInspect(ctx, ws.containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		return "", fmt.Errorf("addr: inspect container: %w", err)
 	}
+	info := cResult.Container
 
 	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
 		return "", fmt.Errorf("addr: no networks on container %s", id)
@@ -746,7 +748,7 @@ func (d *DockerBackend) Addr(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("addr: container not on network %s", ws.networkName)
 	}
 
-	if endpoint.IPAddress == "" {
+	if !endpoint.IPAddress.IsValid() {
 		return "", fmt.Errorf("addr: no IP on network %s", ws.networkName)
 	}
 
@@ -766,7 +768,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		return backend.BuildResult{}, fmt.Errorf("build: %w", err)
 	}
 	defer func() {
-		d.client.NetworkRemove(ctx, buildNetworkName) //nolint:errcheck // best-effort cleanup
+		d.client.NetworkRemove(ctx, buildNetworkName, client.NetworkRemoveOptions{}) //nolint:errcheck // best-effort cleanup
 	}()
 
 	if err := d.blockMetadataEndpoint(ctx, buildNetworkName, "build-"+spec.BundleID); err != nil {
@@ -787,15 +789,15 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 		mounts = append(mounts, dm...)
 	}
 
-	resp, err := d.client.ContainerCreate(ctx,
-		&container.Config{
+	resp, err := d.client.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
 			Image:      spec.Image,
 			Cmd:        spec.Cmd,
 			WorkingDir: "/app",
 			Labels:     buildLabels(spec),
 			Env:        spec.Env,
 		},
-		&container.HostConfig{
+		HostConfig: &container.HostConfig{
 			NetworkMode: container.NetworkMode(buildNetworkName),
 			Binds:       binds,
 			Mounts:      mounts,
@@ -809,9 +811,8 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 				PidsLimit: int64Ptr(512),
 			},
 		},
-		nil, nil,
-		containerName,
-	)
+		Name: containerName,
+	})
 	if err != nil {
 		return backend.BuildResult{}, fmt.Errorf("build: create container: %w", err)
 	}
@@ -819,14 +820,14 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 	containerID := resp.ID
 
 	// 4. Start the build container
-	if err := d.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+	if _, err := d.client.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
+		_, _ = d.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 		return backend.BuildResult{}, fmt.Errorf("build: start container: %w", err)
 	}
 
 	// 5. Stream logs in real-time while the build runs.
 	var buildLogs strings.Builder
-	if logReader, logErr := d.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+	if logReader, logErr := d.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
@@ -844,13 +845,15 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 	}
 
 	// 6. Wait for exit (container has already stopped since log follow ended).
-	waitCh, errCh := d.client.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
+	waitResult := d.client.ContainerWait(ctx, containerID, client.ContainerWaitOptions{
+		Condition: container.WaitConditionNotRunning,
+	})
 
 	var exitCode int
 	select {
-	case result := <-waitCh:
+	case result := <-waitResult.Result:
 		exitCode = int(result.StatusCode)
-	case err := <-errCh:
+	case err := <-waitResult.Error:
 		slog.Warn("build container wait error", "error", err)
 		exitCode = -1
 	case <-ctx.Done():
@@ -861,7 +864,7 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 	success := exitCode == 0
 
 	// 7. Remove the build container
-	_ = d.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+	_, _ = d.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 
 	return backend.BuildResult{
 		Success:  success,
@@ -874,16 +877,14 @@ func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResou
 	var resources []backend.ManagedResource
 
 	// Find managed containers (including stopped)
-	containers, err := d.client.ContainerList(ctx, container.ListOptions{
-		All: true,
-		Filters: filters.NewArgs(
-			filters.Arg("label", "dev.blockyard/managed=true"),
-		),
+	containerResult, err := d.client.ContainerList(ctx, client.ContainerListOptions{
+		All:     true,
+		Filters: make(client.Filters).Add("label", "dev.blockyard/managed=true"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list managed containers: %w", err)
 	}
-	for _, c := range containers {
+	for _, c := range containerResult.Items {
 		resources = append(resources, backend.ManagedResource{
 			ID:     c.ID,
 			Kind:   backend.ResourceContainer,
@@ -892,15 +893,13 @@ func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResou
 	}
 
 	// Find managed networks
-	networks, err := d.client.NetworkList(ctx, network.ListOptions{
-		Filters: filters.NewArgs(
-			filters.Arg("label", "dev.blockyard/managed=true"),
-		),
+	networkResult, err := d.client.NetworkList(ctx, client.NetworkListOptions{
+		Filters: make(client.Filters).Add("label", "dev.blockyard/managed=true"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list managed networks: %w", err)
 	}
-	for _, n := range networks {
+	for _, n := range networkResult.Items {
 		resources = append(resources, backend.ManagedResource{
 			ID:     n.ID,
 			Kind:   backend.ResourceNetwork,
@@ -917,7 +916,9 @@ func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResou
 }
 
 func (d *DockerBackend) ContainerStats(ctx context.Context, containerID string) (*backend.ContainerStatsResult, error) {
-	resp, err := d.client.ContainerStatsOneShot(ctx, containerID)
+	resp, err := d.client.ContainerStats(ctx, containerID, client.ContainerStatsOptions{
+		IncludePreviousSample: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("container stats: %w", err)
 	}
@@ -971,9 +972,11 @@ func (d *DockerBackend) ContainerStats(ctx context.Context, containerID string) 
 func (d *DockerBackend) RemoveResource(ctx context.Context, r backend.ManagedResource) error {
 	switch r.Kind {
 	case backend.ResourceContainer:
-		return d.client.ContainerRemove(ctx, r.ID, container.RemoveOptions{Force: true})
+		_, err := d.client.ContainerRemove(ctx, r.ID, client.ContainerRemoveOptions{Force: true})
+		return err
 	case backend.ResourceNetwork:
-		return d.client.NetworkRemove(ctx, r.ID)
+		_, err := d.client.NetworkRemove(ctx, r.ID, client.NetworkRemoveOptions{})
+		return err
 	default:
 		return fmt.Errorf("unknown resource kind: %d", r.Kind)
 	}
@@ -1014,20 +1017,20 @@ func (d *DockerBackend) blockMetadataEndpoint(ctx context.Context, networkName, 
 	// First spawn — detect capabilities
 
 	// Inspect network to get subnet CIDR
-	info, err := d.client.NetworkInspect(ctx, networkName, network.InspectOptions{})
+	netResult, err := d.client.NetworkInspect(ctx, networkName, client.NetworkInspectOptions{})
 	if err != nil {
 		return fmt.Errorf("inspect network for metadata rule: %w", err)
 	}
-	if len(info.IPAM.Config) == 0 {
+	if len(netResult.Network.IPAM.Config) == 0 {
 		return fmt.Errorf("network %s has no IPAM config", networkName)
 	}
-	subnet := info.IPAM.Config[0].Subnet
+	subnet := netResult.Network.IPAM.Config[0].Subnet
 
 	// Try inserting iptables rule
 	comment := "blockyard-" + workerID
 	_, insertErr := d.runCmd(ctx, "iptables",
 		"-I", "DOCKER-USER",
-		"-s", subnet,
+		"-s", subnet.String(),
 		"-d", "169.254.169.254/32",
 		"-j", "DROP",
 		"-m", "comment", "--comment", comment,
@@ -1110,19 +1113,19 @@ func dockerUserBlocksMetadataWithRunner(run cmdRunner) bool {
 }
 
 func (d *DockerBackend) insertMetadataRule(ctx context.Context, networkName, workerID string) error {
-	info, err := d.client.NetworkInspect(ctx, networkName, network.InspectOptions{})
+	netResult, err := d.client.NetworkInspect(ctx, networkName, client.NetworkInspectOptions{})
 	if err != nil {
 		return fmt.Errorf("inspect network for metadata rule: %w", err)
 	}
-	if len(info.IPAM.Config) == 0 {
+	if len(netResult.Network.IPAM.Config) == 0 {
 		return fmt.Errorf("network %s has no IPAM config", networkName)
 	}
-	subnet := info.IPAM.Config[0].Subnet
+	subnet := netResult.Network.IPAM.Config[0].Subnet
 
 	comment := "blockyard-" + workerID
 	if _, err := d.runCmd(ctx, "iptables",
 		"-I", "DOCKER-USER",
-		"-s", subnet,
+		"-s", subnet.String(),
 		"-d", "169.254.169.254/32",
 		"-j", "DROP",
 		"-m", "comment", "--comment", comment,

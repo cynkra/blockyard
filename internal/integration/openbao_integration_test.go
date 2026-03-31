@@ -13,9 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/testutil"
@@ -35,7 +34,7 @@ var (
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "docker client: %v\n", err)
 		os.Exit(1)
@@ -43,13 +42,13 @@ func TestMain(m *testing.M) {
 	defer cli.Close()
 
 	// Pull image.
-	reader, err := cli.ImagePull(ctx, openbaoImage, image.PullOptions{})
+	pullResp, err := cli.ImagePull(ctx, openbaoImage, client.ImagePullOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "image pull: %v\n", err)
 		os.Exit(1)
 	}
-	io.Copy(io.Discard, reader)
-	reader.Close()
+	io.Copy(io.Discard, pullResp)
+	pullResp.Close()
 
 	// Start MockIdP for JWT auth configuration.
 	mockIdP = testutil.NewMockIdP()
@@ -60,8 +59,8 @@ func TestMain(m *testing.M) {
 	// Create OpenBao dev server container.
 	// Use host networking so OpenBao can reach the mock IdP on 127.0.0.1.
 	baoPort := "8200"
-	resp, err := cli.ContainerCreate(ctx,
-		&container.Config{
+	resp, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
 			Image: openbaoImage,
 			Cmd:   []string{"server", "-dev", "-dev-root-token-id=" + rootToken, "-dev-listen-address=0.0.0.0:" + baoPort},
 			Env: []string{
@@ -69,21 +68,21 @@ func TestMain(m *testing.M) {
 			},
 			Labels: map[string]string{"blockyard-test": "openbao"},
 		},
-		&container.HostConfig{
+		HostConfig: &container.HostConfig{
 			NetworkMode: "host",
 			CapAdd:      []string{"IPC_LOCK"},
 		},
-		nil, nil, "blockyard-openbao-test",
-	)
+		Name: "blockyard-openbao-test",
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "container create: %v\n", err)
 		os.Exit(1)
 	}
 	containerID = resp.ID
 
-	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+	if _, err := cli.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
 		fmt.Fprintf(os.Stderr, "container start: %v\n", err)
-		cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		cli.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 		os.Exit(1)
 	}
 
@@ -124,8 +123,8 @@ func TestMain(m *testing.M) {
 
 func cleanup(ctx context.Context, cli *client.Client) {
 	timeout := 10
-	cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
-	cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+	cli.ContainerStop(ctx, containerID, client.ContainerStopOptions{Timeout: &timeout})
+	cli.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true})
 }
 
 // configureJWTAuth sets up the JWT auth method in OpenBao with the mock IdP.

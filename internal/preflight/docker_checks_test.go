@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
@@ -17,14 +17,13 @@ import (
 
 func testDockerClient(t *testing.T) *client.Client {
 	t.Helper()
-	cli, err := client.NewClientWithOpts(
+	cli, err := client.New(
 		client.WithHost("unix:///var/run/docker.sock"),
-		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
 	}
-	if _, err := cli.Ping(context.Background()); err != nil {
+	if _, err := cli.Ping(context.Background(), client.PingOptions{}); err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
 	return cli
