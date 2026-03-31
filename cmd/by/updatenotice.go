@@ -38,12 +38,14 @@ func loadUpdateCache() *updateCache {
 
 func saveUpdateCache(c *updateCache) {
 	dir := cliconfig.Dir()
-	os.MkdirAll(dir, 0o700)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
 	data, err := json.Marshal(c)
 	if err != nil {
 		return
 	}
-	os.WriteFile(updateCachePath(), data, 0o600)
+	_ = os.WriteFile(updateCachePath(), data, 0o600)
 }
 
 // updateResult is sent from the background goroutine to the post-run hook.
