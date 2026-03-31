@@ -39,6 +39,9 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 
 # Install Playwright system dependencies + Chromium
 # Done as root before user switch so shared libs land in system paths.
+# PLAYWRIGHT_BROWSERS_PATH puts binaries in a shared location readable by
+# the non-root user; the env var is exported globally so runtime picks it up.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN npx playwright install --with-deps chromium
 
 # Create non-root user

@@ -6,7 +6,6 @@ services:
     volumes:
       - ..:/workspace:cached
       - blockyard-gomodcache:/home/dev/go/pkg/mod
-      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       BLOCKYARD_TEST_POSTGRES_URL: postgres://blockyard:blockyard@postgres:5432/blockyard_test?sslmode=disable
     env_file:
