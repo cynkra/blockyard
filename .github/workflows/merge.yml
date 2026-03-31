@@ -47,7 +47,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
           images: >
-            alpine:3.21
+            alpine:3.23
             curlimages/curl:latest
             dexidp/dex:v2.41.1
             golang:1.25.8-bookworm

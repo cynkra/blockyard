@@ -13,7 +13,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -ldflags "-X main.version=${VERSION}" -o /blockyard ./cmd/blockyard
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
-FROM alpine:3.21
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates curl iptables
 
