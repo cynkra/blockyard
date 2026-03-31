@@ -165,7 +165,7 @@ func CreateArchive(dir string) (*os.File, error) {
 			return err
 		}
 		if !d.IsDir() {
-			f, err := os.Open(path)
+			f, err := os.Open(path) //nolint:gosec // G122: walks local deploy dir, no symlink risk
 			if err != nil {
 				return err
 			}

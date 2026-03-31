@@ -26,7 +26,7 @@ const (
 	ActionAppRestore        Action = "app.restore"
 	ActionAccessGrant       Action = "access.grant"
 	ActionAccessRevoke      Action = "access.revoke"
-	ActionCredentialEnroll  Action = "credential.enroll"
+	ActionCredentialEnroll  Action = "credential.enroll" //nolint:gosec // G101: audit action name, not a credential
 	ActionUserLogin         Action = "user.login"
 	ActionUserLogout        Action = "user.logout"
 	ActionUserUpdate        Action = "user.update"
@@ -90,7 +90,7 @@ func (l *Log) Run(ctx context.Context, path string) {
 		return
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: audit log path from server config
 	if err != nil {
 		slog.Error("failed to open audit log", "path", path, "error", err)
 		return

@@ -51,7 +51,7 @@ func (s *Store) PopulateBuild(
 
 		// Hard-link config's package tree into build library.
 		dest := filepath.Join(lib, entry.Package)
-		out, cpErr := exec.Command(
+		out, cpErr := exec.Command( //nolint:gosec // G204: controlled cp hardlink for package store
 			"cp", "-al",
 			s.Path(entry.Package, sourceHash, configHash), dest,
 		).CombinedOutput()
@@ -147,7 +147,7 @@ func (s *Store) PopulateRuntime(
 		if ok {
 			// Store hit -- hardlink the new config into staging.
 			dest := filepath.Join(lib, pkg)
-			out, cpErr := exec.Command(
+			out, cpErr := exec.Command( //nolint:gosec // G204: controlled cp hardlink for package store
 				"cp", "-al",
 				s.Path(pkg, sourceHash, newConfigHash), dest,
 			).CombinedOutput()
@@ -189,7 +189,7 @@ func (s *Store) PopulateRuntime(
 		}
 
 		dest := filepath.Join(lib, entry.Package)
-		out, cpErr := exec.Command(
+		out, cpErr := exec.Command( //nolint:gosec // G204: controlled cp hardlink for package store
 			"cp", "-al",
 			s.Path(entry.Package, sourceHash, configHash), dest,
 		).CombinedOutput()
@@ -207,7 +207,7 @@ func (s *Store) PopulateRuntime(
 func hardlinkDir(srcLib, pkg, destLib string) error {
 	src := filepath.Join(srcLib, pkg)
 	dest := filepath.Join(destLib, pkg)
-	out, err := exec.Command("cp", "-al", src, dest).CombinedOutput()
+	out, err := exec.Command("cp", "-al", src, dest).CombinedOutput() //nolint:gosec // G204: controlled cp hardlink for package store
 	if err != nil {
 		return fmt.Errorf("%s: %w", out, err)
 	}

@@ -13,7 +13,7 @@ import (
 // on the same filesystem as the store (enabling atomic rename and hardlinks).
 func (s *Store) CreateStagingDir() (string, error) {
 	dir := filepath.Join(s.root, ".staging", uuid.New().String())
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: staging dir, not secrets
 		return "", fmt.Errorf("create staging dir: %w", err)
 	}
 	return dir, nil

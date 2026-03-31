@@ -86,7 +86,7 @@ func PostRefresh(srv *server.Server) http.HandlerFunc {
 		// Start refresh as a background task.
 		taskID := uuid.New().String()
 		sender := srv.Tasks.Create(taskID, app.ID)
-		go srv.RunRefresh(context.Background(), app, m, sender)
+		go srv.RunRefresh(context.Background(), app, m, sender) //nolint:gosec // G118: intentional background refresh, outlives request
 
 		if r.Header.Get("HX-Request") != "" {
 			w.Header().Set("HX-Trigger", "refreshStarted")
@@ -177,7 +177,7 @@ func PostRefreshRollback(srv *server.Server) http.HandlerFunc {
 		// Start rollback as a background task.
 		taskID := uuid.New().String()
 		sender := srv.Tasks.Create(taskID, app.ID)
-		go srv.RunRollback(context.Background(), app, target, sender)
+		go srv.RunRollback(context.Background(), app, target, sender) //nolint:gosec // G118: intentional background rollback, outlives request
 
 		writeJSON(w, http.StatusAccepted, map[string]string{
 			"task_id": taskID,

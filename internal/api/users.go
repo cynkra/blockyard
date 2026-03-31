@@ -101,7 +101,7 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 	if srv.DB != nil {
 		dbUser, err := srv.DB.GetUser(cookie.Sub)
 		if err != nil {
-			slog.Warn("failed to look up user role", "sub", cookie.Sub, "error", err)
+			slog.Warn("failed to look up user role", "sub", cookie.Sub, "error", err) //nolint:gosec // G706: slog structured logging handles this
 			return nil // fail closed: deny access when DB is unreachable
 		}
 		if dbUser != nil && !dbUser.Active {
@@ -160,8 +160,8 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 		}
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
-			_ = r.ParseForm()
-			body.APIKey = r.FormValue("api_key")
+			_ = r.ParseForm()                    //nolint:gosec // G120: auth-gated admin endpoint
+			body.APIKey = r.FormValue("api_key") //nolint:gosec // G120: auth-gated admin endpoint
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				badRequest(w, "invalid request body")
@@ -179,7 +179,7 @@ func EnrollCredential(srv *server.Server) http.HandlerFunc {
 			map[string]any{"api_key": body.APIKey},
 		)
 		if err != nil {
-			slog.Error("credential enrollment failed",
+			slog.Error("credential enrollment failed", //nolint:gosec // G706: slog structured logging handles this
 				"sub", caller.Sub, "service", service, "error", err)
 			serverError(w, "failed to store credential")
 			return

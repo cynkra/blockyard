@@ -57,7 +57,7 @@ func (s *Store) Ingest(pkg, sourceHash, configHash, srcDir string) error {
 	if dirExists(dst) {
 		return nil // already in store
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil { //nolint:gosec // G301: package store dir, not secrets
 		return fmt.Errorf("create store dir: %w", err)
 	}
 	return os.Rename(srcDir, dst)

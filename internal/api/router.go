@@ -51,7 +51,7 @@ func requestLogger(next http.Handler) http.Handler {
 
 		// Health/readiness probes at Debug to avoid log spam.
 		if path == "/healthz" || path == "/readyz" {
-			slog.Debug("request",
+			slog.Debug("request", //nolint:gosec // G706: slog structured logging handles this
 				"method", r.Method,
 				"path", path,
 				"status", status,
@@ -69,11 +69,11 @@ func requestLogger(next http.Handler) http.Handler {
 
 		switch {
 		case status >= 500:
-			slog.Error("request", attrs...)
+			slog.Error("request", attrs...) //nolint:gosec // G706: slog structured logging handles this
 		case status >= 400:
-			slog.Warn("request", attrs...)
+			slog.Warn("request", attrs...) //nolint:gosec // G706: slog structured logging handles this
 		default:
-			slog.Info("request", attrs...)
+			slog.Info("request", attrs...) //nolint:gosec // G706: slog structured logging handles this
 		}
 	})
 }

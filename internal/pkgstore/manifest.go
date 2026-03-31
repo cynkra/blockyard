@@ -15,12 +15,12 @@ func WritePackageManifest(libDir string, manifest map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(libDir, packageManifestFile), data, 0o644)
+	return os.WriteFile(filepath.Join(libDir, packageManifestFile), data, 0o644) //nolint:gosec // G306: package manifest, not secrets
 }
 
 // ReadPackageManifest reads the per-worker package manifest.
 func ReadPackageManifest(libDir string) (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Join(libDir, packageManifestFile))
+	data, err := os.ReadFile(filepath.Join(libDir, packageManifestFile)) //nolint:gosec // G304: reads package manifest from managed path
 	if err != nil {
 		return nil, err
 	}
@@ -54,13 +54,13 @@ func WriteStoreManifest(dir string, manifest map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, storeManifestFile), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, storeManifestFile), data, 0o644) //nolint:gosec // G306: store manifest, not secrets
 }
 
 // ReadStoreManifest reads a store-manifest from the given path.
 // The path should be the full file path (e.g., "{bundle}/store-manifest.json").
 func ReadStoreManifest(path string) (map[string]string, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads store manifest from managed path
 	if err != nil {
 		return nil, err
 	}

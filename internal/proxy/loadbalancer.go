@@ -31,7 +31,7 @@ func (lb *LoadBalancer) Assign(
 ) (string, error) {
 	workerIDs := workers.ForAppAvailable(appID)
 	if len(workerIDs) == 0 {
-		slog.Debug("lb: no workers available, caller should spawn",
+		slog.Debug("lb: no workers available, caller should spawn", //nolint:gosec // G706: slog structured logging handles this
 			"app_id", appID)
 		return "", nil // no workers yet — caller spawns
 	}
@@ -49,7 +49,7 @@ func (lb *LoadBalancer) Assign(
 	}
 
 	if bestID != "" {
-		slog.Debug("lb: assigned to least-loaded worker",
+		slog.Debug("lb: assigned to least-loaded worker", //nolint:gosec // G706: slog structured logging handles this
 			"app_id", appID, "worker_id", bestID,
 			"session_count", bestCount,
 			"available_workers", len(workerIDs))
@@ -58,12 +58,12 @@ func (lb *LoadBalancer) Assign(
 
 	// All workers at capacity — can we spawn more?
 	if maxWorkersPerApp == nil || len(workerIDs) < *maxWorkersPerApp {
-		slog.Debug("lb: all workers at capacity, caller should spawn",
+		slog.Debug("lb: all workers at capacity, caller should spawn", //nolint:gosec // G706: slog structured logging handles this
 			"app_id", appID, "worker_count", len(workerIDs))
 		return "", nil // caller spawns
 	}
 
-	slog.Debug("lb: capacity exhausted",
+	slog.Debug("lb: capacity exhausted", //nolint:gosec // G706: slog structured logging handles this
 		"app_id", appID, "worker_count", len(workerIDs),
 		"max_workers_per_app", *maxWorkersPerApp)
 	return "", errCapacityExhausted

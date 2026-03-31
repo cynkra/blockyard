@@ -210,12 +210,12 @@ func runRestore(p RestoreParams) error {
 
 		// Write pak refs and repos for the legacy R build script.
 		refsData := strings.Join(m.PakRefs(), "\n") + "\n"
-		if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-refs"), []byte(refsData), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-refs"), []byte(refsData), 0o644); err != nil { //nolint:gosec // G306: pak-refs metadata, not secrets
 			return fmt.Errorf("write pak refs: %w", err)
 		}
 		if lines := m.RepoLines(); len(lines) > 0 {
 			repoData := strings.Join(lines, "\n") + "\n"
-			if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-repos"), []byte(repoData), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(p.Paths.Unpacked, ".pak-repos"), []byte(repoData), 0o644); err != nil { //nolint:gosec // G306: pak-repos metadata, not secrets
 				return fmt.Errorf("write pak repos: %w", err)
 			}
 		}
@@ -223,13 +223,13 @@ func runRestore(p RestoreParams) error {
 
 	// 5. Ensure download cache dir exists.
 	dlCachePath := filepath.Join(p.BasePath, ".pak-dl-cache")
-	if err := os.MkdirAll(dlCachePath, 0o755); err != nil {
+	if err := os.MkdirAll(dlCachePath, 0o755); err != nil { //nolint:gosec // G301: download cache dir, not secrets
 		return fmt.Errorf("create download cache dir: %w", err)
 	}
 
 	// 6. Ensure store dir exists and prepare build.
 	if p.Store != nil {
-		if err := os.MkdirAll(p.Store.Root(), 0o755); err != nil {
+		if err := os.MkdirAll(p.Store.Root(), 0o755); err != nil { //nolint:gosec // G301: package store dir, not secrets
 			return fmt.Errorf("create store dir: %w", err)
 		}
 	}

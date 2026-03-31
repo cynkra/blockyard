@@ -73,13 +73,13 @@ func preProcess(ctx context.Context, be backend.Backend,
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) //nolint:gosec // G304: opens bundle file from managed path
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	out, err := os.Create(dst) //nolint:gosec // G304: creates processed bundle at managed path
 	if err != nil {
 		return err
 	}

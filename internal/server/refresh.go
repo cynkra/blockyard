@@ -61,7 +61,7 @@ func (srv *Server) RunRefresh(
 	// 3. Run the standard build flow using the original unpinned manifest.
 	buildUUID := uuid.New().String()
 	dlCachePath := filepath.Join(bsp, ".pak-dl-cache")
-	os.MkdirAll(dlCachePath, 0o755) //nolint:errcheck
+	os.MkdirAll(dlCachePath, 0o755) //nolint:errcheck,gosec // G301: download cache dir, not secrets
 
 	spec := backend.BuildSpec{
 		AppID:    app.ID,

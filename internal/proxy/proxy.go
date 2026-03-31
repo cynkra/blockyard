@@ -51,14 +51,14 @@ func Handler(srv *server.Server) http.Handler {
 		// UUID lookup gives stable URLs that survive app renames.
 		app, err := srv.DB.GetApp(appName)
 		if err != nil {
-			slog.Error("proxy: db error", "app", appName, "error", err)
+			slog.Error("proxy: db error", "app", appName, "error", err) //nolint:gosec // G706: slog structured logging handles this
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		if app == nil {
 			app, err = srv.DB.GetAppByName(appName)
 			if err != nil {
-				slog.Error("proxy: db error", "app", appName, "error", err)
+				slog.Error("proxy: db error", "app", appName, "error", err) //nolint:gosec // G706: slog structured logging handles this
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
@@ -68,7 +68,7 @@ func Handler(srv *server.Server) http.Handler {
 			var phase string
 			app, phase, err = srv.DB.GetAppByAlias(appName)
 			if err != nil {
-				slog.Error("proxy: db error", "app", appName, "error", err)
+				slog.Error("proxy: db error", "app", appName, "error", err) //nolint:gosec // G706: slog structured logging handles this
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
@@ -148,7 +148,7 @@ func Handler(srv *server.Server) http.Handler {
 			if ok {
 				// When OIDC is active, reject sessions owned by a different user.
 				if entry.UserSub != "" && callerSub != entry.UserSub {
-					slog.Warn("proxy: session owner mismatch",
+					slog.Warn("proxy: session owner mismatch", //nolint:gosec // G706: slog structured logging handles this
 						"session_id", sessionID,
 						"session_owner", entry.UserSub,
 						"caller", callerSub)
@@ -161,11 +161,11 @@ func Handler(srv *server.Server) http.Handler {
 				if addrOk {
 					workerID, addr = entry.WorkerID, a
 					srv.Sessions.Touch(sessionID)
-					slog.Debug("proxy: reusing session",
+					slog.Debug("proxy: reusing session", //nolint:gosec // G706: slog structured logging handles this
 						"app", appName, "session_id", sessionID,
 						"worker_id", workerID)
 				} else {
-					slog.Debug("proxy: session worker not in registry",
+					slog.Debug("proxy: session worker not in registry", //nolint:gosec // G706: slog structured logging handles this
 						"app", appName, "session_id", sessionID,
 						"worker_id", entry.WorkerID)
 				}
@@ -176,14 +176,14 @@ func Handler(srv *server.Server) http.Handler {
 			// No valid session or stale worker — assign via load balancer
 			isNewSession = true
 			sessionID = uuid.New().String()
-			slog.Debug("proxy: creating new session",
+			slog.Debug("proxy: creating new session", //nolint:gosec // G706: slog structured logging handles this
 				"app", appName, "session_id", sessionID)
 
 			// Check if any workers exist before calling ensureWorker.
 			// If none exist and this is a browser request, serve the loading
 			// page instead of blocking.
 			if !hasAvailableWorker(srv, app.ID) && isBrowserRequest(r) {
-				go triggerSpawn(srv, app)
+				go triggerSpawn(srv, app) //nolint:gosec // G118: intentional background spawn, outlives request
 				serveLoadingPage(w, app, appName, srv)
 				return
 			}
@@ -202,7 +202,7 @@ func Handler(srv *server.Server) http.Handler {
 				case errHealthTimeout:
 					http.Error(w, "app failed to start", http.StatusServiceUnavailable)
 				default:
-					slog.Error("proxy: ensure worker failed",
+					slog.Error("proxy: ensure worker failed", //nolint:gosec // G706: slog structured logging handles this
 						"app", appName, "error", err)
 					http.Error(w, "internal error", http.StatusInternalServerError)
 				}
@@ -225,7 +225,7 @@ func Handler(srv *server.Server) http.Handler {
 
 			// Trigger pre-warm replacement if we just claimed a warm worker.
 			if wasIdle && app.PreWarmedSeats > 0 {
-				go ensurePreWarmed(context.Background(), srv, app)
+				go ensurePreWarmed(context.Background(), srv, app) //nolint:gosec // G118: intentional background pre-warm, outlives request
 			}
 		}
 

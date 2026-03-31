@@ -31,7 +31,7 @@ func EnsureCached(cachePath, version string) (string, error) {
 		return binPath, nil
 	}
 
-	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+	if err := os.MkdirAll(cachePath, 0o755); err != nil { //nolint:gosec // G301: app cache dir, not secrets
 		return "", fmt.Errorf("create builder cache dir: %w", err)
 	}
 
@@ -57,12 +57,12 @@ func EnsureCached(cachePath, version string) (string, error) {
 
 // copyBinary copies a file preserving its permissions.
 func copyBinary(src, dst string) error {
-	data, err := os.ReadFile(src)
+	data, err := os.ReadFile(src) //nolint:gosec // G304: reads cached builder binary from managed path
 	if err != nil {
 		return err
 	}
 	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+	if err := os.WriteFile(tmp, data, 0o755); err != nil { //nolint:gosec // G306: builder binary needs exec permission
 		return err
 	}
 	return os.Rename(tmp, dst)
@@ -80,7 +80,7 @@ func buildFromSource(binPath string) error {
 	}
 
 	tmpPath := binPath + ".tmp"
-	cmd := exec.Command("go", "build", "-o", tmpPath, "./cmd/by-builder/")
+	cmd := exec.Command("go", "build", "-o", tmpPath, "./cmd/by-builder/") //nolint:gosec // G204: controlled go build invocation
 	cmd.Dir = modRoot
 	cmd.Env = append(os.Environ(),
 		"CGO_ENABLED=0",

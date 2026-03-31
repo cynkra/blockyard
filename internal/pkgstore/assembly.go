@@ -25,7 +25,7 @@ func SplitStoreRef(ref string) (sourceHash, configHash string, err error) {
 func (s *Store) AssembleLibrary(
 	libDir string, storeManifest map[string]string,
 ) (missing []string, err error) {
-	if err := os.MkdirAll(libDir, 0o755); err != nil {
+	if err := os.MkdirAll(libDir, 0o755); err != nil { //nolint:gosec // G301: R library dir, not secrets
 		return nil, fmt.Errorf("create lib dir: %w", err)
 	}
 
@@ -42,7 +42,7 @@ func (s *Store) AssembleLibrary(
 		}
 
 		destPath := filepath.Join(libDir, pkg)
-		out, cpErr := exec.Command(
+		out, cpErr := exec.Command( //nolint:gosec // G204: controlled cp hardlink for package store
 			"cp", "-al", storePath, destPath,
 		).CombinedOutput()
 		if cpErr != nil {

@@ -1,6 +1,8 @@
 version: "2"
 
 linters:
+  enable:
+    - gosec
   settings:
     errcheck:
       exclude-functions:
@@ -22,11 +24,15 @@ linters:
         - "-QF*"
         - "-ST1000"
         - "-ST1003"
+    gosec:
+      excludes:
+        - G104 # covered by errcheck linter
   exclusions:
     rules:
-      - path: (_test\.go|internal/testutil/)
+      - path: (_test\.go|internal/testutil/|internal/integration/)
         linters:
           - errcheck
+          - gosec
       - linters:
           - errcheck
         source: '\.Close\('

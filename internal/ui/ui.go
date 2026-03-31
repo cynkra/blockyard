@@ -574,7 +574,7 @@ func (ui *UI) createToken(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		name := strings.TrimSpace(r.FormValue("name"))
+		name := strings.TrimSpace(r.FormValue("name")) //nolint:gosec // G120: auth-gated endpoint, bounded board name
 		if name == "" {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, `<p class="pat-error">Token name is required.</p>`)

@@ -152,7 +152,7 @@ func FileChecksums(dir string) map[string]manifest.FileInfo {
 		if rel == "renv.lock" || strings.HasPrefix(rel, "renv/") || strings.HasPrefix(rel, "renv\\") {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G122: walks local app dir, no symlink risk
 		if err != nil {
 			return nil
 		}

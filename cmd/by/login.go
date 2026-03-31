@@ -95,11 +95,11 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", url) //nolint:gosec // G204: opens browser with server-provided login URL
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		cmd = exec.Command("cmd", "/c", "start", url) //nolint:gosec // G204: opens browser with server-provided login URL
 	default:
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", url) //nolint:gosec // G204: opens browser with server-provided login URL
 	}
 	// Best-effort; ignore errors (e.g., headless systems).
 	_ = cmd.Start()

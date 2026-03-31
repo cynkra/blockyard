@@ -30,14 +30,14 @@ func (c *WsCache) Cache(sessionID string, reader *backendReader, ttl time.Durati
 
 	// Evict any existing entry for this session
 	if existing, ok := c.entries[sessionID]; ok {
-		slog.Debug("wscache: evicting existing entry on re-cache",
+		slog.Debug("wscache: evicting existing entry on re-cache", //nolint:gosec // G706: slog structured logging handles this
 			"session_id", sessionID)
 		existing.timer.Stop()
 		existing.reader.Close()
 		delete(c.entries, sessionID)
 	}
 
-	slog.Debug("wscache: caching backend reader",
+	slog.Debug("wscache: caching backend reader", //nolint:gosec // G706: slog structured logging handles this
 		"session_id", sessionID, "ttl", ttl)
 
 	timer := time.AfterFunc(ttl, func() {
@@ -45,7 +45,7 @@ func (c *WsCache) Cache(sessionID string, reader *backendReader, ttl time.Durati
 		entry, ok := c.entries[sessionID]
 		matched := ok && entry.reader == reader
 		if matched {
-			slog.Debug("wscache: TTL expired, removing entry",
+			slog.Debug("wscache: TTL expired, removing entry", //nolint:gosec // G706: slog structured logging handles this
 				"session_id", sessionID)
 			delete(c.entries, sessionID)
 		}
@@ -67,14 +67,14 @@ func (c *WsCache) Take(sessionID string) *backendReader {
 
 	entry, ok := c.entries[sessionID]
 	if !ok {
-		slog.Debug("wscache: miss (no cached entry)",
+		slog.Debug("wscache: miss (no cached entry)", //nolint:gosec // G706: slog structured logging handles this
 			"session_id", sessionID)
 		return nil
 	}
 
 	entry.timer.Stop()
 	delete(c.entries, sessionID)
-	slog.Debug("wscache: hit, reclaiming backend reader",
+	slog.Debug("wscache: hit, reclaiming backend reader", //nolint:gosec // G706: slog structured logging handles this
 		"session_id", sessionID)
 	return entry.reader
 }

@@ -131,7 +131,7 @@ func (d *Duration) UnmarshalText(text []byte) error {
 }
 
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads config from user-specified path
 	if err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", path, err)
 	}
@@ -501,11 +501,11 @@ func validate(cfg *Config) error {
 }
 
 func ensureDirWritable(path, label string) error {
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	if err := os.MkdirAll(path, 0o755); err != nil { //nolint:gosec // G301: app config dir, not secrets
 		return fmt.Errorf("config: %s: cannot create directory %q: %w", label, path, err)
 	}
 	testFile := filepath.Join(path, ".blockyard-write-test")
-	if err := os.WriteFile(testFile, nil, 0o644); err != nil {
+	if err := os.WriteFile(testFile, nil, 0o644); err != nil { //nolint:gosec // G306: writability test file, not secrets
 		return fmt.Errorf("config: %s: directory %q is not writable: %w", label, path, err)
 	}
 	if err := os.Remove(testFile); err != nil {

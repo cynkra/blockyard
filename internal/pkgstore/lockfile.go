@@ -38,7 +38,7 @@ type Lockfile struct {
 
 // ReadLockfile reads and validates a pak lockfile from the given path.
 func ReadLockfile(path string) (*Lockfile, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads lockfile from managed path
 	if err != nil {
 		return nil, err
 	}

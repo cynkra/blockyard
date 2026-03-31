@@ -75,7 +75,7 @@ func computeFileChecksums(unpackedPath string) map[string]manifest.FileInfo {
 		if err != nil || strings.HasPrefix(rel, ".") {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G122: walks local app bundle, no symlink risk
 		if err != nil {
 			return nil
 		}

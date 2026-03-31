@@ -32,7 +32,7 @@ func WriteStoreConfigs(path string, sc StoreConfigs) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o644); err != nil { //nolint:gosec // G306: package metadata, not secrets
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -40,7 +40,7 @@ func WriteStoreConfigs(path string, sc StoreConfigs) error {
 
 // ReadStoreConfigs reads a configs.json file.
 func ReadStoreConfigs(path string) (StoreConfigs, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads package metadata from managed path
 	if err != nil {
 		return StoreConfigs{}, err
 	}
@@ -54,7 +54,7 @@ func WriteConfigMeta(path string, meta ConfigMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o644) //nolint:gosec // G306: package metadata, not secrets
 }
 
 // ResolveConfig reads configs.json for a package's source hash and
@@ -144,7 +144,7 @@ func IngestContext(
 
 // ParseDCF reads a Debian Control File (DESCRIPTION) into a map.
 func ParseDCF(path string) (map[string]string, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads package metadata from managed path
 	if err != nil {
 		return nil, err
 	}

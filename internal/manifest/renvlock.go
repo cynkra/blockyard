@@ -26,7 +26,7 @@ func FromRenvLock(
 	meta Metadata,
 	files map[string]FileInfo,
 ) (*Manifest, error) {
-	data, err := os.ReadFile(lockPath)
+	data, err := os.ReadFile(lockPath) //nolint:gosec // G304: reads renv.lock from managed path
 	if err != nil {
 		return nil, fmt.Errorf("read renv.lock: %w", err)
 	}

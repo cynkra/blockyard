@@ -163,7 +163,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	defer spawnCancel()
 
 	wid := uuid.New().String()
-	slog.Info("spawning worker",
+	slog.Info("spawning worker", //nolint:gosec // G706: slog structured logging handles this
 		"worker_id", wid, "app_id", app.ID,
 		"bundle_id", *app.ActiveBundle,
 		"current_workers", srv.Workers.Count())
@@ -208,7 +208,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	// Pre-create transfer directory for container transfer signaling.
 	// Mounted rw at /transfer inside the container.
 	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", wid)
-	if err := os.MkdirAll(transferDir, 0o755); err != nil {
+	if err := os.MkdirAll(transferDir, 0o755); err != nil { //nolint:gosec // G301: transfer dir, not secrets
 		slog.Warn("failed to create transfer dir", "worker_id", wid, "error", err)
 		transferDir = ""
 	}
@@ -238,7 +238,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 			_ = os.RemoveAll(transferDir)
 		}
 		if tokDir != "" {
-			_ = os.RemoveAll(tokDir)
+			_ = os.RemoveAll(tokDir) //nolint:gosec // G703: server-created temp dir cleanup
 		}
 		if libDir != "" && srv.PkgStore != nil {
 			_ = srv.PkgStore.CleanupWorkerLib(wid)
@@ -289,7 +289,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 
 	coldStartBegin := time.Now()
 	if err := pollHealthy(spawnCtx, srv, wid); err != nil {
-		slog.Warn("worker failed health check during cold start",
+		slog.Warn("worker failed health check during cold start", //nolint:gosec // G706: slog structured logging handles this
 			"worker_id", wid, "app_id", app.ID,
 			"elapsed", time.Since(coldStartBegin).Round(time.Millisecond),
 			"error", err)
@@ -304,7 +304,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	telemetry.WorkersSpawned.Inc()
 	telemetry.WorkersActive.Inc()
 
-	slog.Info("worker ready",
+	slog.Info("worker ready", //nolint:gosec // G706: slog structured logging handles this
 		"worker_id", wid, "app_id", app.ID, "addr", a,
 		"cold_start_ms", coldStartElapsed.Milliseconds())
 	return wid, a, nil

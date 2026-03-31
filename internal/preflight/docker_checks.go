@@ -124,7 +124,7 @@ func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
 
 	// Write a file on the host side while the container is running.
 	sentinel := filepath.Join(tmpDir, "preflight-sentinel")
-	if err := os.WriteFile(sentinel, []byte("ok"), 0o644); err != nil {
+	if err := os.WriteFile(sentinel, []byte("ok"), 0o644); err != nil { //nolint:gosec // G306: preflight sentinel file, not secrets
 		return &Result{
 			Name:     "ro_bind_visibility",
 			Severity: SeverityError,
@@ -152,7 +152,7 @@ func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
 // same filesystem.
 func checkHardLink(storePath string) *Result {
 	workersDir := filepath.Join(storePath, ".workers")
-	if err := os.MkdirAll(workersDir, 0o755); err != nil {
+	if err := os.MkdirAll(workersDir, 0o755); err != nil { //nolint:gosec // G301: workers dir, not secrets
 		return &Result{
 			Name:     "hardlink_cross_device",
 			Severity: SeverityError,

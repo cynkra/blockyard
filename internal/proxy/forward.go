@@ -26,7 +26,7 @@ func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName, external
 	defer cancel()
 	r = r.WithContext(ctx)
 
-	slog.Debug("proxy: forwarding HTTP",
+	slog.Debug("proxy: forwarding HTTP", //nolint:gosec // G706: slog structured logging handles this
 		"app", appName, "backend", addr,
 		"path", stripAppPrefix(r.URL.Path, appName))
 	target := &url.URL{
@@ -37,7 +37,7 @@ func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName, external
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = transport
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		slog.Warn("proxy: backend error", "app", appName, "error", err)
+		slog.Warn("proxy: backend error", "app", appName, "error", err) //nolint:gosec // G706: slog structured logging handles this
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}
 

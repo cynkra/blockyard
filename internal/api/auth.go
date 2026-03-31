@@ -67,7 +67,7 @@ func authenticateFromPAT(srv *server.Server, r *http.Request, token string) *aut
 
 	// Check revoked.
 	if result.PAT.Revoked {
-		slog.Debug("auth: PAT rejected (revoked)", "pat_id", result.PAT.ID)
+		slog.Debug("auth: PAT rejected (revoked)", "pat_id", result.PAT.ID) //nolint:gosec // G706: slog structured logging handles this
 		return nil
 	}
 
@@ -75,14 +75,14 @@ func authenticateFromPAT(srv *server.Server, r *http.Request, token string) *aut
 	if result.PAT.ExpiresAt != nil {
 		expiry, err := time.Parse(time.RFC3339, *result.PAT.ExpiresAt)
 		if err == nil && time.Now().After(expiry) {
-			slog.Debug("auth: PAT rejected (expired)", "pat_id", result.PAT.ID)
+			slog.Debug("auth: PAT rejected (expired)", "pat_id", result.PAT.ID) //nolint:gosec // G706: slog structured logging handles this
 			return nil
 		}
 	}
 
 	// Check user is active.
 	if !result.User.Active {
-		slog.Debug("auth: PAT rejected (user inactive)",
+		slog.Debug("auth: PAT rejected (user inactive)", //nolint:gosec // G706: slog structured logging handles this
 			"pat_id", result.PAT.ID, "sub", result.User.Sub)
 		return nil
 	}
