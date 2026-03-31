@@ -165,17 +165,17 @@ jobs:
         working-directory: tests/e2e
         run: npx playwright test
       - name: Stop services and flush coverage
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         run: docker compose -f examples/hello-shiny/docker-compose.yml stop blockyard
       - name: Convert coverage data
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         run: |
           dir="/tmp/playwright-coverage"
           if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
             go tool covdata textfmt -i="$dir" -o="coverage-e2e.out"
           fi
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         with:
           name: coverage-e2e
           path: coverage-e2e-*.out
@@ -188,7 +188,7 @@ jobs:
           path: tests/e2e/playwright-report/
           retention-days: 7
       - name: Dump compose logs on failure
-        if: failure()
+        if: failure() && github.event_name != 'pull_request'
         run: |
           docker compose -f examples/hello-shiny/docker-compose.yml logs --no-color 2>/dev/null || true
           docker compose -f examples/hello-shiny/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
