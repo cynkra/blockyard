@@ -24,10 +24,18 @@ import (
 // mockDockerClient implements dockerClient. Only the methods under test need
 // real implementations; the rest panic so unexpected calls surface immediately.
 type mockDockerClient struct {
-	containerInspectFn func(ctx context.Context, id string) (container.InspectResponse, error)
-	networkInspectFn   func(ctx context.Context, id string, opts network.InspectOptions) (network.Inspect, error)
-	networkConnectFn   func(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error
+	containerInspectFn  func(ctx context.Context, id string) (container.InspectResponse, error)
+	containerListFn     func(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
+	containerRemoveFn   func(ctx context.Context, containerID string, options container.RemoveOptions) error
+	containerStopFn     func(ctx context.Context, containerID string, options container.StopOptions) error
+	imageInspectFn      func(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
+	imagePullFn         func(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error)
+	networkConnectFn    func(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error
+	networkCreateFn     func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
 	networkDisconnectFn func(ctx context.Context, networkID, containerID string, force bool) error
+	networkInspectFn    func(ctx context.Context, id string, opts network.InspectOptions) (network.Inspect, error)
+	networkListFn       func(ctx context.Context, options network.ListOptions) ([]network.Summary, error)
+	networkRemoveFn     func(ctx context.Context, networkID string) error
 }
 
 func (m *mockDockerClient) ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error) {
@@ -41,16 +49,22 @@ func (m *mockDockerClient) ContainerInspect(ctx context.Context, id string) (con
 	panic("ContainerInspect not implemented")
 }
 
-func (m *mockDockerClient) ContainerList(context.Context, container.ListOptions) ([]container.Summary, error) {
-	panic("not implemented")
+func (m *mockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+	if m.containerListFn != nil {
+		return m.containerListFn(ctx, options)
+	}
+	panic("ContainerList not implemented")
 }
 
 func (m *mockDockerClient) ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error) {
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ContainerRemove(context.Context, string, container.RemoveOptions) error {
-	panic("not implemented")
+func (m *mockDockerClient) ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error {
+	if m.containerRemoveFn != nil {
+		return m.containerRemoveFn(ctx, containerID, options)
+	}
+	panic("ContainerRemove not implemented")
 }
 
 func (m *mockDockerClient) ContainerStart(context.Context, string, container.StartOptions) error {
@@ -61,20 +75,29 @@ func (m *mockDockerClient) ContainerStatsOneShot(context.Context, string) (conta
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ContainerStop(context.Context, string, container.StopOptions) error {
-	panic("not implemented")
+func (m *mockDockerClient) ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error {
+	if m.containerStopFn != nil {
+		return m.containerStopFn(ctx, containerID, options)
+	}
+	panic("ContainerStop not implemented")
 }
 
 func (m *mockDockerClient) ContainerWait(context.Context, string, container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	panic("not implemented")
 }
 
-func (m *mockDockerClient) ImageInspect(context.Context, string, ...client.ImageInspectOption) (image.InspectResponse, error) {
-	panic("not implemented")
+func (m *mockDockerClient) ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (image.InspectResponse, error) {
+	if m.imageInspectFn != nil {
+		return m.imageInspectFn(ctx, imageID, opts...)
+	}
+	panic("ImageInspect not implemented")
 }
 
-func (m *mockDockerClient) ImagePull(context.Context, string, image.PullOptions) (io.ReadCloser, error) {
-	panic("not implemented")
+func (m *mockDockerClient) ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error) {
+	if m.imagePullFn != nil {
+		return m.imagePullFn(ctx, refStr, options)
+	}
+	panic("ImagePull not implemented")
 }
 
 func (m *mockDockerClient) NetworkConnect(ctx context.Context, networkID, containerID string, cfg *network.EndpointSettings) error {
@@ -84,8 +107,11 @@ func (m *mockDockerClient) NetworkConnect(ctx context.Context, networkID, contai
 	panic("NetworkConnect not implemented")
 }
 
-func (m *mockDockerClient) NetworkCreate(context.Context, string, network.CreateOptions) (network.CreateResponse, error) {
-	panic("not implemented")
+func (m *mockDockerClient) NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+	if m.networkCreateFn != nil {
+		return m.networkCreateFn(ctx, name, options)
+	}
+	panic("NetworkCreate not implemented")
 }
 
 func (m *mockDockerClient) NetworkDisconnect(ctx context.Context, networkID, containerID string, force bool) error {
@@ -102,12 +128,18 @@ func (m *mockDockerClient) NetworkInspect(ctx context.Context, id string, opts n
 	panic("NetworkInspect not implemented")
 }
 
-func (m *mockDockerClient) NetworkList(context.Context, network.ListOptions) ([]network.Summary, error) {
-	panic("not implemented")
+func (m *mockDockerClient) NetworkList(ctx context.Context, options network.ListOptions) ([]network.Summary, error) {
+	if m.networkListFn != nil {
+		return m.networkListFn(ctx, options)
+	}
+	panic("NetworkList not implemented")
 }
 
-func (m *mockDockerClient) NetworkRemove(context.Context, string) error {
-	panic("not implemented")
+func (m *mockDockerClient) NetworkRemove(ctx context.Context, networkID string) error {
+	if m.networkRemoveFn != nil {
+		return m.networkRemoveFn(ctx, networkID)
+	}
+	panic("NetworkRemove not implemented")
 }
 
 // --- helpers ---
@@ -900,4 +932,520 @@ func TestCleanupOrphanRules_NoOrphans(t *testing.T) {
 	}
 	// Should not panic
 	cleanupOrphanMetadataRulesWithRunner(context.Background(), runner)
+}
+
+// --- ensureImage ---
+
+func TestEnsureImage_AlreadyPresent(t *testing.T) {
+	mock := &mockDockerClient{
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
+			return image.InspectResponse{}, nil
+		},
+	}
+	d := newTestBackend(mock)
+	if err := d.ensureImage(context.Background(), "alpine:3.21"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureImage_PullsWhenMissing(t *testing.T) {
+	var pulled bool
+	mock := &mockDockerClient{
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
+			return image.InspectResponse{}, errors.New("not found")
+		},
+		imagePullFn: func(_ context.Context, ref string, _ image.PullOptions) (io.ReadCloser, error) {
+			pulled = true
+			if ref != "alpine:3.21" {
+				t.Errorf("pulled %q, want alpine:3.21", ref)
+			}
+			return io.NopCloser(strings.NewReader("")), nil
+		},
+	}
+	d := newTestBackend(mock)
+	if err := d.ensureImage(context.Background(), "alpine:3.21"); err != nil {
+		t.Fatal(err)
+	}
+	if !pulled {
+		t.Error("expected ImagePull to be called")
+	}
+}
+
+func TestEnsureImage_PullFails(t *testing.T) {
+	mock := &mockDockerClient{
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
+			return image.InspectResponse{}, errors.New("not found")
+		},
+		imagePullFn: func(_ context.Context, _ string, _ image.PullOptions) (io.ReadCloser, error) {
+			return nil, errors.New("registry unavailable")
+		},
+	}
+	d := newTestBackend(mock)
+	err := d.ensureImage(context.Background(), "alpine:3.21")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// --- disconnectServiceContainers ---
+
+func TestDisconnectServiceContainers_EmptyServiceNetwork(t *testing.T) {
+	d := newTestBackend(nil)
+	// config.ServiceNetwork is empty by default → no-op
+	d.disconnectServiceContainers(context.Background(), "worker-net")
+}
+
+func TestDisconnectServiceContainers_DisconnectsExceptServer(t *testing.T) {
+	var disconnected []string
+
+	mock := &mockDockerClient{
+		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
+			return network.Inspect{
+				Containers: map[string]network.EndpointResource{
+					"server-id":    {},
+					"db-container": {},
+				},
+			}, nil
+		},
+		networkDisconnectFn: func(_ context.Context, _, containerID string, _ bool) error {
+			disconnected = append(disconnected, containerID)
+			return nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.config.ServiceNetwork = "svc-net"
+	d.serverID = "server-id"
+
+	d.disconnectServiceContainers(context.Background(), "worker-net")
+	if len(disconnected) != 1 || disconnected[0] != "db-container" {
+		t.Fatalf("expected [db-container], got %v", disconnected)
+	}
+}
+
+func TestDisconnectServiceContainers_NetworkInspectError(t *testing.T) {
+	mock := &mockDockerClient{
+		networkInspectFn: func(_ context.Context, _ string, _ network.InspectOptions) (network.Inspect, error) {
+			return network.Inspect{}, errors.New("not found")
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.config.ServiceNetwork = "svc-net"
+
+	// Should not panic — errors are logged, not returned
+	d.disconnectServiceContainers(context.Background(), "worker-net")
+}
+
+// --- createNetwork ---
+
+func TestCreateNetwork_HappyPath(t *testing.T) {
+	var createdName string
+	mock := &mockDockerClient{
+		networkCreateFn: func(_ context.Context, name string, opts network.CreateOptions) (network.CreateResponse, error) {
+			createdName = name
+			if opts.Driver != "bridge" {
+				t.Errorf("expected bridge driver, got %q", opts.Driver)
+			}
+			return network.CreateResponse{ID: "net-new-id"}, nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	id, err := d.createNetwork(context.Background(), "blockyard-w1", "app-1", "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "net-new-id" {
+		t.Errorf("got ID %q, want net-new-id", id)
+	}
+	if createdName != "blockyard-w1" {
+		t.Errorf("created network %q, want blockyard-w1", createdName)
+	}
+}
+
+func TestCreateNetwork_Error(t *testing.T) {
+	mock := &mockDockerClient{
+		networkCreateFn: func(_ context.Context, _ string, _ network.CreateOptions) (network.CreateResponse, error) {
+			return network.CreateResponse{}, errors.New("quota exceeded")
+		},
+	}
+
+	d := newTestBackend(mock)
+	_, err := d.createNetwork(context.Background(), "blockyard-w1", "app-1", "w1")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// --- Addr ---
+
+func TestAddr_HappyPath(t *testing.T) {
+	mock := &mockDockerClient{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				NetworkSettings: &container.NetworkSettings{
+					Networks: map[string]*network.EndpointSettings{
+						"blockyard-w1": {IPAddress: "172.18.0.2"},
+					},
+				},
+			}, nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.config.ShinyPort = 8080
+	d.workers["w1"] = &workerState{
+		containerID: "ctr-123",
+		networkName: "blockyard-w1",
+	}
+
+	addr, err := d.Addr(context.Background(), "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr != "172.18.0.2:8080" {
+		t.Errorf("got %q, want 172.18.0.2:8080", addr)
+	}
+}
+
+func TestAddr_UnknownWorker(t *testing.T) {
+	d := newTestBackend(nil)
+	_, err := d.Addr(context.Background(), "nonexistent")
+	if err == nil || !strings.Contains(err.Error(), "unknown worker") {
+		t.Fatalf("expected unknown worker error, got %v", err)
+	}
+}
+
+func TestAddr_InspectError(t *testing.T) {
+	mock := &mockDockerClient{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{}, errors.New("gone")
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.workers["w1"] = &workerState{containerID: "ctr-123", networkName: "net-1"}
+
+	_, err := d.Addr(context.Background(), "w1")
+	if err == nil || !strings.Contains(err.Error(), "inspect container") {
+		t.Fatalf("expected inspect error, got %v", err)
+	}
+}
+
+func TestAddr_NoNetworkSettings(t *testing.T) {
+	mock := &mockDockerClient{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{NetworkSettings: nil}, nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.workers["w1"] = &workerState{containerID: "ctr-123", networkName: "net-1"}
+
+	_, err := d.Addr(context.Background(), "w1")
+	if err == nil || !strings.Contains(err.Error(), "no networks") {
+		t.Fatalf("expected no networks error, got %v", err)
+	}
+}
+
+func TestAddr_NotOnExpectedNetwork(t *testing.T) {
+	mock := &mockDockerClient{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				NetworkSettings: &container.NetworkSettings{
+					Networks: map[string]*network.EndpointSettings{
+						"other-net": {IPAddress: "172.18.0.2"},
+					},
+				},
+			}, nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.workers["w1"] = &workerState{containerID: "ctr-123", networkName: "blockyard-w1"}
+
+	_, err := d.Addr(context.Background(), "w1")
+	if err == nil || !strings.Contains(err.Error(), "not on network") {
+		t.Fatalf("expected not on network error, got %v", err)
+	}
+}
+
+func TestAddr_EmptyIP(t *testing.T) {
+	mock := &mockDockerClient{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				NetworkSettings: &container.NetworkSettings{
+					Networks: map[string]*network.EndpointSettings{
+						"blockyard-w1": {IPAddress: ""},
+					},
+				},
+			}, nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.workers["w1"] = &workerState{containerID: "ctr-123", networkName: "blockyard-w1"}
+
+	_, err := d.Addr(context.Background(), "w1")
+	if err == nil || !strings.Contains(err.Error(), "no IP") {
+		t.Fatalf("expected no IP error, got %v", err)
+	}
+}
+
+// --- Stop ---
+
+func TestStop_HappyPath(t *testing.T) {
+	var stopped, removed, netRemoved bool
+
+	mock := &mockDockerClient{
+		containerStopFn: func(_ context.Context, _ string, _ container.StopOptions) error {
+			stopped = true
+			return nil
+		},
+		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
+			removed = true
+			return nil
+		},
+		networkRemoveFn: func(_ context.Context, _ string) error {
+			netRemoved = true
+			return nil
+		},
+	}
+
+	d := newTestBackend(mock, func(d *DockerBackend) {
+		d.metaMode = metadataHostManaged
+	})
+	d.workers["w1"] = &workerState{
+		containerID: "ctr-123",
+		networkID:   "net-id-123",
+		networkName: "blockyard-w1",
+	}
+
+	if err := d.Stop(context.Background(), "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Error("ContainerStop not called")
+	}
+	if !removed {
+		t.Error("ContainerRemove not called")
+	}
+	if !netRemoved {
+		t.Error("NetworkRemove not called")
+	}
+
+	// Worker should be removed from map
+	d.mu.Lock()
+	_, ok := d.workers["w1"]
+	d.mu.Unlock()
+	if ok {
+		t.Error("worker should be removed from map after Stop")
+	}
+}
+
+func TestStop_UnknownWorker(t *testing.T) {
+	d := newTestBackend(nil)
+	err := d.Stop(context.Background(), "nonexistent")
+	if err == nil || !strings.Contains(err.Error(), "unknown worker") {
+		t.Fatalf("expected unknown worker error, got %v", err)
+	}
+}
+
+func TestStop_ContainerStopErrorStillCleansUp(t *testing.T) {
+	var removeCalled, netRemoveCalled bool
+
+	mock := &mockDockerClient{
+		containerStopFn: func(_ context.Context, _ string, _ container.StopOptions) error {
+			return errors.New("timeout")
+		},
+		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
+			removeCalled = true
+			return nil
+		},
+		networkRemoveFn: func(_ context.Context, _ string) error {
+			netRemoveCalled = true
+			return nil
+		},
+	}
+
+	d := newTestBackend(mock, func(d *DockerBackend) {
+		d.metaMode = metadataHostManaged
+	})
+	d.workers["w1"] = &workerState{
+		containerID: "ctr-123",
+		networkID:   "net-id-123",
+		networkName: "blockyard-w1",
+	}
+
+	err := d.Stop(context.Background(), "w1")
+	if err == nil || !strings.Contains(err.Error(), "stop container") {
+		t.Fatalf("expected stop container error, got %v", err)
+	}
+	if !removeCalled {
+		t.Error("ContainerRemove should still be called after stop error")
+	}
+	if !netRemoveCalled {
+		t.Error("NetworkRemove should still be called after stop error")
+	}
+}
+
+func TestStop_DisconnectsServer(t *testing.T) {
+	var serverDisconnected bool
+
+	mock := &mockDockerClient{
+		containerStopFn: func(_ context.Context, _ string, _ container.StopOptions) error {
+			return nil
+		},
+		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
+			return nil
+		},
+		networkDisconnectFn: func(_ context.Context, _, containerID string, _ bool) error {
+			if containerID == "server-id" {
+				serverDisconnected = true
+			}
+			return nil
+		},
+		networkRemoveFn: func(_ context.Context, _ string) error {
+			return nil
+		},
+	}
+
+	d := newTestBackend(mock, func(d *DockerBackend) {
+		d.metaMode = metadataHostManaged
+		d.serverID = "server-id"
+	})
+	d.workers["w1"] = &workerState{
+		containerID: "ctr-123",
+		networkID:   "net-id-123",
+		networkName: "blockyard-w1",
+	}
+
+	if err := d.Stop(context.Background(), "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if !serverDisconnected {
+		t.Error("server should be disconnected from worker network")
+	}
+}
+
+// --- ListManaged ---
+
+func TestListManaged_ReturnsContainersAndNetworks(t *testing.T) {
+	mock := &mockDockerClient{
+		containerListFn: func(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
+			return []container.Summary{
+				{ID: "ctr-1", Labels: map[string]string{"dev.blockyard/managed": "true"}},
+			}, nil
+		},
+		networkListFn: func(_ context.Context, _ network.ListOptions) ([]network.Summary, error) {
+			return []network.Summary{
+				{ID: "net-1", Labels: map[string]string{"dev.blockyard/managed": "true"}},
+			}, nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	resources, err := d.ListManaged(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 2 {
+		t.Fatalf("expected 2 resources, got %d", len(resources))
+	}
+	// Containers should come first (sorted by Kind)
+	if resources[0].Kind != backend.ResourceContainer {
+		t.Error("expected container first in sorted output")
+	}
+	if resources[1].Kind != backend.ResourceNetwork {
+		t.Error("expected network second in sorted output")
+	}
+}
+
+func TestListManaged_ContainerListError(t *testing.T) {
+	mock := &mockDockerClient{
+		containerListFn: func(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
+			return nil, errors.New("docker down")
+		},
+	}
+
+	d := newTestBackend(mock)
+	_, err := d.ListManaged(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestListManaged_NetworkListError(t *testing.T) {
+	mock := &mockDockerClient{
+		containerListFn: func(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
+			return nil, nil
+		},
+		networkListFn: func(_ context.Context, _ network.ListOptions) ([]network.Summary, error) {
+			return nil, errors.New("docker down")
+		},
+	}
+
+	d := newTestBackend(mock)
+	_, err := d.ListManaged(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// --- RemoveResource ---
+
+func TestRemoveResource_Container(t *testing.T) {
+	var removedID string
+	mock := &mockDockerClient{
+		containerRemoveFn: func(_ context.Context, id string, _ container.RemoveOptions) error {
+			removedID = id
+			return nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	err := d.RemoveResource(context.Background(), backend.ManagedResource{
+		ID:   "ctr-123",
+		Kind: backend.ResourceContainer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removedID != "ctr-123" {
+		t.Errorf("removed %q, want ctr-123", removedID)
+	}
+}
+
+func TestRemoveResource_Network(t *testing.T) {
+	var removedID string
+	mock := &mockDockerClient{
+		networkRemoveFn: func(_ context.Context, id string) error {
+			removedID = id
+			return nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	err := d.RemoveResource(context.Background(), backend.ManagedResource{
+		ID:   "net-123",
+		Kind: backend.ResourceNetwork,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removedID != "net-123" {
+		t.Errorf("removed %q, want net-123", removedID)
+	}
+}
+
+func TestRemoveResource_UnknownKind(t *testing.T) {
+	d := newTestBackend(nil)
+	err := d.RemoveResource(context.Background(), backend.ManagedResource{
+		ID:   "x",
+		Kind: 99,
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown kind")
+	}
 }
