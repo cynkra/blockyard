@@ -990,6 +990,82 @@ func TestCallbackDeactivatedUser(t *testing.T) {
 	}
 }
 
+// TestFullLoginCallbackMiddlewareFlow verifies the complete chain:
+// GET /login → callback with state cookie → session cookie set →
+// middleware recognises session cookie → user is authenticated.
+// This is the exact flow a browser performs; if the session cookie
+// produced by the callback is not accepted by the middleware, the
+// user ends up back on the landing page.
+func TestFullLoginCallbackMiddlewareFlow(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+
+	// Wire a middleware-protected "/" that reports whether the user
+	// was authenticated.
+	var capturedUser *auth.AuthenticatedUser
+	r := chi.NewRouter()
+	r.Get("/login", auth.LoginHandler(deps))
+	r.Get("/callback", auth.CallbackHandler(deps))
+	r.Group(func(sub chi.Router) {
+		sub.Use(auth.AppAuthMiddleware(deps))
+		sub.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			capturedUser = auth.UserFromContext(r.Context())
+			if capturedUser == nil {
+				w.Write([]byte("landing"))
+			} else {
+				w.Write([]byte("authenticated:" + capturedUser.Sub))
+			}
+		})
+	})
+
+	// Step 1: GET /login — extract state cookie and CSRF token.
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	stateCookie := findCookie(w.Result(), "blockyard_oidc_state")
+	if stateCookie == nil {
+		t.Fatal("login: missing state cookie")
+	}
+	location := w.Header().Get("Location")
+	csrfToken := extractStateParam(location)
+	idp.Nonce = extractNonceParam(location)
+
+	// Step 2: GET /callback — exchange code, set session cookie.
+	req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
+	req.AddCookie(stateCookie)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback: expected 302, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	sessionCookie := findCookie(w.Result(), "blockyard_session")
+	if sessionCookie == nil {
+		t.Fatal("callback did not produce blockyard_session cookie")
+	}
+	if sessionCookie.MaxAge <= 0 {
+		t.Fatalf("session cookie Max-Age = %d; want > 0 (Max-Age=0 tells the browser to delete it immediately)", sessionCookie.MaxAge)
+	}
+
+	// Step 3: GET / with the session cookie — must be authenticated.
+	capturedUser = nil
+	req = httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if capturedUser == nil {
+		t.Fatalf("middleware did not authenticate user; response body: %q", body)
+	}
+	if !strings.HasPrefix(body, "authenticated:") {
+		t.Fatalf("expected authenticated response, got %q", body)
+	}
+}
+
 func TestMiddlewareWithRoleCache(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()

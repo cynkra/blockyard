@@ -826,12 +826,18 @@ func (d *DockerBackend) Build(ctx context.Context, spec backend.BuildSpec) (back
 	}
 
 	// 5. Stream logs in real-time while the build runs.
+	// Close the log reader when the context is cancelled so scanner.Scan()
+	// unblocks instead of hanging forever on a stalled container.
 	var buildLogs strings.Builder
 	if logReader, logErr := d.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
 	}); logErr == nil {
+		go func() {
+			<-ctx.Done()
+			logReader.Close()
+		}()
 		scanner := bufio.NewScanner(demuxReader(logReader))
 		for scanner.Scan() {
 			line := scanner.Text()

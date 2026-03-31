@@ -149,7 +149,11 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 	taskID := uuid.New().String()
 	sender := tasks.Create(taskID, app.ID)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
 	bundle.SpawnRestore(bundle.RestoreParams{
+		Ctx:          ctx,
 		Backend:      be,
 		DB:           database,
 		Tasks:        tasks,
@@ -171,7 +175,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Minute):
+	case <-ctx.Done():
 		t.Fatal("restore timed out")
 	}
 

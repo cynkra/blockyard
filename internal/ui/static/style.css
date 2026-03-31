@@ -607,7 +607,7 @@ header nav { display: flex; align-items: center; gap: 1rem; }
 .field-feedback { font-size: 0.8rem; flex-shrink: 0; }
 .field-error { color: var(--flash-error-text); font-size: 0.8rem; margin-top: 0.25rem; }
 .field-invalid { border-color: var(--flash-error-text); }
-.hidden { display: none; }
+.hidden { display: none !important; }
 
 /* Tag chips */
 .tag-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }

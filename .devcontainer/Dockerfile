@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-dev \
     openssh-client \
     postgresql-client \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
@@ -21,17 +22,25 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Playwright system dependencies + Chromium
+# Done as root before user switch so shared libs land in system paths.
+# PLAYWRIGHT_BROWSERS_PATH puts binaries in a shared location readable by
+# the non-root user; the env var is exported globally so runtime picks it up.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN npx playwright install --with-deps chromium
+
 # Create non-root user
 ARG USERNAME=dev
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 RUN groupadd --gid $USER_GID $USERNAME \
-    && useradd --uid $USER_UID --gid $USER_GID -m -s /bin/bash $USERNAME
-
-# Install Node.js (for docs site)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && useradd --uid $USER_UID --gid $USER_GID -m -s /bin/bash $USERNAME \
+    && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME
 
 # Install Go
 ARG GO_VERSION=1.25.8
