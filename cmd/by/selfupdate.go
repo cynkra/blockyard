@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const apiBase = "https://api.github.com/repos/cynkra/blockyard"
+var apiBase = "https://api.github.com/repos/cynkra/blockyard"
 
 type githubRelease struct {
 	TagName string        `json:"tag_name"`
