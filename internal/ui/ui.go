@@ -145,9 +145,16 @@ func New() *UI {
 		)
 		pages[name] = t
 	}
+	// Re-parse profile.html with the shared token_list fragment.
+	pages["profile.html"] = template.Must(
+		template.New("").Funcs(funcMap).ParseFS(
+			content, "templates/base.html", "templates/profile.html", "templates/token_list.html",
+		),
+	)
 
 	fragments := make(map[string]*template.Template)
 	fragmentNames := []string{
+		"token_list.html",
 		"pat_created.html",
 		"sidebar.html",
 		"tab_overview.html",
@@ -602,7 +609,24 @@ func (ui *UI) createToken(srv *server.Server) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html")
 		if err := ui.fragments["pat_created.html"].Execute(w, struct{ Token string }{Token: plaintext}); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
 		}
+
+		// OOB swap: refresh the token list table.
+		pats, _ := srv.DB.ListPATsByUser(caller.Sub)
+		tokens := make([]tokenEntry, len(pats))
+		for i, p := range pats {
+			createdAt := p.CreatedAt
+			tokens[i] = tokenEntry{
+				ID:         p.ID,
+				Name:       p.Name,
+				CreatedAt:  &createdAt,
+				LastUsedAt: p.LastUsedAt,
+			}
+		}
+		fmt.Fprint(w, `<div id="token-list" hx-swap-oob="true">`)
+		_ = ui.fragments["token_list.html"].ExecuteTemplate(w, "tokenList", tokens)
+		fmt.Fprint(w, `</div>`)
 	}
 }
 

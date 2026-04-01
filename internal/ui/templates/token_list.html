@@ -1,0 +1,25 @@
+{{define "tokenList"}}
+{{if .}}
+<table class="data-table">
+    <thead>
+        <tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr>
+    </thead>
+    <tbody>
+    {{range .}}
+        <tr>
+            <td>{{.Name}}</td>
+            <td>{{.CreatedAt | timeAgo}}</td>
+            <td>{{if .LastUsedAt}}{{.LastUsedAt | timeAgo}}{{else}}Never{{end}}</td>
+            <td><button class="btn btn-sm btn-danger"
+                        hx-delete="/api/v1/users/me/tokens/{{.ID}}"
+                        hx-confirm="Revoke token '{{.Name}}'? This cannot be undone."
+                        hx-target="closest tr"
+                        hx-swap="outerHTML swap:0.2s">Revoke</button></td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="empty-state">No tokens created.</p>
+{{end}}
+{{end}}
