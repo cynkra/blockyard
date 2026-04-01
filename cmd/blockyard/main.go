@@ -283,6 +283,9 @@ func main() {
 		hash := auth.HashPAT(token)
 		if database.PATHashExists(hash) {
 			slog.Info("bootstrap token already redeemed")
+			// Ensure the sentinel is marked revoked (back-compat for
+			// deployments that created it before we set revoked = 1).
+			database.RevokePAT("bootstrap-redeemed", cfg.OIDC.InitialAdmin) //nolint:errcheck
 		} else {
 			srv.BootstrapTokenHash = hash
 			slog.Warn("bootstrap token active — exchange via POST /api/v1/bootstrap")

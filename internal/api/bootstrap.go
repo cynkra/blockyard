@@ -101,6 +101,7 @@ func ExchangeBootstrapToken(srv *server.Server) http.HandlerFunc {
 		// revoked PAT sentinel so it survives server restarts.
 		revoked := time.Now().UTC().Format(time.RFC3339)
 		srv.DB.CreatePAT("bootstrap-redeemed", hash, sub, "bootstrap-redeemed", &revoked) //nolint:errcheck
+		srv.DB.RevokePAT("bootstrap-redeemed", sub)                                       //nolint:errcheck
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
