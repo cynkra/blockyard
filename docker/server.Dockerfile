@@ -1,3 +1,10 @@
+FROM node:22-alpine AS docs
+WORKDIR /docs
+COPY docs/package.json docs/package-lock.json ./
+RUN npm ci
+COPY docs/ .
+RUN DOCS_BASE=/docs npm run build
+
 FROM golang:1.25.8-alpine AS builder
 
 ENV GOTOOLCHAIN=local
@@ -7,6 +14,7 @@ RUN go mod download
 
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY --from=docs /docs/dist internal/docs/dist
 
 ARG COVER=""
 ARG VERSION=dev
