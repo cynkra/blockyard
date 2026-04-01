@@ -194,6 +194,13 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Post("/logout", auth.LogoutHandler(authDeps))
 	})
 
+	// Bootstrap token exchange — one-time use, no auth middleware.
+	r.Group(func(r chi.Router) {
+		r.Use(limitBody)
+		r.Use(apiCSP)
+		r.Post("/api/v1/bootstrap", ExchangeBootstrapToken(srv))
+	})
+
 	// Credential exchange — moderate rate limit.
 	r.Group(func(r chi.Router) {
 		r.Use(httprate.LimitByIP(20, time.Minute))

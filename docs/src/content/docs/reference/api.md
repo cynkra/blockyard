@@ -84,6 +84,31 @@ OIDC callback endpoint. Completes the login flow and sets a session cookie.
 
 Clears the session cookie and logs the user out.
 
+### `POST /api/v1/bootstrap`
+
+Exchange a one-time bootstrap token for a Personal Access Token. The
+bootstrap token is configured on the server via `server.bootstrap_token`
+(`BLOCKYARD_SERVER_BOOTSTRAP_TOKEN`). After a single successful exchange the
+bootstrap token is permanently burned — subsequent calls return `410 Gone`.
+
+No API authentication required — the bootstrap token itself is the credential.
+
+**Request:**
+
+```bash
+curl -X POST "$BLOCKYARD/api/v1/bootstrap" \
+  -H "Authorization: Bearer $BOOTSTRAP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"deploy","expires_in":"1h"}'
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | `string` | No | Token name (default: `"bootstrap"`) |
+| `expires_in` | `string` | No | Token TTL, e.g. `"1h"`, `"7d"` (default: no expiry) |
+
+**Response:** `201 Created` with the PAT (same schema as `POST /api/v1/users/me/tokens`).
+
 ---
 
 ## Apps

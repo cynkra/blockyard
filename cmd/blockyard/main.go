@@ -272,6 +272,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Bootstrap token — a one-time token that can be exchanged for a real
+	// PAT via POST /api/v1/bootstrap. The token itself never grants API
+	// access; it can only be traded once for a properly scoped PAT.
+	if token := cfg.Server.BootstrapToken; token != "" {
+		if cfg.OIDC == nil || cfg.OIDC.InitialAdmin == "" {
+			slog.Error("bootstrap_token requires oidc.initial_admin to be set")
+			os.Exit(1)
+		}
+		hash := auth.HashPAT(token)
+		if database.PATHashExists(hash) {
+			slog.Info("bootstrap token already redeemed")
+		} else {
+			srv.BootstrapTokenHash = hash
+			slog.Warn("bootstrap token active — exchange via POST /api/v1/bootstrap")
+		}
+	}
+
 	// Clean up orphaned worker library directories from previous runs.
 	if srv.PkgStore != nil {
 		workersDir := filepath.Join(srv.PkgStore.Root(), ".workers")
