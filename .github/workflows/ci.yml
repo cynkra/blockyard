@@ -29,8 +29,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    outputs:
+      code: ${{ steps.check.outputs.code }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FILES=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate -q '.[].filename')
+          if [ -z "$FILES" ] || echo "$FILES" | grep -qvE '^docs/|\.md$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   dependency-review:
-    if: github.event_name == 'pull_request'
+    needs: [changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -40,7 +63,8 @@ jobs:
           fail-on-severity: high
 
   unit:
-    if: github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'unit')
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'unit')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
