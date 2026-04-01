@@ -176,13 +176,40 @@
     background: var(--color-status-stopped-bg); color: var(--color-status-stopped-text);
   }
 
-  /* ── App card ── */
+  /* ── Page layout ── */
+  .page-layout { @apply flex min-h-screen; }
+  .container { @apply max-w-5xl mx-auto p-6; }
+  .page-header { @apply mb-6; }
+  .page-header h1 { @apply m-0 mb-2 text-2xl; }
+  .page-description { @apply opacity-50 m-0; }
+
+  /* ── Buttons ── */
+  a.btn, button.btn, .btn { @apply btn; }
+  .btn-primary { @apply btn-primary; }
+  .btn-danger { @apply btn-error; }
+  .btn-link { @apply btn-link; }
+  .btn-sm { @apply btn-sm; }
+
+  /* ── Search form ── */
+  .search-form { @apply flex gap-2; }
+  .search-input { @apply input input-sm flex-1 text-sm; }
+
+  /* ── App grid + card ── */
+  .app-grid { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); }
   .app-card {
     @apply relative flex flex-col p-4 rounded-md bg-base-100 border border-base-300 no-underline shadow-sm;
     color: inherit !important;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
   .app-card:hover { @apply border-primary shadow-md; }
+  .app-name { @apply font-semibold; }
+  .app-title { @apply text-sm opacity-60; }
+  .app-desc { @apply text-sm opacity-50 mt-1; }
+  .app-status { @apply text-xs mt-auto pt-2; }
+  .app-status--running { @apply text-success; }
+  .app-status--stopped { @apply opacity-50; }
+  .app-tags { @apply flex gap-1 flex-wrap mt-1; }
+  .tag { @apply text-xs rounded-sm bg-base-300 px-1.5 py-0.5; }
   .app-card-gear {
     @apply absolute top-2 right-2 bg-transparent border-none text-lg cursor-pointer p-0.5 leading-none rounded-sm opacity-40;
     transition: opacity 0.15s, background 0.15s;
