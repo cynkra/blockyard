@@ -42,23 +42,13 @@ jobs:
       - uses: ./.github/actions/docker-cache
         if: github.event_name != 'pull_request'
         with:
+          phase: setup
+          key: ${{ matrix.test }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
-          images: >
-            alpine:3.23
-            curlimages/curl:latest
-            dexidp/dex:v2.41.1
-            golang:1.25.8-bookworm
-            postgres:17
-            postgrest/postgrest:v12.2.3
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 -f docker/server.Dockerfile .
-      - name: Pull GHCR images used by examples
-        if: github.event_name != 'pull_request'
-        run: |
-          docker pull ghcr.io/openbao/openbao:2.5.2
-          docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - name: Block cloud metadata endpoint for containers
         if: github.event_name != 'pull_request'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
@@ -67,10 +57,9 @@ jobs:
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
       - name: Run example tests
         if: github.event_name != 'pull_request'
-        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
+        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
-          E2E_PULL_POLICY: never
       - name: Convert example coverage data
         if: github.event_name != 'pull_request'
         run: |
@@ -87,6 +76,11 @@ jobs:
           path: coverage-examples-*.out
           if-no-files-found: ignore
           retention-days: 1
+      - uses: ./.github/actions/docker-cache
+        if: always() && github.event_name != 'pull_request'
+        with:
+          phase: save
+          key: ${{ matrix.test }}
       - name: Dump compose logs on failure
         if: failure()
         run: |
@@ -107,18 +101,12 @@ jobs:
       - uses: ./.github/actions/docker-cache
         if: github.event_name != 'pull_request'
         with:
+          phase: setup
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
-          images: >
-            dexidp/dex:v2.41.1
-            alpine:3.23
-            golang:1.25.8-bookworm
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request'
         run: docker build -t ghcr.io/cynkra/blockyard:latest --build-arg COVER=1 -f docker/server.Dockerfile .
-      - name: Pull GHCR images
-        if: github.event_name != 'pull_request'
-        run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - name: Block cloud metadata endpoint
         if: github.event_name != 'pull_request'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
@@ -187,6 +175,10 @@ jobs:
           name: playwright-report
           path: tests/e2e/playwright-report/
           retention-days: 7
+      - uses: ./.github/actions/docker-cache
+        if: always() && github.event_name != 'pull_request'
+        with:
+          phase: save
       - name: Dump compose logs on failure
         if: failure() && github.event_name != 'pull_request'
         run: |

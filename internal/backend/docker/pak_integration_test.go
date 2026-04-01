@@ -21,10 +21,11 @@ import (
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
-func pakTestConfig() *config.DockerConfig {
+func pakTestConfig(t *testing.T) *config.DockerConfig {
+	t.Helper()
 	return &config.DockerConfig{
 		Socket:     "/var/run/docker.sock",
-		Image:      "alpine:3.23",
+		Image:      testutil.TOMLDockerImage(t),
 		ShinyPort:  8080,
 		PakVersion: "stable",
 	}
@@ -34,10 +35,10 @@ func pakTestConfig() *config.DockerConfig {
 // Cmd/Mounts API. Since we cannot run a full pak install without pak in the
 // image, we use a simple R command to verify mounts and command override work.
 func TestBuildE2E_PakBuild(t *testing.T) {
-	const image = "ghcr.io/rocker-org/r-ver:4.4.3"
+	image := testutil.TOMLDockerImage(t)
 
 	ctx := context.Background()
-	b, err := New(ctx, pakTestConfig(), t.TempDir())
+	b, err := New(ctx, pakTestConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -88,10 +89,10 @@ func TestBuildE2E_PakBuild(t *testing.T) {
 // mount issues we hit in real deployments.
 func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 	const pakVersion = "stable"
-	const image = "ghcr.io/rocker-org/r-ver:4.4.3"
+	image := testutil.TOMLDockerImage(t)
 
 	ctx := context.Background()
-	be, err := New(ctx, pakTestConfig(), t.TempDir())
+	be, err := New(ctx, pakTestConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
