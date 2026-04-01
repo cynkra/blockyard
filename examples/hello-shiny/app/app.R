@@ -12,8 +12,7 @@ ui <- fluidPage(
   )
 )
 
-server <- function(input, output, session) {
-  session$allowReconnect(TRUE)
+server <- function(input, output) {
   output$distPlot <- renderPlot({
     x <- faithful[, 2]
     bins <- seq(min(x), max(x), length.out = input$bins + 1)
