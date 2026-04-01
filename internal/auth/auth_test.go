@@ -432,6 +432,7 @@ func TestMiddlewareContextCarriesUser(t *testing.T) {
 	}
 	if captured == nil {
 		t.Fatal("expected AuthenticatedUser in context")
+		return
 	}
 	if captured.Sub != "ctx-user" {
 		t.Errorf("Sub = %q", captured.Sub)
@@ -1118,6 +1119,7 @@ func TestMiddlewareWithRoleCache(t *testing.T) {
 	}
 	if captured == nil {
 		t.Fatal("expected CallerIdentity in context")
+		return
 	}
 	if captured.Sub != "role-user" {
 		t.Errorf("Sub = %q", captured.Sub)
@@ -1238,6 +1240,7 @@ func TestMiddlewareValidUserHasCallerAndUser(t *testing.T) {
 	}
 	if capturedUser == nil {
 		t.Fatal("expected AuthenticatedUser in context")
+		return
 	}
 	if capturedUser.Sub != "valid-user" {
 		t.Errorf("User.Sub = %q, want valid-user", capturedUser.Sub)
@@ -1247,6 +1250,7 @@ func TestMiddlewareValidUserHasCallerAndUser(t *testing.T) {
 	}
 	if capturedCaller == nil {
 		t.Fatal("expected CallerIdentity in context")
+		return
 	}
 	if capturedCaller.Sub != "valid-user" {
 		t.Errorf("Caller.Sub = %q, want valid-user", capturedCaller.Sub)

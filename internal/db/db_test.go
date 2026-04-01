@@ -1168,6 +1168,7 @@ func TestPATCRUD(t *testing.T) {
 		}
 		if result == nil {
 			t.Fatal("expected non-nil lookup result")
+			return
 		}
 		if result.PAT.ID != "pat-1" {
 			t.Errorf("expected PAT ID pat-1, got %q", result.PAT.ID)
@@ -1318,6 +1319,7 @@ func TestSoftDeleteApp(t *testing.T) {
 		fetched, _ = db.GetAppIncludeDeleted(app.ID)
 		if fetched == nil {
 			t.Fatal("expected non-nil from GetAppIncludeDeleted")
+			return
 		}
 		if fetched.DeletedAt == nil {
 			t.Error("expected deleted_at to be set")
@@ -1349,6 +1351,7 @@ func TestRestoreApp(t *testing.T) {
 		fetched, _ := db.GetApp(app.ID)
 		if fetched == nil {
 			t.Fatal("expected app to reappear after restore")
+			return
 		}
 		if fetched.DeletedAt != nil {
 			t.Error("expected deleted_at to be nil after restore")
@@ -1604,6 +1607,7 @@ func TestSessionCRUD(t *testing.T) {
 		}
 		if s == nil {
 			t.Fatal("expected session, got nil")
+			return
 		}
 		if s.AppID != app.ID {
 			t.Errorf("expected app_id=%s, got %s", app.ID, s.AppID)
@@ -2149,6 +2153,7 @@ func TestGetAppByNameIncludeDeleted(t *testing.T) {
 		}
 		if fetched == nil {
 			t.Fatal("expected non-nil from GetAppByNameIncludeDeleted")
+			return
 		}
 		if fetched.ID != app.ID {
 			t.Errorf("expected id=%s, got %s", app.ID, fetched.ID)
@@ -2185,6 +2190,7 @@ func TestGetAppIncludeDeleted(t *testing.T) {
 		}
 		if fetched == nil {
 			t.Fatal("expected non-nil from GetAppIncludeDeleted")
+			return
 		}
 		if fetched.DeletedAt == nil {
 			t.Error("expected deleted_at to be set")
@@ -2219,6 +2225,7 @@ func TestRenameAppSuccess(t *testing.T) {
 		}
 		if aliasApp == nil {
 			t.Fatal("expected alias to resolve to the app")
+			return
 		}
 		if aliasApp.ID != app.ID {
 			t.Errorf("expected alias to point to %s, got %s", app.ID, aliasApp.ID)
@@ -2281,6 +2288,7 @@ func TestGetAppByAlias(t *testing.T) {
 		}
 		if fetched == nil {
 			t.Fatal("expected app from alias lookup")
+			return
 		}
 		if fetched.ID != app.ID {
 			t.Errorf("expected app ID %s, got %s", app.ID, fetched.ID)
