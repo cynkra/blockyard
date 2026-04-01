@@ -35,13 +35,13 @@ required to call the product useful. v2 adds single-node production
 completeness (CLI, scale-to-zero, pre-warming, build pipeline
 modernization with pak, a content-addressable package store, board
 storage via PostgreSQL + PostgREST + vault Identity OIDC, cold-start
-loading page). v3 has two tracks: operations (rolling updates via Redis
-shared state, interface extraction for session/worker stores, `by admin
-update` CLI command) and runtime (pre-fork worker model for the Docker
-backend, lightweight process backend, deferred single-node features).
-The operations track runs first — it enables low-friction iteration on
-deployed v2 instances and front-loads the shared state layer needed for
-v4 clustering. v4 adds Kubernetes for multi-node scaling.
+loading page). v3 has two tracks: operations (rolling updates via Redis shared state,
+interface extraction for session/worker stores, `by admin update` and
+`by admin rollback` CLI commands with scheduled auto-updates) and
+runtime (pre-fork worker model for the Docker backend, lightweight
+process backend, per-app container configuration). The operations track
+runs first — it enables low-friction iteration on deployed v2 instances
+and front-loads the shared state layer needed for v4 clustering. v4 adds Kubernetes for multi-node scaling.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
 interface (Docker vs. process vs. Kubernetes). This abstraction is worth its
@@ -673,16 +673,18 @@ existing Docker deployment. No Kubernetes dependency.
   per-worker hard-linked library views. See [v2 plan](v2/plan.md) for the
   full design.
 
-### v3: Operations, Process Backend + Deferred Single-Node Features
+### v3: Operations, Process Backend + Per-App Configuration
 
 Two tracks. The **operations track** adds rolling updates with zero
 downtime — Redis-backed shared state for session/worker routing,
 interface extraction for the in-memory stores, a drain mode for graceful
-server handoff, and the `by admin update` CLI command. This work runs
-first: once v2 is deployed, low-friction updates are immediately needed,
-and the shared state layer directly serves v4 clustering. The **runtime
-track** adds the pre-fork worker model, the lightweight process backend,
-and deferred single-node features.
+server handoff, and the `by admin update`/`rollback` CLI commands with
+scheduled auto-updates. This work runs first: once v2 is deployed,
+low-friction updates are immediately needed, and the shared state layer
+directly serves v4 clustering. The **runtime track** adds the pre-fork
+worker model, the lightweight process backend, and per-app container
+configuration. See [v3/plan.md](v3/plan.md) for the full implementation
+plan.
 
 ---
 
@@ -694,8 +696,7 @@ and deferred single-node features.
   workers left alive), the proxy shifts traffic to the new server, and
   the old server exits. Workers survive the transition — they continue
   serving existing sessions under the new server. See
-  [update.md](update.md) for the full design. Related: #70
-  (client-server version negotiation), #71 (update notifications).
+  [update.md](update.md) for the full design.
 
 - **Redis shared state.** Session store, worker registry, and worker map
   move behind Go interfaces with two implementations: in-memory (default,
@@ -724,7 +725,24 @@ and deferred single-node features.
   rolling update flow: pull new image, back up database, start new
   container, wait for readiness, signal old server to drain, wait for
   exit, clean up. Detects absence of Redis and falls back to printing
-  manual `docker compose` commands.
+  manual `docker compose` commands. Supports `--watch` for post-update
+  health monitoring with automatic rollback on failure.
+
+- **`by admin rollback` command.** Rolls back to the previous version
+  (N-1 only) using the same rolling update infrastructure. Runs down
+  migrations to the recorded pre-update schema version. Multi-version
+  rollback is manual.
+
+- **Scheduled auto-updates.** Server-side config (`[update] schedule`)
+  triggers automatic updates on a cron schedule. The server orchestrates
+  the update internally, then monitors the new server's health for a
+  configurable watch period, rolling back automatically on failure.
+
+- **Migration discipline.** Expand-and-contract migration pattern with
+  multi-layered CI enforcement: SQL DDL linter, atlas migrate lint,
+  up-down-up roundtrip test, and backward-compatibility test (old code's
+  tests against new schema). Down migrations are a production path
+  (`by admin rollback`).
 
 - **Pre-fork worker model.** An enhancement to the Docker backend's
   multi-session mode. Instead of multiplexing sessions onto a shared R
@@ -738,8 +756,7 @@ and deferred single-node features.
   per-process resource limits via `setrlimit()`. Requires the same
   custom seccomp profile as the process backend (allowing
   `CLONE_NEWUSER`). Prior art: Rserve, RestRserve, and OpenCPU all use
-  this pre-fork pattern in production. See [v3 draft](v3/draft.md) for
-  the full design, package compatibility analysis, and open questions.
+  this pre-fork pattern in production.
 
 - **Process backend implementation.** Implement the `Backend` interface
   using bubblewrap (`bwrap`) for process sandboxing. Workers are spawned
@@ -769,17 +786,17 @@ and deferred single-node features.
   paths are available; app owners reference sources by name and specify
   the container mount point and read-only/read-write mode.
 
-- **Docker daemon hardening.** A Docker authorization plugin that enforces
-  mount path restrictions, disallows privileged containers, restricts
-  network modes, and limits allowed images at the daemon level — defense
-  in depth against a compromised server process.
+- **Multiple execution environment images.** Per-app image selection; add
+  an `image` field to app configuration that overrides the server-wide
+  default.
 
-- **Multiple execution environment images.** Per-app image selection; add an
-  `image` field to app configuration that overrides the server-wide default.
+- **Per-app OCI runtime selection.** Per-app `runtime` field selects the
+  OCI runtime (e.g., `kata-runtime` for stronger isolation on
+  public-facing apps, `runc` for trusted/private apps).
 
-- **UI branding and customization.** Customizable cold-start loading page,
-  in-app navigation chrome (navbar, app switcher), and general branding
-  support (logo, colors).
+- **Dynamic resource limit updates.** Changing memory or CPU limits via
+  the API applies to running workers immediately (Docker backend:
+  `ContainerUpdate()`), not just newly spawned ones.
 
 ### v4: Kubernetes and Multi-Node
 
