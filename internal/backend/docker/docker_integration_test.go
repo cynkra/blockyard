@@ -20,6 +20,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/testutil"
 )
 
 // rawClient extracts the concrete *client.Client from a DockerBackend.
@@ -34,10 +35,11 @@ func rawClient(t *testing.T, d *DockerBackend) *client.Client {
 	return c
 }
 
-func testConfig() *config.DockerConfig {
+func testConfig(t *testing.T) *config.DockerConfig {
+	t.Helper()
 	return &config.DockerConfig{
 		Socket:     "/var/run/docker.sock",
-		Image:      "alpine:3.23",
+		Image:      testutil.AlpineImage(t),
 		ShinyPort:  8080,
 		PakVersion: "stable",
 	}
@@ -46,7 +48,7 @@ func testConfig() *config.DockerConfig {
 
 func TestSpawnAndStop(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -55,7 +57,7 @@ func TestSpawnAndStop(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -91,7 +93,7 @@ func TestSpawnAndStop(t *testing.T) {
 
 func TestHealthCheckNoListener(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -100,7 +102,7 @@ func TestHealthCheckNoListener(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -123,7 +125,7 @@ func TestHealthCheckNoListener(t *testing.T) {
 
 func TestOrphanCleanup(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -132,7 +134,7 @@ func TestOrphanCleanup(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -187,7 +189,7 @@ func TestOrphanCleanup(t *testing.T) {
 
 func TestNetworkIsolation(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -198,7 +200,7 @@ func TestNetworkIsolation(t *testing.T) {
 		return backend.WorkerSpec{
 			AppID:       "test-app",
 			WorkerID:    id,
-			Image:       "alpine:3.23",
+			Image:       testutil.AlpineImage(t),
 			Cmd:         []string{"sleep", "300"},
 			BundlePath:  "/tmp",
 			LibraryPath: "",
@@ -266,7 +268,7 @@ func TestNetworkIsolation(t *testing.T) {
 
 func TestMetadataEndpointBlocked(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -275,7 +277,7 @@ func TestMetadataEndpointBlocked(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -326,7 +328,7 @@ func testSpawn(t *testing.T, b *DockerBackend, cmd []string) (string, backend.Wo
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         cmd,
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -343,7 +345,7 @@ func testSpawn(t *testing.T, b *DockerBackend, cmd []string) (string, backend.Wo
 
 func TestLogs(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -378,7 +380,7 @@ func TestLogs(t *testing.T) {
 
 func TestLogsUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -391,7 +393,7 @@ func TestLogsUnknownWorker(t *testing.T) {
 
 func TestStopUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -403,7 +405,7 @@ func TestStopUnknownWorker(t *testing.T) {
 
 func TestHealthCheckUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -422,7 +424,7 @@ func testBundleDir(t *testing.T) (bundleDir, libDir string) {
 
 func TestBuildFailsWithBadImage(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -431,7 +433,7 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.23",
+		Image:    testutil.AlpineImage(t),
 		Cmd:      []string{"false"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -453,7 +455,7 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 
 func TestBuildWithProductionImage(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -466,7 +468,7 @@ func TestBuildWithProductionImage(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.23",
+		Image:    testutil.AlpineImage(t),
 		Cmd:      []string{"true"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -486,7 +488,7 @@ func TestBuildWithProductionImage(t *testing.T) {
 
 func TestAddrUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -502,7 +504,7 @@ func TestAddrUnknownWorker(t *testing.T) {
 
 func TestSpawnWithMemoryLimit(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -511,7 +513,7 @@ func TestSpawnWithMemoryLimit(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -543,7 +545,7 @@ func TestSpawnWithMemoryLimit(t *testing.T) {
 
 func TestSpawnWithCPULimit(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -552,7 +554,7 @@ func TestSpawnWithCPULimit(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -584,7 +586,7 @@ func TestSpawnWithCPULimit(t *testing.T) {
 
 func TestSpawnWithEnvVars(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -593,7 +595,7 @@ func TestSpawnWithEnvVars(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"sleep", "300"},
 		BundlePath:  "/tmp",
 		LibraryPath: "",
@@ -643,7 +645,7 @@ func TestSpawnWithEnvVars(t *testing.T) {
 
 func TestBuildLogWriter(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -656,7 +658,7 @@ func TestBuildLogWriter(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.23",
+		Image:    testutil.AlpineImage(t),
 		Cmd:      []string{"true"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -688,7 +690,7 @@ func TestBuildLogWriter(t *testing.T) {
 
 func TestBuildExitCodeOnFailure(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -698,7 +700,7 @@ func TestBuildExitCodeOnFailure(t *testing.T) {
 	spec := backend.BuildSpec{
 		AppID:    "test-app",
 		BundleID: uuid.New().String()[:8],
-		Image:    "alpine:3.23",
+		Image:    testutil.AlpineImage(t),
 		Cmd:      []string{"false"},
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
@@ -723,7 +725,7 @@ func TestBuildExitCodeOnFailure(t *testing.T) {
 
 func TestSpawnAndHealthCheckWithListener(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -732,7 +734,7 @@ func TestSpawnAndHealthCheckWithListener(t *testing.T) {
 	spec := backend.WorkerSpec{
 		AppID:       "test-app",
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd: []string{"sh", "-c",
 			"while true; do echo -e 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok' | nc -l -p 8080; done",
 		},
@@ -758,7 +760,7 @@ func TestSpawnAndHealthCheckWithListener(t *testing.T) {
 
 func TestListManagedIncludesNetworks(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -791,7 +793,7 @@ func TestListManagedIncludesNetworks(t *testing.T) {
 
 func TestContainerStats(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

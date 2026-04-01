@@ -24,6 +24,7 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/testutil"
 )
 
 // wsEchoServerSource is a minimal Go WebSocket echo server.
@@ -155,10 +156,11 @@ func buildWSEchoBinary(t *testing.T) string {
 }
 
 // dockerTestConfig returns a DockerConfig suitable for integration tests.
-func dockerTestConfig() *config.DockerConfig {
+func dockerTestConfig(t *testing.T) *config.DockerConfig {
+	t.Helper()
 	return &config.DockerConfig{
 		Socket:    "/var/run/docker.sock",
-		Image:     "alpine:3.23",
+		Image:     testutil.AlpineImage(t),
 		ShinyPort: 8080,
 		PakVersion: "stable",
 	}
@@ -173,7 +175,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	tmp := t.TempDir()
 
 	// Create DockerBackend.
-	be, err := dockerbe.New(ctx, dockerTestConfig(), tmp)
+	be, err := dockerbe.New(ctx, dockerTestConfig(t), tmp)
 	if err != nil {
 		t.Fatalf("docker backend: %v", err)
 	}
@@ -182,7 +184,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
 		Docker: config.DockerConfig{
-			Image:     "alpine:3.23",
+			Image:     testutil.AlpineImage(t),
 			ShinyPort: 8080,
 		},
 		Storage: config.StorageConfig{
@@ -228,7 +230,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	spec := backend.WorkerSpec{
 		AppID:       app.ID,
 		WorkerID:    workerID,
-		Image:       "alpine:3.23",
+		Image:       testutil.AlpineImage(t),
 		Cmd:         []string{"/wsecho-bin"},
 		BundlePath:  tmp,
 		LibraryPath: "",
