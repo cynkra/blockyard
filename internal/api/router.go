@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/httprate"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	httpSwagger "github.com/swaggo/http-swagger/v2"
+	"github.com/swaggo/swag/v2"
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/proxy"
@@ -130,6 +131,17 @@ func apiCSP(next http.Handler) http.Handler {
 	})
 }
 
+// swaggerDocJSON serves the OpenAPI spec from the swag/v2 registry.
+func swaggerDocJSON(w http.ResponseWriter, _ *http.Request) {
+	doc, err := swag.ReadDoc()
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Write([]byte(doc))
+}
+
 func NewRouter(srv *server.Server) http.Handler {
 	r := chi.NewRouter()
 
@@ -180,8 +192,11 @@ func NewRouter(srv *server.Server) http.Handler {
 	// Swagger UI — serves OpenAPI spec and interactive documentation.
 	// Uses soft auth so the doc.json fetch from Swagger UI's JavaScript
 	// succeeds without requiring a session cookie or bearer token.
+	// doc.json is served directly via swag/v2 because http-swagger/v2
+	// reads from swag v1, which has a separate registry.
 	r.Group(func(r chi.Router) {
 		r.Use(auth.AppAuthMiddleware(authDeps))
+		r.Get("/swagger/doc.json", swaggerDocJSON)
 		r.Get("/swagger/*", httpSwagger.WrapHandler)
 	})
 
