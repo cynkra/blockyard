@@ -18,7 +18,7 @@ Depends on phase 3-1 (migration tooling). No new dependencies.
 
 ## Deliverables
 
-1. **SessionStore interface** (`internal/session/iface.go`) -- extracted
+1. **Store interface** (`internal/session/iface.go`) -- extracted
    from the existing `Store` type.
 2. **MemoryStore rename** -- `Store` becomes `MemoryStore`, constructor
    becomes `NewMemoryStore()`.
@@ -42,7 +42,7 @@ Depends on phase 3-1 (migration tooling). No new dependencies.
 
 ## Step-by-step
 
-### Step 1: SessionStore interface
+### Step 1: Store interface
 
 New file `internal/session/iface.go`:
 
@@ -51,10 +51,10 @@ package session
 
 import "time"
 
-// SessionStore defines the contract for session state storage.
+// Store defines the contract for session state storage.
 // MemoryStore is the in-process implementation; Redis implements
 // the same interface for shared state during rolling updates.
-type SessionStore interface {
+type Store interface {
     Get(sessionID string) (Entry, bool)
     Set(sessionID string, entry Entry)
     Touch(sessionID string) bool
@@ -102,7 +102,7 @@ No logic changes. Add the compile-time interface check at the bottom
 of the file:
 
 ```go
-var _ SessionStore = (*MemoryStore)(nil)
+var _ Store = (*MemoryStore)(nil)
 ```
 
 ### Step 3: WorkerRegistry interface
@@ -246,7 +246,7 @@ Change the three field types from concrete to interface in
 type Server struct {
     // ...
     Workers  WorkerMap                  // was *WorkerMap
-    Sessions session.SessionStore       // was *session.Store
+    Sessions session.Store               // was *session.Store
     Registry registry.WorkerRegistry    // was *registry.Registry
     // ...
 }
@@ -302,13 +302,42 @@ the compiler verifies completeness. The changes are:
 
 | Location | Before | After |
 |----------|--------|-------|
-| `srv.Sessions` field | `*session.Store` | `session.SessionStore` |
+| `srv.Sessions` field | `*session.Store` | `session.Store` |
 | `srv.Registry` field | `*registry.Registry` | `registry.WorkerRegistry` |
 | `srv.Workers` field | `*WorkerMap` | `WorkerMap` |
 
 No logic changes. No behavioral changes. The method sets are identical.
 
-### Step 9: Worker token -- OpenBao storage
+### Step 9a: `KVRead` sentinel error
+
+`KVRead` currently wraps both "not found" and transient failures into
+a generic `error`. Callers that do read-or-generate (like
+`ResolveSessionSecret` and `ResolveWorkerKey` below) need to
+distinguish the two: a missing key means generate, a vault error
+means abort.
+
+In `internal/integration/openbao.go`, add a sentinel and use it in
+`KVRead`:
+
+```go
+// ErrNotFound is returned by KVRead when the secret path does not
+// exist in vault. Callers can use errors.Is to distinguish this
+// from transient failures.
+var ErrNotFound = errors.New("secret not found")
+```
+
+```go
+if resp.StatusCode == http.StatusNotFound {
+    return nil, fmt.Errorf("openbao kv read %s: %w", path, ErrNotFound)
+}
+```
+
+Then update `ResolveSessionSecret` to use the same pattern shown
+below for `ResolveWorkerKey` -- treat `ErrNotFound` as "generate",
+treat any other error as fatal. This is a small, backward-compatible
+change to an existing function.
+
+### Step 9b: Worker token -- OpenBao storage
 
 New file `internal/integration/worker_key.go`:
 
@@ -319,6 +348,7 @@ import (
     "context"
     "crypto/rand"
     "encoding/base64"
+    "errors"
     "fmt"
     "log/slog"
 )
@@ -327,9 +357,13 @@ const workerKeyKVPath = "blockyard/worker-signing-key"
 
 // ResolveWorkerKey reads or generates the worker signing key from vault.
 // Follows the same pattern as ResolveSessionSecret: read if exists,
-// generate + store if not.
+// generate + store if not. Transient vault errors are fatal --
+// only ErrNotFound triggers generation.
 func ResolveWorkerKey(ctx context.Context, client *Client) ([]byte, error) {
     data, err := client.KVRead(ctx, workerKeyKVPath, client.AdminToken())
+    if err != nil && !errors.Is(err, ErrNotFound) {
+        return nil, fmt.Errorf("read worker key from vault: %w", err)
+    }
     if err == nil {
         if v, ok := data["worker_signing_key"]; ok {
             if s, ok := v.(string); ok && s != "" {
@@ -346,7 +380,7 @@ func ResolveWorkerKey(ctx context.Context, client *Client) ([]byte, error) {
         }
     }
 
-    // Generate new key.
+    // ErrNotFound: generate new key.
     key := make([]byte, 32)
     if _, err := rand.Read(key); err != nil {
         return nil, fmt.Errorf("generate worker signing key: %w", err)
@@ -365,9 +399,7 @@ func ResolveWorkerKey(ctx context.Context, client *Client) ([]byte, error) {
 }
 ```
 
-This is structurally identical to `ResolveSessionSecret` -- same
-read-or-generate pattern, same KV v2 API calls, same admin token
-usage. The key is stored at `secret/data/blockyard/worker-signing-key`
+The key is stored at `secret/data/blockyard/worker-signing-key`
 under the field `worker_signing_key`, base64url-encoded (32 raw bytes
 = 43 encoded characters).
 
@@ -529,11 +561,11 @@ only call site. Confirm with a grep before deleting.
 In `internal/session/store_test.go`:
 
 ```go
-func TestMemoryStoreImplementsSessionStore(t *testing.T) {
+func TestMemoryStoreImplementsStore(t *testing.T) {
     // Compile-time check is in store.go:
-    //   var _ SessionStore = (*MemoryStore)(nil)
+    //   var _ Store = (*MemoryStore)(nil)
     // This test exists as documentation.
-    var store SessionStore = NewMemoryStore()
+    var store Store = NewMemoryStore()
     _ = store
 }
 ```
@@ -743,13 +775,15 @@ No behavioral changes. Grep for these constructors and update.
 
 | File | Action | Summary |
 |------|--------|---------|
-| `internal/session/iface.go` | **create** | `SessionStore` interface (10 methods) |
+| `internal/session/iface.go` | **create** | `Store` interface (10 methods) |
 | `internal/session/store.go` | **rename** | `Store` → `MemoryStore`, `NewStore()` → `NewMemoryStore()` |
 | `internal/registry/iface.go` | **create** | `WorkerRegistry` interface (3 methods) |
 | `internal/registry/registry.go` | **rename** | `Registry` → `MemoryRegistry`, `New()` → `NewMemoryRegistry()` |
 | `internal/server/workermap_iface.go` | **create** | `WorkerMap` interface (16 methods) |
 | `internal/server/workermap_memory.go` | **create** | `MemoryWorkerMap` implementation (extracted from `state.go`) |
 | `internal/server/state.go` | **update** | Remove `WorkerMap` impl, update `Server` field types, update `NewServer()` |
+| `internal/integration/openbao.go` | **update** | Add `ErrNotFound` sentinel, wrap 404 in `KVRead` |
+| `internal/integration/session_secret.go` | **update** | Use `ErrNotFound` to distinguish missing from transient errors |
 | `internal/integration/worker_key.go` | **create** | `ResolveWorkerKey()` -- vault persistence |
 | `internal/server/workerkey.go` | **create** | `LoadOrCreateWorkerKey()` -- orchestrator + file fallback |
 | `cmd/blockyard/main.go` | **update** | Replace ephemeral key gen with `LoadOrCreateWorkerKey()`, reorder after OpenBao init |
@@ -797,6 +831,6 @@ No behavioral changes. Grep for these constructors and update.
 
 7. **Interface fields, not pointer-to-interface, in `Server`.**
    The fields change from `*session.Store` (pointer to concrete) to
-   `session.SessionStore` (interface). Interfaces in Go are already
+   `session.Store` (interface). Interfaces in Go are already
    reference types -- no `*` needed. This is the standard Go pattern
    for interface-typed struct fields.
