@@ -137,7 +137,7 @@ type SessionStore interface {
     Get(sessionID string) (session.Entry, bool)
     Set(sessionID string, entry session.Entry)
     Delete(sessionID string)
-    DeleteByWorker(workerID string)
+    DeleteByWorker(workerID string) int
     CountForWorkers(workerIDs []string) int
 }
 
@@ -150,11 +150,11 @@ type WorkerRegistry interface {
 
 // Used by autoscaler, health poller, proxy, ops
 type WorkerMap interface {
-    Get(workerID string) (server.ActiveWorker, bool)
-    Set(workerID string, w server.ActiveWorker)
-    Delete(workerID string)
+    Get(id string) (server.ActiveWorker, bool)
+    Set(id string, w server.ActiveWorker)
+    Delete(id string)
     All() []string
-    MarkDraining(appID string)
+    MarkDraining(appID string) []string
     // ...
 }
 ```
