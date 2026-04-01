@@ -447,8 +447,8 @@ func TestProxyWebSocketLargeMessage(t *testing.T) {
 }
 
 // TestProxyWebSocketCacheReconnect verifies that when a client
-// disconnects and reconnects within the TTL, the backend WebSocket
-// connection is reused (Bug 3 fix — context lifecycle).
+// disconnects abnormally (network error) and reconnects within the TTL,
+// the backend WebSocket connection is reused.
 func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	srv, ts := testProxyServer(t)
 
@@ -511,8 +511,9 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 		t.Fatalf("expected 1 backend accept, got %d", backendAccepts)
 	}
 
-	// Close client connection — backend should be cached
-	conn1.Close(websocket.StatusNormalClosure, "bye")
+	// Close client connection abruptly (simulates network error) —
+	// backend should be cached for reconnect.
+	conn1.CloseNow()
 	// Give the proxy a moment to detect the close and cache the backend
 	time.Sleep(100 * time.Millisecond)
 
@@ -543,6 +544,200 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	// the cached one should have been reused.
 	if backendAccepts != 1 {
 		t.Errorf("expected 1 backend accept (cached reuse), got %d", backendAccepts)
+	}
+}
+
+// TestProxyWebSocketCleanCloseSkipsCache verifies that a clean WebSocket
+// close (1000 Normal, 1001 Going Away) does NOT cache the backend reader.
+// A clean close corresponds to page reload or navigation, where the Shiny
+// client state is destroyed and a stale backend would deliver messages
+// that the freshly-initialized client cannot handle.
+func TestProxyWebSocketCleanCloseSkipsCache(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	var backendAccepts int32
+	srv.Backend.(*mock.MockBackend).SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		backendAccepts++
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		c.SetReadLimit(-1)
+		for {
+			typ, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			c.Write(context.Background(), typ, data)
+		}
+	})
+
+	createAndStartApp(t, ts, "clean-close-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/clean-close-app/"
+
+	conn1, resp1, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sessCookie *http.Cookie
+	for _, c := range resp1.Cookies() {
+		if c.Name == "blockyard_route" {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("no session cookie on WebSocket response")
+		return
+	}
+
+	// Confirm first connection works
+	if err := conn1.Write(ctx, websocket.MessageText, []byte("msg1")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn1.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "msg1" {
+		t.Fatalf("expected 'msg1', got %q", data)
+	}
+
+	// Close cleanly (simulates page reload / browser Going Away)
+	conn1.Close(websocket.StatusGoingAway, "page reload")
+	time.Sleep(100 * time.Millisecond)
+
+	// Reconnect with same session cookie — backend should NOT be cached,
+	// so the proxy must dial a fresh backend connection.
+	hdr := http.Header{}
+	hdr.Set("Cookie", sessCookie.String())
+	conn2, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: hdr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.CloseNow()
+
+	if err := conn2.Write(ctx, websocket.MessageText, []byte("msg2")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err = conn2.Read(ctx)
+	if err != nil {
+		t.Fatalf("read after reconnect failed: %v", err)
+	}
+	if string(data) != "msg2" {
+		t.Fatalf("expected 'msg2', got %q", data)
+	}
+
+	// Backend should have accepted TWO connections — no cache reuse.
+	if backendAccepts != 2 {
+		t.Errorf("expected 2 backend accepts (no cache), got %d", backendAccepts)
+	}
+}
+
+// TestProxyWebSocketQueryStringForwarded verifies that query parameters
+// on the WebSocket upgrade URL are forwarded to the backend.
+func TestProxyWebSocketQueryStringForwarded(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	var backendRequestURL string
+	srv.Backend.(*mock.MockBackend).SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		backendRequestURL = r.URL.String()
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		c.SetReadLimit(-1)
+		for {
+			typ, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			c.Write(context.Background(), typ, data)
+		}
+	})
+
+	createAndStartApp(t, ts, "qs-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/qs-app/websocket/?w=abc&s=def"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	// Exchange a message so the connection is fully established.
+	if err := conn.Write(ctx, websocket.MessageText, []byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	conn.Read(ctx)
+
+	// The backend should see the stripped path with query string preserved.
+	if backendRequestURL == "" {
+		t.Fatal("backend never received the upgrade request")
+	}
+	// Path should be stripped of /app/qs-app prefix, query preserved.
+	if !strings.Contains(backendRequestURL, "w=abc") ||
+		!strings.Contains(backendRequestURL, "s=def") {
+		t.Errorf("expected query params w=abc&s=def in backend URL, got %q", backendRequestURL)
+	}
+	if !strings.HasPrefix(backendRequestURL, "/websocket/") {
+		t.Errorf("expected path /websocket/..., got %q", backendRequestURL)
+	}
+}
+
+// TestProxyWebSocketBinaryMessage verifies that binary WebSocket frames
+// are forwarded with their message type preserved. Shiny uses a custom
+// binary protocol (0x01020202 magic header) for file uploads.
+func TestProxyWebSocketBinaryMessage(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
+	createAndStartApp(t, ts, "bin-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/bin-app/"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	// Simulate a Shiny binary upload frame: 0x01020202 magic + payload.
+	payload := []byte{0x01, 0x02, 0x02, 0x02}
+	// Append a 4-byte length (little-endian) and a small JSON blob.
+	jsonBlob := []byte(`{"method":"upload","args":["file1"]}`)
+	length := uint32(len(jsonBlob))
+	payload = append(payload,
+		byte(length), byte(length>>8), byte(length>>16), byte(length>>24))
+	payload = append(payload, jsonBlob...)
+
+	if err := conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
+		t.Fatal(err)
+	}
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != websocket.MessageBinary {
+		t.Errorf("expected MessageBinary, got %v", typ)
+	}
+	if len(data) != len(payload) {
+		t.Errorf("expected %d bytes, got %d", len(payload), len(data))
+	}
+	// Verify magic header preserved byte-for-byte.
+	if data[0] != 0x01 || data[1] != 0x02 || data[2] != 0x02 || data[3] != 0x02 {
+		t.Errorf("binary magic header corrupted: %x", data[:4])
 	}
 }
 
