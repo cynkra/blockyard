@@ -246,6 +246,7 @@ func TestFullAuthFlow(t *testing.T) {
 	sessionCookie := findCookie(w.Result(), "blockyard_session")
 	if sessionCookie == nil {
 		t.Fatal("missing session cookie after callback")
+		return
 	}
 
 	// Verify state cookie was cleared (Max-Age=0 means delete).
@@ -258,6 +259,7 @@ func TestFullAuthFlow(t *testing.T) {
 	sess := deps.UserSessions.Get("test-sub")
 	if sess == nil {
 		t.Fatal("expected server-side session to exist")
+		return
 	}
 	if sess.AccessToken != "mock-access-token" {
 		t.Errorf("AccessToken = %q", sess.AccessToken)
@@ -688,6 +690,7 @@ func TestMiddlewareTokenRefresh(t *testing.T) {
 	sess := deps.UserSessions.Get("refresh-user")
 	if sess == nil {
 		t.Fatal("expected session to still exist")
+		return
 	}
 	if sess.AccessToken == "old-access-token" {
 		t.Error("expected access token to be refreshed")
@@ -1045,6 +1048,7 @@ func TestFullLoginCallbackMiddlewareFlow(t *testing.T) {
 	sessionCookie := findCookie(w.Result(), "blockyard_session")
 	if sessionCookie == nil {
 		t.Fatal("callback did not produce blockyard_session cookie")
+		return
 	}
 	if sessionCookie.MaxAge <= 0 {
 		t.Fatalf("session cookie Max-Age = %d; want > 0 (Max-Age=0 tells the browser to delete it immediately)", sessionCookie.MaxAge)
