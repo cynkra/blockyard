@@ -104,6 +104,7 @@ func TestUserSessionStoreSetGet(t *testing.T) {
 	sess := store.Get("alice")
 	if sess == nil {
 		t.Fatal("expected session for alice")
+		return
 	}
 	if sess.AccessToken != "at-1" {
 		t.Errorf("AccessToken = %q", sess.AccessToken)

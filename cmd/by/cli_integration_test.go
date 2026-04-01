@@ -235,6 +235,7 @@ func TestCLI_AuthHeader(t *testing.T) {
 	req := m.reqTo("GET", "/api/v1/apps")
 	if req == nil {
 		t.Fatal("no request recorded")
+		return
 	}
 	if req.Auth != "Bearer test-tok-123" {
 		t.Errorf("auth = %q, want %q", req.Auth, "Bearer test-tok-123")
@@ -492,6 +493,7 @@ func TestCLI_Rollback(t *testing.T) {
 	req := m.reqTo("POST", "/api/v1/apps/myapp/rollback")
 	if req == nil {
 		t.Fatal("no rollback request")
+		return
 	}
 	body := bodyJSON(t, req)
 	if body["bundle_id"] != "bun-old" {
@@ -733,6 +735,7 @@ func TestCLI_Deploy(t *testing.T) {
 		req := m.reqTo("POST", "/api/v1/apps/app-123/bundles")
 		if req == nil {
 			t.Fatal("no upload request")
+			return
 		}
 		if req.ContentType != "application/gzip" {
 			t.Errorf("content-type = %q, want application/gzip", req.ContentType)
@@ -815,6 +818,7 @@ func TestCLI_Deploy(t *testing.T) {
 		req := m.reqTo("POST", "/api/v1/apps")
 		if req == nil {
 			t.Fatal("no create-app request")
+			return
 		}
 		body := bodyJSON(t, req)
 		if body["name"] != "newapp" {

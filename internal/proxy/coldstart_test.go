@@ -594,6 +594,7 @@ func TestWorkerEnvNilOpenbao(t *testing.T) {
 	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
+		return
 	}
 	if _, ok := env["BLOCKYARD_API_URL"]; !ok {
 		t.Error("expected BLOCKYARD_API_URL to be set")
@@ -615,6 +616,7 @@ func TestWorkerEnvWithExternalURL(t *testing.T) {
 	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
+		return
 	}
 	if got := env["VAULT_ADDR"]; got != "http://vault:8200" {
 		t.Errorf("VAULT_ADDR = %q, want %q", got, "http://vault:8200")
@@ -640,6 +642,7 @@ func TestWorkerEnvWithServices(t *testing.T) {
 	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
+		return
 	}
 
 	raw, ok := env["BLOCKYARD_VAULT_SERVICES"]
@@ -677,6 +680,7 @@ func TestWorkerEnvWithServiceNetwork(t *testing.T) {
 	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
+		return
 	}
 	if got, want := env["BLOCKYARD_API_URL"], "http://blockyard:8080"; got != want {
 		t.Errorf("BLOCKYARD_API_URL = %q, want %q", got, want)
@@ -718,6 +722,7 @@ func TestWorkerEnvWithBoardStorage(t *testing.T) {
 	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
+		return
 	}
 	if got, want := env["POSTGREST_URL"], "http://postgrest:3000"; got != want {
 		t.Errorf("POSTGREST_URL = %q, want %q", got, want)
@@ -736,6 +741,7 @@ func TestWorkerEnvWithoutBoardStorage(t *testing.T) {
 	env := server.WorkerEnv(srv)
 	if env == nil {
 		t.Fatal("expected non-nil env map")
+		return
 	}
 	if _, ok := env["POSTGREST_URL"]; ok {
 		t.Error("expected POSTGREST_URL to be absent when board_storage is not configured")

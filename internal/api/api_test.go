@@ -2232,6 +2232,7 @@ func TestSoftDeleteApp(t *testing.T) {
 	app, _ := srv.DB.GetAppIncludeDeleted(id)
 	if app == nil {
 		t.Fatal("expected app to still be in DB")
+		return
 	}
 	if app.DeletedAt == nil {
 		t.Error("expected deleted_at to be set")
@@ -3584,6 +3585,7 @@ func TestGetAppRuntimeWithLiveWorkerAndDeadWorker(t *testing.T) {
 
 	if live == nil {
 		t.Fatal("expected an active worker")
+		return
 	}
 	if live.ID != "w-live" {
 		t.Errorf("expected live worker id=w-live, got %s", live.ID)
@@ -3602,6 +3604,7 @@ func TestGetAppRuntimeWithLiveWorkerAndDeadWorker(t *testing.T) {
 
 	if dead == nil {
 		t.Fatal("expected an ended worker")
+		return
 	}
 	if dead.ID != "w-dead" {
 		t.Errorf("expected dead worker id=w-dead, got %s", dead.ID)
