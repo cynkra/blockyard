@@ -48,6 +48,7 @@ shutdown_timeout = "30s"
 | `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 | `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Each entry must be a valid CIDR. Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
+| `bootstrap_token` | `string` | — | No | One-time token that can be exchanged for a real PAT via `POST /api/v1/bootstrap`. Requires `oidc.initial_admin` to be set. Intended for dev/CI bootstrapping — do not use in production. See [Bootstrap tokens](/reference/api/#post-apiv1bootstrap). |
 
 <Aside type="note">
   API authentication uses [Personal Access Tokens](/guides/authorization/#personal-access-tokens)

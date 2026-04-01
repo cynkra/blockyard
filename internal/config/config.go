@@ -49,6 +49,7 @@ type ServerConfig struct {
 	LogLevel             string   `toml:"log_level"`              // debug, info, warn, error (default: info)
 	TrustedProxies       []string `toml:"trusted_proxies"`        // CIDRs whose X-Forwarded-For to trust (e.g. ["10.0.0.0/8"])
 	SkipDockerPreflight  bool     `toml:"skip_docker_preflight"`  // skip Docker-dependent preflight checks at startup
+	BootstrapToken       string   `toml:"bootstrap_token"`        // dev only: one-time token exchanged for a real PAT via POST /api/v1/bootstrap
 }
 
 type DockerConfig struct {

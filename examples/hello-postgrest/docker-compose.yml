@@ -128,6 +128,7 @@ services:
       BLOCKYARD_OIDC_CLIENT_ID: blockyard
       BLOCKYARD_OIDC_CLIENT_SECRET: blockyard-dex-secret
       BLOCKYARD_OIDC_INITIAL_ADMIN: Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA
+      BLOCKYARD_SERVER_BOOTSTRAP_TOKEN: by_bootstrap_for_examples
       # OpenBao (AppRole auth — session_secret is auto-generated via vault)
       BLOCKYARD_OPENBAO_ADDRESS: http://openbao:8200
       BLOCKYARD_OPENBAO_ROLE_ID: blockyard-server

@@ -1094,6 +1094,14 @@ func (db *DB) CreatePAT(id string, tokenHash []byte, userSub, name string, expir
 	}, nil
 }
 
+// PATHashExists returns true if a PAT with the given hash exists (any state).
+func (db *DB) PATHashExists(tokenHash []byte) bool {
+	var count int
+	err := db.QueryRow(db.rebind(
+		`SELECT COUNT(*) FROM personal_access_tokens WHERE token_hash = ?`), tokenHash).Scan(&count)
+	return err == nil && count > 0
+}
+
 // LookupPATByHash looks up a PAT by its SHA-256 hash, joined with the
 // owning user. Returns nil if not found.
 func (db *DB) LookupPATByHash(tokenHash []byte) (*PATLookupResult, error) {

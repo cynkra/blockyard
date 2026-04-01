@@ -69,6 +69,12 @@ type Server struct {
 	// Prevents a second install from starting a parallel transfer.
 	transferring sync.Map // workerID → bool
 
+	// Bootstrap token state — one-time token that can be exchanged for
+	// a real PAT via POST /api/v1/bootstrap. Hash is set at startup;
+	// Redeemed is flipped to true on first successful exchange.
+	BootstrapTokenHash []byte
+	BootstrapRedeemed  atomic.Bool
+
 	// Version is the server version string, set at build time.
 	Version string
 
