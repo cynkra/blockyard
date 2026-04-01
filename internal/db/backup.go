@@ -65,7 +65,7 @@ func (db *DB) backupPostgres(ctx context.Context) (string, error) {
 
 	// Use the stored connection URL so pg_dump inherits the full DSN
 	// including credentials. The connURL field is set in openPostgres().
-	cmd := exec.CommandContext(ctx, "pg_dump",
+	cmd := exec.CommandContext(ctx, "pg_dump", //nolint:gosec // connURL is from our own config, not user input
 		"--format=custom", "--dbname="+db.connURL, "-f", dest)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
