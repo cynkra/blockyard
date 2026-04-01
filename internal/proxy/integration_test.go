@@ -640,6 +640,107 @@ func TestProxyWebSocketCleanCloseSkipsCache(t *testing.T) {
 	}
 }
 
+// TestProxyWebSocketQueryStringForwarded verifies that query parameters
+// on the WebSocket upgrade URL are forwarded to the backend.
+func TestProxyWebSocketQueryStringForwarded(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	var backendRequestURL string
+	srv.Backend.(*mock.MockBackend).SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		backendRequestURL = r.URL.String()
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		c.SetReadLimit(-1)
+		for {
+			typ, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			c.Write(context.Background(), typ, data)
+		}
+	})
+
+	createAndStartApp(t, ts, "qs-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/qs-app/websocket/?w=abc&s=def"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	// Exchange a message so the connection is fully established.
+	if err := conn.Write(ctx, websocket.MessageText, []byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	conn.Read(ctx)
+
+	// The backend should see the stripped path with query string preserved.
+	if backendRequestURL == "" {
+		t.Fatal("backend never received the upgrade request")
+	}
+	// Path should be stripped of /app/qs-app prefix, query preserved.
+	if !strings.Contains(backendRequestURL, "w=abc") ||
+		!strings.Contains(backendRequestURL, "s=def") {
+		t.Errorf("expected query params w=abc&s=def in backend URL, got %q", backendRequestURL)
+	}
+	if !strings.HasPrefix(backendRequestURL, "/websocket/") {
+		t.Errorf("expected path /websocket/..., got %q", backendRequestURL)
+	}
+}
+
+// TestProxyWebSocketBinaryMessage verifies that binary WebSocket frames
+// are forwarded with their message type preserved. Shiny uses a custom
+// binary protocol (0x01020202 magic header) for file uploads.
+func TestProxyWebSocketBinaryMessage(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
+	createAndStartApp(t, ts, "bin-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/bin-app/"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	// Simulate a Shiny binary upload frame: 0x01020202 magic + payload.
+	payload := []byte{0x01, 0x02, 0x02, 0x02}
+	// Append a 4-byte length (little-endian) and a small JSON blob.
+	jsonBlob := []byte(`{"method":"upload","args":["file1"]}`)
+	length := uint32(len(jsonBlob))
+	payload = append(payload,
+		byte(length), byte(length>>8), byte(length>>16), byte(length>>24))
+	payload = append(payload, jsonBlob...)
+
+	if err := conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
+		t.Fatal(err)
+	}
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != websocket.MessageBinary {
+		t.Errorf("expected MessageBinary, got %v", typ)
+	}
+	if len(data) != len(payload) {
+		t.Errorf("expected %d bytes, got %d", len(payload), len(data))
+	}
+	// Verify magic header preserved byte-for-byte.
+	if data[0] != 0x01 || data[1] != 0x02 || data[2] != 0x02 || data[3] != 0x02 {
+		t.Errorf("binary magic header corrupted: %x", data[:4])
+	}
+}
+
 // TestProxyWebSocketCrossOriginRejected verifies that cross-origin
 // WebSocket upgrades are rejected when external_url is not configured.
 // This prevents cross-site WebSocket hijacking in misconfigured deployments.
