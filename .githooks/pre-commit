@@ -1,0 +1,11 @@
+#!/bin/sh
+# Ensure style.css is rebuilt when input.css changes.
+
+if git diff --cached --name-only | grep -q 'internal/ui/input.css'; then
+  if ! git diff --cached --name-only | grep -q 'internal/ui/static/style.css'; then
+    echo "ERROR: internal/ui/input.css is staged but static/style.css is not."
+    echo "Run:  cd internal/ui && npm run css:build"
+    echo "Then stage the updated style.css."
+    exit 1
+  fi
+fi

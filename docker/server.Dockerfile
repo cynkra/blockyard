@@ -5,6 +5,14 @@ RUN npm ci
 COPY docs/ .
 RUN DOCS_BASE=/docs npm run build
 
+FROM node:22-alpine AS css-builder
+WORKDIR /src/internal/ui
+COPY internal/ui/package.json internal/ui/package-lock.json ./
+RUN npm ci
+COPY internal/ui/input.css ./
+COPY internal/ui/templates/ templates/
+RUN npm run css:build
+
 FROM golang:1.25.8-alpine AS builder
 
 ENV GOTOOLCHAIN=local
@@ -15,6 +23,7 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY --from=docs /docs/dist internal/docs/dist
+COPY --from=css-builder /src/internal/ui/static/style.css internal/ui/static/style.css
 
 ARG COVER=""
 ARG VERSION=dev
