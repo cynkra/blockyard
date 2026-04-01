@@ -1130,7 +1130,7 @@ func (db *DB) ListPATsByUser(userSub string) ([]PATRow, error) {
 	err := db.DB.Select(&pats, db.rebind(
 		`SELECT id, user_sub, name, created_at, expires_at, last_used_at, revoked
 		 FROM personal_access_tokens
-		 WHERE user_sub = ?
+		 WHERE user_sub = ? AND revoked = 0
 		 ORDER BY created_at DESC`),
 		userSub,
 	)
