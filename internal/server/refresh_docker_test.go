@@ -29,15 +29,13 @@ import (
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
-const (
-	testImage      = "ghcr.io/rocker-org/r-ver:4.4.3"
-	testPakVersion = "stable"
-)
+const testPakVersion = "stable"
 
-func dockerTestConfig() *config.DockerConfig {
+func dockerTestConfig(t *testing.T) *config.DockerConfig {
+	t.Helper()
 	return &config.DockerConfig{
 		Socket:     "/var/run/docker.sock",
-		Image:      testImage,
+		Image:      testutil.TOMLDockerImage(t),
 		ShinyPort:  8080,
 		PakVersion: testPakVersion,
 	}
@@ -48,7 +46,7 @@ func setupDockerServer(t *testing.T) *server.Server {
 	ctx := context.Background()
 	basePath := t.TempDir()
 
-	be, err := dockerbe.New(ctx, dockerTestConfig(), basePath)
+	be, err := dockerbe.New(ctx, dockerTestConfig(t), basePath)
 	if err != nil {
 		t.Fatalf("New docker backend: %v", err)
 	}
@@ -63,7 +61,7 @@ func setupDockerServer(t *testing.T) *server.Server {
 	os.MkdirAll(storeRoot, 0o755)
 
 	cfg := &config.Config{
-		Docker: *dockerTestConfig(),
+		Docker: *dockerTestConfig(t),
 		Storage: config.StorageConfig{
 			BundleServerPath: basePath,
 			BundleWorkerPath: "/app",
@@ -144,7 +142,7 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 		AppID:        app.ID,
 		BundleID:     bundleID,
 		Paths:        paths,
-		Image:        testImage,
+		Image:        testutil.TOMLDockerImage(t),
 		PakVersion:   testPakVersion,
 		PakCachePath: pakCachePath,
 		Retention:    5,
@@ -191,7 +189,7 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	spec := backend.WorkerSpec{
 		AppID:       app.ID,
 		WorkerID:    workerID,
-		Image:       testImage,
+		Image:       testutil.TOMLDockerImage(t),
 		Cmd:         []string{"R", "--no-save", "-e", "cat('worker ok'); Sys.sleep(300)"},
 		BundlePath:  hostPaths.Unpacked,
 		LibraryPath: hostPaths.Library,

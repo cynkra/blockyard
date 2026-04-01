@@ -20,9 +20,8 @@ import (
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
-const (
-	openbaoImage = "ghcr.io/openbao/openbao:2.5.2"
-)
+var openbaoImage = testutil.ComposeServiceImage(
+	"examples/hello-pocketbase/docker-compose.yml", "openbao")
 
 var (
 	openbaoURL   string
