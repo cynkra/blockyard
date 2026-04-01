@@ -68,7 +68,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 
 | Field | Default | Description |
 |---|---|---|
-| `ws_cache_ttl` | `60s` | How long to keep a backend WebSocket open after client disconnect |
+| `ws_cache_ttl` | `60s` | How long to keep a backend WebSocket open after client disconnect. Enables transparent reconnection on network blips — see [Reconnection on network interruptions](/guides/deploying/#reconnection-on-network-interruptions). |
 | `health_interval` | `15s` | Interval between worker health checks |
 | `worker_start_timeout` | `60s` | Max time to wait for a worker to become healthy |
 | `max_workers` | `100` | Maximum number of concurrent worker containers |

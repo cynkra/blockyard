@@ -122,6 +122,31 @@ Blockyard spawns a worker container on the first request (cold start) and
 proxies HTTP and WebSocket traffic to it. A session cookie pins the user to
 the same worker for subsequent requests.
 
+### Reconnection on network interruptions
+
+If the browser's WebSocket connection drops briefly (network blip, laptop
+sleep), the proxy keeps the backend connection alive for up to `ws_cache_ttl`
+(default 60 s). When the client reconnects, it resumes the same Shiny
+session transparently — no page reload, no lost state. This works for all
+apps with no code changes.
+
+For disconnects **longer** than the cache TTL, the session is lost and the
+user sees Shiny's "Disconnected" overlay. Apps whose outputs are purely
+determined by their inputs can opt into Shiny's
+[new-session reconnection](https://shiny.posit.co/r/articles/improve/reconnecting/)
+to recover automatically:
+
+```r
+server <- function(input, output, session) {
+  session$allowReconnect(TRUE)
+  # ...
+}
+```
+
+This is **not safe** for apps that store state in `reactiveValues`, count
+`actionButton` presses, accept file uploads, or generate random values —
+that state is lost when a new session starts.
+
 ## Container security
 
 Worker containers run with hardened defaults:
