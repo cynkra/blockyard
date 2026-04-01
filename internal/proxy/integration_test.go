@@ -447,8 +447,8 @@ func TestProxyWebSocketLargeMessage(t *testing.T) {
 }
 
 // TestProxyWebSocketCacheReconnect verifies that when a client
-// disconnects and reconnects within the TTL, the backend WebSocket
-// connection is reused (Bug 3 fix — context lifecycle).
+// disconnects abnormally (network error) and reconnects within the TTL,
+// the backend WebSocket connection is reused.
 func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	srv, ts := testProxyServer(t)
 
@@ -511,8 +511,9 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 		t.Fatalf("expected 1 backend accept, got %d", backendAccepts)
 	}
 
-	// Close client connection — backend should be cached
-	conn1.Close(websocket.StatusNormalClosure, "bye")
+	// Close client connection abruptly (simulates network error) —
+	// backend should be cached for reconnect.
+	conn1.CloseNow()
 	// Give the proxy a moment to detect the close and cache the backend
 	time.Sleep(100 * time.Millisecond)
 
@@ -543,6 +544,99 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	// the cached one should have been reused.
 	if backendAccepts != 1 {
 		t.Errorf("expected 1 backend accept (cached reuse), got %d", backendAccepts)
+	}
+}
+
+// TestProxyWebSocketCleanCloseSkipsCache verifies that a clean WebSocket
+// close (1000 Normal, 1001 Going Away) does NOT cache the backend reader.
+// A clean close corresponds to page reload or navigation, where the Shiny
+// client state is destroyed and a stale backend would deliver messages
+// that the freshly-initialized client cannot handle.
+func TestProxyWebSocketCleanCloseSkipsCache(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	var backendAccepts int32
+	srv.Backend.(*mock.MockBackend).SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		backendAccepts++
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		c.SetReadLimit(-1)
+		for {
+			typ, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			c.Write(context.Background(), typ, data)
+		}
+	})
+
+	createAndStartApp(t, ts, "clean-close-app")
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
+		"/app/clean-close-app/"
+
+	conn1, resp1, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sessCookie *http.Cookie
+	for _, c := range resp1.Cookies() {
+		if c.Name == "blockyard_route" {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("no session cookie on WebSocket response")
+		return
+	}
+
+	// Confirm first connection works
+	if err := conn1.Write(ctx, websocket.MessageText, []byte("msg1")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn1.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "msg1" {
+		t.Fatalf("expected 'msg1', got %q", data)
+	}
+
+	// Close cleanly (simulates page reload / browser Going Away)
+	conn1.Close(websocket.StatusGoingAway, "page reload")
+	time.Sleep(100 * time.Millisecond)
+
+	// Reconnect with same session cookie — backend should NOT be cached,
+	// so the proxy must dial a fresh backend connection.
+	hdr := http.Header{}
+	hdr.Set("Cookie", sessCookie.String())
+	conn2, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: hdr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.CloseNow()
+
+	if err := conn2.Write(ctx, websocket.MessageText, []byte("msg2")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err = conn2.Read(ctx)
+	if err != nil {
+		t.Fatalf("read after reconnect failed: %v", err)
+	}
+	if string(data) != "msg2" {
+		t.Fatalf("expected 'msg2', got %q", data)
+	}
+
+	// Backend should have accepted TWO connections — no cache reuse.
+	if backendAccepts != 2 {
+		t.Errorf("expected 2 backend accepts (no cache), got %d", backendAccepts)
 	}
 }
 

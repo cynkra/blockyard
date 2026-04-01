@@ -189,12 +189,18 @@ func shuttleWS(
 	// Client reader goroutine.
 	clientMsgs := make(chan wsMsg)
 	clientDone := make(chan struct{})
+	// clientCloseStatus captures the WebSocket close code sent by the
+	// peer. Written before clientDone is closed, read only after
+	// <-clientDone, so no data race.
+	var clientCloseStatus websocket.StatusCode = -1
 	go func() { //nolint:gosec // G118: intentional background relay, outlives request
 		defer close(clientDone)
 		for {
 			typ, data, err := clientConn.Read(context.Background())
 			if err != nil {
-				slog.Debug("ws client read done", "error", err)
+				clientCloseStatus = websocket.CloseStatus(err)
+				slog.Debug("ws client read done", "error", err,
+					"close_status", clientCloseStatus)
 				return
 			}
 			select {
@@ -277,8 +283,16 @@ func shuttleWS(
 			}
 
 		case <-clientDone:
-			// Client reader exited (disconnect or error).
-			cacheBackend = true
+			// Client reader exited. Only cache the backend reader when
+			// the disconnect was abnormal (network error, no close frame).
+			// A clean close — 1000 (Normal) or 1001 (Going Away) — means
+			// the browser deliberately left (page reload, navigation, tab
+			// close). In that case the Shiny client state is gone, so a
+			// cached backend connection would deliver stale messages that
+			// the new page's freshly-initialized Shiny JS cannot handle.
+			cs := clientCloseStatus
+			cacheBackend = cs != websocket.StatusNormalClosure &&
+				cs != websocket.StatusGoingAway
 			goto done
 
 		case <-br.done:
