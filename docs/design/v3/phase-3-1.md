@@ -911,7 +911,8 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
         lines = append(lines, fmt.Sprintf("INDEX %s: %s", name, def))
     }
 
-    // CHECK constraints
+    // CHECK constraints (exclude system-generated NOT NULL constraints whose
+    // names contain OIDs that change across drop/create cycles)
     chkRows, err := db.Query(`
         SELECT tc.table_name, cc.constraint_name, cc.check_clause
         FROM information_schema.check_constraints cc
@@ -920,6 +921,7 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
            AND cc.constraint_schema = tc.constraint_schema
         WHERE tc.table_schema = 'public'
           AND tc.table_name != 'schema_migrations'
+          AND cc.constraint_name NOT LIKE '%_not_null'
         ORDER BY tc.table_name, cc.constraint_name`)
     if err != nil {
         t.Fatal(err)
@@ -1445,7 +1447,7 @@ func openRawPostgres(t *testing.T) *DB {
         cleanup.Close()
     })
 
-    return &DB{DB: rawDB, dialect: DialectPostgres}
+    return &DB{DB: rawDB, dialect: DialectPostgres, connURL: testURL}
 }
 ```
 
@@ -1458,6 +1460,7 @@ New file: `internal/db/backup.go`. Used by `by admin update` (phase
 package db
 
 import (
+    "bytes"
     "context"
     "fmt"
     "os"
@@ -1489,9 +1492,10 @@ func (db *DB) backupSQLite(ctx context.Context) (string, error) {
         return "", fmt.Errorf("backup: cannot back up in-memory database")
     }
 
-    var path string
+    var seq int
+    var name, path string
     if err := db.QueryRowContext(ctx,
-        "PRAGMA database_list").Scan(nil, nil, &path); err != nil {
+        "PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
         return "", fmt.Errorf("backup: resolve database path: %w", err)
     }
 
@@ -1520,12 +1524,13 @@ func (db *DB) backupPostgres(ctx context.Context) (string, error) {
 
     // Use the stored connection URL so pg_dump inherits the full DSN
     // including credentials. The connURL field is set in openPostgres().
-    cmd := exec.CommandContext(ctx, "pg_dump",
+    cmd := exec.CommandContext(ctx, "pg_dump", //nolint:gosec // connURL is from our own config, not user input
         "--format=custom", "--dbname="+db.connURL, "-f", dest)
-    cmd.Stderr = os.Stderr
+    var stderr bytes.Buffer
+    cmd.Stderr = &stderr
     if err := cmd.Run(); err != nil {
         os.Remove(dest)
-        return "", fmt.Errorf("backup: pg_dump: %w", err)
+        return "", fmt.Errorf("backup: pg_dump: %w: %s", err, stderr.String())
     }
 
     return dest, nil
@@ -1618,6 +1623,10 @@ func TestBackupPostgres(t *testing.T) {
 
     dest, err := db.Backup(context.Background())
     if err != nil {
+        // pg_dump fails on version mismatch (e.g., pg_dump 15 vs server 17).
+        if strings.Contains(err.Error(), "version mismatch") {
+            t.Skip("pg_dump version mismatch with server")
+        }
         t.Fatal(err)
     }
     defer os.Remove(dest)

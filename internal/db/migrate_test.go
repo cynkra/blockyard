@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -269,12 +270,19 @@ func TestMigrationConventions(t *testing.T) {
 	}
 }
 
-func checkConventions(t *testing.T, dialect string, fsys fs.FS, released map[int]bool) {
-	t.Helper()
+// findConventionViolations checks migration files for convention violations
+// and returns a list of human-readable descriptions. Separated from
+// checkConventions so negative tests can inspect violations without
+// propagating subtest failures.
+func findConventionViolations(fsys fs.FS, released map[int]bool) []string {
+	var violations []string
+	addf := func(format string, args ...any) {
+		violations = append(violations, fmt.Sprintf(format, args...))
+	}
 
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
-		t.Fatal(err)
+		return []string{fmt.Sprintf("read dir: %v", err)}
 	}
 
 	ups := map[int]string{}
@@ -290,7 +298,7 @@ func checkConventions(t *testing.T, dialect string, fsys fs.FS, released map[int
 		parts := strings.SplitN(name, "_", 2)
 		num, err := strconv.Atoi(parts[0])
 		if err != nil {
-			t.Errorf("%s: migration number is not an integer: %q", name, parts[0])
+			addf("%s: migration number is not an integer: %q", name, parts[0])
 			continue
 		}
 
@@ -300,19 +308,19 @@ func checkConventions(t *testing.T, dialect string, fsys fs.FS, released map[int
 		case strings.HasSuffix(name, ".down.sql"):
 			downs[num] = name
 		default:
-			t.Errorf("%s: unexpected suffix (want .up.sql or .down.sql)", name)
+			addf("%s: unexpected suffix (want .up.sql or .down.sql)", name)
 		}
 	}
 
 	// Every up has a matching down and vice versa
 	for num, name := range ups {
 		if _, ok := downs[num]; !ok {
-			t.Errorf("%s: missing matching .down.sql", name)
+			addf("%s: missing matching .down.sql", name)
 		}
 	}
 	for num, name := range downs {
 		if _, ok := ups[num]; !ok {
-			t.Errorf("%s: missing matching .up.sql", name)
+			addf("%s: missing matching .up.sql", name)
 		}
 	}
 
@@ -325,60 +333,32 @@ func checkConventions(t *testing.T, dialect string, fsys fs.FS, released map[int
 	for i, num := range nums {
 		expected := i + 1
 		if num != expected {
-			t.Errorf("gap in migration numbering: expected %03d, got %03d", expected, num)
+			addf("gap in migration numbering: expected %03d, got %03d", expected, num)
 		}
 	}
 
 	// No empty files
 	for _, name := range ups {
-		checkNonEmpty(t, fsys, name)
+		if data, err := fs.ReadFile(fsys, name); err == nil {
+			if strings.TrimSpace(string(data)) == "" {
+				addf("%s: migration file is empty", name)
+			}
+		}
 	}
 	for _, name := range downs {
-		checkNonEmpty(t, fsys, name)
+		if data, err := fs.ReadFile(fsys, name); err == nil {
+			if strings.TrimSpace(string(data)) == "" {
+				addf("%s: migration file is empty", name)
+			}
+		}
 	}
 
 	// Phase tags (up files only)
-	phases := checkPhaseTags(t, fsys, ups)
-
-	// Contract referential integrity
-	for num, phase := range phases {
-		if phase != "contract" {
-			continue
-		}
-		refs := contractRefs(t, fsys, ups[num])
-		if len(refs) == 0 {
-			t.Errorf("%s: contract migration missing -- contracts: NNN", ups[num])
-			continue
-		}
-		for _, ref := range refs {
-			if ref >= num {
-				t.Errorf("%s: contracts reference %03d must be lower than %03d",
-					ups[num], ref, num)
-			}
-			if _, ok := ups[ref]; !ok {
-				t.Errorf("%s: contracts reference %03d does not exist",
-					ups[num], ref)
-			} else if phases[ref] != "expand" {
-				t.Errorf("%s: contracts reference %03d is %q, not expand",
-					ups[num], ref, phases[ref])
-			}
-			if !released[ref] {
-				t.Errorf("%s: contracts reference %03d has not been released "+
-					"(not in released.txt)", ups[num], ref)
-			}
-		}
-	}
-}
-
-// checkPhaseTags verifies every .up.sql has a valid -- phase: tag on its
-// first line and returns the phase for each migration number.
-func checkPhaseTags(t *testing.T, fsys fs.FS, ups map[int]string) map[int]string {
-	t.Helper()
 	phases := map[int]string{}
 	for num, name := range ups {
 		data, err := fs.ReadFile(fsys, name)
 		if err != nil {
-			t.Fatal(err)
+			continue
 		}
 		first, _, _ := strings.Cut(string(data), "\n")
 		first = strings.TrimSpace(first)
@@ -388,19 +368,57 @@ func checkPhaseTags(t *testing.T, fsys fs.FS, ups map[int]string) map[int]string
 		case "-- phase: contract":
 			phases[num] = "contract"
 		default:
-			t.Errorf("%s: first line must be '-- phase: expand' or '-- phase: contract', got %q",
+			addf("%s: first line must be '-- phase: expand' or '-- phase: contract', got %q",
 				name, first)
 		}
 	}
-	return phases
+
+	// Contract referential integrity
+	for num, phase := range phases {
+		if phase != "contract" {
+			continue
+		}
+		refs := parseContractRefs(fsys, ups[num])
+		if len(refs) == 0 {
+			addf("%s: contract migration missing -- contracts: NNN", ups[num])
+			continue
+		}
+		for _, ref := range refs {
+			if ref >= num {
+				addf("%s: contracts reference %03d must be lower than %03d",
+					ups[num], ref, num)
+			}
+			if _, ok := ups[ref]; !ok {
+				addf("%s: contracts reference %03d does not exist",
+					ups[num], ref)
+			} else if phases[ref] != "expand" {
+				addf("%s: contracts reference %03d is %q, not expand",
+					ups[num], ref, phases[ref])
+			}
+			if !released[ref] {
+				addf("%s: contracts reference %03d has not been released "+
+					"(not in released.txt)", ups[num], ref)
+			}
+		}
+	}
+
+	return violations
 }
 
-// contractRefs parses -- contracts: NNN[, NNN...] from a migration file.
-func contractRefs(t *testing.T, fsys fs.FS, name string) []int {
+// checkConventions runs findConventionViolations and reports each violation
+// via t.Errorf. Used by TestMigrationConventions for the real migration files.
+func checkConventions(t *testing.T, dialect string, fsys fs.FS, released map[int]bool) {
 	t.Helper()
+	for _, v := range findConventionViolations(fsys, released) {
+		t.Errorf("[%s] %s", dialect, v)
+	}
+}
+
+// parseContractRefs parses -- contracts: NNN[, NNN...] from a migration file.
+func parseContractRefs(fsys fs.FS, name string) []int {
 	data, err := fs.ReadFile(fsys, name)
 	if err != nil {
-		t.Fatal(err)
+		return nil
 	}
 	var refs []int
 	for _, line := range strings.Split(string(data), "\n") {
@@ -416,7 +434,6 @@ func contractRefs(t *testing.T, fsys fs.FS, name string) []int {
 			}
 			num, err := strconv.Atoi(s)
 			if err != nil {
-				t.Errorf("%s: invalid contracts reference %q", name, s)
 				continue
 			}
 			refs = append(refs, num)
@@ -454,18 +471,6 @@ func parseReleased(t *testing.T) map[int]bool {
 	return released
 }
 
-func checkNonEmpty(t *testing.T, fsys fs.FS, name string) {
-	t.Helper()
-	data, err := fs.ReadFile(fsys, name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := strings.TrimSpace(string(data))
-	if content == "" {
-		t.Errorf("%s: migration file is empty", name)
-	}
-}
-
 func migrationNumbers(t *testing.T, embedFS embed.FS, dir string) []int {
 	t.Helper()
 	fsys, err := fs.Sub(embedFS, dir)
@@ -491,6 +496,190 @@ func migrationNumbers(t *testing.T, embedFS embed.FS, dir string) []int {
 	}
 	sort.Ints(nums)
 	return nums
+}
+
+// ---------------------------------------------------------------------------
+// Convention check negative tests — verify that violations are caught
+// ---------------------------------------------------------------------------
+
+func TestConventionCheckRejectsViolations(t *testing.T) {
+	noReleases := map[int]bool{}
+
+	cases := []struct {
+		name     string
+		fsys     fstest.MapFS
+		released map[int]bool
+		wantFail bool
+	}{
+		{
+			name: "valid_baseline",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+			},
+			released: noReleases,
+		},
+		{
+			name: "missing_down",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql": {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+			},
+			released: noReleases,
+			wantFail: true,
+		},
+		{
+			name: "missing_up",
+			fsys: fstest.MapFS{
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+			},
+			released: noReleases,
+			wantFail: true,
+		},
+		{
+			name: "numbering_gap",
+			fsys: fstest.MapFS{
+				"001_first.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE a (id INT);\n")},
+				"001_first.down.sql": {Data: []byte("DROP TABLE a;\n")},
+				"003_third.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE b (id INT);\n")},
+				"003_third.down.sql": {Data: []byte("DROP TABLE b;\n")},
+			},
+			released: noReleases,
+			wantFail: true,
+		},
+		{
+			name: "bad_phase_tag",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: unknown\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+			},
+			released: noReleases,
+			wantFail: true,
+		},
+		{
+			name: "no_phase_tag",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("CREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+			},
+			released: noReleases,
+			wantFail: true,
+		},
+		{
+			name: "empty_up",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+			},
+			released: noReleases,
+			wantFail: true,
+		},
+		{
+			name: "empty_down",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("")},
+			},
+			released: noReleases,
+			wantFail: true,
+		},
+		{
+			name: "contract_no_ref",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+				"002_cleanup.up.sql":   {Data: []byte("-- phase: contract\nDROP COLUMN x;\n")},
+				"002_cleanup.down.sql": {Data: []byte("ALTER TABLE t ADD COLUMN x INT;\n")},
+			},
+			released: map[int]bool{1: true},
+			wantFail: true,
+		},
+		{
+			name: "contract_ref_higher",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+				"002_cleanup.up.sql":   {Data: []byte("-- phase: contract\n-- contracts: 003\nDROP COLUMN x;\n")},
+				"002_cleanup.down.sql": {Data: []byte("ALTER TABLE t ADD COLUMN x INT;\n")},
+			},
+			released: map[int]bool{1: true, 3: true},
+			wantFail: true,
+		},
+		{
+			name: "contract_ref_nonexistent",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+				"002_cleanup.up.sql":   {Data: []byte("-- phase: contract\n-- contracts: 099\nDROP COLUMN x;\n")},
+				"002_cleanup.down.sql": {Data: []byte("ALTER TABLE t ADD COLUMN x INT;\n")},
+			},
+			released: map[int]bool{99: true},
+			wantFail: true,
+		},
+		{
+			name: "contract_ref_contract",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+				"002_cleanup.up.sql":   {Data: []byte("-- phase: contract\n-- contracts: 001\nDROP COLUMN x;\n")},
+				"002_cleanup.down.sql": {Data: []byte("ALTER TABLE t ADD COLUMN x INT;\n")},
+				"003_more.up.sql":      {Data: []byte("-- phase: contract\n-- contracts: 002\nDROP COLUMN y;\n")},
+				"003_more.down.sql":    {Data: []byte("ALTER TABLE t ADD COLUMN y INT;\n")},
+			},
+			released: map[int]bool{1: true, 2: true},
+			wantFail: true,
+		},
+		{
+			name: "contract_ref_unreleased",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+				"002_add_col.up.sql":   {Data: []byte("-- phase: expand\nALTER TABLE t ADD COLUMN x INT;\n")},
+				"002_add_col.down.sql": {Data: []byte("ALTER TABLE t DROP COLUMN x;\n")},
+				"003_cleanup.up.sql":   {Data: []byte("-- phase: contract\n-- contracts: 002\nDROP COLUMN y;\n")},
+				"003_cleanup.down.sql": {Data: []byte("ALTER TABLE t ADD COLUMN y INT;\n")},
+			},
+			released: map[int]bool{1: true}, // 002 not released
+			wantFail: true,
+		},
+		{
+			name: "valid_contract",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+				"002_add_col.up.sql":   {Data: []byte("-- phase: expand\nALTER TABLE t ADD COLUMN x INT;\n")},
+				"002_add_col.down.sql": {Data: []byte("ALTER TABLE t DROP COLUMN x;\n")},
+				"003_cleanup.up.sql":   {Data: []byte("-- phase: contract\n-- contracts: 002\nDROP COLUMN y;\n")},
+				"003_cleanup.down.sql": {Data: []byte("ALTER TABLE t ADD COLUMN y INT;\n")},
+			},
+			released: map[int]bool{1: true, 2: true},
+		},
+		{
+			name: "valid_multi_ref_contract",
+			fsys: fstest.MapFS{
+				"001_initial.up.sql":   {Data: []byte("-- phase: expand\nCREATE TABLE t (id INT);\n")},
+				"001_initial.down.sql": {Data: []byte("DROP TABLE t;\n")},
+				"002_add_x.up.sql":     {Data: []byte("-- phase: expand\nALTER TABLE t ADD COLUMN x INT;\n")},
+				"002_add_x.down.sql":   {Data: []byte("ALTER TABLE t DROP COLUMN x;\n")},
+				"003_add_y.up.sql":     {Data: []byte("-- phase: expand\nALTER TABLE t ADD COLUMN y INT;\n")},
+				"003_add_y.down.sql":   {Data: []byte("ALTER TABLE t DROP COLUMN y;\n")},
+				"004_cleanup.up.sql":   {Data: []byte("-- phase: contract\n-- contracts: 002, 003\nDROP stuff;\n")},
+				"004_cleanup.down.sql": {Data: []byte("ADD stuff;\n")},
+			},
+			released: map[int]bool{1: true, 2: true, 3: true},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			violations := findConventionViolations(tc.fsys, tc.released)
+			if tc.wantFail && len(violations) == 0 {
+				t.Error("expected convention check to find violations, but it passed")
+			}
+			if !tc.wantFail && len(violations) > 0 {
+				t.Errorf("expected no violations, got: %v", violations)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
