@@ -7,12 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       test:
-        description: "Run a single e2e test (leave empty for all)"
+        description: "Run a single example test (leave empty for all)"
         type: choice
         options:
           - ""
           - TestHelloShiny
-          - TestHelloShinyUI
           - TestHelloPocketbase
           - TestHelloPostgrest
 
@@ -28,8 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(
-          inputs.test == 'TestHelloShiny'            && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
-          inputs.test == 'TestHelloShinyUI'     && '[{"example":"hello-shiny","test":"TestHelloShinyUI"}]' ||
+          inputs.test == 'TestHelloShiny'       && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
           inputs.test == 'TestHelloPocketbase'  && '[{"example":"hello-pocketbase","test":"TestHelloPocketbase"}]' ||
           inputs.test == 'TestHelloPostgrest'   && '[{"example":"hello-postgrest","test":"TestHelloPostgrest"}]' ||
           '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-pocketbase","test":"TestHelloPocketbase"},{"example":"hello-postgrest","test":"TestHelloPostgrest"}]'
@@ -67,26 +65,26 @@ jobs:
       - name: Prepare coverage directory
         if: github.event_name != 'pull_request'
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
-      - name: Run e2e tests
+      - name: Run example tests
         if: github.event_name != 'pull_request'
-        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags e2e -run ${{ matrix.test }} -timeout 20m ./e2e/...
+        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
           E2E_PULL_POLICY: never
-      - name: Convert e2e coverage data
+      - name: Convert example coverage data
         if: github.event_name != 'pull_request'
         run: |
           for sub in cli server; do
             dir="/tmp/e2e-coverage/$sub"
             if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-              go tool covdata textfmt -i="$dir" -o="coverage-e2e-${sub}-${{ matrix.test }}.out"
+              go tool covdata textfmt -i="$dir" -o="coverage-examples-${sub}-${{ matrix.test }}.out"
             fi
           done
       - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
         with:
-          name: coverage-e2e-${{ matrix.test }}
-          path: coverage-e2e-*.out
+          name: coverage-examples-${{ matrix.test }}
+          path: coverage-examples-*.out
           if-no-files-found: ignore
           retention-days: 1
       - name: Dump compose logs on failure
@@ -96,6 +94,106 @@ jobs:
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
 
   e2e:
+    name: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        if: github.event_name != 'pull_request'
+      - uses: actions/setup-node@v4
+        if: github.event_name != 'pull_request'
+        with:
+          node-version: 22
+      - uses: ./.github/actions/docker-cache
+        if: github.event_name != 'pull_request'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          token: ${{ secrets.DOCKERHUB_TOKEN }}
+          images: >
+            dexidp/dex:v2.41.1
+            alpine:3.23
+            golang:1.25.8-bookworm
+      - name: Build blockyard image from source
+        if: github.event_name != 'pull_request'
+        run: docker build -t ghcr.io/cynkra/blockyard:latest --build-arg COVER=1 -f docker/server.Dockerfile .
+      - name: Pull GHCR images
+        if: github.event_name != 'pull_request'
+        run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
+      - name: Block cloud metadata endpoint
+        if: github.event_name != 'pull_request'
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
+      - name: Prepare coverage directory
+        if: github.event_name != 'pull_request'
+        run: mkdir -p /tmp/playwright-coverage
+      - name: Start services
+        if: github.event_name != 'pull_request'
+        run: |
+          E2E_GOCOVERDIR=/tmp/playwright-coverage \
+          docker compose -f examples/hello-shiny/docker-compose.yml \
+                         -f tests/examples/docker-compose.cover.yml \
+                         up -d --wait
+      - uses: actions/setup-go@v6
+        if: github.event_name != 'pull_request'
+        with:
+          go-version-file: go.mod
+      - name: Build CLI and deploy hello app
+        if: github.event_name != 'pull_request'
+        run: |
+          go build -o /tmp/by ./cmd/by
+
+          # Automated OIDC login to obtain a PAT (same flow as deploy.sh).
+          COOKIE_JAR=$(mktemp)
+          LOGIN_PAGE=$(curl -sS -L -c "$COOKIE_JAR" -b "$COOKIE_JAR" -w '\n%{url_effective}' http://localhost:8080/login)
+          FORM_ACTION=$(echo "$LOGIN_PAGE" | sed '$d' | grep -o 'action="[^"]*"' | head -1 | cut -d'"' -f2 | sed 's/&amp;/\&/g')
+          [[ "$FORM_ACTION" == /* ]] && FORM_ACTION="http://localhost:5556${FORM_ACTION}"
+          curl -sS -L -c "$COOKIE_JAR" -b "$COOKIE_JAR" -d "login=demo@example.com&password=password" "$FORM_ACTION" > /dev/null
+          TOKEN=$(curl -sS -b "$COOKIE_JAR" -X POST -H "Content-Type: application/json" \
+            -d '{"name":"playwright-ci","expires_in":"1h"}' \
+            http://localhost:8080/api/v1/users/me/tokens | grep -o '"token":"[^"]*' | cut -d'"' -f4)
+          rm -f "$COOKIE_JAR"
+
+          BLOCKYARD_URL=http://localhost:8080 BLOCKYARD_TOKEN="$TOKEN" \
+            /tmp/by deploy examples/hello-shiny/app --yes --wait --name hello
+      - name: Install Playwright
+        if: github.event_name != 'pull_request'
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run Playwright tests
+        if: github.event_name != 'pull_request'
+        working-directory: tests/e2e
+        run: npx playwright test
+      - name: Stop services and flush coverage
+        if: always() && github.event_name != 'pull_request'
+        run: docker compose -f examples/hello-shiny/docker-compose.yml stop blockyard
+      - name: Convert coverage data
+        if: always() && github.event_name != 'pull_request'
+        run: |
+          dir="/tmp/playwright-coverage"
+          if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
+            go tool covdata textfmt -i="$dir" -o="coverage-e2e.out"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always() && github.event_name != 'pull_request'
+        with:
+          name: coverage-e2e
+          path: coverage-e2e-*.out
+          if-no-files-found: ignore
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: tests/e2e/playwright-report/
+          retention-days: 7
+      - name: Dump compose logs on failure
+        if: failure() && github.event_name != 'pull_request'
+        run: |
+          docker compose -f examples/hello-shiny/docker-compose.yml logs --no-color 2>/dev/null || true
+          docker compose -f examples/hello-shiny/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
+
+  examples:
     if: always()
     needs: [run]
     runs-on: ubuntu-24.04
@@ -103,13 +201,13 @@ jobs:
     steps:
       - if: needs.run.result != 'success'
         run: |
-          echo "::error::e2e failed (run result: ${{ needs.run.result }})"
+          echo "::error::Example tests failed (run: ${{ needs.run.result }})"
           exit 1
-      - run: echo "All e2e tests passed."
+      - run: echo "All example tests passed."
 
   coverage:
     if: github.event_name == 'merge_group'
-    needs: [run]
+    needs: [run, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -143,19 +241,19 @@ jobs:
             rm -rf ci-coverage
           fi
 
-      # Download e2e coverage artifacts from this workflow.
+      # Download test coverage artifacts from this workflow.
       - uses: actions/download-artifact@v8
         with:
-          pattern: coverage-e2e-*
+          pattern: coverage-*
           merge-multiple: true
 
-      # Aggregate all per-test e2e files into a single coverage-e2e.out.
-      - name: Aggregate e2e coverage
+      # Aggregate per-matrix example files into a single coverage-examples.out.
+      - name: Aggregate example coverage
         run: |
-          files=$(ls coverage-e2e-*.out 2>/dev/null || true)
+          files=$(ls coverage-examples-*.out 2>/dev/null || true)
           [ -z "$files" ] && exit 0
-          head -1 $(echo "$files" | head -1) > coverage-e2e.out
-          tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-e2e.out
+          head -1 $(echo "$files" | head -1) > coverage-examples.out
+          tail -n +2 -q $files | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> coverage-examples.out
           rm -f $files
 
       - name: List coverage files

@@ -22,6 +22,8 @@ flags:
     carryforward: true
   ui:
     carryforward: true
+  examples:
+    carryforward: true
   e2e:
     carryforward: true
 
