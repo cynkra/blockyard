@@ -5,6 +5,9 @@
 # Test coverage
 coverage.out
 
+# UI build artefacts
+internal/ui/node_modules/
+
 # Secrets and runtime data
 .env
 !.env.example
