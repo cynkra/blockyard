@@ -2,6 +2,9 @@ name: Merge
 
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   merge_group:
   workflow_call:
   workflow_dispatch:
