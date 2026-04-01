@@ -211,18 +211,82 @@ updates.
 `Backend.Stop`. Workers, networks, and token directories are left
 intact. The new server already manages them via Redis.
 
+### Background Goroutine Ownership
+
+During the overlap, both servers can serve requests — they share routing
+state via Redis and either can handle any incoming request. But
+background goroutines that mutate state (autoscaler, health poller,
+token refreshers) must not run on both servers simultaneously. Two
+autoscalers making independent scaling decisions against the same shared
+state would race — both could see "app X needs 1 more worker" and each
+spawn one.
+
+The new server starts in **passive mode**: it serves requests but does
+not start the autoscaler, health poller, or other state-mutating
+background loops. The old server continues running them normally. After
+the old server exits, `by admin update` signals the new server to
+activate its background goroutines (e.g., via an admin API call or a
+second signal). At no point do two sets of background loops run
+concurrently.
+
+This is simpler than leader election and has no race window regardless
+of overlap duration — the old server's autoscaler makes correct
+decisions for as long as it runs, because it reads the same Redis state.
+
 ### Migration Safety
 
 Database migrations run on startup via `golang-migrate`. During a
 rolling update, the old server is still serving traffic when the new
 server starts and runs migrations.
 
-**Constraint: migrations must be backward-compatible within a major
-version.** The old server continues reading and writing the database
-after migrations run. This means: new columns with defaults, new tables,
-new indexes — never drop, rename, or change column types. This is a
-standard discipline for zero-downtime deployments and not burdensome in
-practice.
+**Constraint: migrations must be backward-compatible with the previous
+release.** The old server continues reading and writing the database
+after migrations run. This follows the expand-and-contract pattern:
+
+- **Expand** (this release): add new columns with defaults, new tables,
+  new indexes. The old server ignores schema it doesn't know about.
+- **Contract** (next release): drop old columns, remove deprecated
+  tables, tighten constraints. Safe because no server running the
+  previous code is still alive.
+
+The compatibility window is N/N-1: each release's migrations must work
+with the previous release's code. Cleanup of deprecated schema ships in
+the following release.
+
+#### CI Enforcement
+
+A `migration-compat` CI job enforces backward compatibility mechanically
+rather than relying on review discipline. When a PR touches migration
+files, CI applies all migrations (including the new ones) to a fresh
+database, then checks out the latest release tag and runs its database
+tests against the migrated schema. If the old code's tests pass, the
+migration is backward-compatible by definition.
+
+```yaml
+migration-compat:
+  if: # PR touches internal/db/migrations/
+  steps:
+    - uses: actions/checkout@v4
+    - name: Apply migrations from PR
+      run: go test -run TestMigrateUp ./internal/db/...
+    - name: Checkout previous release
+      run: |
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 --match 'v*')
+        git checkout "$PREV_TAG" -- internal/db/*_test.go internal/db/db.go
+    - name: Run old tests against migrated schema
+      run: go test ./internal/db/...
+```
+
+This catches issues no SQL linter would flag — a column rename that
+breaks a hardcoded query, a `NOT NULL` addition without a default, a
+dropped column still referenced in a `SELECT`. Conversely, a `DROP
+COLUMN` that the old code never references passes cleanly.
+
+**Complement: `atlas migrate lint`** runs as a fast pre-check before the
+full compatibility test. It catches common mistakes (missing defaults,
+destructive DDL, transaction gaps) in seconds, providing earlier feedback
+while the heavier test runs. It supports golang-migrate format and both
+PostgreSQL and SQLite.
 
 **Pre-migration backup:** `by admin update` backs up the database before
 starting the new container. For SQLite: file copy. For PostgreSQL:
@@ -271,8 +335,14 @@ Before doing anything, the command verifies:
    channel). If up to date, exit.
 2. Redis is configured and reachable. If not, print the manual compose
    commands and exit.
-3. The server reports a service-discovery-capable proxy (detected via
-   config). If not, warn and suggest the basic path.
+
+The server does not attempt to detect whether the proxy supports service
+discovery — that's a property of the proxy's configuration, not
+something blockyard can reliably probe. If the proxy is statically
+configured, the new container won't receive traffic and the `/readyz`
+poll in step 4 will time out. The update fails safely: the old server
+keeps running, nothing breaks. The documentation notes the proxy
+requirement; the precondition check does not enforce it.
 
 ### Rolling Update Flow
 
