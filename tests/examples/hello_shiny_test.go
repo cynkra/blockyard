@@ -1,6 +1,6 @@
-//go:build e2e
+//go:build examples
 
-package e2e_test
+package examples_test
 
 import (
 	"io"
@@ -18,7 +18,7 @@ import (
 // properly sent (or recognised) on the subsequent redirect — a scenario
 // that manual cookie injection in the other e2e tests cannot detect.
 func TestHelloShinyBrowserLogin(t *testing.T) {
-	composeUp(t, "../examples/hello-shiny/docker-compose.yml")
+	composeUp(t, "../../examples/hello-shiny/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"
 	dexURL := "http://localhost:5556"
@@ -93,7 +93,7 @@ func TestHelloShinyBrowserLogin(t *testing.T) {
 }
 
 func TestHelloShiny(t *testing.T) {
-	composeUp(t, "../examples/hello-shiny/docker-compose.yml")
+	composeUp(t, "../../examples/hello-shiny/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"
 	dexURL := "http://localhost:5556"
@@ -118,7 +118,7 @@ func TestHelloShiny(t *testing.T) {
 			t.Skip("depends on auth")
 		}
 
-		appDir := copyAppDir(t, "../examples/hello-shiny/app")
+		appDir := copyAppDir(t, "../../examples/hello-shiny/app")
 
 		var result map[string]any
 		runCLIJSON(t, baseURL, token, &result,

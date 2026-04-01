@@ -1,6 +1,6 @@
-//go:build e2e
+//go:build examples
 
-package e2e_test
+package examples_test
 
 import (
 	"net/http"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestHelloPocketbase(t *testing.T) {
-	composeUp(t, "../examples/hello-pocketbase/docker-compose.yml")
+	composeUp(t, "../../examples/hello-pocketbase/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"
 	dexURL := "http://localhost:5556"
@@ -44,7 +44,7 @@ func TestHelloPocketbase(t *testing.T) {
 		token1 = createPAT(t, baseURL, cookies1)
 
 		// Set access_type and scaling before deploy starts the app.
-		appDir := copyAppDir(t, "../examples/hello-pocketbase/app")
+		appDir := copyAppDir(t, "../../examples/hello-pocketbase/app")
 
 		var result map[string]any
 		runCLIJSON(t, baseURL, token1, &result,
