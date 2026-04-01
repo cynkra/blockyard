@@ -250,7 +250,7 @@ func simulateLogin(t *testing.T, serverURL string) (*http.Cookie, *http.Response
 	stateCookie := findCookie(resp, "blockyard_oidc_state")
 	if stateCookie == nil {
 		t.Fatal("missing blockyard_oidc_state cookie after /login")
-		return
+		return nil, nil
 	}
 	keycloakAuthURL := resp.Header.Get("Location")
 
@@ -277,7 +277,7 @@ func simulateLogin(t *testing.T, serverURL string) (*http.Cookie, *http.Response
 	matches := formActionRe.FindSubmatch(body)
 	if matches == nil {
 		t.Fatalf("could not find login form action in Keycloak HTML:\n%s", string(body[:min(len(body), 2000)]))
-		return
+		return nil, nil
 	}
 	// The action URL is HTML-encoded; decode &amp; to &.
 	formAction := strings.ReplaceAll(string(matches[1]), "&amp;", "&")
