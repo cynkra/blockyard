@@ -3,6 +3,8 @@ name: Publish
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # Monday 6 AM UTC — rebuild to pick up base image patches
 
 permissions:
   contents: write
@@ -17,6 +19,7 @@ env:
 
 jobs:
   cli-binaries:
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +58,7 @@ jobs:
           retention-days: 1
 
   cli-release:
+    if: github.event_name != 'schedule'
     needs: cli-binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 5
