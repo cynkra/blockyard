@@ -105,6 +105,7 @@ func TestCallerContextRoundTrip(t *testing.T) {
 	got := auth.CallerFromContext(ctx)
 	if got == nil {
 		t.Fatal("CallerFromContext returned nil")
+		return
 	}
 	if got.Sub != "user-1" {
 		t.Errorf("Sub = %q, want %q", got.Sub, "user-1")
@@ -151,6 +152,7 @@ func TestContextWithUser(t *testing.T) {
 	got := auth.UserFromContext(ctx)
 	if got == nil {
 		t.Fatal("expected user from context")
+		return
 	}
 	if got.Sub != "u1" {
 		t.Errorf("Sub = %q, want %q", got.Sub, "u1")

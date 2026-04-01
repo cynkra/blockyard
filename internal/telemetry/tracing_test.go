@@ -16,6 +16,7 @@ func TestInitTracingEmpty(t *testing.T) {
 	}
 	if shutdown == nil {
 		t.Fatal("expected non-nil shutdown function")
+		return
 	}
 	// No-op shutdown should succeed
 	if err := shutdown(context.Background()); err != nil {
@@ -36,6 +37,7 @@ func TestInitTracingWithEndpoint(t *testing.T) {
 	}
 	if shutdown == nil {
 		t.Fatal("expected non-nil shutdown function")
+		return
 	}
 	// Shutdown should succeed (flushes empty batch).
 	if err := shutdown(context.Background()); err != nil {
