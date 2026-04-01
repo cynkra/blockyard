@@ -75,11 +75,7 @@ func composeUp(t *testing.T, composeFile string) {
 		_ = down.Run()
 	})
 
-	upArgs := []string{"up", "-d", "--wait"}
-	if p := os.Getenv("E2E_PULL_POLICY"); p != "" {
-		upArgs = append(upArgs, "--pull", p)
-	}
-	run(upArgs...)
+	run("up", "-d", "--wait")
 }
 
 // ---------------------------------------------------------------------------
