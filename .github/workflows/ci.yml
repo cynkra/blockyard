@@ -144,7 +144,6 @@ jobs:
           phase: setup
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
-      - run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/server/...
       - uses: actions/upload-artifact@v7
         with:
@@ -169,7 +168,6 @@ jobs:
       - uses: ./.github/actions/docker-cache
         with:
           phase: setup
-      - run: docker pull quay.io/keycloak/keycloak:26.0
       - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./internal/...,./cmd/by/... ./internal/auth/...
       - uses: actions/upload-artifact@v7
         with:
@@ -194,7 +192,6 @@ jobs:
       - uses: ./.github/actions/docker-cache
         with:
           phase: setup
-      - run: docker pull ghcr.io/openbao/openbao:2.5.2
       - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./internal/...,./cmd/by/... ./internal/integration/...
       - uses: actions/upload-artifact@v7
         with:
