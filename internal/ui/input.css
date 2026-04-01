@@ -379,6 +379,8 @@
   .autocomplete-list { @apply absolute top-full left-0 right-0 mt-0.5 bg-base-100 border border-base-300 rounded-md shadow-lg z-[300] max-h-48 overflow-y-auto; }
   .autocomplete-item { @apply px-2.5 py-1.5 cursor-pointer text-sm; }
   .autocomplete-item:hover { @apply bg-base-200; }
+  .autocomplete-item.no-result { @apply opacity-60 cursor-default; }
+  .autocomplete-item.no-result:hover { @apply bg-base-100; }
   .autocomplete-name { @apply font-medium; }
   .autocomplete-email { @apply text-xs ml-2 opacity-60; }
 

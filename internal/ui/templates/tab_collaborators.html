@@ -44,15 +44,62 @@
         {{end}}
         <form class="acl-add-form"
               hx-post="/api/v1/apps/{{.App.ID}}/access"
-              hx-swap="none">
+              hx-swap="none"
+              hx-on::after-request="if(event.detail.successful){this.reset();document.getElementById('acl-principal').value='';}"
+              onsubmit="return document.getElementById('acl-principal').value !== ''">
             <input type="hidden" name="kind" value="user">
-            <input type="text" name="principal" placeholder="Username or email" required>
+            <input type="hidden" id="acl-principal" name="principal" value="">
+            <div class="autocomplete-wrap">
+                <input type="text" id="acl-user-search" placeholder="Search users..."
+                       autocomplete="off" required
+                       oninput="searchUsers(this)"
+                       onfocus="if(this.value) searchUsers(this)"
+                       onblur="setTimeout(function(){document.querySelector('.user-suggest')?.classList.add('hidden')},200)">
+                <div class="autocomplete-list user-suggest hidden"></div>
+            </div>
             <select name="role">
                 <option value="viewer">Viewer</option>
                 <option value="collaborator">Collaborator</option>
             </select>
             <button type="submit" class="btn btn-sm">Add</button>
         </form>
+        <script>
+        var _userSearchTimer;
+        function searchUsers(input) {
+            clearTimeout(_userSearchTimer);
+            document.getElementById('acl-principal').value = '';
+            var q = input.value.trim();
+            var list = input.nextElementSibling;
+            if (q.length < 2) {
+                list.classList.add('hidden');
+                return;
+            }
+            _userSearchTimer = setTimeout(function() {
+                fetch('/ui/users/search?q=' + encodeURIComponent(q), {credentials: 'same-origin'})
+                    .then(function(r) { return r.text(); })
+                    .then(function(html) {
+                        list.innerHTML = html;
+                        if (html.trim()) {
+                            list.querySelectorAll('.autocomplete-item').forEach(function(el) {
+                                el.onmousedown = function() { selectUser(el); };
+                            });
+                            list.classList.remove('hidden');
+                        } else {
+                            list.innerHTML = '<div class="autocomplete-item no-result">No users found</div>';
+                            list.classList.remove('hidden');
+                        }
+                    });
+            }, 200);
+        }
+        function selectUser(el) {
+            var input = document.getElementById('acl-user-search');
+            var nameEl = el.querySelector('.autocomplete-name');
+            var emailEl = el.querySelector('.autocomplete-email');
+            input.value = nameEl.textContent + (emailEl.textContent ? ' (' + emailEl.textContent + ')' : '');
+            document.getElementById('acl-principal').value = el.dataset.value;
+            el.closest('.autocomplete-list').classList.add('hidden');
+        }
+        </script>
     </div>
     {{end}}
 </div>
