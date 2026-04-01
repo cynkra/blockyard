@@ -115,15 +115,19 @@ jobs:
           go-version-file: go.mod
       - uses: ./.github/actions/docker-cache
         with:
+          phase: setup
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
-          images: alpine:3.23
       - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/proxy/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker
           path: coverage-docker.out
           retention-days: 1
+      - uses: ./.github/actions/docker-cache
+        if: always()
+        with:
+          phase: save
 
   pak:
     runs-on: ubuntu-24.04
@@ -135,6 +139,11 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/docker-cache
+        with:
+          phase: setup
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          token: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: docker pull ghcr.io/rocker-org/r-ver:4.4.3
       - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/server/...
       - uses: actions/upload-artifact@v7
@@ -142,6 +151,10 @@ jobs:
           name: coverage-pak
           path: coverage-pak.out
           retention-days: 1
+      - uses: ./.github/actions/docker-cache
+        if: always()
+        with:
+          phase: save
 
   idp:
     runs-on: ubuntu-24.04
@@ -153,6 +166,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/docker-cache
+        with:
+          phase: setup
       - run: docker pull quay.io/keycloak/keycloak:26.0
       - run: go test -tags idp_test -coverprofile=coverage-idp.out -coverpkg=./internal/...,./cmd/by/... ./internal/auth/...
       - uses: actions/upload-artifact@v7
@@ -160,6 +176,10 @@ jobs:
           name: coverage-idp
           path: coverage-idp.out
           retention-days: 1
+      - uses: ./.github/actions/docker-cache
+        if: always()
+        with:
+          phase: save
 
   openbao:
     runs-on: ubuntu-24.04
@@ -171,6 +191,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/docker-cache
+        with:
+          phase: setup
       - run: docker pull ghcr.io/openbao/openbao:2.5.2
       - run: go test -tags openbao_test -coverprofile=coverage-openbao.out -coverpkg=./internal/...,./cmd/by/... ./internal/integration/...
       - uses: actions/upload-artifact@v7
@@ -178,6 +201,10 @@ jobs:
           name: coverage-openbao
           path: coverage-openbao.out
           retention-days: 1
+      - uses: ./.github/actions/docker-cache
+        if: always()
+        with:
+          phase: save
 
   ui:
     runs-on: ubuntu-24.04

@@ -42,15 +42,10 @@ jobs:
       - uses: ./.github/actions/docker-cache
         if: github.event_name != 'pull_request'
         with:
+          phase: setup
+          key: ${{ matrix.test }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
-          images: >
-            alpine:3.23
-            curlimages/curl:latest
-            dexidp/dex:v2.41.1
-            golang:1.25.8-bookworm
-            postgres:17
-            postgrest/postgrest:v12.2.3
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 -f docker/server.Dockerfile .
@@ -87,6 +82,11 @@ jobs:
           path: coverage-examples-*.out
           if-no-files-found: ignore
           retention-days: 1
+      - uses: ./.github/actions/docker-cache
+        if: always() && github.event_name != 'pull_request'
+        with:
+          phase: save
+          key: ${{ matrix.test }}
       - name: Dump compose logs on failure
         if: failure()
         run: |
