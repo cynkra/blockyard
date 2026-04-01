@@ -1233,6 +1233,93 @@ func TestCreateTokenDBError(t *testing.T) {
 	}
 }
 
+func TestCreateTokenWithTTL(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "token-user", auth.RoleAdmin)
+
+	form := url.Values{"name": {"CI Token"}, "expires_in": {"30d"}}
+	resp, err := http.Post(ts.URL+"/ui/tokens", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "by_") {
+		t.Error("expected token value with by_ prefix")
+	}
+	if !strings.Contains(body, "Expires in") {
+		t.Error("expected expiry info in response")
+	}
+}
+
+func TestCreateTokenNoExpiry(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "token-user", auth.RoleAdmin)
+
+	form := url.Values{"name": {"Long-lived Token"}, "expires_in": {""}}
+	resp, err := http.Post(ts.URL+"/ui/tokens", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "by_") {
+		t.Error("expected token value with by_ prefix")
+	}
+	if !strings.Contains(body, "never expires") {
+		t.Error("expected 'never expires' in response")
+	}
+}
+
+func TestCreateTokenInvalidExpiry(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "token-user", auth.RoleAdmin)
+
+	form := url.Values{"name": {"Bad Token"}, "expires_in": {"forever"}}
+	resp, err := http.Post(ts.URL+"/ui/tokens", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "pat-error") {
+		t.Error("expected error for invalid expiry")
+	}
+}
+
+func TestProfilePageShowsTokenExpiry(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "expiry-user", auth.RoleAdmin)
+
+	// Token with expiry.
+	exp := time.Now().Add(90 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	srv.DB.CreatePAT("tok-exp", []byte("hash-exp"), "expiry-user", "Expiring Token", &exp)
+
+	// Token without expiry.
+	srv.DB.CreatePAT("tok-perm", []byte("hash-perm"), "expiry-user", "Permanent Token", nil)
+
+	resp, err := http.Get(ts.URL + "/profile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "Expiring Token") {
+		t.Error("expected expiring token name")
+	}
+	if !strings.Contains(body, "Permanent Token") {
+		t.Error("expected permanent token name")
+	}
+	// The Expires column header should be present.
+	if !strings.Contains(body, "<th>Expires</th>") {
+		t.Error("expected Expires column header")
+	}
+	// Permanent token should show "Never".
+	if !strings.Contains(body, "Never") {
+		t.Error("expected 'Never' for permanent token expiry")
+	}
+}
+
 // --- Sidebar placeholder tests ---
 
 func TestSidebarReturns404ForNonExistentApp(t *testing.T) {

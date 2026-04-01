@@ -328,10 +328,12 @@
   .section-description { @apply text-sm opacity-60 mb-4; }
   .pat-create-form { @apply flex gap-2 mb-4; }
   .pat-create-form input { @apply input input-sm flex-1 max-w-80 text-sm; }
+  .pat-create-form select { @apply select select-sm text-sm; }
   .pat-created { @apply bg-warning/15 border border-warning rounded-md p-4 mb-4; }
   .pat-warning { @apply text-warning font-medium m-0 mb-2; }
   .pat-value { @apply flex items-center gap-2; }
   .pat-value code { @apply bg-base-200 px-2 py-1 border border-base-300 rounded-sm text-sm break-all; }
+  .pat-expiry { @apply text-sm opacity-60 mt-2 mb-0; }
   .pat-error { @apply text-error text-sm my-2; }
 
   /* ── Profile ── */
