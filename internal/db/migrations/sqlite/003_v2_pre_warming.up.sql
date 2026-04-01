@@ -1,1 +1,0 @@
-ALTER TABLE apps ADD COLUMN pre_warmed_seats INTEGER NOT NULL DEFAULT 0;

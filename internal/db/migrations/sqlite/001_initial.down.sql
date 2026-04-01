@@ -1,3 +1,6 @@
+DROP TABLE IF EXISTS bundle_logs;
+DROP TABLE IF EXISTS app_aliases;
+DROP TABLE IF EXISTS sessions;
 DROP TABLE IF EXISTS app_tags;
 DROP TABLE IF EXISTS tags;
 DROP TABLE IF EXISTS personal_access_tokens;
