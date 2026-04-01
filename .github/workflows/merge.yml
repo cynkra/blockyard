@@ -49,12 +49,6 @@ jobs:
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 -f docker/server.Dockerfile .
-      - name: Pull images used by example
-        if: github.event_name != 'pull_request'
-        run: |
-          docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" config --images \
-            | grep -v cynkra/blockyard \
-            | xargs -r -n1 docker pull
       - name: Block cloud metadata endpoint for containers
         if: github.event_name != 'pull_request'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
@@ -63,10 +57,9 @@ jobs:
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
       - name: Run example tests
         if: github.event_name != 'pull_request'
-        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR,E2E_PULL_POLICY go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
+        run: sudo --preserve-env=PATH,E2E_GOCOVERDIR go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
-          E2E_PULL_POLICY: never
       - name: Convert example coverage data
         if: github.event_name != 'pull_request'
         run: |
