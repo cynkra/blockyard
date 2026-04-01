@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -93,6 +94,51 @@ var funcMap = template.FuncMap{
 				return "1 day ago"
 			}
 			return fmt.Sprintf("%d days ago", days)
+		}
+	},
+	"timeUntil": func(v any) string {
+		var s string
+		switch val := v.(type) {
+		case *string:
+			if val == nil {
+				return ""
+			}
+			s = *val
+		case string:
+			if val == "" {
+				return ""
+			}
+			s = val
+		default:
+			return ""
+		}
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return s
+		}
+		d := time.Until(t)
+		if d < 0 {
+			return "Expired"
+		}
+		switch {
+		case d < time.Hour:
+			m := int(d.Minutes())
+			if m <= 1 {
+				return "in <1 minute"
+			}
+			return fmt.Sprintf("in %d minutes", m)
+		case d < 24*time.Hour:
+			h := int(d.Hours())
+			if h == 1 {
+				return "in 1 hour"
+			}
+			return fmt.Sprintf("in %d hours", h)
+		default:
+			days := int(d.Hours() / 24)
+			if days == 1 {
+				return "in 1 day"
+			}
+			return fmt.Sprintf("in %d days", days)
 		}
 	},
 	"truncate": func(s string) string {
@@ -286,6 +332,7 @@ type tokenEntry struct {
 	ID         string
 	Name       string
 	CreatedAt  *string
+	ExpiresAt  *string
 	LastUsedAt *string
 }
 
@@ -549,6 +596,7 @@ func (ui *UI) profilePage(srv *server.Server) http.HandlerFunc {
 				ID:         p.ID,
 				Name:       p.Name,
 				CreatedAt:  &createdAt,
+				ExpiresAt:  p.ExpiresAt,
 				LastUsedAt: p.LastUsedAt,
 			}
 		}
@@ -595,11 +643,20 @@ func (ui *UI) createToken(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// 90-day default expiration
-		exp := time.Now().Add(90 * 24 * time.Hour).UTC().Format(time.RFC3339)
+		var expiresAt *string
+		if v := r.FormValue("expires_in"); v != "" { //nolint:gosec // G120: auth-gated endpoint, bounded select value
+			dur, ok := parseDuration(v)
+			if !ok {
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, `<p class="pat-error">Invalid expiry value.</p>`)
+				return
+			}
+			exp := time.Now().Add(dur).UTC().Format(time.RFC3339)
+			expiresAt = &exp
+		}
 
 		id := uuid.New().String()
-		_, err = srv.DB.CreatePAT(id, hash, caller.Sub, name, &exp)
+		_, err = srv.DB.CreatePAT(id, hash, caller.Sub, name, expiresAt)
 		if err != nil {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, `<p class="pat-error">Failed to create token.</p>`)
@@ -607,7 +664,10 @@ func (ui *UI) createToken(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html")
-		if err := ui.fragments["pat_created.html"].Execute(w, struct{ Token string }{Token: plaintext}); err != nil {
+		if err := ui.fragments["pat_created.html"].Execute(w, struct {
+			Token     string
+			ExpiresAt *string
+		}{Token: plaintext, ExpiresAt: expiresAt}); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
@@ -628,6 +688,29 @@ func (ui *UI) createToken(srv *server.Server) http.HandlerFunc {
 		_ = ui.fragments["token_list.html"].ExecuteTemplate(w, "tokenList", tokens)
 		fmt.Fprint(w, `</div>`)
 	}
+}
+
+// parseDuration parses duration strings like "90d", "24h", "30m".
+var durationRe = regexp.MustCompile(`^(\d+)([dhm])$`)
+
+func parseDuration(s string) (time.Duration, bool) {
+	m := durationRe.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
+	}
+	n := 0
+	for _, c := range m[1] {
+		n = n*10 + int(c-'0')
+	}
+	switch m[2] {
+	case "d":
+		return time.Duration(n) * 24 * time.Hour, true
+	case "h":
+		return time.Duration(n) * time.Hour, true
+	case "m":
+		return time.Duration(n) * time.Minute, true
+	}
+	return 0, false
 }
 
 // --- Builders ---

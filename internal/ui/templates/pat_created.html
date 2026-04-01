@@ -5,4 +5,5 @@
         <button onclick="navigator.clipboard.writeText('{{.Token}}')"
                 class="btn btn-sm">Copy</button>
     </div>
+    <p class="pat-expiry">{{if .ExpiresAt}}Expires {{.ExpiresAt | timeUntil}}.{{else}}This token never expires.{{end}}</p>
 </div>
