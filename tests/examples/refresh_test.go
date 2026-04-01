@@ -1,6 +1,6 @@
-//go:build e2e
+//go:build examples
 
-package e2e_test
+package examples_test
 
 import (
 	"net/http"
@@ -13,7 +13,7 @@ import (
 // renv.lock), exercises the refresh endpoint to re-resolve dependencies,
 // and then rolls back to the previous state.
 func TestRefreshAndRollback(t *testing.T) {
-	composeUp(t, "../examples/hello-shiny/docker-compose.yml")
+	composeUp(t, "../../examples/hello-shiny/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"
 	dexURL := "http://localhost:5556"
@@ -39,7 +39,7 @@ func TestRefreshAndRollback(t *testing.T) {
 			t.Skip("depends on auth")
 		}
 
-		appDir := copyAppDir(t, "../examples/hello-shiny/app")
+		appDir := copyAppDir(t, "../../examples/hello-shiny/app")
 
 		var result map[string]any
 		runCLIJSON(t, baseURL, token, &result,
