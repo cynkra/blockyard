@@ -12,6 +12,7 @@ import (
 	httpSwagger "github.com/swaggo/http-swagger/v2"
 
 	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/docs"
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
@@ -176,6 +177,10 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Use(auth.AppAuthMiddleware(authDeps))
 		uiHandler.RegisterRoutes(r, srv)
 	})
+
+	// Self-hosted documentation (embedded Astro/Starlight build).
+	r.Handle("/docs", http.RedirectHandler("/docs/", http.StatusMovedPermanently))
+	r.Handle("/docs/*", http.StripPrefix("/docs", docs.Handler()))
 
 	// Swagger UI — serves OpenAPI spec and interactive documentation.
 	// Gated behind API auth to prevent unauthenticated mapping of the
