@@ -1,61 +1,126 @@
-name: Cache Docker Hub images
+name: Docker image cache
 description: >
-  Load Docker Hub images from GH Actions cache, pulling only on cache miss.
-  Cache key is based on the image list content, so adding or changing an
-  image version invalidates the cache automatically.
+  Transparent Docker image caching. Call with phase=setup at the start
+  of a job and phase=save at the end. Caches any images pulled during
+  the job automatically — no image list needed. Cache expires weekly
+  to garbage-collect orphaned images.
 
 inputs:
+  phase:
+    description: '"setup" to restore cached images, "save" to cache pulled images'
+    required: true
+  key:
+    description: Extra cache key segment (use for matrix jobs to avoid collisions)
+    required: false
+    default: ""
   username:
     description: Docker Hub username (optional – skips login when empty)
     required: false
   token:
     description: Docker Hub token (optional – skips login when empty)
     required: false
-  images:
-    description: Space or newline separated list of Docker Hub images to cache.
-    required: true
 
 runs:
   using: composite
   steps:
+    # ── common ───────────────────────────────────────────────────────
+    - name: Compute cache week
+      id: meta
+      shell: bash
+      run: echo "week=$(date +%Y-%W)" >> "$GITHUB_OUTPUT"
+
+    # ── setup ────────────────────────────────────────────────────────
     - uses: docker/login-action@v4
-      if: inputs.username != '' && inputs.token != ''
+      if: inputs.phase == 'setup' && inputs.username != '' && inputs.token != ''
       with:
         username: ${{ inputs.username }}
         password: ${{ inputs.token }}
 
-    - name: Resolve image list
-      id: images
-      shell: bash
-      run: |
-        list=$(echo "$INPUT" | xargs)
-        echo "list=$list" >> "$GITHUB_OUTPUT"
-        echo "hash=$(echo "$list" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-      env:
-        INPUT: ${{ inputs.images }}
-
-    - uses: actions/cache@v5
-      id: cache
+    - uses: actions/cache/restore@v5
+      if: inputs.phase == 'setup'
       with:
         path: /tmp/docker-cache
-        key: docker-hub-${{ steps.images.outputs.hash }}
+        key: docker-${{ github.job }}-${{ inputs.key }}-wk${{ steps.meta.outputs.week }}-${{ github.run_id }}
+        restore-keys: |
+          docker-${{ github.job }}-${{ inputs.key }}-wk${{ steps.meta.outputs.week }}-
 
-    - name: Load or pull images
+    - name: Load cached images
+      if: inputs.phase == 'setup'
       shell: bash
       run: |
-        if [ "$CACHE_HIT" = "true" ]; then
-          for f in /tmp/docker-cache/*.tar.zst; do
-            zstd -d "$f" --stdout | docker load
-          done
-        else
-          mkdir -p /tmp/docker-cache
-          for img in $IMAGES; do
-            echo "Pulling: $img"
-            docker pull "$img"
-            safe=$(echo "$img" | tr '/:' '-')
-            docker save "$img" | zstd -T0 -3 > "/tmp/docker-cache/${safe}.tar.zst"
-          done
+        shopt -s nullglob
+        for f in /tmp/docker-cache/*.tar.zst; do
+          echo "Loading $(basename "${f%.tar.zst}")"
+          zstd -d "$f" --stdout | docker load || true
+        done
+
+    - name: Record baseline images (after cache load)
+      if: inputs.phase == 'setup'
+      shell: bash
+      run: |
+        docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
+          | grep -v '<none>' | sort -u > /tmp/docker-baseline.txt
+
+    # ── save ─────────────────────────────────────────────────────────
+    - name: Snapshot pulled images
+      if: inputs.phase == 'save'
+      id: snap
+      shell: bash
+      run: |
+        if [ ! -f /tmp/docker-baseline.txt ]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
-      env:
-        IMAGES: ${{ steps.images.outputs.list }}
-        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+
+        # Compare repo:tag+ID so digest changes on mutable tags
+        # (e.g. :latest, :main) are detected as new.
+        changed=$(comm -13 /tmp/docker-baseline.txt \
+          <(docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
+              | grep -v '<none>' | sort -u))
+
+        if [ -z "$changed" ]; then
+          echo "No new images pulled"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Extract just the repo:tag for saving.
+        new=$(echo "$changed" | awk '{print $1}')
+
+        mkdir -p /tmp/docker-cache
+
+        # Evict stale versions: when alpine:3.24 is pulled, remove
+        # any existing alpine__*.tar.zst tarballs (e.g. alpine:3.23).
+        declare -A seen
+        while IFS= read -r img; do
+          # Skip locally built images — only cache images pulled from a
+          # registry (they have RepoDigests; built images don't).
+          digests=$(docker image inspect --format '{{len .RepoDigests}}' "$img" 2>/dev/null) || continue
+          [ "$digests" = "0" ] && continue
+          id=$(docker image inspect --format '{{.Id}}' "$img" 2>/dev/null) || continue
+          [ "${seen[$id]+_}" ] && continue
+          seen[$id]=1
+          repo=$(echo "${img%%:*}" | tr '/' '-')
+          rm -f /tmp/docker-cache/"${repo}"__*.tar.zst
+          safe="${repo}__${img#*:}"
+          echo "Caching $img"
+          docker save "$img" | zstd -T0 -3 > "/tmp/docker-cache/${safe}.tar.zst"
+        done <<< "$new"
+
+        # Skip save if no tarballs exist (e.g. all images were locally built).
+        if ! ls /tmp/docker-cache/*.tar.zst >/dev/null 2>&1; then
+          echo "No registry images to cache"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Hash the full set of cached tarballs (existing + new).
+        hash=$(ls -1 /tmp/docker-cache/*.tar.zst | sort | sha256sum | cut -c1-16)
+        echo "hash=$hash" >> "$GITHUB_OUTPUT"
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache/save@v5
+      if: inputs.phase == 'save' && steps.snap.outputs.skip != 'true'
+      with:
+        path: /tmp/docker-cache
+        key: docker-${{ github.job }}-${{ inputs.key }}-wk${{ steps.meta.outputs.week }}-${{ steps.snap.outputs.hash }}
