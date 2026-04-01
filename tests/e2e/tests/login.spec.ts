@@ -79,7 +79,9 @@ test.describe("authenticated navigation", () => {
 test.describe("unauthenticated access", () => {
   test("protected pages redirect to login", async ({ page }) => {
     await page.goto("/deployments");
-    // Should end up on the Dex login form (redirected through /login).
+    // Redirect chain: /deployments → /login → Dex. Wait for the Dex
+    // page to load before checking for the form input.
+    await page.waitForURL(/\/auth\//, { timeout: 15000 });
     await expect(page.locator('input[name="login"]')).toBeVisible();
   });
 });

@@ -250,6 +250,7 @@ func simulateLogin(t *testing.T, serverURL string) (*http.Cookie, *http.Response
 	stateCookie := findCookie(resp, "blockyard_oidc_state")
 	if stateCookie == nil {
 		t.Fatal("missing blockyard_oidc_state cookie after /login")
+		return nil, nil
 	}
 	keycloakAuthURL := resp.Header.Get("Location")
 
@@ -276,6 +277,7 @@ func simulateLogin(t *testing.T, serverURL string) (*http.Cookie, *http.Response
 	matches := formActionRe.FindSubmatch(body)
 	if matches == nil {
 		t.Fatalf("could not find login form action in Keycloak HTML:\n%s", string(body[:min(len(body), 2000)]))
+		return nil, nil
 	}
 	// The action URL is HTML-encoded; decode &amp; to &.
 	formAction := strings.ReplaceAll(string(matches[1]), "&amp;", "&")
@@ -322,6 +324,7 @@ func simulateLogin(t *testing.T, serverURL string) (*http.Cookie, *http.Response
 	sessionCookie := findCookie(resp, "blockyard_session")
 	if sessionCookie == nil {
 		t.Fatal("missing blockyard_session cookie after /callback")
+		return nil, resp
 	}
 
 	return sessionCookie, resp
@@ -450,6 +453,7 @@ func TestIDPTokenRefresh(t *testing.T) {
 	session := deps.UserSessions.Get(payload.Sub)
 	if session == nil {
 		t.Fatal("expected session to exist")
+		return
 	}
 	originalToken := session.AccessToken
 
@@ -478,6 +482,7 @@ func TestIDPTokenRefresh(t *testing.T) {
 	refreshedSession := deps.UserSessions.Get(payload.Sub)
 	if refreshedSession == nil {
 		t.Fatal("session missing after refresh")
+		return
 	}
 	if refreshedSession.AccessToken == originalToken {
 		t.Error("expected access token to change after refresh")

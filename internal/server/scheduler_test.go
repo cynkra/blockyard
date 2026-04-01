@@ -16,36 +16,41 @@ import (
 
 func TestShouldRun_NeverRunBefore(t *testing.T) {
 	// "every minute" schedule, never run before → should fire.
-	if !shouldRun("* * * * *", nil, time.Now()) {
+	now := time.Date(2026, 3, 26, 10, 30, 0, 0, time.UTC)
+	if !shouldRun("* * * * *", nil, now) {
 		t.Error("expected shouldRun=true when never run before")
 	}
 }
 
 func TestShouldRun_RecentlyRun(t *testing.T) {
 	// "every hour" schedule, last run 30s ago → should not fire.
-	last := time.Now().Add(-30 * time.Second).Format(time.RFC3339)
-	if shouldRun("0 * * * *", &last, time.Now()) {
+	now := time.Date(2026, 3, 26, 10, 30, 0, 0, time.UTC)
+	last := now.Add(-30 * time.Second).Format(time.RFC3339)
+	if shouldRun("0 * * * *", &last, now) {
 		t.Error("expected shouldRun=false when last run was 30s ago and schedule is hourly")
 	}
 }
 
 func TestShouldRun_DueToFire(t *testing.T) {
 	// "every minute" schedule, last run 2 minutes ago → should fire.
-	last := time.Now().Add(-2 * time.Minute).Format(time.RFC3339)
-	if !shouldRun("* * * * *", &last, time.Now()) {
+	now := time.Date(2026, 3, 26, 10, 30, 0, 0, time.UTC)
+	last := now.Add(-2 * time.Minute).Format(time.RFC3339)
+	if !shouldRun("* * * * *", &last, now) {
 		t.Error("expected shouldRun=true when last run was 2 minutes ago")
 	}
 }
 
 func TestShouldRun_InvalidCron(t *testing.T) {
-	if shouldRun("invalid-cron", nil, time.Now()) {
+	now := time.Date(2026, 3, 26, 10, 30, 0, 0, time.UTC)
+	if shouldRun("invalid-cron", nil, now) {
 		t.Error("expected shouldRun=false for invalid cron expression")
 	}
 }
 
 func TestShouldRun_EmptyLastRun(t *testing.T) {
+	now := time.Date(2026, 3, 26, 10, 30, 0, 0, time.UTC)
 	empty := ""
-	if !shouldRun("* * * * *", &empty, time.Now()) {
+	if !shouldRun("* * * * *", &empty, now) {
 		t.Error("expected shouldRun=true when lastRun is empty string")
 	}
 }

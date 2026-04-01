@@ -168,6 +168,7 @@ func TestProxySessionReuse(t *testing.T) {
 	}
 	if sessCookie == nil {
 		t.Fatal("no session cookie")
+		return
 	}
 
 	initialWorkerCount := srv.Workers.Count()
@@ -491,6 +492,7 @@ func TestProxyWebSocketCacheReconnect(t *testing.T) {
 	}
 	if sessCookie == nil {
 		t.Fatal("no session cookie on WebSocket response")
+		return
 	}
 
 	// Send and receive a message to confirm it works
@@ -735,6 +737,7 @@ func TestProxyStaleSessionCreatesNew(t *testing.T) {
 	}
 	if sessCookie == nil {
 		t.Fatal("no session cookie")
+		return
 	}
 
 	// Delete the worker from the registry so the session is stale.
@@ -805,6 +808,7 @@ func TestProxyWebSocketForwardsHeaders(t *testing.T) {
 
 	if backendHeaders == nil {
 		t.Fatal("backend never received the upgrade request")
+		return
 	}
 	if got := backendHeaders.Get("Origin"); got != sameOrigin {
 		t.Errorf("Origin: expected %q, got %q", sameOrigin, got)

@@ -47,6 +47,7 @@ func TestCacheTakeBeforeExpiry(t *testing.T) {
 	got := cache.Take("sess-1")
 	if got == nil {
 		t.Fatal("expected non-nil reader from Take")
+		return
 	}
 	if got != br {
 		t.Error("expected same reader back")

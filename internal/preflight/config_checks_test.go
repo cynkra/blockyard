@@ -209,6 +209,7 @@ func TestCheckNoAuditLog(t *testing.T) {
 		res := findResult(r, "no_audit_log")
 		if res == nil {
 			t.Fatal("expected no_audit_log result")
+			return
 		}
 		if res.Severity != SeverityInfo {
 			t.Errorf("expected SeverityInfo, got %d", res.Severity)

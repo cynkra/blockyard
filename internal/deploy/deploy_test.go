@@ -29,6 +29,7 @@ func TestPrepareManifest_CaseManifest(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil manifest")
+		return
 	}
 	if result.Metadata.Entrypoint != "app.R" {
 		t.Errorf("entrypoint: got %q", result.Metadata.Entrypoint)
@@ -53,6 +54,7 @@ func TestPrepareManifest_CaseRenvLock(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil manifest")
+		return
 	}
 	if !result.IsPinned() {
 		t.Error("expected pinned manifest")
@@ -74,6 +76,7 @@ func TestPrepareManifest_CaseDescription(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil manifest")
+		return
 	}
 	if result.IsPinned() {
 		t.Error("expected unpinned manifest")
