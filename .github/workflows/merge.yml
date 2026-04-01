@@ -224,7 +224,7 @@ jobs:
           PR_NUM=$(echo "$REF" | grep -oP 'pr-\K[0-9]+')
           echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
 
-      - uses: dawidd6/action-download-artifact@v8
+      - uses: dawidd6/action-download-artifact@v19
         with:
           workflow: ci.yml
           pr: ${{ steps.pr.outputs.number }}

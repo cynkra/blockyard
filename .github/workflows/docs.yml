@@ -44,4 +44,4 @@ jobs:
     steps:
       - id: deployment
         # TODO: bump to v5 once released with node24 support
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
