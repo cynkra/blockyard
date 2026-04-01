@@ -59,6 +59,7 @@ jobs:
       - uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+          retry-on-snapshot-warnings: true
 
   unit:
     needs: [changes]
