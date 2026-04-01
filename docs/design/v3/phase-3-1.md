@@ -585,9 +585,15 @@ Add to `.devcontainer/Dockerfile`, after the Go installation:
 
 ```dockerfile
 # Atlas Community CLI (migration linting) — pin version, -latest is a canary.
+# Checksum published at release.ariga.io alongside the binary.
 ARG ATLAS_VERSION=v1.1.0
 RUN curl -fsSL "https://release.ariga.io/atlas/atlas-community-linux-amd64-${ATLAS_VERSION}" \
-    -o /usr/local/bin/atlas && chmod +x /usr/local/bin/atlas
+      -o /usr/local/bin/atlas \
+    && curl -fsSL "https://release.ariga.io/atlas/atlas-community-linux-amd64-${ATLAS_VERSION}.sha256" \
+      -o /tmp/atlas.sha256 \
+    && echo "$(cat /tmp/atlas.sha256)  /usr/local/bin/atlas" | sha256sum -c - \
+    && chmod +x /usr/local/bin/atlas \
+    && rm /tmp/atlas.sha256
 ```
 
 #### CI workflow: `migration-lint` job
@@ -619,7 +625,11 @@ migration-lint:
     - name: Install Atlas Community
       run: |
         curl -fsSL https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.1.0 \
-          -o /usr/local/bin/atlas && chmod +x /usr/local/bin/atlas
+          -o /usr/local/bin/atlas
+        curl -fsSL https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.1.0.sha256 \
+          -o /tmp/atlas.sha256
+        echo "$(cat /tmp/atlas.sha256)  /usr/local/bin/atlas" | sha256sum -c -
+        chmod +x /usr/local/bin/atlas
     - name: Lint SQLite migrations
       run: |
         atlas migrate lint \
@@ -853,6 +863,79 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
         }
         lines = append(lines, fmt.Sprintf("FK %s.%s: %s -> %s.%s",
             tbl, name, col, refTbl, refCol))
+    }
+
+    // Functions (excludes internal/system functions)
+    fnRows, err := db.Query(`
+        SELECT p.proname, pg_get_functiondef(p.oid)
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+        ORDER BY p.proname`)
+    if err != nil {
+        t.Fatal(err)
+    }
+    defer fnRows.Close()
+
+    for fnRows.Next() {
+        var name, def string
+        if err := fnRows.Scan(&name, &def); err != nil {
+            t.Fatal(err)
+        }
+        lines = append(lines, fmt.Sprintf("FUNC %s: %s", name, def))
+    }
+
+    // Triggers
+    trgRows, err := db.Query(`
+        SELECT tgname, pg_get_triggerdef(t.oid)
+        FROM pg_trigger t
+        JOIN pg_class c ON t.tgrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'public'
+          AND NOT t.tgisinternal
+        ORDER BY c.relname, t.tgname`)
+    if err != nil {
+        t.Fatal(err)
+    }
+    defer trgRows.Close()
+
+    for trgRows.Next() {
+        var name, def string
+        if err := trgRows.Scan(&name, &def); err != nil {
+            t.Fatal(err)
+        }
+        lines = append(lines, fmt.Sprintf("TRIGGER %s: %s", name, def))
+    }
+
+    // RLS policies
+    polRows, err := db.Query(`
+        SELECT pol.polname, c.relname, pg_get_expr(pol.polqual, pol.polrelid) AS using_expr,
+               pg_get_expr(pol.polwithcheck, pol.polrelid) AS check_expr
+        FROM pg_policy pol
+        JOIN pg_class c ON pol.polrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'public'
+        ORDER BY c.relname, pol.polname`)
+    if err != nil {
+        t.Fatal(err)
+    }
+    defer polRows.Close()
+
+    for polRows.Next() {
+        var name, tbl string
+        var usingExpr, checkExpr *string
+        if err := polRows.Scan(&name, &tbl, &usingExpr, &checkExpr); err != nil {
+            t.Fatal(err)
+        }
+        u, c := "NULL", "NULL"
+        if usingExpr != nil {
+            u = *usingExpr
+        }
+        if checkExpr != nil {
+            c = *checkExpr
+        }
+        lines = append(lines, fmt.Sprintf("POLICY %s.%s: USING(%s) CHECK(%s)",
+            tbl, name, u, c))
     }
 
     return strings.Join(lines, "\n")
@@ -1366,15 +1449,15 @@ func TestBackupPostgres(t *testing.T) {
 
 7. **Schema dump via SQL introspection, not `pg_dump`.** The roundtrip
    test needs a deterministic schema comparison. `sqlite_master` and
-   `information_schema`/`pg_indexes` produce stable, sorted output
-   without external tool dependencies. `pg_dump` output varies across
-   versions and includes comments that complicate diffing. The
-   PostgreSQL dump covers columns, indexes, CHECK constraints, and
-   foreign keys — sufficient for the server's own tables. Board-specific
-   objects (RLS policies, triggers, functions) are not included: they're
-   PostgREST-facing, expected to remain stable, and any missing `DROP`
-   in a down migration would already cause the second `up` to fail with
-   a duplicate-object error.
+   `information_schema`/`pg_indexes`/`pg_proc`/`pg_trigger`/`pg_policy`
+   produce stable, sorted output without external tool dependencies.
+   `pg_dump` output varies across versions and includes comments that
+   complicate diffing. The PostgreSQL dump covers columns, indexes,
+   CHECK constraints, foreign keys, functions, triggers, and RLS
+   policies — a complete picture of the public schema. This avoids
+   relying on duplicate-object errors to catch missing `DROP`s in down
+   migrations, which would silently fail for any object created with
+   `CREATE OR REPLACE`.
 
 8. **Pre-migration backup as a `DB` method.** The backup utility lives
    on the `DB` struct because it needs dialect awareness and a live
