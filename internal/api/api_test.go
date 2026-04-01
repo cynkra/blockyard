@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/cynkra/blockyard/internal/api/docs"
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
@@ -4851,5 +4852,26 @@ func TestRestoreAppHXRequest(t *testing.T) {
 	trigger := resp.Header.Get("HX-Trigger")
 	if !strings.Contains(trigger, "showToast") {
 		t.Errorf("expected HX-Trigger to contain showToast, got %q", trigger)
+	}
+}
+
+// TestSwaggerDocJSON verifies that /swagger/doc.json is accessible without
+// authentication (regression test for #99).
+func TestSwaggerDocJSON(t *testing.T) {
+	_, ts := testServer(t)
+
+	resp, err := http.Get(ts.URL + "/swagger/doc.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json content-type, got %q", ct)
 	}
 }
