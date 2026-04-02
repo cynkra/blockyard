@@ -14,6 +14,13 @@ endpoint). Completes the operations track.
 
 ## Prerequisites from Earlier Phases
 
+- **Reverse proxy** — the server must run behind a reverse proxy that
+  discovers backend containers via Docker labels or network membership.
+  Rolling updates start the new container on the same Docker network
+  without host port bindings; the proxy routes traffic by container IP.
+  Deployments that rely on host port bindings (`-p`) cannot use rolling
+  updates — the admin endpoints return `501 Not Implemented` when no
+  proxy-compatible setup is detected.
 - **Phase 3-2** — worker token persistence (both servers verify the
   same tokens), interface extraction (shared state contracts).
 - **Phase 3-3** — Redis-backed session store, worker registry, and
@@ -140,8 +147,9 @@ func (db *DB) BackupWithMeta(ctx context.Context, imageTag string) (*BackupMeta,
 }
 ```
 
-`MigrationVersion()` already exists on `*db.DB` — it wraps
-`golang-migrate`'s `Version()` method.
+`MigrationVersion()` is new — a thin wrapper around
+`golang-migrate`'s `Version()` method, added alongside the backup
+metadata code.
 
 Also add `LatestBackupMeta()` to find the most recent metadata file
 for rollback:
@@ -178,6 +186,8 @@ type Orchestrator struct {
     serverID string           // own container ID from DockerBackend.ServerID()
     db       *db.DB
     cfg      *config.Config
+    version  string           // current server version (from cfg.Server.Version)
+    tasks    *task.Store       // for creating tasks in scheduled updates
     update   updateAPI        // interface for GitHub release checking
     log      *slog.Logger
 }
@@ -195,8 +205,17 @@ type dockerClient interface {
 }
 
 // updateAPI abstracts the GitHub release check so tests can mock it.
+// The existing update.CheckLatest() function is wrapped in a
+// DefaultChecker struct to satisfy this interface.
 type updateAPI interface {
     CheckLatest(channel, currentVersion string) (*update.Result, error)
+}
+
+// DefaultChecker wraps the existing update.CheckLatest function.
+type DefaultChecker struct{}
+
+func (DefaultChecker) CheckLatest(channel, currentVersion string) (*update.Result, error) {
+    return update.CheckLatest(channel, currentVersion)
 }
 ```
 
@@ -236,6 +255,11 @@ func (o *Orchestrator) cloneConfig(
         cfg.Env = appendOrReplace(cfg.Env, parts[0], parts[1])
     }
 
+    // Strip host port bindings — the proxy discovers the new container
+    // by Docker network/labels, so host ports are unnecessary and would
+    // conflict with the still-running old container.
+    hostCfg.PortBindings = nil
+
     // Generate a unique container name to avoid conflicts.
     cfg.Hostname = ""
     name := fmt.Sprintf("blockyard-update-%d", time.Now().Unix())
@@ -257,8 +281,16 @@ and `BLOCKYARD_PASSIVE=1`.
 #### Rolling update sequence
 
 ```go
+// UpdateResult holds the new container's identity so the caller can
+// pass it to Watchdog. Nil when the server is already up to date.
+type UpdateResult struct {
+    ContainerID string // Docker container ID of the new instance
+    Addr        string // internal IP:port for health checks
+}
+
 // Update executes the rolling update. It reports progress to the
-// provided sender (task.Sender) and returns nil on success.
+// provided sender (task.Sender) and returns the new container's
+// identity on success (nil result when already up to date).
 //
 // The caller (API handler or cron trigger) runs this in a goroutine.
 // The context should be the server's background context, not a
@@ -269,15 +301,15 @@ func (o *Orchestrator) Update(
     sender task.Sender,
     drainFn func(),       // sets health → 503 (listeners stay alive)
     undrainFn func(),     // clears draining flag (health → 200)
-) error {
+) (*UpdateResult, error) {
     // 1. Check for newer version.
     result, err := o.update.CheckLatest(channel, o.cfg.Server.Version)
     if err != nil {
-        return fmt.Errorf("check latest: %w", err)
+        return nil, fmt.Errorf("check latest: %w", err)
     }
     if !result.UpdateAvailable {
         sender.Write("Already up to date (" + result.CurrentVersion + ").")
-        return nil
+        return nil, nil
     }
     newImage := imageRef(result)
     sender.Write(fmt.Sprintf("Update available: %s → %s",
@@ -286,14 +318,14 @@ func (o *Orchestrator) Update(
     // 2. Pull new image.
     sender.Write("Pulling " + newImage + " ...")
     if err := o.pullImage(ctx, newImage); err != nil {
-        return fmt.Errorf("pull image: %w", err)
+        return nil, fmt.Errorf("pull image: %w", err)
     }
 
     // 3. Back up database.
     sender.Write("Backing up database ...")
     meta, err := o.db.BackupWithMeta(ctx, o.currentImageTag())
     if err != nil {
-        return fmt.Errorf("backup: %w", err)
+        return nil, fmt.Errorf("backup: %w", err)
     }
     sender.Write("Backup: " + meta.BackupPath)
 
@@ -301,7 +333,7 @@ func (o *Orchestrator) Update(
     sender.Write("Starting new container ...")
     newID, err := o.startClone(ctx, newImage)
     if err != nil {
-        return fmt.Errorf("start new container: %w", err)
+        return nil, fmt.Errorf("start new container: %w", err)
     }
 
     // 5. Poll /readyz on new container until 200.
@@ -309,7 +341,7 @@ func (o *Orchestrator) Update(
     newAddr, err := o.waitReady(ctx, newID)
     if err != nil {
         o.killAndRemove(ctx, newID)
-        return fmt.Errorf("new container never became ready: %w", err)
+        return nil, fmt.Errorf("new container never became ready: %w", err)
     }
 
     // 6. Drain self.
@@ -321,12 +353,12 @@ func (o *Orchestrator) Update(
     if err := o.activate(ctx, newAddr); err != nil {
         o.killAndRemove(ctx, newID)
         undrainFn()
-        return fmt.Errorf("activate new server: %w", err)
+        return nil, fmt.Errorf("activate new server: %w", err)
     }
 
-    // 8. Record new container ID for watchdog.
+    // 8. Return new container identity for watchdog.
     sender.Write("Update complete. Entering watchdog mode ...")
-    return nil
+    return &UpdateResult{ContainerID: newID, Addr: newAddr}, nil
 }
 ```
 
@@ -515,7 +547,8 @@ func (db *DB) CheckDownMigrationSafety(toVersion, fromVersion uint) error {
 
 ### Step 5: Admin API endpoints
 
-In `internal/api/admin.go`, new handlers behind admin-role auth:
+In `internal/api/admin.go`, new handlers with inline admin checks
+(same `caller.Role.CanManageRoles()` pattern as the activate endpoint):
 
 ```go
 // POST /api/v1/admin/update
@@ -564,7 +597,6 @@ group):
 
 ```go
 r.Route("/api/v1/admin", func(r chi.Router) {
-    r.Use(requireRole("admin"))
     r.Post("/update", handleAdminUpdate(srv, orch))
     r.Post("/rollback", handleAdminRollback(srv, orch))
     r.Get("/update/status", handleAdminUpdateStatus(srv))
@@ -616,8 +648,14 @@ calls `Finish()` to cleanly tear down:
 
 ```go
 // In the update handler goroutine:
-if err := orch.Update(bgCtx, channel, sender, drainFn, undrainFn); err != nil {
-    sender.Fail(err.Error())
+ur, err := orch.Update(bgCtx, channel, sender, drainFn, undrainFn)
+if err != nil {
+    sender.Write(err.Error())
+    sender.Complete(task.Failed)
+    return
+}
+if ur == nil {
+    sender.Complete(task.Completed) // already up to date
     return
 }
 
@@ -626,13 +664,15 @@ watchPeriod := cfg.Update.WatchPeriod.Duration
 if watchPeriod == 0 {
     watchPeriod = 5 * time.Minute
 }
-if err := orch.Watchdog(bgCtx, newID, newAddr, watchPeriod, undrainFn, sender); err != nil {
-    sender.Fail(err.Error())
+if err := orch.Watchdog(bgCtx, ur.ContainerID, ur.Addr, watchPeriod, undrainFn, sender); err != nil {
+    sender.Write(err.Error())
+    sender.Complete(task.Failed)
     return // rollback happened, server is still running
 }
 
 // Watchdog passed — clean exit (workers survive via Redis).
-sender.Complete("Update successful. Shutting down old server.")
+sender.Write("Update successful. Shutting down old server.")
+sender.Complete(task.Completed)
 drainer.Finish(cfg.Server.DrainTimeout.Duration)
 ```
 
@@ -862,19 +902,27 @@ func (o *Orchestrator) RunScheduled(
             "latest", result.LatestVersion)
 
         sender := o.tasks.Create(uuid.New().String(), "scheduled-update")
-        if err := o.Update(ctx, channel, sender, drainFn, undrainFn); err != nil {
+        ur, err := o.Update(ctx, channel, sender, drainFn, undrainFn)
+        if err != nil {
             slog.Error("update scheduler: update failed", "error", err)
-            sender.Fail(err.Error())
+            sender.Complete(task.Failed)
+            continue
+        }
+        if ur == nil {
+            sender.Complete(task.Completed) // already up to date
             continue
         }
 
         // Enter watchdog — same as CLI-triggered flow.
         // On success: Finish() + exit. On failure: rollback + continue loop.
-        if err := o.Watchdog(ctx, ...); err != nil {
+        if err := o.Watchdog(ctx, ur.ContainerID, ur.Addr,
+            cfg.Update.WatchPeriod.Duration, undrainFn, sender); err != nil {
             slog.Error("update scheduler: watchdog rollback", "error", err)
+            sender.Complete(task.Failed)
             continue
         }
 
+        sender.Complete(task.Completed)
         finishFn()
     }
 }
@@ -999,7 +1047,7 @@ func TestBackupMetaRoundTrip(t *testing.T)  // write → read → compare
 | `internal/config/config.go` | **update** | Add `UpdateConfig` struct and `Update *UpdateConfig` field |
 | `internal/db/backup.go` | **update** | Add `BackupMeta`, `BackupWithMeta()`, `LatestBackupMeta()`, `ErrNoBackup` |
 | `internal/db/backup_test.go` | **update** | Add metadata round-trip tests |
-| `internal/db/migrate.go` | **update** | Add `CheckDownMigrationSafety()` and `MigrateDown()` |
+| `internal/db/migrate.go` | **update** | Add `MigrationVersion()`, `CheckDownMigrationSafety()`, and `MigrateDown()` |
 | `internal/orchestrator/orchestrator.go` | **create** | `Orchestrator` struct, `dockerClient` interface, `Update()` method |
 | `internal/orchestrator/rollback.go` | **create** | `Rollback()` method |
 | `internal/orchestrator/watchdog.go` | **create** | `Watchdog()` method |
