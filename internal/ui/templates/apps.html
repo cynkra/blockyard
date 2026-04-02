@@ -42,6 +42,7 @@
 <section class="app-grid">
     {{range .Apps}}
     <a href="/app/{{.Name}}/" class="app-card">
+        <div class="card-body p-4">
         {{if .CanManage}}
         <button class="app-card-gear"
                 hx-get="/ui/apps/{{.Name}}/sidebar"
@@ -59,6 +60,7 @@
             {{range .Tags}}<span class="tag">{{.}}</span>{{end}}
         </span>
         {{end}}
+        </div>
     </a>
     {{end}}
 </section>

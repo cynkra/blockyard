@@ -17,9 +17,11 @@
         <div class="app-grid">
             {{range .PublicApps}}
             <a href="/app/{{.Name}}/" class="app-card">
+                <div class="card-body p-4">
                 <span class="app-name">{{.Name}}</span>
                 {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
                 <span class="app-status app-status--{{.Status}}">{{.Status}}</span>
+                </div>
             </a>
             {{end}}
         </div>
