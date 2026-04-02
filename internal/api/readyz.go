@@ -86,6 +86,19 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 			}()
 		}
 
+		// Redis
+		if srv.RedisClient != nil {
+			func() {
+				ctx, cancel := context.WithTimeout(r.Context(), readyzCheckTimeout)
+				defer cancel()
+				if err := srv.RedisClient.Ping(ctx); err != nil {
+					checks["redis"] = "fail"
+				} else {
+					checks["redis"] = "pass"
+				}
+			}()
+		}
+
 		// OpenBao
 		if srv.VaultClient != nil {
 			func() {

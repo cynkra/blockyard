@@ -16,6 +16,7 @@ import (
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/logstore"
 	"github.com/cynkra/blockyard/internal/pkgstore"
+	"github.com/cynkra/blockyard/internal/redisstate"
 	"github.com/cynkra/blockyard/internal/registry"
 	"github.com/cynkra/blockyard/internal/session"
 	"github.com/cynkra/blockyard/internal/task"
@@ -48,6 +49,9 @@ type Server struct {
 	// VaultTokenHealthy reports whether the vault token is valid.
 	// Non-nil only when AppRole auth is used (token renewal active).
 	VaultTokenHealthy func() bool
+
+	// Redis client — nil when [redis] is not configured.
+	RedisClient *redisstate.Client
 
 	// Audit log — nil when [audit] is not configured.
 	AuditLog *audit.Log

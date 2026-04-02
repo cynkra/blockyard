@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 	"syscall"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/api"
 	_ "github.com/cynkra/blockyard/internal/api/docs"
@@ -27,7 +28,10 @@ import (
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/proxy"
+	"github.com/cynkra/blockyard/internal/redisstate"
+	"github.com/cynkra/blockyard/internal/registry"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/session"
 	"github.com/cynkra/blockyard/internal/telemetry"
 	"github.com/cynkra/blockyard/internal/update"
 )
@@ -202,6 +206,26 @@ func main() {
 		os.Exit(1)
 	}
 	srv.WorkerTokenKey = workerKey
+
+	// ── Redis shared state (optional) ──
+	if cfg.Redis != nil {
+		rc, err := redisstate.New(context.Background(), cfg.Redis)
+		if err != nil {
+			slog.Error("failed to connect to redis", "error", err)
+			os.Exit(1)
+		}
+		defer rc.Close()
+
+		srv.RedisClient = rc
+		srv.Sessions = session.NewRedisStore(rc, cfg.Proxy.SessionIdleTTL.Duration)
+		registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
+		srv.Registry = registry.NewRedisRegistry(rc, registryTTL)
+		hostname, _ := os.Hostname()
+		srv.Workers = server.NewRedisWorkerMap(rc, hostname)
+		slog.Info("using redis for shared state",
+			"url", maskRedisPassword(cfg.Redis.URL),
+			"prefix", cfg.Redis.KeyPrefix)
+	}
 
 	// Deferred validation: session_secret must be present if OIDC is configured.
 	if cfg.OIDC != nil {
@@ -436,5 +460,17 @@ func main() {
 	}
 
 	slog.Info("shutdown complete")
+}
+
+// maskRedisPassword replaces the password in a Redis URL with "***".
+func maskRedisPassword(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if _, hasPwd := u.User.Password(); hasPwd {
+		u.User = url.UserPassword(u.User.Username(), "***")
+	}
+	return u.String()
 }
 

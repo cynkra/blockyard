@@ -22,4 +22,5 @@ type WorkerMap interface {
 	IdleWorkers(timeout time.Duration) []string
 	AppIDs() []string
 	IsDraining(appID string) bool
+	ClearDraining(workerID string)
 }

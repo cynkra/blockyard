@@ -20,11 +20,17 @@ type Config struct {
 	Storage   StorageConfig    `toml:"storage"`
 	Database  DatabaseConfig   `toml:"database"`
 	Proxy     ProxyConfig      `toml:"proxy"`
+	Redis        *RedisConfig        `toml:"redis"`         // nil when not configured
 	OIDC         *OidcConfig         `toml:"oidc"`          // nil when not configured
 	Openbao      *OpenbaoConfig      `toml:"openbao"`       // nil when not configured
 	BoardStorage *BoardStorageConfig `toml:"board_storage"` // nil when not configured
 	Audit        *AuditConfig        `toml:"audit"`         // nil when not configured
 	Telemetry    *TelemetryConfig    `toml:"telemetry"`     // nil when not configured
+}
+
+type RedisConfig struct {
+	URL       string `toml:"url"`        // redis://[:password@]host:port[/db]
+	KeyPrefix string `toml:"key_prefix"` // default: "blockyard:"
 }
 
 type BoardStorageConfig struct {
@@ -214,11 +220,23 @@ func applyDefaults(cfg *Config) {
 		v := 16.0
 		cfg.Proxy.MaxCPULimit = &v
 	}
+	if cfg.Redis != nil {
+		redisDefaults(cfg.Redis)
+	}
 	if cfg.OIDC != nil {
 		oidcDefaults(cfg.OIDC)
 	}
 	if cfg.Openbao != nil {
 		openbaoDefaults(cfg.Openbao)
+	}
+}
+
+func redisDefaults(c *RedisConfig) {
+	if c.KeyPrefix == "" {
+		c.KeyPrefix = "blockyard:"
+	}
+	if !strings.HasSuffix(c.KeyPrefix, ":") {
+		c.KeyPrefix += ":"
 	}
 }
 
@@ -251,6 +269,12 @@ func applyEnvOverrides(cfg *Config) {
 	if cfg.Openbao == nil && envPrefixExists("BLOCKYARD_OPENBAO_") {
 		cfg.Openbao = &OpenbaoConfig{}
 		openbaoDefaults(cfg.Openbao)
+	}
+
+	// Auto-construct [redis] section if any BLOCKYARD_REDIS_* env var is set.
+	if cfg.Redis == nil && envPrefixExists("BLOCKYARD_REDIS_") {
+		cfg.Redis = &RedisConfig{}
+		redisDefaults(cfg.Redis)
 	}
 
 	// Auto-construct [board_storage] section if any BLOCKYARD_BOARD_STORAGE_* env var is set.
@@ -454,6 +478,10 @@ func validate(cfg *Config) error {
 			}
 			seen[svc.ID] = true
 		}
+	}
+
+	if cfg.Redis != nil && cfg.Redis.URL == "" {
+		return fmt.Errorf("config: [redis] section present but url is empty")
 	}
 
 	if cfg.BoardStorage != nil {

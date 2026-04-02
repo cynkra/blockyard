@@ -121,6 +121,30 @@ func StartupCleanup(ctx context.Context, srv *server.Server) error {
 			"count", count)
 	}
 
+	// Reconcile Redis worker map against containers still running.
+	// With in-memory stores this is a no-op (All() returns empty).
+	workerIDs := srv.Workers.All()
+	if len(workerIDs) > 0 {
+		remaining, _ := srv.Backend.ListManaged(ctx)
+		alive := make(map[string]bool, len(remaining))
+		for _, r := range remaining {
+			alive[r.ID] = true
+		}
+		var stale int
+		for _, wid := range workerIDs {
+			if !alive[wid] {
+				srv.Workers.Delete(wid)
+				srv.Sessions.DeleteByWorker(wid)
+				srv.Registry.Delete(wid)
+				stale++
+			}
+		}
+		if stale > 0 {
+			slog.Info("startup: removed stale worker entries from redis",
+				"count", stale)
+		}
+	}
+
 	return nil
 }
 
@@ -174,6 +198,10 @@ func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
 	for r := range results {
 		active[r.workerID] = true
 		if r.healthy {
+			// Refresh registry TTL on successful health check.
+			if addr, ok := srv.Registry.Get(r.workerID); ok {
+				srv.Registry.Set(r.workerID, addr)
+			}
 			delete(misses, r.workerID)
 			continue
 		}
