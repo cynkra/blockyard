@@ -1,6 +1,8 @@
 name: Merge
 
 on:
+  push:
+    branches: [main]
   pull_request:
   merge_group:
   workflow_call:
@@ -36,7 +38,7 @@ jobs:
       - uses: actions/checkout@v6
         if: github.event_name != 'pull_request'
       - uses: actions/setup-go@v6
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           go-version-file: go.mod
       - uses: ./.github/actions/docker-cache
@@ -46,22 +48,25 @@ jobs:
           key: ${{ matrix.test }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Pull compose images
+        if: github.event_name == 'push'
+        run: docker compose -f examples/${{ matrix.example }}/docker-compose.yml pull
       - name: Build blockyard image from source
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 -f docker/server.Dockerfile .
       - name: Block cloud metadata endpoint for containers
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Prepare coverage directory
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
       - name: Run example tests
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo --preserve-env=PATH,E2E_GOCOVERDIR go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
         env:
           E2E_GOCOVERDIR: /tmp/e2e-coverage
       - name: Convert example coverage data
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: |
           for sub in cli server; do
             dir="/tmp/e2e-coverage/$sub"
@@ -70,7 +75,7 @@ jobs:
             fi
           done
       - uses: actions/upload-artifact@v7
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           name: coverage-examples-${{ matrix.test }}
           path: coverage-examples-*.out
@@ -95,7 +100,7 @@ jobs:
       - uses: actions/checkout@v6
         if: github.event_name != 'pull_request'
       - uses: actions/setup-node@v4
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           node-version: 22
       - uses: ./.github/actions/docker-cache
@@ -104,28 +109,31 @@ jobs:
           phase: setup
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Pull compose images
+        if: github.event_name == 'push'
+        run: docker compose -f examples/hello-shiny/docker-compose.yml pull
       - name: Build blockyard image from source
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: docker build -t ghcr.io/cynkra/blockyard:latest --build-arg COVER=1 -f docker/server.Dockerfile .
       - name: Block cloud metadata endpoint
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
       - name: Prepare coverage directory
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: mkdir -p /tmp/playwright-coverage
       - name: Start services
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: |
           E2E_GOCOVERDIR=/tmp/playwright-coverage \
           docker compose -f examples/hello-shiny/docker-compose.yml \
                          -f tests/examples/docker-compose.cover.yml \
                          up -d --wait
       - uses: actions/setup-go@v6
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           go-version-file: go.mod
       - name: Build CLI and deploy hello app
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: |
           go build -o /tmp/by ./cmd/by
 
@@ -143,27 +151,27 @@ jobs:
           BLOCKYARD_URL=http://localhost:8080 BLOCKYARD_TOKEN="$TOKEN" \
             /tmp/by deploy examples/hello-shiny/app --yes --wait --name hello
       - name: Install Playwright
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         working-directory: tests/e2e
         run: |
           npm ci
           npx playwright install --with-deps chromium
       - name: Run Playwright tests
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
         working-directory: tests/e2e
         run: npx playwright test
       - name: Stop services and flush coverage
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request' && github.event_name != 'push'
         run: docker compose -f examples/hello-shiny/docker-compose.yml stop blockyard
       - name: Convert coverage data
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request' && github.event_name != 'push'
         run: |
           dir="/tmp/playwright-coverage"
           if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
             go tool covdata textfmt -i="$dir" -o="coverage-e2e.out"
           fi
       - uses: actions/upload-artifact@v7
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           name: coverage-e2e
           path: coverage-e2e-*.out
@@ -186,7 +194,7 @@ jobs:
           docker compose -f examples/hello-shiny/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
 
   examples:
-    if: always()
+    if: always() && github.event_name != 'push'
     needs: [run]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
