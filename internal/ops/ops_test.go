@@ -109,6 +109,75 @@ func TestEvictWorkerCleansUpPkgStore(t *testing.T) {
 	}
 }
 
+func TestStartupCleanupPassiveSkipsDestructiveOps(t *testing.T) {
+	srv, be := testServer(t)
+	bsp := srv.Config.Storage.BundleServerPath
+
+	// Seed managed resources — should survive in passive mode.
+	be.SetManagedResources([]backend.ManagedResource{
+		{ID: "container-1", Kind: backend.ResourceContainer},
+	})
+
+	// Create worker token directory — should survive in passive mode.
+	tokenDir := filepath.Join(bsp, ".worker-tokens", "w-live")
+	os.MkdirAll(tokenDir, 0o755)
+	os.WriteFile(filepath.Join(tokenDir, "token"), []byte("tok"), 0o644)
+
+	// Create orphaned staging directory — should still be cleaned.
+	storeRoot := filepath.Join(bsp, ".pkg-store")
+	os.MkdirAll(storeRoot, 0o755)
+	srv.PkgStore = pkgstore.NewStore(storeRoot)
+	stagingDir := filepath.Join(storeRoot, ".staging", "orphan-1")
+	os.MkdirAll(stagingDir, 0o755)
+	os.WriteFile(filepath.Join(stagingDir, "data"), []byte("stale"), 0o644)
+
+	// Create orphaned transfer directory — should still be cleaned.
+	transferDir := filepath.Join(bsp, ".transfers", "old-worker")
+	os.MkdirAll(transferDir, 0o755)
+	os.WriteFile(filepath.Join(transferDir, "board.json"), []byte("{}"), 0o644)
+
+	// Create a stale build — should still be failed.
+	app, err := srv.DB.CreateApp("test-app", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := srv.DB.CreateBundle("bundle-1", app.ID, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.DB.UpdateBundleStatus(bundle.ID, "building"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := StartupCleanup(context.Background(), srv, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Destructive ops must be skipped:
+	resources, _ := be.ListManaged(context.Background())
+	if len(resources) != 1 {
+		t.Errorf("passive mode should preserve managed resources, got %d", len(resources))
+	}
+	if _, err := os.Stat(tokenDir); os.IsNotExist(err) {
+		t.Error("passive mode should preserve worker token directories")
+	}
+
+	// Non-destructive cleanup must still run:
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Error("staging dir should be removed even in passive mode")
+	}
+	if _, err := os.Stat(transferDir); !os.IsNotExist(err) {
+		t.Error("transfer dir should be removed even in passive mode")
+	}
+	b, err := srv.DB.GetBundle(bundle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "failed" {
+		t.Errorf("stale builds should be failed even in passive mode, got %q", b.Status)
+	}
+}
+
 func TestStartupCleanupRemovesOrphans(t *testing.T) {
 	srv, be := testServer(t)
 

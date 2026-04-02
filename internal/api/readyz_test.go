@@ -807,6 +807,59 @@ func TestReadyzPassiveMode(t *testing.T) {
 	}
 }
 
+func TestReadyzPassiveModeWithFailedDeps(t *testing.T) {
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestAdmin(t, database)
+
+	cfg := &config.Config{}
+	be := &failingBackend{MockBackend: mock.New()}
+	srv := server.NewServer(cfg, be, database)
+	srv.Passive.Store(true)
+
+	// Close DB so database check also fails.
+	database.Close()
+
+	handler := readyzHandler(srv, true)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["status"] != "not_ready" {
+		t.Errorf("expected status 'not_ready', got %v", body["status"])
+	}
+	if body["mode"] != "passive" {
+		t.Errorf("expected mode 'passive', got %v", body["mode"])
+	}
+}
+
+func TestMainRouterHealthzDraining(t *testing.T) {
+	srv := testServerForReadyz(t)
+	srv.Draining.Store(true)
+	// ManagementBind empty — /healthz is on the main router.
+
+	router := NewRouter(srv, func() {})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+	if body := rec.Body.String(); body != "draining" {
+		t.Errorf("expected body 'draining', got %q", body)
+	}
+}
+
 func TestManagementRouterMetricsExplicitlyDisabled(t *testing.T) {
 	srv := testServerForReadyz(t)
 	// Telemetry is set but metrics explicitly disabled.
