@@ -470,8 +470,9 @@ and selects the appropriate backend.
 
 1. **Redis client package** (`internal/redisstate/`) — manages the
    shared `*redis.Client`, health check, and key prefix. Exposes a
-   `New(cfg config.RedisConfig) (*Client, error)` constructor and a
-   `Ping(ctx) error` health check. The config struct:
+   `New(ctx, cfg *config.RedisConfig) (*Client, error)` constructor
+   (ctx bounds the initial PING) and a `Ping(ctx) error` health check.
+   The config struct:
 
    ```go
    type RedisConfig struct {
@@ -495,22 +496,24 @@ and selects the appropriate backend.
 4. **Redis WorkerMap** (`internal/server/workermap_redis.go`) —
    implements `WorkerMap` using Redis hashes. Each worker is a hash at
    `{prefix}worker:{workerID}` with fields `app_id`, `bundle_id`,
-   `draining`, `idle_since`, `started_at`. List operations (`All`,
-   `ForApp`, etc.) use `SCAN` with pattern matching. `CancelToken` is
-   not serializable — it remains local to the owning server instance.
+   `draining`, `idle_since`, `started_at`, `server_id` (hostname of
+   the owning server — useful for debugging during rolling updates).
+   List operations (`All`, `ForApp`, etc.) use `SCAN` with pattern
+   matching. `CancelToken` is not serializable — it remains local to
+   the owning server instance.
 
-5. **Server startup selection** — in `cmd/blockyard/main.go`:
+5. **Server startup selection** — in `cmd/blockyard/main.go`.
+   `NewServer()` initialises memory stores by default; when Redis is
+   configured the stores are overwritten:
 
    ```go
-   if cfg.Redis.URL != "" {
-       rc, err := redisstate.New(cfg.Redis)
-       srv.Sessions = session.NewRedisStore(rc)
-       srv.Registry = registry.NewRedisRegistry(rc)
-       srv.Workers = server.NewRedisWorkerMap(rc)
-   } else {
-       srv.Sessions = session.NewMemoryStore()
-       srv.Registry = registry.NewMemoryRegistry()
-       srv.Workers = server.NewMemoryWorkerMap()
+   if cfg.Redis != nil {
+       rc, err := redisstate.New(ctx, cfg.Redis)
+       srv.RedisClient = rc
+       srv.Sessions = session.NewRedisStore(rc, cfg.Proxy.SessionIdleTTL.Duration)
+       srv.Registry = registry.NewRedisRegistry(rc, 3*cfg.Proxy.HealthInterval.Duration)
+       hostname, _ := os.Hostname()
+       srv.Workers = server.NewRedisWorkerMap(rc, hostname)
    }
    ```
 
@@ -519,10 +522,18 @@ and selects the appropriate backend.
 
 7. **Redis network isolation** — workers must not reach Redis.
 
-   **Docker backend:** Redis on a dedicated `internal: true` network
-   (`blockyard-state`). Only the server connects to it. **Redis must NOT
-   be on the `ServiceNetwork`** — that network is connected to every
-   worker.
+   Workers are already isolated by construction: each gets its own
+   per-worker bridge network and can only reach containers explicitly
+   connected to it (service containers, the server). Redis is never
+   connected to any worker network, so workers cannot reach it — unless
+   the operator puts Redis on the `ServiceNetwork`.
+
+   **Preflight check:** `checkRedisOnServiceNetwork` (in
+   `internal/preflight/docker_checks.go`) inspects the service network
+   at startup and rejects if any container matching the Redis hostname
+   or IP is found on it.
+
+   **Deployment guidance:** use a separate Docker network for Redis:
 
    ```yaml
    services:
@@ -535,17 +546,14 @@ and selects the appropriate backend.
        internal: true
    ```
 
-   **Process backend:** Unix socket outside the bwrap sandbox
-   (recommended). TCP with AUTH accepted but logs a warning at startup.
-
-   **Defense in depth (both backends):** Redis AUTH required — startup
-   rejects unauthenticated Redis URLs. No Redis data in worker-visible
+   **Defense in depth:** Redis AUTH recommended — startup logs a warning
+   when the connection has no password. No Redis data in worker-visible
    surfaces.
 
-8. **Tests** — Redis integration tests (tagged `redis_test`). Same
-   behavioral tests as memory stores, concurrent access tests, Lua
-   script atomicity. Network isolation test (tagged `docker_test`):
-   verify worker container cannot connect to Redis.
+8. **Tests** — Redis integration tests (tagged `redis_test`) against a
+   real Redis service container in CI. Unit tests use miniredis for each
+   store method. Concurrent access tests (race-detected) for all three
+   stores verify Lua script atomicity and absence of data races.
 
 ### Phase 3-4: Drain Mode & Server Handoff
 

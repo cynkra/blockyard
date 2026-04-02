@@ -118,6 +118,10 @@ func main() {
 		}
 
 		preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		var redisURL string
+		if cfg.Redis != nil {
+			redisURL = cfg.Redis.URL
+		}
 		dockerReport := preflight.RunDockerChecks(preflightCtx, preflight.DockerDeps{
 			Client:     be.Client(),
 			ServerID:   be.ServerID(),
@@ -125,6 +129,7 @@ func main() {
 			Config:     &cfg.Docker,
 			StorePath:  storePath,
 			BuilderBin: builderBin,
+			RedisURL:   redisURL,
 		})
 		preflightCancel()
 		dockerReport.Log()
