@@ -117,7 +117,7 @@ func TestStartupCleanupRemovesOrphans(t *testing.T) {
 		{ID: "network-1", Kind: backend.ResourceNetwork},
 	})
 
-	if err := StartupCleanup(context.Background(), srv); err != nil {
+	if err := StartupCleanup(context.Background(), srv, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -150,7 +150,7 @@ func TestStartupCleanupRemovesOrphanDirs(t *testing.T) {
 	os.MkdirAll(tokenDir, 0o755)
 	os.WriteFile(filepath.Join(tokenDir, "token"), []byte("tok"), 0o644)
 
-	if err := StartupCleanup(context.Background(), srv); err != nil {
+	if err := StartupCleanup(context.Background(), srv, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -205,7 +205,7 @@ func TestStartupCleanupFailsStaleBuilds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := StartupCleanup(context.Background(), srv); err != nil {
+	if err := StartupCleanup(context.Background(), srv, false); err != nil {
 		t.Fatal(err)
 	}
 

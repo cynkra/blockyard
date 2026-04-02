@@ -73,7 +73,7 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 	srv.VaultClient = mockVaultForEnrollment(t)
 	srv.VaultTokenCache = integration.NewVaultTokenCache()
 
-	handler := NewRouter(srv)
+	handler := NewRouter(srv, func() {})
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

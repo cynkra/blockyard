@@ -49,6 +49,15 @@ func isAuthenticated(r *http.Request, srv *server.Server) bool {
 // are only shown to authenticated callers.
 func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if srv.Draining.Load() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]any{
+				"status": "draining",
+			})
+			return
+		}
+
 		checks := make(map[string]string)
 
 		// Database
@@ -149,6 +158,9 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 		// On the management listener (trusted), always expose details.
 		// On the main listener, only expose to authenticated callers.
 		result := map[string]any{"status": status}
+		if srv.Passive.Load() {
+			result["mode"] = "passive"
+		}
 		if trusted || isAuthenticated(r, srv) {
 			result["checks"] = checks
 			if v := srv.UpdateAvailable.Load(); v != nil {

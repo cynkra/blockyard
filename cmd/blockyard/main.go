@@ -23,6 +23,7 @@ import (
 	"github.com/cynkra/blockyard/internal/buildercache"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/drain"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/pkgstore"
@@ -90,8 +91,6 @@ func main() {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
-	defer database.Close()
-
 	// Build shared state and router
 	srv := server.NewServer(cfg, be, database)
 	srv.Version = version
@@ -294,8 +293,19 @@ func main() {
 		tracingShutdown = shutdown
 	}
 
+	// Passive mode — set by `by admin update` when starting a new server
+	// alongside the old one during a rolling update.
+	passive := os.Getenv("BLOCKYARD_PASSIVE") == "1"
+	if passive && (cfg.Redis == nil || cfg.Redis.URL == "") {
+		slog.Error("BLOCKYARD_PASSIVE=1 requires [redis] to be configured")
+		os.Exit(1)
+	}
+	if passive {
+		slog.Info("starting in passive mode (background goroutines deferred)")
+	}
+
 	// Startup cleanup — must complete before accepting traffic.
-	if err := ops.StartupCleanup(context.Background(), srv); err != nil {
+	if err := ops.StartupCleanup(context.Background(), srv, passive); err != nil {
 		slog.Error("startup cleanup failed", "error", err)
 		os.Exit(1)
 	}
@@ -334,7 +344,72 @@ func main() {
 		}
 	}
 
-	handler := api.NewRouter(srv)
+	// Extract background goroutine spawning into a function so it can be
+	// called directly (active mode) or deferred (passive mode, triggered
+	// by POST /api/v1/admin/activate).
+	startBG := func() {
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			ops.SpawnHealthPoller(bgCtx, srv)
+		}()
+
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			ops.SpawnLogRetentionCleaner(bgCtx, srv)
+		}()
+
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			proxy.RunAutoscaler(bgCtx, srv)
+		}()
+
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			ops.SpawnSoftDeleteSweeper(bgCtx, srv)
+		}()
+
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			update.SpawnChecker(bgCtx, version, srv)
+		}()
+
+		// Store eviction sweeper.
+		if cfg.Docker.StoreRetention.Duration > 0 {
+			pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Docker.StoreRetention.Duration)
+		}
+
+		// Refresh scheduler.
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			srv.RunRefreshScheduler(bgCtx)
+		}()
+	}
+
+	// Audit log writer runs unconditionally — even in passive mode the
+	// server serves requests that produce audit entries. Without the
+	// writer draining the buffered channel, it fills and blocks request
+	// goroutines.
+	if srv.AuditLog != nil {
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			srv.AuditLog.Run(bgCtx, cfg.Audit.Path)
+		}()
+	}
+
+	if !passive {
+		startBG()
+	} else {
+		srv.Passive.Store(true)
+	}
+
+	handler := api.NewRouter(srv, startBG)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Bind,
@@ -359,61 +434,28 @@ func main() {
 		}
 	}
 
-	bgWg.Add(1)
-	go func() {
-		defer bgWg.Done()
-		ops.SpawnHealthPoller(bgCtx, srv)
-	}()
+	// Set up signal channels.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
 
-	bgWg.Add(1)
-	go func() {
-		defer bgWg.Done()
-		ops.SpawnLogRetentionCleaner(bgCtx, srv)
-	}()
-
-	bgWg.Add(1)
-	go func() {
-		defer bgWg.Done()
-		proxy.RunAutoscaler(bgCtx, srv)
-	}()
-
-	bgWg.Add(1)
-	go func() {
-		defer bgWg.Done()
-		ops.SpawnSoftDeleteSweeper(bgCtx, srv)
-	}()
-
-	bgWg.Add(1)
-	go func() {
-		defer bgWg.Done()
-		update.SpawnChecker(bgCtx, version, srv)
-	}()
-
-	// Store eviction sweeper.
-	if cfg.Docker.StoreRetention.Duration > 0 {
-		pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Docker.StoreRetention.Duration)
+	drainer := &drain.Drainer{
+		Srv:             srv,
+		MainServer:      httpServer,
+		MgmtServer:      mgmtServer,
+		BGCancel:        bgCancel,
+		BGWait:          &bgWg,
+		TracingShutdown: tracingShutdown,
 	}
 
-	// Refresh scheduler.
-	bgWg.Add(1)
-	go func() {
-		defer bgWg.Done()
-		srv.RunRefreshScheduler(bgCtx)
-	}()
-
-	// Start audit log background writer.
-	if srv.AuditLog != nil {
-		bgWg.Add(1)
+	// forceExitOnSecondSignal spawns a goroutine that force-exits if a
+	// second signal arrives during graceful drain/shutdown.
+	forceExitOnSecondSignal := func() {
 		go func() {
-			defer bgWg.Done()
-			srv.AuditLog.Run(bgCtx, cfg.Audit.Path)
+			s := <-sigCh
+			slog.Warn("second signal received, forcing exit", "signal", s)
+			os.Exit(1)
 		}()
 	}
-
-	// Graceful shutdown on SIGTERM / SIGINT
-	ctx, stop := signal.NotifyContext(context.Background(),
-		syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	go func() {
 		slog.Info("server listening", "bind", cfg.Server.Bind)
@@ -433,38 +475,17 @@ func main() {
 		}()
 	}
 
-	<-ctx.Done()
-	slog.Info("shutdown signal received")
-
-	// 1. Drain management listener first (health probes fail, LB stops
-	//    sending traffic), then drain the main listener.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(),
-		cfg.Server.ShutdownTimeout.Duration)
-	defer cancel()
-
-	if mgmtServer != nil {
-		if err := mgmtServer.Shutdown(shutdownCtx); err != nil {
-			slog.Error("management server shutdown error", "error", err)
-		}
+	// Wait for signal.
+	sig := <-sigCh
+	forceExitOnSecondSignal()
+	switch sig {
+	case syscall.SIGUSR1:
+		drainer.Drain()
+		drainer.Finish(cfg.Server.DrainTimeout.Duration)
+	default:
+		// SIGTERM, SIGINT → full shutdown.
+		drainer.Shutdown(cfg.Server.ShutdownTimeout.Duration)
 	}
-
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
-	}
-
-	// 2. Cancel background goroutines and wait
-	bgCancel()
-	bgWg.Wait()
-
-	// 3. Stop all workers and clean up
-	ops.GracefulShutdown(context.Background(), srv)
-
-	// 4. Flush tracing spans
-	if tracingShutdown != nil {
-		tracingShutdown(context.Background()) //nolint:errcheck // best-effort flush during shutdown
-	}
-
-	slog.Info("shutdown complete")
 }
 
 // maskRedisPassword replaces the password in a Redis URL with "***".

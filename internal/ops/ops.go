@@ -63,10 +63,16 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 }
 
 // StartupCleanup removes orphaned resources and fails stale builds.
-// Called in main() before binding the listener.
-func StartupCleanup(ctx context.Context, srv *server.Server) error {
-	// Remove orphaned iptables rules from previous runs.
-	docker.CleanupOrphanMetadataRules()
+// Called in main() before binding the listener. When passive is true
+// (rolling update), destructive operations that would kill workers the
+// old server is handing off are skipped.
+func StartupCleanup(ctx context.Context, srv *server.Server, passive bool) error {
+	// In passive mode, skip destructive operations that would kill
+	// workers the old server is handing off.
+	if !passive {
+		// Remove orphaned iptables rules from previous runs.
+		docker.CleanupOrphanMetadataRules()
+	}
 
 	// Clean up orphaned staging directories from previous runs.
 	if srv.PkgStore != nil {
@@ -88,27 +94,32 @@ func StartupCleanup(ctx context.Context, srv *server.Server) error {
 		}
 	}
 
-	// Clean up orphaned worker token directories.
-	tokenBaseDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".worker-tokens")
-	entries, _ := os.ReadDir(tokenBaseDir)
-	for _, e := range entries {
-		if e.IsDir() {
-			os.RemoveAll(filepath.Join(tokenBaseDir, e.Name())) //nolint:errcheck
+	if !passive {
+		// Worker token directories — bind-mounted into surviving
+		// containers; removing them breaks worker→server auth.
+		tokenBaseDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".worker-tokens")
+		entries, _ := os.ReadDir(tokenBaseDir)
+		for _, e := range entries {
+			if e.IsDir() {
+				os.RemoveAll(filepath.Join(tokenBaseDir, e.Name())) //nolint:errcheck
+			}
 		}
-	}
 
-	resources, err := srv.Backend.ListManaged(ctx)
-	if err != nil {
-		return err
-	}
-	if len(resources) > 0 {
-		slog.Info("startup: removing orphaned resources",
-			"count", len(resources))
-	}
-	for _, r := range resources {
-		if err := srv.Backend.RemoveResource(ctx, r); err != nil {
-			slog.Warn("startup: failed to remove orphan",
-				"id", r.ID, "error", err)
+		// Container force-removal — the new server adopts existing
+		// workers via Redis instead.
+		resources, err := srv.Backend.ListManaged(ctx)
+		if err != nil {
+			return err
+		}
+		if len(resources) > 0 {
+			slog.Info("startup: removing orphaned resources",
+				"count", len(resources))
+		}
+		for _, r := range resources {
+			if err := srv.Backend.RemoveResource(ctx, r); err != nil {
+				slog.Warn("startup: failed to remove orphan",
+					"id", r.ID, "error", err)
+			}
 		}
 	}
 
