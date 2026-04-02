@@ -175,8 +175,8 @@ func TestCreateAppUploadSuccess(t *testing.T) {
 		t.Fatalf("got %d, want 200; body: %s", resp.StatusCode, readBody(t, resp))
 	}
 	redirect := resp.Header.Get("HX-Redirect")
-	if redirect != "/app/test-app/" {
-		t.Errorf("HX-Redirect = %q, want /app/test-app/", redirect)
+	if redirect != "/" {
+		t.Errorf("HX-Redirect = %q, want /", redirect)
 	}
 }
 
@@ -195,8 +195,8 @@ func TestCreateAppUploadZip(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("got %d, want 200; body: %s", resp.StatusCode, readBody(t, resp))
 	}
-	if got := resp.Header.Get("HX-Redirect"); got != "/app/zip-app/" {
-		t.Errorf("HX-Redirect = %q, want /app/zip-app/", got)
+	if got := resp.Header.Get("HX-Redirect"); got != "/" {
+		t.Errorf("HX-Redirect = %q, want /", got)
 	}
 }
 
@@ -216,8 +216,8 @@ func TestCreateAppUploadIndividualFiles(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("got %d, want 200; body: %s", resp.StatusCode, readBody(t, resp))
 	}
-	if got := resp.Header.Get("HX-Redirect"); got != "/app/files-app/" {
-		t.Errorf("HX-Redirect = %q, want /app/files-app/", got)
+	if got := resp.Header.Get("HX-Redirect"); got != "/" {
+		t.Errorf("HX-Redirect = %q, want /", got)
 	}
 }
 
@@ -359,5 +359,117 @@ func TestPackageFilesProducesValidTarGz(t *testing.T) {
 
 	if !names["app.R"] || !names["helpers.R"] {
 		t.Errorf("expected app.R and helpers.R in tar, got %v", names)
+	}
+}
+
+func TestRepackageZipProducesValidTarGz(t *testing.T) {
+	zipData := makeZip(t, map[string][]byte{
+		"app.R":    []byte("library(shiny)\n"),
+		"utils.R":  []byte("util <- 1\n"),
+	})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("files", "app.zip")
+	fw.Write(zipData)
+	mw.Close()
+
+	mr := multipart.NewReader(&buf, mw.Boundary())
+	form, err := mr.ReadForm(10 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer form.RemoveAll()
+
+	rc, err := repackageZip(form.File["files"][0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	gr, err := gzip.NewReader(rc)
+	if err != nil {
+		t.Fatal("gzip open:", err)
+	}
+	tr := tar.NewReader(gr)
+
+	names := map[string]bool{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal("tar next:", err)
+		}
+		names[hdr.Name] = true
+	}
+
+	if !names["app.R"] || !names["utils.R"] {
+		t.Errorf("expected app.R and utils.R in tar, got %v", names)
+	}
+}
+
+func TestRepackageZipRejectsPathTraversal(t *testing.T) {
+	// Create a zip with a path-traversal entry.
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	fw, _ := zw.Create("../etc/passwd")
+	fw.Write([]byte("root::0:0\n"))
+	zw.Close()
+
+	var form bytes.Buffer
+	mw := multipart.NewWriter(&form)
+	ffw, _ := mw.CreateFormFile("files", "evil.zip")
+	ffw.Write(buf.Bytes())
+	mw.Close()
+
+	mr := multipart.NewReader(&form, mw.Boundary())
+	parsed, err := mr.ReadForm(10 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parsed.RemoveAll()
+
+	rc, err := repackageZip(parsed.File["files"][0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Reading the stream should surface the path traversal error.
+	_, err = io.ReadAll(rc)
+	rc.Close()
+	if err == nil || !strings.Contains(err.Error(), "escapes root") {
+		t.Errorf("expected path traversal error, got: %v", err)
+	}
+}
+
+func TestNewAppButtonVisibleForPublisher(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "pub-user", auth.RolePublisher)
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "New App") {
+		t.Error("expected 'New App' button for publisher")
+	}
+}
+
+func TestNewAppButtonHiddenForViewer(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "view-user", auth.RoleViewer)
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body := readBody(t, resp)
+	if strings.Contains(body, "New App") {
+		t.Error("'New App' button should not appear for viewer")
 	}
 }

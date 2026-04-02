@@ -335,8 +335,8 @@ func (ui *UI) createApp(srv *server.Server) http.HandlerFunc {
 			})
 		}
 
-		// Redirect to app page so the user can watch the build.
-		w.Header().Set("HX-Redirect", "/app/"+app.Name+"/")
+		// Redirect to apps page — the new app appears in the grid.
+		w.Header().Set("HX-Redirect", "/")
 		w.WriteHeader(http.StatusOK)
 	}
 }
