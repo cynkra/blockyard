@@ -17,28 +17,24 @@
         </thead>
         <tbody>
         {{range .Workers}}
-            <tr style="cursor:pointer"
+            <tr class="worker-entry"
                 hx-get="/ui/apps/{{$.App.Name}}/tab/runtime/worker/{{.ID}}"
                 hx-target="#tab-content">
                 <td class="font-mono text-xs" title="{{.ID}}">{{.ID | truncate}}</td>
                 <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
                 <td>{{printf "%.1f" .CPUPercent}}%</td>
                 <td>{{.MemoryUsageBytes | humanBytes}} / {{.MemoryLimitBytes | humanBytes}}</td>
-                <td>{{len .Sessions}}</td>
-            </tr>
-            {{if .Sessions}}
-            <tr class="worker-sessions-row">
-                <td colspan="5">
-                    <div class="worker-sessions">
+                <td>
+                    {{len .Sessions}}
+                    {{if .Sessions}}
+                    <div class="worker-sessions mt-1">
                         {{range .Sessions}}
-                        <span class="session-chip">
-                            {{.UserDisplayName}} (<span class="time-ago" data-timestamp="{{.StartedAt}}">{{.StartedAt | timeAgo}}</span>)
-                        </span>
+                        <span class="session-chip">{{.UserDisplayName}}</span>
                         {{end}}
                     </div>
+                    {{end}}
                 </td>
             </tr>
-            {{end}}
         {{end}}
         </tbody>
     </table>

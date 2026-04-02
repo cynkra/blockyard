@@ -11,7 +11,8 @@
     <h1>Apps</h1>
     <form method="GET" action="/" class="flex gap-2">
         <input type="search" name="search" value="{{.Search}}"
-               placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps">
+               placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps"
+               oninput="filterApps(this.value)">
         <button type="submit" class="btn btn-sm">Search</button>
     </form>
     {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
@@ -143,6 +144,22 @@ document.body.addEventListener('htmx:beforeSwap', function(e) {
         stopLogs();
     }
 });
+
+/* Client-side live search filtering */
+function filterApps(query) {
+    var q = query.toLowerCase().trim();
+    document.querySelectorAll('.app-card').forEach(function(card) {
+        var name = card.querySelector('.app-name');
+        var title = card.querySelector('.app-title');
+        var desc = card.querySelector('.app-desc');
+        var tags = card.querySelector('.app-tags');
+        var text = (name ? name.textContent : '') +
+            (title ? ' ' + title.textContent : '') +
+            (desc ? ' ' + desc.textContent : '') +
+            (tags ? ' ' + tags.textContent : '');
+        card.style.display = (!q || text.toLowerCase().indexOf(q) !== -1) ? '' : 'none';
+    });
+}
 
 /* Close sidebar when drawer overlay is clicked (checkbox unchecked) */
 document.getElementById('sidebar-toggle').addEventListener('change', function() {
