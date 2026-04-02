@@ -202,8 +202,12 @@ func checkDiskSpace(storePath string) Result {
 		}
 	}
 
-	total := stat.Blocks * uint64(stat.Bsize)
-	avail := stat.Bavail * uint64(stat.Bsize)
+	bsize := stat.Bsize
+	if bsize <= 0 {
+		bsize = 1
+	}
+	total := stat.Blocks * uint64(bsize) //nolint:gosec // G115: Bsize is always positive on real filesystems
+	avail := stat.Bavail * uint64(bsize) //nolint:gosec // G115: Bsize is always positive on real filesystems
 
 	if total == 0 {
 		return Result{
