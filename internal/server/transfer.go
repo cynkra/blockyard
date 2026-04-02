@@ -140,9 +140,14 @@ func (srv *Server) completeTransfer(
 	// Start token refresher for the new worker.
 	var cancelToken func()
 	if srv.WorkerTokenKey != nil {
-		_, cancelToken, _ = SpawnTokenRefresher(
+		var tokenErr error
+		_, cancelToken, tokenErr = SpawnTokenRefresher(
 			context.Background(), srv.Config.Storage.BundleServerPath,
 			srv.WorkerTokenKey, appID, newWorkerID)
+		if tokenErr != nil {
+			slog.Error("transfer: failed to start token refresher",
+				"worker_id", newWorkerID, "error", tokenErr)
+		}
 	}
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{

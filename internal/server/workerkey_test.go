@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/integration"
 )
 
 func TestWorkerKeyFileRoundTrip(t *testing.T) {
@@ -109,6 +112,23 @@ func TestLoadOrCreateWorkerKeyNoVault(t *testing.T) {
 	_, err = auth.DecodeSessionToken(tok, key2)
 	if err != nil {
 		t.Fatal("keys should match across calls")
+	}
+}
+
+func TestLoadOrCreateWorkerKeyVaultError(t *testing.T) {
+	// Vault returns 500 for all requests — a transient error, not ErrNotFound.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := integration.NewClient(srv.URL, func() string { return "test-token" })
+	cfg := &config.Config{}
+	cfg.Storage.BundleServerPath = t.TempDir()
+
+	_, err := LoadOrCreateWorkerKey(context.Background(), client, cfg)
+	if err == nil {
+		t.Fatal("expected error when vault returns 500")
 	}
 }
 

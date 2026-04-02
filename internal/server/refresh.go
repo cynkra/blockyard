@@ -204,9 +204,14 @@ func (srv *Server) drainAndReplace(
 	// Start token refresher for the new worker.
 	var cancelToken func()
 	if srv.WorkerTokenKey != nil {
-		_, cancelToken, _ = SpawnTokenRefresher(
+		var tokenErr error
+		_, cancelToken, tokenErr = SpawnTokenRefresher(
 			context.Background(), srv.Config.Storage.BundleServerPath,
 			srv.WorkerTokenKey, app.ID, newWorkerID)
+		if tokenErr != nil {
+			slog.Error("refresh: failed to start token refresher",
+				"worker_id", newWorkerID, "error", tokenErr)
+		}
 	}
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{

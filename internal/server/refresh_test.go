@@ -262,6 +262,90 @@ func TestDrainAndReplace_HealthCheckFails(t *testing.T) {
 	}
 }
 
+func TestDrainAndReplace_SpawnFails(t *testing.T) {
+	srv, be := testServerWithMock(t)
+
+	srv.PkgStore.SetPlatform("test-platform")
+	pkgDir := srv.PkgStore.Path("shiny", "src1", "cfg1")
+	os.MkdirAll(pkgDir, 0o755)
+	os.WriteFile(filepath.Join(pkgDir, "DESCRIPTION"), []byte("Package: shiny"), 0o644)
+	metaPath := srv.PkgStore.ConfigMetaPath("shiny", "src1", "cfg1")
+	os.WriteFile(metaPath, []byte(`{}`), 0o644)
+
+	srv.Workers.Set("old-w-000", ActiveWorker{AppID: "app-1", BundleID: "b-1"})
+	srv.Registry.Set("old-w-000", "localhost:1234")
+
+	tmpDir := t.TempDir()
+	pkgstore.WriteStoreManifest(tmpDir, map[string]string{"shiny": "src1/cfg1"})
+	manifestPath := filepath.Join(tmpDir, "store-manifest.json")
+
+	bundleID := "b-1"
+	app := &db.AppRow{ID: "app-1", ActiveBundle: &bundleID}
+
+	be.SpawnFails.Store(true)
+
+	sender := srv.Tasks.Create("task-1", "app-1")
+	err := srv.drainAndReplace(context.Background(), app, manifestPath, sender)
+	if err == nil {
+		t.Fatal("expected drainAndReplace to return an error")
+	}
+
+	// Old workers should be restored (not draining).
+	if srv.Workers.IsDraining("app-1") {
+		t.Error("old workers should be un-drained after spawn failure")
+	}
+	count := srv.Workers.CountForApp("app-1")
+	if count != 1 {
+		t.Errorf("expected 1 worker (old restored), got %d", count)
+	}
+	// Backend should have no workers (spawn failed, nothing to stop).
+	if be.WorkerCount() != 0 {
+		t.Errorf("expected 0 backend workers, got %d", be.WorkerCount())
+	}
+}
+
+func TestDrainAndReplace_AddrFails(t *testing.T) {
+	srv, be := testServerWithMock(t)
+
+	srv.PkgStore.SetPlatform("test-platform")
+	pkgDir := srv.PkgStore.Path("shiny", "src1", "cfg1")
+	os.MkdirAll(pkgDir, 0o755)
+	os.WriteFile(filepath.Join(pkgDir, "DESCRIPTION"), []byte("Package: shiny"), 0o644)
+	metaPath := srv.PkgStore.ConfigMetaPath("shiny", "src1", "cfg1")
+	os.WriteFile(metaPath, []byte(`{}`), 0o644)
+
+	srv.Workers.Set("old-w-000", ActiveWorker{AppID: "app-1", BundleID: "b-1"})
+	srv.Registry.Set("old-w-000", "localhost:1234")
+
+	tmpDir := t.TempDir()
+	pkgstore.WriteStoreManifest(tmpDir, map[string]string{"shiny": "src1/cfg1"})
+	manifestPath := filepath.Join(tmpDir, "store-manifest.json")
+
+	bundleID := "b-1"
+	app := &db.AppRow{ID: "app-1", ActiveBundle: &bundleID}
+
+	be.AddrFails.Store(true)
+
+	sender := srv.Tasks.Create("task-1", "app-1")
+	err := srv.drainAndReplace(context.Background(), app, manifestPath, sender)
+	if err == nil {
+		t.Fatal("expected drainAndReplace to return an error")
+	}
+
+	// Old workers should be restored (not draining).
+	if srv.Workers.IsDraining("app-1") {
+		t.Error("old workers should be un-drained after addr failure")
+	}
+	count := srv.Workers.CountForApp("app-1")
+	if count != 1 {
+		t.Errorf("expected 1 worker (old restored), got %d", count)
+	}
+	// Backend should have 0 workers: the spawned worker should have been stopped.
+	if be.WorkerCount() != 0 {
+		t.Errorf("expected 0 backend workers (new stopped after addr fail), got %d", be.WorkerCount())
+	}
+}
+
 func TestLinkNewPackages(t *testing.T) {
 	srv := setupRefreshTest(t)
 
@@ -367,6 +451,18 @@ func TestStoreManifestsChanged_OldMissing(t *testing.T) {
 		filepath.Join(dir, "store-manifest.json"))
 	if err == nil {
 		t.Error("expected error for missing old manifest")
+	}
+}
+
+func TestStoreManifestsChanged_NewMissing(t *testing.T) {
+	dir := t.TempDir()
+	pkgstore.WriteStoreManifest(dir, map[string]string{"shiny": "src1/cfg1"})
+
+	_, err := storeManifestsChanged(
+		filepath.Join(dir, "store-manifest.json"),
+		filepath.Join(dir, "nonexistent.json"))
+	if err == nil {
+		t.Error("expected error for missing new manifest")
 	}
 }
 
