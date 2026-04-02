@@ -1,6 +1,8 @@
 package preflight
 
 import (
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -35,6 +37,27 @@ func (s Severity) String() string {
 // MarshalJSON serializes Severity as a lowercase JSON string.
 func (s Severity) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + s.String() + `"`), nil
+}
+
+// UnmarshalJSON parses a Severity from a JSON string.
+func (s *Severity) UnmarshalJSON(b []byte) error {
+	var str string
+	if err := json.Unmarshal(b, &str); err != nil {
+		return err
+	}
+	switch str {
+	case "ok":
+		*s = SeverityOK
+	case "info":
+		*s = SeverityInfo
+	case "warning":
+		*s = SeverityWarning
+	case "error":
+		*s = SeverityError
+	default:
+		return fmt.Errorf("unknown severity: %q", str)
+	}
+	return nil
 }
 
 // Result describes the outcome of a single check.
