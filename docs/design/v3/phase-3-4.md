@@ -36,7 +36,10 @@ shared state is meaningless.
    requests but does not start background goroutines.
 7. **Activation endpoint** — `POST /api/v1/admin/activate` starts
    background goroutines on a passive server.
-8. **Tests** — drain sequence ordering, passive mode verification,
+8. **Passive-aware `StartupCleanup`** — skip destructive operations
+   (container removal, iptables, worker token cleanup) in passive mode
+   so the new server adopts existing workers instead of killing them.
+9. **Tests** — drain sequence ordering, passive mode verification,
    activation endpoint, health gating.
 
 ## Step-by-step
@@ -132,7 +135,19 @@ scenarios where sessions should finish gracefully.
 
 ### Step 4: Drain package
 
-New file `internal/drain/drain.go`:
+New file `internal/drain/drain.go`. The Drainer exposes four methods
+designed for the rolling update lifecycle in phase 3-5:
+
+- `Drain()` / `Undrain()` — toggle the health endpoint flag. Cheap,
+  reversible.
+- `Finish(timeout)` — terminal cleanup without worker eviction (rolling
+  update success path).
+- `Shutdown(timeout)` — terminal cleanup with worker eviction (SIGTERM).
+
+The key insight: `Drain()` does **not** shut down HTTP servers. It only
+sets the draining flag so health endpoints return 503 and the proxy
+stops routing traffic. The HTTP listeners stay alive so that `Undrain()`
+can resume serving without recreating `http.Server` instances.
 
 ```go
 package drain
@@ -148,8 +163,13 @@ import (
     "github.com/cynkra/blockyard/internal/server"
 )
 
-// Drainer manages the two shutdown paths: drain (SIGUSR1, workers
-// survive) and shutdown (SIGTERM, full cleanup).
+// Drainer manages server lifecycle for drain mode (SIGUSR1) and
+// shutdown (SIGTERM). Four methods cover the full rolling update
+// lifecycle:
+//
+//   - Drain / Undrain toggle health endpoint responses (503 / 200).
+//   - Finish tears down the process without evicting workers.
+//   - Shutdown tears down the process and evicts all workers.
 type Drainer struct {
     Srv        *server.Server
     MainServer *http.Server
@@ -159,68 +179,76 @@ type Drainer struct {
     TracingShutdown func(context.Context) error // may be nil
 }
 
-// Drain executes the SIGUSR1 sequence. Workers survive — the new
-// server manages them via Redis.
-//
-// Sequence:
-//  1. Set draining flag (health endpoints return 503 immediately)
-//  2. Drain HTTP servers (finish in-flight requests)
-//  3. Cancel background goroutines
-//  4. Close database
-//  5. Flush tracing
-func (d *Drainer) Drain(timeout time.Duration) {
-    slog.Info("drain mode: entering (SIGUSR1)")
-
-    // 1. Health endpoints start returning 503.
+// Drain sets the draining flag. Health endpoints start returning 503,
+// causing the proxy/LB to stop routing new traffic. HTTP listeners
+// stay alive so Undrain() can reverse this without recreating servers.
+func (d *Drainer) Drain() {
+    slog.Info("drain mode: health endpoints returning 503")
     d.Srv.Draining.Store(true)
+}
 
-    // 2. Drain HTTP servers.
+// Undrain clears the draining flag. Health endpoints resume returning
+// 200 and the proxy/LB routes traffic again. Used when a rolling
+// update fails and the old server must resume serving.
+func (d *Drainer) Undrain() {
+    slog.Info("undrain: health endpoints returning 200")
+    d.Srv.Draining.Store(false)
+}
+
+// Finish performs non-destructive teardown: shuts down HTTP servers,
+// cancels background goroutines, closes the database, and flushes
+// tracing. Workers survive — the new server manages them via Redis.
+//
+// Called after a successful drain in the rolling update path.
+// In phase 3-4 (without the phase 3-5 watchdog), SIGUSR1 calls
+// Drain() followed by Finish().
+func (d *Drainer) Finish(timeout time.Duration) {
+    slog.Info("finish: shutting down (workers survive)")
+
     ctx, cancel := context.WithTimeout(context.Background(), timeout)
     defer cancel()
 
+    // 1. Shut down HTTP servers (finish in-flight requests).
+    // Note: Shutdown does NOT wait for hijacked connections (WebSockets).
+    // Active terminal/log sessions are severed immediately — clients
+    // reconnect through the new server. Workers survive, so the
+    // interruption is brief.
     if d.MgmtServer != nil {
         if err := d.MgmtServer.Shutdown(ctx); err != nil {
-            slog.Error("drain: management server shutdown error", "error", err)
+            slog.Error("finish: management server shutdown error", "error", err)
         }
     }
     if err := d.MainServer.Shutdown(ctx); err != nil {
-        slog.Error("drain: main server shutdown error", "error", err)
+        slog.Error("finish: main server shutdown error", "error", err)
     }
 
-    // 3. Stop background goroutines.
+    // 2. Stop background goroutines.
     d.BGCancel()
     d.BGWait.Wait()
 
-    // 4. Close database.
+    // 3. Close database.
     if err := d.Srv.DB.Close(); err != nil {
-        slog.Error("drain: database close error", "error", err)
+        slog.Error("finish: database close error", "error", err)
     }
 
-    // 5. Flush tracing.
+    // 4. Flush tracing.
     if d.TracingShutdown != nil {
         d.TracingShutdown(context.Background()) //nolint:errcheck
     }
 
-    slog.Info("drain mode: complete, exiting")
+    slog.Info("finish: complete, exiting")
 }
 
-// Shutdown executes the SIGTERM sequence. Workers are evicted and
-// resources cleaned up — the full current shutdown behavior.
-//
-// Sequence:
-//  1. Set draining flag (health endpoints return 503 immediately)
-//  2. Drain HTTP servers
-//  3. Cancel background goroutines
-//  4. Graceful worker shutdown (drain sessions, evict, remove resources)
-//  5. Close database
-//  6. Flush tracing
+// Shutdown performs full teardown including worker eviction. Called
+// on SIGTERM/SIGINT.
 func (d *Drainer) Shutdown(timeout time.Duration) {
     slog.Info("shutdown: entering (SIGTERM/SIGINT)")
 
     // 1. Health endpoints start returning 503.
-    d.Srv.Draining.Store(true)
+    d.Drain()
 
-    // 2. Drain HTTP servers.
+    // 2. Shut down HTTP servers (finish in-flight requests;
+    // hijacked WebSocket connections are severed immediately).
     ctx, cancel := context.WithTimeout(context.Background(), timeout)
     defer cancel()
 
@@ -237,8 +265,11 @@ func (d *Drainer) Shutdown(timeout time.Duration) {
     d.BGCancel()
     d.BGWait.Wait()
 
-    // 4. Stop all workers and clean up.
-    ops.GracefulShutdown(context.Background(), d.Srv)
+    // 4. Stop all workers and clean up. Reuses the timeout context —
+    // whatever budget remains after HTTP shutdown goes to worker
+    // eviction. drainAndEvictAll also uses ShutdownTimeout/2 internally,
+    // so this ctx is a ceiling, not the only guard.
+    ops.GracefulShutdown(ctx, d.Srv)
 
     // 5. Close database.
     if err := d.Srv.DB.Close(); err != nil {
@@ -254,15 +285,25 @@ func (d *Drainer) Shutdown(timeout time.Duration) {
 }
 ```
 
-**Key difference between Drain and Shutdown:** `Drain` skips step 4
-(`ops.GracefulShutdown`). Workers, networks, and token directories are
-left intact — the new server already manages them via Redis.
+**Method summary:**
+
+| Path | Sequence |
+|------|----------|
+| SIGUSR1 (phase 3-4) | `Drain()` → `Finish()` |
+| SIGUSR1 (phase 3-5, success) | `Drain()` → watchdog → `Finish()` |
+| SIGUSR1 (phase 3-5, failure) | `Drain()` → watchdog → `Undrain()` |
+| SIGTERM / SIGINT | `Shutdown()` (calls `Drain()` internally) |
+
+`Shutdown` duplicates the HTTP/bg/DB/tracing teardown from `Finish`
+because it needs to insert worker eviction between steps 3 and 5.
+Extracting shared helpers would save ~10 lines but add indirection for
+no real benefit.
 
 ### Step 5: Signal handling in main.go
 
-Replace the current signal handling block (lines 385-439) in
+Replace the current signal handling block (lines 413-467) in
 `cmd/blockyard/main.go`. Also remove the `defer database.Close()` (line
-89) — the Drainer now owns DB lifecycle via its `Drain()` and
+93) — the Drainer now owns DB lifecycle via its `Finish()` and
 `Shutdown()` methods. The new code distinguishes three signals:
 
 ```go
@@ -279,11 +320,23 @@ drainer := &drain.Drainer{
     TracingShutdown: tracingShutdown,
 }
 
+// forceExitOnSecondSignal spawns a goroutine that force-exits if a
+// second signal arrives during graceful drain/shutdown.
+forceExitOnSecondSignal := func() {
+    go func() {
+        s := <-sigCh
+        slog.Warn("second signal received, forcing exit", "signal", s)
+        os.Exit(1)
+    }()
+}
+
 // Wait for signal.
 sig := <-sigCh
+forceExitOnSecondSignal()
 switch sig {
 case syscall.SIGUSR1:
-    drainer.Drain(cfg.Server.DrainTimeout.Duration)
+    drainer.Drain()
+    drainer.Finish(cfg.Server.DrainTimeout.Duration)
 default:
     // SIGTERM, SIGINT → full shutdown.
     drainer.Shutdown(cfg.Server.ShutdownTimeout.Duration)
@@ -292,7 +345,9 @@ default:
 
 This replaces `signal.NotifyContext` with an explicit channel so we can
 distinguish signal types. The `<-sigCh` blocks the same way `<-ctx.Done()`
-did.
+did. A second signal during drain or shutdown force-exits — the standard
+Go pattern for "first signal graceful, second signal immediate." Phase 3-5
+will insert the watchdog between `Drain()` and `Finish()`.
 
 ### Step 6: Passive mode — environment variable
 
@@ -363,7 +418,74 @@ type Server struct {
 }
 ```
 
-### Step 7: Activation endpoint
+### Step 7: Passive-aware StartupCleanup
+
+`StartupCleanup` in `internal/ops/ops.go` currently force-removes all
+managed containers, iptables rules, and worker token directories on
+every boot. In passive mode (rolling update), this would destroy the
+workers the old server is handing off — defeating the entire purpose
+of drain mode.
+
+**Change:** add a `passive bool` parameter. When true, skip the three
+destructive operations; keep the safe ones:
+
+```go
+func StartupCleanup(ctx context.Context, srv *server.Server, passive bool) error {
+    // In passive mode, skip destructive operations that would kill
+    // workers the old server is handing off.
+    if !passive {
+        docker.CleanupOrphanMetadataRules()
+    }
+
+    // Staging and transfer directory cleanup — safe, no active
+    // operation spans a server restart.
+    // ...unchanged...
+
+    if !passive {
+        // Worker token directories — bind-mounted into surviving
+        // containers; removing them breaks worker→server auth.
+        // ...token cleanup...
+
+        // Container force-removal — the new server adopts existing
+        // workers via Redis instead.
+        // ...ListManaged + RemoveResource...
+    }
+
+    // Stale build marking — safe, DB-level.
+    // ...unchanged...
+
+    // Redis reconciliation — removes stale entries for containers
+    // that died while no server was running. Runs in both modes.
+    // ...unchanged...
+}
+```
+
+**Skipped in passive mode:**
+- `CleanupOrphanMetadataRules()` — removes ALL `blockyard-*` iptables
+  rules, breaking running workers' network access
+- Worker token directory cleanup — tokens are bind-mounted into
+  containers; deleting them breaks worker→server HMAC auth
+- `ListManaged` + `RemoveResource` loop — kills all managed containers
+
+**Still runs in passive mode:**
+- Staging directory cleanup (no active operation spans a restart)
+- Transfer directory cleanup (same)
+- `FailStaleBuilds` (DB-level, safe)
+- Redis worker map reconciliation (removes stale entries for dead
+  containers, doesn't touch running ones)
+
+**Caller update in `main.go`:**
+
+```go
+passive := os.Getenv("BLOCKYARD_PASSIVE") == "1"
+// ...
+
+if err := ops.StartupCleanup(context.Background(), srv, passive); err != nil {
+    // ...
+}
+```
+
+### Step 8: Activation endpoint
 
 New endpoint `POST /api/v1/admin/activate` in `internal/api/router.go`,
 registered in the authenticated API group (requires admin PAT).
@@ -432,10 +554,13 @@ func activateHandler(srv *server.Server, startBG func()) http.HandlerFunc {
 }
 ```
 
-**Router registration** in the admin-authed API group:
+**Router registration** inside the `r.Route("/api/v1", ...)` group in
+`NewRouter`, before the `limitBody` sub-group (the endpoint has no
+request body). Always registered — when the server isn't passive the
+handler returns 409 immediately:
 
 ```go
-r.Post("/api/v1/admin/activate", activateHandler(srv, startBG))
+r.Post("/admin/activate", activateHandler(srv, startBG))
 ```
 
 **`startBG` closure in `main.go`:**
@@ -495,11 +620,11 @@ handler := api.NewRouter(srv, startBG)
 closure keeps the dependency graph clean.
 
 **Router signature change:** `NewRouter` gains a `startBG func()`
-parameter. When the server is not passive (`startBG == nil` would also
-work), the activate endpoint can still be registered but returns 409
-immediately.
+parameter. The activate endpoint is always registered — it returns 409
+when the server is already active, so there's no need for conditional
+registration or nil-guard logic.
 
-### Step 8: Readyz integration — passive mode
+### Step 9: Readyz integration — passive mode
 
 When the server is passive, `/readyz` should still return 200 (the
 server is ready to serve requests). Add the passive state to the
@@ -516,7 +641,7 @@ This lets `by admin update` (phase 3-5) poll `/readyz` until 200, then
 know the server is passive and needs activation after the old server
 exits.
 
-### Step 9: Vault token renewal in passive mode
+### Step 10: Vault token renewal in passive mode
 
 The vault token renewer is special — it's not a state-mutating background
 loop, it keeps the server's own vault authentication alive. If the
@@ -534,32 +659,56 @@ In `main.go`, the vault token renewal goroutine spawns unconditionally
 (before the `if !passive` block), same as today. Only the state-mutating
 goroutines are deferred.
 
-### Step 10: Tests
+### Step 11: Tests
 
-#### Drain sequence test
+#### Drain / Undrain / Finish tests
 
 `internal/drain/drain_test.go`:
 
 ```go
 func TestDrainSetsFlag(t *testing.T) {
     srv := &server.Server{}
-    main := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-    defer main.Close()
+    d := &drain.Drainer{Srv: srv}
+
+    d.Drain()
+    if !srv.Draining.Load() {
+        t.Error("expected Draining to be true after Drain()")
+    }
+}
+
+func TestUndrainClearsFlag(t *testing.T) {
+    srv := &server.Server{}
+    d := &drain.Drainer{Srv: srv}
+
+    d.Drain()
+    d.Undrain()
+    if srv.Draining.Load() {
+        t.Error("expected Draining to be false after Undrain()")
+    }
+}
+
+func TestFinishShutdownsServers(t *testing.T) {
+    srv := &server.Server{
+        DB: testDB(t), // in-memory SQLite
+    }
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+    defer ts.Close()
 
     var wg sync.WaitGroup
-    ctx, cancel := context.WithCancel(context.Background())
+    _, cancel := context.WithCancel(context.Background())
 
     d := &drain.Drainer{
         Srv:        srv,
-        MainServer: main.Config, // *http.Server from httptest
+        MainServer: ts.Config,
         BGCancel:   cancel,
         BGWait:     &wg,
     }
 
-    // Drain should set the flag.
-    d.Drain(5 * time.Second)
+    d.Drain()
+    d.Finish(5 * time.Second)
+
     if !srv.Draining.Load() {
-        t.Error("expected Draining to be true after Drain()")
+        t.Error("Draining flag should still be set after Finish")
     }
 }
 ```
@@ -620,8 +769,12 @@ func TestActivateEndpoint(t *testing.T) {
 
     handler := activateHandler(srv, startBG)
 
+    adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
+        Role: auth.RoleAdmin,
+    })
+
     // First call: activates.
-    r := httptest.NewRequest("POST", "/api/v1/admin/activate", nil)
+    r := httptest.NewRequest("POST", "/api/v1/admin/activate", nil).WithContext(adminCtx)
     w := httptest.NewRecorder()
     handler.ServeHTTP(w, r)
 
@@ -636,8 +789,9 @@ func TestActivateEndpoint(t *testing.T) {
     }
 
     // Second call: conflict.
+    r2 := httptest.NewRequest("POST", "/api/v1/admin/activate", nil).WithContext(adminCtx)
     w2 := httptest.NewRecorder()
-    handler.ServeHTTP(w2, r)
+    handler.ServeHTTP(w2, r2)
     if w2.Code != http.StatusConflict {
         t.Errorf("expected 409, got %d", w2.Code)
     }
@@ -651,12 +805,36 @@ func TestActivateWhenAlreadyActive(t *testing.T) {
         t.Error("startBG should not be called when not passive")
     })
 
-    r := httptest.NewRequest("POST", "/api/v1/admin/activate", nil)
+    adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
+        Role: auth.RoleAdmin,
+    })
+    r := httptest.NewRequest("POST", "/api/v1/admin/activate", nil).WithContext(adminCtx)
     w := httptest.NewRecorder()
     handler.ServeHTTP(w, r)
 
     if w.Code != http.StatusConflict {
         t.Errorf("expected 409, got %d", w.Code)
+    }
+}
+
+func TestActivateRequiresAdmin(t *testing.T) {
+    srv := testServer(t)
+    srv.Passive.Store(true)
+
+    handler := activateHandler(srv, func() {
+        t.Error("startBG should not be called without admin auth")
+    })
+
+    // No auth context → nil caller → 403.
+    r := httptest.NewRequest("POST", "/api/v1/admin/activate", nil)
+    w := httptest.NewRecorder()
+    handler.ServeHTTP(w, r)
+
+    if w.Code != http.StatusForbidden {
+        t.Errorf("expected 403, got %d", w.Code)
+    }
+    if !srv.Passive.Load() {
+        t.Error("server should still be passive after rejected activation")
     }
 }
 ```
@@ -691,12 +869,13 @@ func TestReadyzPassiveMode(t *testing.T) {
 
 | File | Action | Summary |
 |------|--------|---------|
-| `internal/drain/drain.go` | **create** | `Drainer` struct with `Drain()` and `Shutdown()` methods |
+| `internal/drain/drain.go` | **create** | `Drainer` struct with `Drain()`, `Undrain()`, `Finish()`, `Shutdown()` |
 | `internal/server/state.go` | **update** | Add `Draining atomic.Bool`, `Passive atomic.Bool` fields |
 | `internal/config/config.go` | **update** | Add `DrainTimeout Duration` to `ServerConfig`, default 30s |
 | `internal/api/router.go` | **update** | Gate `/healthz` on draining flag; register `/api/v1/admin/activate`; `NewRouter` gains `startBG` parameter |
 | `internal/api/readyz.go` | **update** | Early 503 return when draining; add `mode` field when passive |
 | `internal/api/activate.go` | **create** | `activateHandler()` — starts background goroutines on passive server |
+| `internal/ops/ops.go` | **update** | `StartupCleanup` gains `passive bool` param; skip destructive ops when true |
 | `cmd/blockyard/main.go` | **update** | SIGUSR1 handling; extract `startBG` closure; passive mode gating; construct `Drainer` |
 | `internal/drain/drain_test.go` | **create** | Drain flag, shutdown sequence tests |
 | `internal/api/activate_test.go` | **create** | Activation endpoint tests |
@@ -707,8 +886,7 @@ func TestReadyzPassiveMode(t *testing.T) {
 1. **`Drainer` struct, not free functions.** The drain and shutdown
    sequences share the same dependencies (servers, cancel func, wait
    group). A struct captures these once at startup rather than threading
-   six parameters through signal handlers. The struct is simple — no
-   methods beyond `Drain()` and `Shutdown()`.
+   six parameters through signal handlers.
 
 2. **Draining flag is `atomic.Bool` on `Server`, not on `Drainer`.**
    The health endpoints need to read it, and they have access to `srv`
@@ -726,10 +904,10 @@ func TestReadyzPassiveMode(t *testing.T) {
    returning `{"status": "draining"}` rather than `{"status":
    "not_ready"}`.
 
-5. **`drain_timeout` separate from `shutdown_timeout`.** Drain mode
-   only finishes in-flight HTTP requests. Shutdown also evicts workers
-   and waits for sessions. Different time budgets. The v3 plan specifies
-   this as a distinct config field.
+5. **`drain_timeout` separate from `shutdown_timeout`.** `Finish()`
+   (the drain success path) only shuts down HTTP servers and background
+   goroutines. `Shutdown()` also evicts workers and waits for sessions.
+   Different operations, different time budgets.
 
 6. **Passive mode via environment variable, not config file.** The
    `BLOCKYARD_PASSIVE=1` var is set by `by admin update` when starting
@@ -758,15 +936,66 @@ func TestReadyzPassiveMode(t *testing.T) {
    into the server package. The closure keeps the dependency explicit
    and directional: main → api, not api → main via Server.
 
-10. **Drain does not close Redis.** The Redis connection is managed by
-    the `redisstate` package (phase 3-3). When the process exits, the
-    connection closes automatically. Explicitly closing it before the
-    process exits adds no value and risks premature disconnection if
-    there's any Redis I/O in the shutdown path.
+10. **Neither `Finish` nor `Shutdown` close Redis.** The Redis
+    connection is managed by the `redisstate` package (phase 3-3) and
+    cleaned up by its `defer rc.Close()` in `main.go`. When the process
+    exits after `Finish()`/`Shutdown()` return, the defer runs and the
+    connection closes. Explicitly closing Redis in the Drainer adds no
+    value and risks premature disconnection if there's any Redis I/O in
+    the shutdown path.
 
-11. **No `StartupCleanup` changes.** The current `StartupCleanup`
-    force-removes all managed containers on boot. For rolling updates,
-    the new server must *not* do this — it should adopt existing workers
-    via Redis. This change belongs in phase 3-3 (Redis startup path),
-    not here. Phase 3-4 only adds drain/passive behavior, not startup
-    behavior changes.
+11. **Two-stage drain for phase 3-5 compatibility.** The phase 3-5
+    rolling update orchestrator needs to run a watchdog *after* the old
+    server stops accepting traffic but *before* the process exits. A
+    single terminal `Drain()` (set flag + HTTP shutdown + cleanup +
+    exit) would kill the orchestrator goroutine. Splitting into
+    `Drain()` (just the flag) + `Finish()` (teardown) lets phase 3-5
+    insert the watchdog between them. In phase 3-4 they're called back
+    to back; the split costs nothing.
+
+12. **`Drain()` does not shut down HTTP servers.** The draining flag
+    makes health endpoints return 503, which is sufficient for the
+    proxy/LB to stop routing traffic. Keeping the listeners alive means
+    `Undrain()` is trivial (clear the flag) — no need to recreate
+    `http.Server` instances or re-bind ports. `Finish()` does the actual
+    `http.Server.Shutdown()` once the decision to exit is final.
+
+13. **`Undrain()` supports rollback in phase 3-5.** If the watchdog
+    detects the new server is unhealthy, the old server must resume
+    serving. Because `Drain()` only set a flag (HTTP servers stayed
+    alive), `Undrain()` is a one-line flag clear — health returns 200,
+    proxy resumes routing. No listener recreation, no state recovery.
+    Building this into the Drainer now avoids retrofitting it in
+    phase 3-5.
+
+14. **`StartupCleanup` passive awareness belongs here, not phase 3-3.**
+    Phase 3-3 added Redis reconciliation to `StartupCleanup` (remove
+    stale entries for dead containers) but left the destructive
+    operations (force-remove containers, iptables, token dirs) intact.
+    Without gating those on passive mode, `BLOCKYARD_PASSIVE=1` is
+    useless — the new server kills everything before reaching the
+    passive/active logic. A `passive bool` parameter is the minimal
+    change: three `if !passive` guards around the destructive blocks.
+
+15. **Second signal force-exits.** Standard Go pattern: first signal
+    triggers graceful drain/shutdown, second signal kills the process.
+    Without this, an operator has no recourse if drain hangs — `kill -9`
+    is the only option, which skips all cleanup. The force-exit goroutine
+    spawns after the first signal is received.
+
+16. **`Shutdown()` shares timeout budget with worker eviction.** The
+    timeout context created for HTTP server shutdown is reused for
+    `ops.GracefulShutdown`. Whatever budget remains after HTTP shutdown
+    goes to worker drain/eviction. `drainAndEvictAll` also enforces
+    `ShutdownTimeout/2` internally, so the context is a ceiling, not the
+    only guard. This avoids an unbounded `context.Background()` that
+    could hang forever if a container stop blocks.
+
+17. **WebSocket connections are not drained.** Go's
+    `http.Server.Shutdown()` does not wait for hijacked connections.
+    Active terminal/log WebSocket sessions are severed when `Finish()`
+    or `Shutdown()` closes the HTTP servers. Workers survive, so clients
+    reconnect through the new server after a brief interruption. This
+    is inherent to the rolling update model — draining long-lived
+    WebSocket connections would require explicit session migration, which
+    is out of scope.
