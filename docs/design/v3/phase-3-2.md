@@ -302,6 +302,7 @@ func (srv *Server) CancelTokenRefresher(workerID string) {
 | `server/transfer.go` ~L148 | `CancelToken: cancelToken` in `Workers.Set` | Remove field; add `srv.SetCancelToken(newWorkerID, cancelToken)` after `Workers.Set` |
 | `server/transfer.go` ~L160 | `if cancelToken != nil { cancelToken() }` | `srv.CancelTokenRefresher(newWorkerID)` |
 | `server/refresh.go` ~L199 | `CancelToken: cancelToken` in `Workers.Set` | Remove field; add `srv.SetCancelToken(newWorkerID, cancelToken)` after `Workers.Set` |
+| `server/refresh.go` ~L211 | `return` after health-check failure (no cleanup) | Add `srv.CancelTokenRefresher(newWorkerID)`, `Workers.Delete`, `Registry.Delete`, `Backend.Stop` before `return` (see below) |
 | `ops/ops.go` ~L24 | `if w.CancelToken != nil { w.CancelToken() }` | `srv.CancelTokenRefresher(workerID)` |
 
 **Pre-registration cleanup is unchanged.** `cleanupLocal()` in
@@ -318,6 +319,25 @@ still stops the goroutine, but without `CancelTokenRefresher` the
 `srv.CancelTokenRefresher(wid)` before `cleanupLocal()` at this site
 cleans up the map. `cleanupLocal()` itself still handles directory
 and package-library cleanup unchanged.
+
+**`drainAndReplace` health-check failure needs cleanup (bugfix).**
+In `refresh.go` ~L211, `waitHealthy` failure currently just returns
+without cleaning up -- the new worker, its registry entry, its
+container, and its cancel token are all orphaned. This is a
+pre-existing bug (compare with `transfer.go` ~L156 which cleans up
+properly). Fix by adding cleanup before `return`:
+
+```go
+if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
+    sender.Write(fmt.Sprintf("New worker (%s) failed health check.", newWorkerID[:8]))
+    slog.Error("refresh: worker health check", "worker_id", newWorkerID, "error", err)
+    srv.CancelTokenRefresher(newWorkerID)
+    srv.Workers.Delete(newWorkerID)
+    srv.Registry.Delete(newWorkerID)
+    srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
+    return
+}
+```
 
 ### Step 8: Server struct update
 
@@ -387,6 +407,9 @@ the compiler verifies completeness. The changes are:
 | `srv.Sessions` field | `*session.Store` | `session.Store` |
 | `srv.Registry` field | `*registry.Registry` | `registry.WorkerRegistry` |
 | `srv.Workers` field | `*WorkerMap` | `WorkerMap` |
+| `LoadBalancer.Assign` param | `workers *server.WorkerMap` | `workers server.WorkerMap` |
+| `LoadBalancer.Assign` param | `sessions *session.Store` | `sessions session.Store` |
+| `appResponse` param | `workers *server.WorkerMap` | `workers server.WorkerMap` |
 
 No logic changes. No behavioral changes. The method sets are identical.
 
@@ -410,7 +433,7 @@ var ErrNotFound = errors.New("secret not found")
 
 ```go
 if resp.StatusCode == http.StatusNotFound {
-    return nil, fmt.Errorf("openbao kv read %s: %w", path, ErrNotFound)
+    return nil, fmt.Errorf("openbao kv read: %s: %w", path, ErrNotFound)
 }
 ```
 
@@ -434,7 +457,9 @@ if err == nil {
 ```
 
 Same pattern as `ResolveWorkerKey` below: `ErrNotFound` means
-generate, any other error is fatal.
+generate, any other error is fatal. This is a behavior change --
+transient vault errors now abort startup instead of silently
+regenerating the secret -- but the old behavior was a bug.
 
 ### Step 10b: Worker token -- OpenBao storage
 
@@ -615,7 +640,7 @@ if _, err := rand.Read(workerKeyBytes); err != nil {
 srv.WorkerTokenKey = auth.NewSigningKey(workerKeyBytes)
 
 // After:
-workerKey, err := server.LoadOrCreateWorkerKey(context.Background(), srv.VaultClient, &cfg)
+workerKey, err := server.LoadOrCreateWorkerKey(context.Background(), srv.VaultClient, cfg)
 if err != nil {
     slog.Error("failed to load or create worker signing key", "error", err)
     os.Exit(1)
@@ -890,8 +915,11 @@ No behavioral changes. Grep for these constructors and update.
 | `internal/integration/worker_key_test.go` | **create** | Vault path round-trip |
 | `internal/proxy/coldstart.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()`; add `srv.CancelTokenRefresher()` before post-registration `cleanupLocal()` |
 | `internal/server/transfer.go` | **update** | Same + replace local `cancelToken()` cleanup with `srv.CancelTokenRefresher()` |
-| `internal/server/refresh.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()` |
+| `internal/server/refresh.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()`; fix missing cleanup on health-check failure in `drainAndReplace` |
 | `internal/ops/ops.go` | **update** | Replace `w.CancelToken()` with `srv.CancelTokenRefresher()` |
+| `internal/proxy/loadbalancer.go` | **update** | `Assign` params: `*server.WorkerMap` → `server.WorkerMap`, `*session.Store` → `session.Store` |
+| `internal/proxy/loadbalancer_test.go` | **update** | Match updated `Assign` parameter types |
+| `internal/api/apps.go` | **update** | `appResponse` param: `*server.WorkerMap` → `server.WorkerMap` |
 | call sites (mechanical) | **update** | Constructor renames across ~20 files |
 
 ## Design decisions

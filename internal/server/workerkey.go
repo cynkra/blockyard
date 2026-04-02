@@ -46,6 +46,8 @@ func LoadOrCreateWorkerKey(
 // loadOrCreateWorkerKeyFile reads the key from disk if it exists,
 // or generates a new one and writes it. File permissions: 0600.
 func loadOrCreateWorkerKeyFile(path string) (*auth.SigningKey, error) {
+	path = filepath.Clean(path)
+
 	// Try reading existing file.
 	data, err := os.ReadFile(path)
 	if err == nil {
