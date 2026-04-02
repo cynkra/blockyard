@@ -141,6 +141,11 @@ func New(ctx context.Context, cfg *config.RedisConfig) (*Client, error) {
         return nil, fmt.Errorf("parse redis url: %w", err)
     }
 
+    // Reject unauthenticated connections (design decision 8).
+    if opts.Password == "" {
+        return nil, fmt.Errorf("redis url has no password; AUTH is required")
+    }
+
     rdb := redis.NewClient(opts)
 
     pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -303,6 +308,7 @@ package registry
 import (
     "context"
     "log/slog"
+    "time"
 
     "github.com/cynkra/blockyard/internal/redisstate"
 )
@@ -344,14 +350,28 @@ and checks their addresses — after a successful health check, it calls
 crashes without cleanup, registry entries expire on their own within
 45 seconds.
 
-**Health poller change:** the health poller
-(`internal/proxy/healthpoll.go`) currently calls
-`srv.Registry.Get(workerID)` to resolve the address, then probes it.
-This phase adds a `srv.Registry.Set(workerID, addr)` call after each
-successful health check to refresh the TTL. This is a one-line
-addition to the existing health check loop — no structural change.
-The MemoryRegistry's `Set` is idempotent (re-setting the same value
-is a no-op in practice), so this doesn't affect the in-memory path.
+**Health poller change:** the health poller (`internal/ops/ops.go`,
+`pollOnce`) iterates all worker IDs via `srv.Workers.All()` and calls
+`srv.Backend.HealthCheck(ctx, id)` for each. It does not currently
+interact with the registry. This phase adds a registry TTL refresh
+after each successful health check:
+
+```go
+if r.healthy {
+    if addr, ok := srv.Registry.Get(r.workerID); ok {
+        srv.Registry.Set(r.workerID, addr)
+    }
+    delete(misses, r.workerID)
+    continue
+}
+```
+
+If `Registry.Get` returns `false` (worker not yet registered — e.g.,
+spawn in progress or registry entry lost), the `Set` is skipped. This
+is safe: the next successful spawn will re-register the address, and
+the TTL will be refreshed on the following poll cycle. The
+MemoryRegistry's `Set` is idempotent (re-setting the same value is a
+no-op in practice), so this doesn't affect the in-memory path.
 
 **Error handling:** same pattern as RedisStore — log + return zero
 values.
@@ -445,12 +465,43 @@ crash are acceptable: on restart, the server runs `StartupCleanup`
 which reconciles Docker containers against the worker map and removes
 stale entries.
 
-**Startup reconciliation note:** `StartupCleanup` currently reconciles
-against Docker labels. With Redis-backed state, it must also scan
-Redis worker keys and remove any that don't correspond to a running
-container. This is a small addition to the existing cleanup logic —
-it already iterates `srv.Workers.All()` and calls
-`srv.Backend.ListManaged()`.
+**Startup reconciliation note:** `StartupCleanup` (`internal/ops/ops.go`)
+currently cleans orphaned Docker resources via `srv.Backend.ListManaged()`
+and removes them, but it does not touch the worker map (memory stores
+start empty). With Redis-backed state, worker keys persist across
+restarts, so `StartupCleanup` must reconcile Redis state against
+running Docker containers. Add a new block after the existing
+`ListManaged` cleanup:
+
+```go
+// Reconcile Redis worker map against running containers.
+// With in-memory stores this is a no-op (All() returns empty).
+workerIDs := srv.Workers.All()
+if len(workerIDs) > 0 {
+    managed := make(map[string]bool)
+    for _, r := range resources { // resources from ListManaged above
+        managed[r.ID] = true
+    }
+    var stale int
+    for _, wid := range workerIDs {
+        if !managed[wid] {
+            srv.Workers.Delete(wid)
+            srv.Sessions.DeleteByWorker(wid)
+            srv.Registry.Delete(wid)
+            stale++
+        }
+    }
+    if stale > 0 {
+        slog.Info("startup: removed stale worker entries from redis",
+            "count", stale)
+    }
+}
+```
+
+This reuses the `resources` slice already fetched by `ListManaged`.
+For the in-memory path, `Workers.All()` returns empty (fresh map)
+so the block is a no-op — no behavioral change for existing
+deployments.
 
 **Error handling:** same pattern as the other stores.
 
@@ -474,7 +525,7 @@ if cfg.Redis != nil {
     srv.Sessions = session.NewRedisStore(rc, cfg.Proxy.SessionIdleTTL.Duration)
     registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
     srv.Registry = registry.NewRedisRegistry(rc, registryTTL)
-    srv.Workers = NewRedisWorkerMap(rc)
+    srv.Workers = server.NewRedisWorkerMap(rc)
     slog.Info("using redis for shared state",
         "url", maskRedisPassword(cfg.Redis.URL),
         "prefix", cfg.Redis.KeyPrefix)
@@ -534,7 +585,7 @@ These run as part of the normal `go test ./...` suite.
 ```go
 func TestRedisStoreGetSet(t *testing.T) {
     mr := miniredis.RunT(t)
-    client := testRedisClient(t, mr.Addr())
+    client := redisstate.TestClient(t, mr.Addr())
 
     store := NewRedisStore(client, time.Hour)
     // ... same behavioral tests as store_test.go: Get/Set/Touch/Delete
@@ -559,8 +610,8 @@ func TestRedisStoreTTLRefreshOnTouch(t *testing.T) {
 ```go
 func TestRedisRegistryGetSetDelete(t *testing.T) {
     mr := miniredis.RunT(t)
-    client := testRedisClient(t, mr.Addr())
-    reg := NewRedisRegistry(client)
+    client := redisstate.TestClient(t, mr.Addr())
+    reg := NewRedisRegistry(client, 45*time.Second)
     // ... same behavioral tests as registry_test.go
 }
 ```
@@ -698,7 +749,7 @@ reach Redis."
 | `internal/server/workermap_redis.go` | **create** | `RedisWorkerMap` implementing `WorkerMap` (hashes + Lua scripts) |
 | `internal/server/workermap_redis_test.go` | **create** | Unit tests (miniredis) |
 | `internal/server/state.go` | **update** | Add `RedisClient *redisstate.Client` field to `Server` |
-| `internal/proxy/healthpoll.go` | **update** | Add `registry.Set()` after successful health check (TTL refresh) |
+| `internal/ops/ops.go` | **update** | Add `registry.Set()` after successful health check (TTL refresh); add Redis worker map reconciliation to `StartupCleanup` |
 | `internal/api/readyz.go` | **update** | Add Redis health check |
 | `cmd/blockyard/main.go` | **update** | Redis init + store selection + `srv.RedisClient` assignment |
 | `examples/hello-shiny/docker-compose.yml` | **update** | Add Redis service + `state` network |
