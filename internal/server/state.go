@@ -10,6 +10,7 @@ import (
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
@@ -55,6 +56,10 @@ type Server struct {
 
 	// Audit log — nil when [audit] is not configured.
 	AuditLog *audit.Log
+
+	// System checks — populated during startup, used by the system page
+	// and API endpoints. Nil until Init is called.
+	Checker *preflight.Checker
 
 	// Package store — nil when not available (no builds yet).
 	PkgStore *pkgstore.Store

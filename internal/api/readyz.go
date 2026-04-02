@@ -78,7 +78,7 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 			func() {
 				ctx, cancel := context.WithTimeout(r.Context(), readyzCheckTimeout)
 				defer cancel()
-				if err := checkIDP(ctx, srv); err != nil {
+				if err := CheckIDP(ctx, srv); err != nil {
 					checks["idp"] = "fail"
 				} else {
 					checks["idp"] = "pass"
@@ -159,8 +159,8 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 	}
 }
 
-// checkIDP verifies the IdP's discovery endpoint is reachable.
-func checkIDP(ctx context.Context, srv *server.Server) error {
+// CheckIDP verifies the IdP's discovery endpoint is reachable.
+func CheckIDP(ctx context.Context, srv *server.Server) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		srv.Config.OIDC.IssuerURL+"/.well-known/openid-configuration", nil)
 	if err != nil {

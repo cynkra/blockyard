@@ -12,20 +12,18 @@ func TestCheckNoOIDC(t *testing.T) {
 			Server: config.ServerConfig{Bind: "127.0.0.1:8080"},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "no_oidc") {
-			t.Error("expected no_oidc result")
+		if !hasFinding(r, "no_oidc") {
+			t.Error("expected no_oidc finding")
 		}
 	})
 
-	t.Run("silent when OIDC configured", func(t *testing.T) {
+	t.Run("ok when OIDC configured", func(t *testing.T) {
 		cfg := &config.Config{
 			Server: config.ServerConfig{Bind: "127.0.0.1:8080"},
 			OIDC:   &config.OidcConfig{},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "no_oidc") {
-			t.Error("unexpected no_oidc result")
-		}
+		assertOK(t, r, "no_oidc")
 	})
 }
 
@@ -35,8 +33,8 @@ func TestCheckWildcardBindNoOIDC(t *testing.T) {
 			Server: config.ServerConfig{Bind: "0.0.0.0:8080"},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "wildcard_bind_no_oidc") {
-			t.Error("expected wildcard_bind_no_oidc result")
+		if !hasFinding(r, "wildcard_bind_no_oidc") {
+			t.Error("expected wildcard_bind_no_oidc finding")
 		}
 	})
 
@@ -45,29 +43,29 @@ func TestCheckWildcardBindNoOIDC(t *testing.T) {
 			Server: config.ServerConfig{Bind: "0.0.0.0:8080"},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "no_oidc") {
+		if hasFinding(r, "no_oidc") {
 			t.Error("no_oidc should be suppressed when wildcard_bind_no_oidc fires")
 		}
 	})
 
-	t.Run("silent on loopback", func(t *testing.T) {
+	t.Run("ok on loopback", func(t *testing.T) {
 		cfg := &config.Config{
 			Server: config.ServerConfig{Bind: "127.0.0.1:8080"},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "wildcard_bind_no_oidc") {
-			t.Error("unexpected wildcard_bind_no_oidc on loopback")
+		if hasFinding(r, "wildcard_bind_no_oidc") {
+			t.Error("unexpected wildcard_bind_no_oidc finding on loopback")
 		}
 	})
 
-	t.Run("silent with OIDC", func(t *testing.T) {
+	t.Run("ok with OIDC", func(t *testing.T) {
 		cfg := &config.Config{
 			Server: config.ServerConfig{Bind: "0.0.0.0:8080"},
 			OIDC:   &config.OidcConfig{},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "wildcard_bind_no_oidc") {
-			t.Error("unexpected wildcard_bind_no_oidc when OIDC configured")
+		if hasFinding(r, "wildcard_bind_no_oidc") {
+			t.Error("unexpected wildcard_bind_no_oidc finding when OIDC configured")
 		}
 	})
 }
@@ -78,27 +76,23 @@ func TestCheckExternalURLNotHTTPS(t *testing.T) {
 			Server: config.ServerConfig{ExternalURL: "http://example.com"},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "external_url_not_https") {
-			t.Error("expected external_url_not_https result")
+		if !hasFinding(r, "external_url_not_https") {
+			t.Error("expected external_url_not_https finding")
 		}
 	})
 
-	t.Run("silent on HTTPS", func(t *testing.T) {
+	t.Run("ok on HTTPS", func(t *testing.T) {
 		cfg := &config.Config{
 			Server: config.ServerConfig{ExternalURL: "https://example.com"},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "external_url_not_https") {
-			t.Error("unexpected external_url_not_https on HTTPS")
-		}
+		assertOK(t, r, "external_url_not_https")
 	})
 
-	t.Run("silent when empty", func(t *testing.T) {
+	t.Run("ok when empty", func(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "external_url_not_https") {
-			t.Error("unexpected external_url_not_https when empty")
-		}
+		assertOK(t, r, "external_url_not_https")
 	})
 }
 
@@ -108,27 +102,23 @@ func TestCheckOpenbaoHTTP(t *testing.T) {
 			Openbao: &config.OpenbaoConfig{Address: "http://vault:8200"},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "openbao_http") {
-			t.Error("expected openbao_http result")
+		if !hasFinding(r, "openbao_http") {
+			t.Error("expected openbao_http finding")
 		}
 	})
 
-	t.Run("silent on HTTPS", func(t *testing.T) {
+	t.Run("ok on HTTPS", func(t *testing.T) {
 		cfg := &config.Config{
 			Openbao: &config.OpenbaoConfig{Address: "https://vault:8200"},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "openbao_http") {
-			t.Error("unexpected openbao_http on HTTPS")
-		}
+		assertOK(t, r, "openbao_http")
 	})
 
-	t.Run("silent when not configured", func(t *testing.T) {
+	t.Run("ok when not configured", func(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "openbao_http") {
-			t.Error("unexpected openbao_http when not configured")
-		}
+		assertOK(t, r, "openbao_http")
 	})
 }
 
@@ -138,27 +128,23 @@ func TestCheckManagementBindPublic(t *testing.T) {
 			Server: config.ServerConfig{ManagementBind: "0.0.0.0:9090"},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "management_bind_public") {
-			t.Error("expected management_bind_public result")
+		if !hasFinding(r, "management_bind_public") {
+			t.Error("expected management_bind_public finding")
 		}
 	})
 
-	t.Run("silent on loopback", func(t *testing.T) {
+	t.Run("ok on loopback", func(t *testing.T) {
 		cfg := &config.Config{
 			Server: config.ServerConfig{ManagementBind: "127.0.0.1:9090"},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "management_bind_public") {
-			t.Error("unexpected management_bind_public on loopback")
-		}
+		assertOK(t, r, "management_bind_public")
 	})
 
-	t.Run("silent when not configured", func(t *testing.T) {
+	t.Run("ok when not configured", func(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "management_bind_public") {
-			t.Error("unexpected management_bind_public when not configured")
-		}
+		assertOK(t, r, "management_bind_public")
 	})
 }
 
@@ -166,19 +152,17 @@ func TestCheckNoDefaultMemoryLimit(t *testing.T) {
 	t.Run("fires when empty", func(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "no_default_memory_limit") {
-			t.Error("expected no_default_memory_limit result")
+		if !hasFinding(r, "no_default_memory_limit") {
+			t.Error("expected no_default_memory_limit finding")
 		}
 	})
 
-	t.Run("silent when set", func(t *testing.T) {
+	t.Run("ok when set", func(t *testing.T) {
 		cfg := &config.Config{
 			Docker: config.DockerConfig{DefaultMemoryLimit: "2g"},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "no_default_memory_limit") {
-			t.Error("unexpected no_default_memory_limit when set")
-		}
+		assertOK(t, r, "no_default_memory_limit")
 	})
 }
 
@@ -186,19 +170,17 @@ func TestCheckNoDefaultCPULimit(t *testing.T) {
 	t.Run("fires when zero", func(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "no_default_cpu_limit") {
-			t.Error("expected no_default_cpu_limit result")
+		if !hasFinding(r, "no_default_cpu_limit") {
+			t.Error("expected no_default_cpu_limit finding")
 		}
 	})
 
-	t.Run("silent when set", func(t *testing.T) {
+	t.Run("ok when set", func(t *testing.T) {
 		cfg := &config.Config{
 			Docker: config.DockerConfig{DefaultCPULimit: 4.0},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "no_default_cpu_limit") {
-			t.Error("unexpected no_default_cpu_limit when set")
-		}
+		assertOK(t, r, "no_default_cpu_limit")
 	})
 }
 
@@ -209,21 +191,18 @@ func TestCheckNoAuditLog(t *testing.T) {
 		res := findResult(r, "no_audit_log")
 		if res == nil {
 			t.Fatal("expected no_audit_log result")
-			return
 		}
 		if res.Severity != SeverityInfo {
-			t.Errorf("expected SeverityInfo, got %d", res.Severity)
+			t.Errorf("expected SeverityInfo, got %v", res.Severity)
 		}
 	})
 
-	t.Run("silent when configured", func(t *testing.T) {
+	t.Run("ok when configured", func(t *testing.T) {
 		cfg := &config.Config{
 			Audit: &config.AuditConfig{Path: "/var/log/audit.jsonl"},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "no_audit_log") {
-			t.Error("unexpected no_audit_log when configured")
-		}
+		assertOK(t, r, "no_audit_log")
 	})
 }
 
@@ -235,8 +214,8 @@ func TestCheckTrustedProxiesTooBroad(t *testing.T) {
 			},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "trusted_proxies_too_broad") {
-			t.Error("expected trusted_proxies_too_broad result")
+		if !hasFinding(r, "trusted_proxies_too_broad") {
+			t.Error("expected trusted_proxies_too_broad finding")
 		}
 	})
 
@@ -247,36 +226,57 @@ func TestCheckTrustedProxiesTooBroad(t *testing.T) {
 			},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasResult(r, "trusted_proxies_too_broad") {
+		if !hasFinding(r, "trusted_proxies_too_broad") {
 			t.Error("expected trusted_proxies_too_broad for /4")
 		}
 	})
 
-	t.Run("silent on /8", func(t *testing.T) {
+	t.Run("ok on /8", func(t *testing.T) {
 		cfg := &config.Config{
 			Server: config.ServerConfig{
 				TrustedProxies: []string{"10.0.0.0/8"},
 			},
 		}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "trusted_proxies_too_broad") {
-			t.Error("unexpected trusted_proxies_too_broad for /8")
-		}
+		assertOK(t, r, "trusted_proxies_too_broad")
 	})
 
-	t.Run("silent when empty", func(t *testing.T) {
+	t.Run("ok when empty", func(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
-		if hasResult(r, "trusted_proxies_too_broad") {
-			t.Error("unexpected trusted_proxies_too_broad when empty")
-		}
+		assertOK(t, r, "trusted_proxies_too_broad")
 	})
+}
+
+func TestResultCategory(t *testing.T) {
+	cfg := &config.Config{}
+	r := RunConfigChecks(cfg)
+	for _, res := range r.Results {
+		if res.Category != "config" {
+			t.Errorf("result %q has category %q, want %q", res.Name, res.Category, "config")
+		}
+	}
 }
 
 // --- helpers ---
 
-func hasResult(r *Report, name string) bool {
-	return findResult(r, name) != nil
+// hasFinding returns true if the report contains a non-OK result with the given name.
+func hasFinding(r *Report, name string) bool {
+	res := findResult(r, name)
+	return res != nil && res.Severity > SeverityOK
+}
+
+// assertOK checks that the named result exists and has SeverityOK.
+func assertOK(t *testing.T, r *Report, name string) {
+	t.Helper()
+	res := findResult(r, name)
+	if res == nil {
+		t.Errorf("expected result %q", name)
+		return
+	}
+	if res.Severity != SeverityOK {
+		t.Errorf("result %q: expected SeverityOK, got %v", name, res.Severity)
+	}
 }
 
 func findResult(r *Report, name string) *Result {

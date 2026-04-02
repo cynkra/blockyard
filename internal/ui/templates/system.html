@@ -1,0 +1,21 @@
+{{template "base" .}}
+
+{{define "title"}}System — blockyard{{end}}
+
+{{define "content"}}
+<div class="page-header">
+    <h1>System Checks</h1>
+    <button class="btn btn-sm"
+            hx-post="/ui/system/run"
+            hx-target="#check-results"
+            hx-swap="innerHTML"
+            hx-indicator="#run-spinner">
+        <span id="run-spinner" class="htmx-indicator loading loading-spinner loading-xs"></span>
+        Run Checks
+    </button>
+</div>
+
+<div id="check-results">
+{{template "checkResults" .}}
+</div>
+{{end}}

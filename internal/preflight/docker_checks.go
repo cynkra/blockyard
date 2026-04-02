@@ -35,15 +35,16 @@ type DockerDeps struct {
 // RunDockerChecks evaluates checks that require Docker or filesystem
 // operations. The context should carry a timeout (recommended: 2min).
 func RunDockerChecks(ctx context.Context, deps DockerDeps) *Report {
-	r := &Report{}
+	r := &Report{RanAt: time.Now().UTC()}
 
 	// Ensure the configured image is available locally before running
 	// container-based checks.
 	if err := ensureImage(ctx, deps.Client, deps.Config.Image); err != nil {
-		r.add(&Result{
+		r.add(Result{
 			Name:     "image_pull",
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to pull worker image %q: %v", deps.Config.Image, err),
+			Category: "docker",
 		})
 		// Container-based checks cannot proceed without the image;
 		// still run non-container checks.
@@ -69,16 +70,20 @@ func RunDockerChecks(ctx context.Context, deps DockerDeps) *Report {
 // bind mount are visible inside a running container. This relies on
 // standard Linux VFS behavior that can break with certain Docker
 // storage drivers or rootless configurations.
-func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
+func checkROBindVisibility(ctx context.Context, deps DockerDeps) Result {
+	const name = "ro_bind_visibility"
+	const category = "docker"
+
 	// Create temp dir under the store path (which is on a known-good
 	// mount), not /tmp — in container mode, /tmp is container-local
 	// and cannot be bind-mounted into sibling containers.
 	tmpDir, err := os.MkdirTemp(deps.StorePath, ".preflight-ro-*")
 	if err != nil {
-		return &Result{
-			Name:     "ro_bind_visibility",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to create temp dir: %v", err),
+			Category: category,
 		}
 	}
 	defer os.RemoveAll(tmpDir) //nolint:errcheck // best-effort cleanup
@@ -109,29 +114,32 @@ func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
 		Name:       containerName,
 	})
 	if err != nil {
-		return &Result{
-			Name:     "ro_bind_visibility",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to create test container: %v", err),
+			Category: category,
 		}
 	}
 	defer deps.Client.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true}) //nolint:errcheck
 
 	if _, err := deps.Client.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
-		return &Result{
-			Name:     "ro_bind_visibility",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to start test container: %v", err),
+			Category: category,
 		}
 	}
 
 	// Write a file on the host side while the container is running.
 	sentinel := filepath.Join(tmpDir, "preflight-sentinel")
 	if err := os.WriteFile(sentinel, []byte("ok"), 0o644); err != nil { //nolint:gosec // G306: preflight sentinel file, not secrets
-		return &Result{
-			Name:     "ro_bind_visibility",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to write sentinel file: %v", err),
+			Category: category,
 		}
 	}
 
@@ -139,37 +147,48 @@ func checkROBindVisibility(ctx context.Context, deps DockerDeps) *Result {
 	stdout, exitCode, err := containerExec(ctx, deps.Client, resp.ID,
 		[]string{"cat", "/preflight-test/preflight-sentinel"})
 	if err != nil || exitCode != 0 || stdout != "ok" {
-		return &Result{
-			Name:     "ro_bind_visibility",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message: "host-side writes to a read-only bind mount are not visible inside containers; " +
 				"this breaks runtime package installation (check Docker storage driver and rootless config)",
+			Category: category,
 		}
 	}
 
-	return nil
+	return Result{
+		Name:     name,
+		Severity: SeverityOK,
+		Message:  "read-only bind mount visibility is working",
+		Category: category,
+	}
 }
 
 // checkHardLink verifies that hard links work between the package store
 // root and the per-worker library directory. Both must reside on the
 // same filesystem.
-func checkHardLink(storePath string) *Result {
+func checkHardLink(storePath string) Result {
+	const name = "hardlink_cross_device"
+	const category = "docker"
+
 	workersDir := filepath.Join(storePath, ".workers")
 	if err := os.MkdirAll(workersDir, 0o755); err != nil { //nolint:gosec // G301: workers dir, not secrets
-		return &Result{
-			Name:     "hardlink_cross_device",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to create workers dir: %v", err),
+			Category: category,
 		}
 	}
 
 	// Create a temp file in the store root.
 	src, err := os.CreateTemp(storePath, "preflight-link-*")
 	if err != nil {
-		return &Result{
-			Name:     "hardlink_cross_device",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to create test file in store: %v", err),
+			Category: category,
 		}
 	}
 	src.Close()
@@ -180,23 +199,37 @@ func checkHardLink(storePath string) *Result {
 	err = os.Link(src.Name(), dst)
 	if err != nil {
 		os.Remove(dst)
-		return &Result{
-			Name:     "hardlink_cross_device",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message: "hard links between .pkg-store and .pkg-store/.workers fail " +
 				"(cross-device link); both must be on the same filesystem",
+			Category: category,
 		}
 	}
 	os.Remove(dst)
 
-	return nil
+	return Result{
+		Name:     name,
+		Severity: SeverityOK,
+		Message:  "hard links between store and workers directory are working",
+		Category: category,
+	}
 }
 
 // checkByBuilder verifies that the by-builder binary is executable and
 // the correct architecture by running it in a short-lived container.
-func checkByBuilder(ctx context.Context, deps DockerDeps) *Result {
+func checkByBuilder(ctx context.Context, deps DockerDeps) Result {
+	const name = "by_builder_exec"
+	const category = "docker"
+
 	if deps.BuilderBin == "" {
-		return nil // skip when binary is not available
+		return Result{
+			Name:     name,
+			Severity: SeverityOK,
+			Message:  "by-builder binary not available; check skipped",
+			Category: category,
+		}
 	}
 
 	// Resolve host-side path for bind mount.
@@ -218,10 +251,11 @@ func checkByBuilder(ctx context.Context, deps DockerDeps) *Result {
 	)
 
 	if err != nil {
-		return &Result{
-			Name:     "by_builder_exec",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message:  fmt.Sprintf("failed to run by-builder check: %v", err),
+			Category: category,
 		}
 	}
 	if exitCode != 0 {
@@ -229,25 +263,39 @@ func checkByBuilder(ctx context.Context, deps DockerDeps) *Result {
 		if len(detail) > 200 {
 			detail = detail[:200]
 		}
-		return &Result{
-			Name:     "by_builder_exec",
+		return Result{
+			Name:     name,
 			Severity: SeverityError,
 			Message: fmt.Sprintf("by-builder binary failed (exit %d); "+
 				"check architecture matches the container image: %s", exitCode, detail),
+			Category: category,
 		}
 	}
 
-	return nil
+	return Result{
+		Name:     name,
+		Severity: SeverityOK,
+		Message:  "by-builder binary is executable and correct architecture",
+		Category: category,
+	}
 }
 
 // checkMetadataBlocking probes whether the server can block container
 // access to the cloud metadata endpoint (169.254.169.254). This
 // requires either CAP_NET_ADMIN or an existing host-level iptables
 // rule.
-func checkMetadataBlocking(serverID string) *Result {
+func checkMetadataBlocking(serverID string) Result {
+	const name = "metadata_endpoint"
+	const category = "docker"
+
 	// Check if a blanket rule already exists.
 	if docker.DockerUserBlocksMetadata() {
-		return nil
+		return Result{
+			Name:     name,
+			Severity: SeverityOK,
+			Message:  "cloud metadata endpoint is blocked by host iptables rule",
+			Category: category,
+		}
 	}
 
 	// In container mode, also try a TCP connect test: if the metadata
@@ -255,69 +303,85 @@ func checkMetadataBlocking(serverID string) *Result {
 	if serverID != "" {
 		conn, err := net.DialTimeout("tcp", "169.254.169.254:80", 2*time.Second)
 		if err != nil {
-			return nil // unreachable = blocked
+			return Result{
+				Name:     name,
+				Severity: SeverityOK,
+				Message:  "cloud metadata endpoint is unreachable",
+				Category: category,
+			}
 		}
 		conn.Close()
 	}
 
 	// Probe whether we can manipulate iptables at all.
 	if err := exec.Command("iptables", "-S", "DOCKER-USER").Run(); err != nil {
-		return &Result{
-			Name:     "metadata_endpoint",
+		return Result{
+			Name:     name,
 			Severity: SeverityWarning,
 			Message: "cannot block cloud metadata endpoint (169.254.169.254); " +
 				"grant CAP_NET_ADMIN to the server container, or add a host-level rule: " +
 				"iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP",
+			Category: category,
 		}
 	}
 
-	return nil
+	return Result{
+		Name:     name,
+		Severity: SeverityOK,
+		Message:  "iptables available for metadata endpoint blocking",
+		Category: category,
+	}
 }
 
 // checkRedisOnServiceNetwork verifies that the Redis server is NOT
 // reachable on the Docker service network. If it is, worker containers
 // can reach Redis, which breaks network isolation.
-func checkRedisOnServiceNetwork(ctx context.Context, deps DockerDeps) *Result {
+func checkRedisOnServiceNetwork(ctx context.Context, deps DockerDeps) Result {
+	const name = "redis_on_service_network"
+	const category = "docker"
+
 	if deps.RedisURL == "" || deps.Config.ServiceNetwork == "" {
-		return nil
+		return Result{Name: name, Severity: SeverityOK, Message: "Redis or service network not configured", Category: category}
 	}
 
 	u, err := url.Parse(deps.RedisURL)
 	if err != nil {
-		return nil // malformed URL caught later during Redis init
+		return Result{Name: name, Severity: SeverityOK, Message: "Redis URL check skipped (parse error)", Category: category}
 	}
 	redisHost := u.Hostname()
 	if redisHost == "" {
-		return nil
+		return Result{Name: name, Severity: SeverityOK, Message: "Redis URL check skipped (no host)", Category: category}
 	}
 
 	netResult, err := deps.Client.NetworkInspect(ctx, deps.Config.ServiceNetwork, client.NetworkInspectOptions{})
 	if err != nil {
-		return nil // service network may not exist yet
+		return Result{Name: name, Severity: SeverityOK, Message: "service network not yet available", Category: category}
 	}
 
 	for _, ep := range netResult.Network.Containers {
 		if ep.Name == redisHost {
-			return &Result{
-				Name:     "redis_on_service_network",
+			return Result{
+				Name:     name,
 				Severity: SeverityError,
 				Message: fmt.Sprintf("redis host %q is a container on the service network %q; "+
 					"worker containers can reach it — move Redis to a separate network",
 					redisHost, deps.Config.ServiceNetwork),
+				Category: category,
 			}
 		}
 		if ep.IPv4Address.IsValid() && ep.IPv4Address.Addr().String() == redisHost {
-			return &Result{
-				Name:     "redis_on_service_network",
+			return Result{
+				Name:     name,
 				Severity: SeverityError,
 				Message: fmt.Sprintf("redis address %q matches a container on the service network %q; "+
 					"worker containers can reach it — move Redis to a separate network",
 					redisHost, deps.Config.ServiceNetwork),
+				Category: category,
 			}
 		}
 	}
 
-	return nil
+	return Result{Name: name, Severity: SeverityOK, Message: "Redis is not on the service network", Category: category}
 }
 
 // --- helpers ---

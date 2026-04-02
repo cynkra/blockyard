@@ -314,6 +314,10 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Post("/apps/{id}/tags", AddAppTag(srv))
 		r.Delete("/apps/{id}/tags/{tagID}", RemoveAppTag(srv))
 
+		// System checks (admin only)
+		r.Get("/system/checks", GetSystemChecks(srv))
+		r.Post("/system/checks/run", RunSystemChecks(srv))
+
 		// Content discovery (deprecated — use GET /api/v1/apps with search/tag params)
 		r.Get("/catalog", CatalogHandler(srv))
 

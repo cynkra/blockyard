@@ -6,6 +6,7 @@
 <div class="drawer drawer-end">
 <input id="sidebar-toggle" type="checkbox" class="drawer-toggle" />
 <div class="drawer-content">
+<div id="system-banner" hx-get="/ui/system/banner" hx-trigger="load" hx-swap="innerHTML"></div>
 <div class="page-header">
     <h1>Apps</h1>
     <form method="GET" action="/" class="flex gap-2">
