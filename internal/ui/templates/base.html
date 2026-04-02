@@ -18,13 +18,13 @@
     <script src="/static/htmx.min.js"></script>
 </head>
 <body>
-    <div id="toast-container" class="toast-container"></div>
-    <div id="session-expired-overlay" class="session-overlay hidden">
-        <div class="session-overlay-card">
-            <p>Your session has expired.</p>
+    <div id="toast-container" class="toast toast-end toast-bottom z-[10000]"></div>
+    <dialog id="session-expired-overlay" class="modal">
+        <div class="modal-box text-center">
+            <p class="text-lg mb-4">Your session has expired.</p>
             <a href="/login" class="btn btn-primary">Sign In</a>
         </div>
-    </div>
+    </dialog>
     {{if .ActivePage}}
     <div class="page-layout">
         <nav class="left-nav" id="left-nav">
@@ -105,9 +105,10 @@
 function showToast(message, type) {
     var c = document.getElementById('toast-container');
     if (!c) return;
+    var cls = type === 'error' ? 'alert-error' : type === 'success' ? 'alert-success' : 'alert-info';
     var t = document.createElement('div');
-    t.className = 'toast toast-' + (type || 'info');
-    t.innerHTML = '<span>' + message + '</span><button onclick="this.parentElement.remove()">&times;</button>';
+    t.className = 'alert ' + cls + ' shadow-lg text-sm';
+    t.innerHTML = '<span>' + message + '</span><button class="btn btn-ghost btn-xs" onclick="this.parentElement.remove()">&times;</button>';
     c.prepend(t);
     while (c.children.length > 5) c.lastChild.remove();
     setTimeout(function() { t.style.opacity = '0'; setTimeout(function() { t.remove(); }, 300); }, 4000);
@@ -124,7 +125,7 @@ document.body.addEventListener('htmx:beforeSwap', function(e) {
     var xhr = e.detail.xhr;
     if (xhr && (xhr.status === 401 || (xhr.responseURL && xhr.responseURL.indexOf('/login') !== -1))) {
         e.detail.shouldSwap = false;
-        document.getElementById('session-expired-overlay').classList.remove('hidden');
+        document.getElementById('session-expired-overlay').showModal();
     }
 });
 

@@ -1,10 +1,10 @@
-<div class="sidebar-header">
-    <h2>{{.App.Name}}</h2>
-    <a href="/app/{{.App.Name}}/" target="_blank" title="Open app">&#8599;</a>
-    <button onclick="closeSidebar()" aria-label="Close">&#10005;</button>
+<div class="flex items-center gap-3 border-b border-base-300 p-4">
+    <h2 class="text-lg flex-1 m-0">{{.App.Name}}</h2>
+    <a href="/app/{{.App.Name}}/" target="_blank" title="Open app" class="btn btn-ghost btn-sm">&#8599;</a>
+    <label for="sidebar-toggle" onclick="closeSidebar()" class="btn btn-ghost btn-sm" aria-label="Close">&#10005;</label>
 </div>
 <nav class="sidebar-tabs">
-    <button class="tab active"
+    <button class="tab tab-active"
             hx-get="/ui/apps/{{.App.Name}}/tab/overview"
             hx-target="#tab-content"
             hx-on::after-request="setActiveTab(this)">Overview</button>
