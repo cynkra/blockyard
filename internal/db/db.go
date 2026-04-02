@@ -31,6 +31,9 @@ var sqliteMigrations embed.FS
 //go:embed migrations/postgres/*.sql
 var postgresMigrations embed.FS
 
+//go:embed migrations/released.txt
+var releasedFile embed.FS
+
 // Dialect identifies the SQL dialect in use.
 type Dialect int
 
@@ -44,6 +47,7 @@ type DB struct {
 	*sqlx.DB
 	dialect  Dialect
 	tempPath string // non-empty when using a temp file for SQLite :memory:
+	connURL  string // original connection URL, set for PostgreSQL
 }
 
 // Open opens a database connection based on the config.
@@ -117,7 +121,7 @@ func openPostgres(url string) (*DB, error) {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	d := &DB{DB: db, dialect: DialectPostgres, tempPath: ""}
+	d := &DB{DB: db, dialect: DialectPostgres, connURL: url}
 	if err := d.runMigrations(); err != nil {
 		db.Close()
 		return nil, err
@@ -125,7 +129,7 @@ func openPostgres(url string) (*DB, error) {
 	return d, nil
 }
 
-func (db *DB) runMigrations() error {
+func (db *DB) newMigrator() (*migrate.Migrate, error) {
 	var fsys fs.FS
 	var err error
 
@@ -136,28 +140,30 @@ func (db *DB) runMigrations() error {
 		fsys, err = fs.Sub(postgresMigrations, "migrations/postgres")
 	}
 	if err != nil {
-		return fmt.Errorf("migration fs: %w", err)
+		return nil, fmt.Errorf("migration fs: %w", err)
 	}
 
 	source, err := iofs.New(fsys, ".")
 	if err != nil {
-		return fmt.Errorf("migration source: %w", err)
+		return nil, fmt.Errorf("migration source: %w", err)
 	}
 
 	driver, err := db.migrateDriver()
 	if err != nil {
-		return fmt.Errorf("migration driver: %w", err)
+		return nil, fmt.Errorf("migration driver: %w", err)
 	}
 
-	m, err := migrate.NewWithInstance("iofs", source, db.driverName(), driver)
+	return migrate.NewWithInstance("iofs", source, db.driverName(), driver)
+}
+
+func (db *DB) runMigrations() error {
+	m, err := db.newMigrator()
 	if err != nil {
 		return fmt.Errorf("create migrator: %w", err)
 	}
-
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("run migrations: %w", err)
 	}
-
 	return nil
 }
 

@@ -117,7 +117,7 @@ func testPostgresDB(t *testing.T) *DB {
 		t.Fatal(err)
 	}
 	rawDB.SetMaxOpenConns(5)
-	db := &DB{DB: rawDB, dialect: DialectPostgres}
+	db := &DB{DB: rawDB, dialect: DialectPostgres, connURL: testURL}
 
 	t.Cleanup(func() {
 		db.Close()

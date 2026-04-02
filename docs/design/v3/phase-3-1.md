@@ -38,7 +38,7 @@ with the new rules from day one.
 
 | Layer | What it catches | When it runs |
 |---|---|---|
-| File convention check | Missing pairs, numbering gaps, dialect mismatch | `go test`, <1s |
+| File convention check | Missing pairs, numbering gaps, dialect mismatch, phase tags | `go test`, <1s |
 | Atlas Community lint | Destructive DDL, missing defaults, lock issues | CI, ~5s |
 | Up-down-up roundtrip | Broken down migrations, schema drift | `go test`, ~10s |
 
@@ -55,6 +55,28 @@ release to test against.
 Delete all existing migration files and replace with a single
 `001_initial` pair per dialect. The consolidated schema is the result of
 applying all eight original migrations in sequence.
+
+#### `migrations/released.txt`
+
+Tracks which migration numbers have shipped in a release. Managed by
+the release process — when a release is tagged, any new migration
+numbers are appended. The convention check reads this file to enforce
+that contract migrations only reference expands that have shipped.
+
+```
+# Managed by the release process. Do not edit manually.
+# Format: NNN vX.Y.Z
+```
+
+Initially empty (no releases yet after consolidation). After the first
+release containing `001_initial`:
+
+```
+001 v0.1.0
+```
+
+This file lives at `internal/db/migrations/released.txt` and is
+embedded alongside the dialect-specific migration directories.
 
 #### Delete old files
 
@@ -85,6 +107,7 @@ instead of a column-level UNIQUE constraint (from 002), and columns
 added by 003/005/006 are present from the start.
 
 ```sql
+-- phase: expand
 CREATE TABLE apps (
     id                      TEXT PRIMARY KEY,
     name                    TEXT NOT NULL,
@@ -219,6 +242,7 @@ Same core schema as SQLite, plus the boards tables, RLS policies,
 triggers, and PostgREST roles from the original migration 004.
 
 ```sql
+-- phase: expand
 CREATE TABLE apps (
     id                      TEXT PRIMARY KEY,
     name                    TEXT NOT NULL,
@@ -523,6 +547,38 @@ migrations run. This is enforced via a two-phase pattern:
 - **Contract** (next release): remove deprecated schema. Safe because
   no server running the previous code is still alive.
 
+#### Migrations must be self-contained
+
+**This is not mechanically enforced. Read carefully.**
+
+Every migration must carry its own data transformations in SQL. Never
+rely on application code running between an expand and its contract to
+move, backfill, or transform data. Migrations run sequentially by
+number — if a user upgrades from v1.0 to v3.0, the application code
+from v2.0 never executes. Any data transformation that lived only in
+v2.0's application code is skipped, and the contract migration will
+destroy data that was never migrated.
+
+Correct — backfill in the migration:
+```sql
+-- phase: expand
+ALTER TABLE users ADD COLUMN email_normalized TEXT NOT NULL DEFAULT '';
+UPDATE users SET email_normalized = lower(email);
+```
+
+Wrong — backfill deferred to application code:
+```sql
+-- phase: expand
+ALTER TABLE users ADD COLUMN email_normalized TEXT NOT NULL DEFAULT '';
+-- Application code will backfill this over the next few days...
+```
+
+If a backfill is too large to run in a single migration, it must still
+be expressed as SQL in the migration file (batched `UPDATE` with a
+loop, or a temporary trigger that populates on read). The migration
+may be slow, but it will be correct regardless of which versions the
+user skipped.
+
 #### Allowed operations (expand phase)
 
 - `ADD COLUMN` with a `DEFAULT` value (or nullable)
@@ -558,14 +614,55 @@ migrations run. This is enforced via a two-phase pattern:
 - One logical change per migration number — don't bundle unrelated DDL.
 - Comments explaining *why* for non-obvious choices.
 
+#### Phase tags
+
+Every `.up.sql` file must begin with a phase tag on its first line:
+
+```sql
+-- phase: expand
+```
+
+or
+
+```sql
+-- phase: contract
+-- contracts: 002
+```
+
+Rules enforced by the convention check:
+
+1. Every `.up.sql` has exactly one `-- phase:` tag (first line), with
+   value `expand` or `contract`.
+2. Every `contract` migration has a `-- contracts: NNN` line
+   referencing one or more expand migration numbers (comma-separated
+   for multi-expand contracts, e.g. `-- contracts: 002, 005`).
+3. Referenced migration numbers must exist and be lower than the
+   current migration number.
+4. Referenced migrations must themselves be tagged `expand` (you
+   don't contract a contract).
+5. Referenced expand migrations must appear in `released.txt` — i.e.,
+   they must have shipped in a prior release.
+
+Phase tags are only required on `.up.sql` files — the `.down.sql`
+inherits the phase from its `.up.sql` pair.
+
+A release can contain any mix of expands and contracts.
+
 #### Contract phase procedure
 
 - The release notes for the expand phase document what will be
   contracted in the next release.
-- The contract migration references the expand migration number:
-  `-- contracts: NNN (vX.Y)`
-- Before merging a contract, verify no deployed server runs the
-  expand-phase code (one full release cycle must have passed).
+- The contract migration references the expand migration number via
+  its `-- contracts: NNN` tag:
+  ```sql
+  -- phase: contract
+  -- contracts: 002
+  ```
+- The convention check verifies that every referenced expand appears
+  in `released.txt`. If the expand hasn't shipped yet, the check
+  fails — no judgment call required.
+- The release process appends newly-shipped migration numbers to
+  `released.txt` when tagging a release.
 
 ### Step 3: Atlas Community lint
 
@@ -585,9 +682,15 @@ Add to `.devcontainer/Dockerfile`, after the Go installation:
 
 ```dockerfile
 # Atlas Community CLI (migration linting) — pin version, -latest is a canary.
+# Checksum published at release.ariga.io alongside the binary.
 ARG ATLAS_VERSION=v1.1.0
 RUN curl -fsSL "https://release.ariga.io/atlas/atlas-community-linux-amd64-${ATLAS_VERSION}" \
-    -o /usr/local/bin/atlas && chmod +x /usr/local/bin/atlas
+      -o /usr/local/bin/atlas \
+    && curl -fsSL "https://release.ariga.io/atlas/atlas-community-linux-amd64-${ATLAS_VERSION}.sha256" \
+      -o /tmp/atlas.sha256 \
+    && echo "$(cat /tmp/atlas.sha256)  /usr/local/bin/atlas" | sha256sum -c - \
+    && chmod +x /usr/local/bin/atlas \
+    && rm /tmp/atlas.sha256
 ```
 
 #### CI workflow: `migration-lint` job
@@ -619,7 +722,11 @@ migration-lint:
     - name: Install Atlas Community
       run: |
         curl -fsSL https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.1.0 \
-          -o /usr/local/bin/atlas && chmod +x /usr/local/bin/atlas
+          -o /usr/local/bin/atlas
+        curl -fsSL https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.1.0.sha256 \
+          -o /tmp/atlas.sha256
+        echo "$(cat /tmp/atlas.sha256)  /usr/local/bin/atlas" | sha256sum -c -
+        chmod +x /usr/local/bin/atlas
     - name: Lint SQLite migrations
       run: |
         atlas migrate lint \
@@ -804,7 +911,8 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
         lines = append(lines, fmt.Sprintf("INDEX %s: %s", name, def))
     }
 
-    // CHECK constraints
+    // CHECK constraints (exclude system-generated NOT NULL constraints whose
+    // names contain OIDs that change across drop/create cycles)
     chkRows, err := db.Query(`
         SELECT tc.table_name, cc.constraint_name, cc.check_clause
         FROM information_schema.check_constraints cc
@@ -813,6 +921,7 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
            AND cc.constraint_schema = tc.constraint_schema
         WHERE tc.table_schema = 'public'
           AND tc.table_name != 'schema_migrations'
+          AND cc.constraint_name NOT LIKE '%_not_null'
         ORDER BY tc.table_name, cc.constraint_name`)
     if err != nil {
         t.Fatal(err)
@@ -855,6 +964,79 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
             tbl, name, col, refTbl, refCol))
     }
 
+    // Functions (excludes internal/system functions)
+    fnRows, err := db.Query(`
+        SELECT p.proname, pg_get_functiondef(p.oid)
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+        ORDER BY p.proname`)
+    if err != nil {
+        t.Fatal(err)
+    }
+    defer fnRows.Close()
+
+    for fnRows.Next() {
+        var name, def string
+        if err := fnRows.Scan(&name, &def); err != nil {
+            t.Fatal(err)
+        }
+        lines = append(lines, fmt.Sprintf("FUNC %s: %s", name, def))
+    }
+
+    // Triggers
+    trgRows, err := db.Query(`
+        SELECT tgname, pg_get_triggerdef(t.oid)
+        FROM pg_trigger t
+        JOIN pg_class c ON t.tgrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'public'
+          AND NOT t.tgisinternal
+        ORDER BY c.relname, t.tgname`)
+    if err != nil {
+        t.Fatal(err)
+    }
+    defer trgRows.Close()
+
+    for trgRows.Next() {
+        var name, def string
+        if err := trgRows.Scan(&name, &def); err != nil {
+            t.Fatal(err)
+        }
+        lines = append(lines, fmt.Sprintf("TRIGGER %s: %s", name, def))
+    }
+
+    // RLS policies
+    polRows, err := db.Query(`
+        SELECT pol.polname, c.relname, pg_get_expr(pol.polqual, pol.polrelid) AS using_expr,
+               pg_get_expr(pol.polwithcheck, pol.polrelid) AS check_expr
+        FROM pg_policy pol
+        JOIN pg_class c ON pol.polrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'public'
+        ORDER BY c.relname, pol.polname`)
+    if err != nil {
+        t.Fatal(err)
+    }
+    defer polRows.Close()
+
+    for polRows.Next() {
+        var name, tbl string
+        var usingExpr, checkExpr *string
+        if err := polRows.Scan(&name, &tbl, &usingExpr, &checkExpr); err != nil {
+            t.Fatal(err)
+        }
+        u, c := "NULL", "NULL"
+        if usingExpr != nil {
+            u = *usingExpr
+        }
+        if checkExpr != nil {
+            c = *checkExpr
+        }
+        lines = append(lines, fmt.Sprintf("POLICY %s.%s: USING(%s) CHECK(%s)",
+            tbl, name, u, c))
+    }
+
     return strings.Join(lines, "\n")
 }
 
@@ -878,8 +1060,18 @@ func dumpSchema(t *testing.T, db *DB) string {
 the embedded filesystems so it runs with `go test` — no filesystem
 assumptions.
 
+Add an embed for `released.txt` in `internal/db/db.go` alongside the
+existing migration embeds:
+
+```go
+//go:embed migrations/released.txt
+var releasedFile embed.FS
+```
+
 ```go
 func TestMigrationConventions(t *testing.T) {
+    released := parseReleased(t)
+
     for _, dialect := range []string{"sqlite", "postgres"} {
         t.Run(dialect, func(t *testing.T) {
             var fsys fs.FS
@@ -893,7 +1085,7 @@ func TestMigrationConventions(t *testing.T) {
             if err != nil {
                 t.Fatal(err)
             }
-            checkConventions(t, dialect, fsys)
+            checkConventions(t, dialect, fsys, released)
         })
     }
 
@@ -906,7 +1098,7 @@ func TestMigrationConventions(t *testing.T) {
     }
 }
 
-func checkConventions(t *testing.T, dialect string, fsys fs.FS) {
+func checkConventions(t *testing.T, dialect string, fsys fs.FS, released map[int]bool) {
     t.Helper()
 
     entries, err := fs.ReadDir(fsys, ".")
@@ -973,6 +1165,122 @@ func checkConventions(t *testing.T, dialect string, fsys fs.FS) {
     for _, name := range downs {
         checkNonEmpty(t, fsys, name)
     }
+
+    // Phase tags (up files only)
+    phases := checkPhaseTags(t, fsys, ups)
+
+    // Contract referential integrity
+    for num, phase := range phases {
+        if phase != "contract" {
+            continue
+        }
+        refs := contractRefs(t, fsys, ups[num])
+        if len(refs) == 0 {
+            t.Errorf("%s: contract migration missing -- contracts: NNN", ups[num])
+            continue
+        }
+        for _, ref := range refs {
+            if ref >= num {
+                t.Errorf("%s: contracts reference %03d must be lower than %03d",
+                    ups[num], ref, num)
+            }
+            if _, ok := ups[ref]; !ok {
+                t.Errorf("%s: contracts reference %03d does not exist",
+                    ups[num], ref)
+            } else if phases[ref] != "expand" {
+                t.Errorf("%s: contracts reference %03d is %q, not expand",
+                    ups[num], ref, phases[ref])
+            }
+            if !released[ref] {
+                t.Errorf("%s: contracts reference %03d has not been released "+
+                    "(not in released.txt)", ups[num], ref)
+            }
+        }
+    }
+}
+
+// checkPhaseTags verifies every .up.sql has a valid -- phase: tag on its
+// first line and returns the phase for each migration number.
+func checkPhaseTags(t *testing.T, fsys fs.FS, ups map[int]string) map[int]string {
+    t.Helper()
+    phases := map[int]string{}
+    for num, name := range ups {
+        data, err := fs.ReadFile(fsys, name)
+        if err != nil {
+            t.Fatal(err)
+        }
+        first, _, _ := strings.Cut(string(data), "\n")
+        first = strings.TrimSpace(first)
+        switch first {
+        case "-- phase: expand":
+            phases[num] = "expand"
+        case "-- phase: contract":
+            phases[num] = "contract"
+        default:
+            t.Errorf("%s: first line must be '-- phase: expand' or '-- phase: contract', got %q",
+                name, first)
+        }
+    }
+    return phases
+}
+
+// contractRefs parses -- contracts: NNN[, NNN...] from a migration file.
+func contractRefs(t *testing.T, fsys fs.FS, name string) []int {
+    t.Helper()
+    data, err := fs.ReadFile(fsys, name)
+    if err != nil {
+        t.Fatal(err)
+    }
+    var refs []int
+    for _, line := range strings.Split(string(data), "\n") {
+        line = strings.TrimSpace(line)
+        if !strings.HasPrefix(line, "-- contracts:") {
+            continue
+        }
+        val := strings.TrimPrefix(line, "-- contracts:")
+        for _, s := range strings.Split(val, ",") {
+            s = strings.TrimSpace(s)
+            if s == "" {
+                continue
+            }
+            num, err := strconv.Atoi(s)
+            if err != nil {
+                t.Errorf("%s: invalid contracts reference %q", name, s)
+                continue
+            }
+            refs = append(refs, num)
+        }
+    }
+    return refs
+}
+
+// parseReleased reads migrations/released.txt and returns the set of
+// migration numbers that have shipped in a release.
+func parseReleased(t *testing.T) map[int]bool {
+    t.Helper()
+    data, err := releasedFile.ReadFile("migrations/released.txt")
+    if err != nil {
+        t.Fatal(err)
+    }
+    released := map[int]bool{}
+    for _, line := range strings.Split(string(data), "\n") {
+        line = strings.TrimSpace(line)
+        if line == "" || strings.HasPrefix(line, "#") {
+            continue
+        }
+        fields := strings.Fields(line)
+        if len(fields) < 2 {
+            t.Errorf("released.txt: malformed line: %q", line)
+            continue
+        }
+        num, err := strconv.Atoi(fields[0])
+        if err != nil {
+            t.Errorf("released.txt: invalid migration number: %q", fields[0])
+            continue
+        }
+        released[num] = true
+    }
+    return released
 }
 
 func checkNonEmpty(t *testing.T, fsys fs.FS, name string) {
@@ -1139,7 +1447,7 @@ func openRawPostgres(t *testing.T) *DB {
         cleanup.Close()
     })
 
-    return &DB{DB: rawDB, dialect: DialectPostgres}
+    return &DB{DB: rawDB, dialect: DialectPostgres, connURL: testURL}
 }
 ```
 
@@ -1152,6 +1460,7 @@ New file: `internal/db/backup.go`. Used by `by admin update` (phase
 package db
 
 import (
+    "bytes"
     "context"
     "fmt"
     "os"
@@ -1183,9 +1492,10 @@ func (db *DB) backupSQLite(ctx context.Context) (string, error) {
         return "", fmt.Errorf("backup: cannot back up in-memory database")
     }
 
-    var path string
+    var seq int
+    var name, path string
     if err := db.QueryRowContext(ctx,
-        "PRAGMA database_list").Scan(nil, nil, &path); err != nil {
+        "PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
         return "", fmt.Errorf("backup: resolve database path: %w", err)
     }
 
@@ -1214,12 +1524,13 @@ func (db *DB) backupPostgres(ctx context.Context) (string, error) {
 
     // Use the stored connection URL so pg_dump inherits the full DSN
     // including credentials. The connURL field is set in openPostgres().
-    cmd := exec.CommandContext(ctx, "pg_dump",
+    cmd := exec.CommandContext(ctx, "pg_dump", //nolint:gosec // connURL is from our own config, not user input
         "--format=custom", "--dbname="+db.connURL, "-f", dest)
-    cmd.Stderr = os.Stderr
+    var stderr bytes.Buffer
+    cmd.Stderr = &stderr
     if err := cmd.Run(); err != nil {
         os.Remove(dest)
-        return "", fmt.Errorf("backup: pg_dump: %w", err)
+        return "", fmt.Errorf("backup: pg_dump: %w: %s", err, stderr.String())
     }
 
     return dest, nil
@@ -1312,6 +1623,10 @@ func TestBackupPostgres(t *testing.T) {
 
     dest, err := db.Backup(context.Background())
     if err != nil {
+        // pg_dump fails on version mismatch (e.g., pg_dump 15 vs server 17).
+        if strings.Contains(err.Error(), "version mismatch") {
+            t.Skip("pg_dump version mismatch with server")
+        }
         t.Fatal(err)
     }
     defer os.Remove(dest)
@@ -1366,15 +1681,15 @@ func TestBackupPostgres(t *testing.T) {
 
 7. **Schema dump via SQL introspection, not `pg_dump`.** The roundtrip
    test needs a deterministic schema comparison. `sqlite_master` and
-   `information_schema`/`pg_indexes` produce stable, sorted output
-   without external tool dependencies. `pg_dump` output varies across
-   versions and includes comments that complicate diffing. The
-   PostgreSQL dump covers columns, indexes, CHECK constraints, and
-   foreign keys — sufficient for the server's own tables. Board-specific
-   objects (RLS policies, triggers, functions) are not included: they're
-   PostgREST-facing, expected to remain stable, and any missing `DROP`
-   in a down migration would already cause the second `up` to fail with
-   a duplicate-object error.
+   `information_schema`/`pg_indexes`/`pg_proc`/`pg_trigger`/`pg_policy`
+   produce stable, sorted output without external tool dependencies.
+   `pg_dump` output varies across versions and includes comments that
+   complicate diffing. The PostgreSQL dump covers columns, indexes,
+   CHECK constraints, foreign keys, functions, triggers, and RLS
+   policies — a complete picture of the public schema. This avoids
+   relying on duplicate-object errors to catch missing `DROP`s in down
+   migrations, which would silently fail for any object created with
+   `CREATE OR REPLACE`.
 
 8. **Pre-migration backup as a `DB` method.** The backup utility lives
    on the `DB` struct because it needs dialect awareness and a live
@@ -1395,3 +1710,22 @@ func TestBackupPostgres(t *testing.T) {
     (`inet_server_addr()`, `current_user`) is fragile and cannot recover
     the password. Storing the URL at open time is simple and no worse
     security-wise than the connection pool already holding it in memory.
+
+11. **Explicit phase tags over implicit classification.** Each `.up.sql`
+    must declare `-- phase: expand` or `-- phase: contract` on its first
+    line. Contract migrations must reference the expand(s) they clean up
+    via `-- contracts: NNN`. This lets the convention check enforce
+    referential integrity mechanically — contracts reference real,
+    lower-numbered expands. Tags live only in `.up.sql` files — the
+    `.down.sql` inherits the phase from its pair, avoiding redundant
+    annotations.
+
+12. **`released.txt` for enforceable release-cycle gating.** The "one
+    full release cycle must have passed" rule is enforced via
+    `migrations/released.txt`, which maps migration numbers to the
+    release they shipped in. The convention check verifies that every
+    contract's referenced expand appears in this file. The release
+    process maintains the file — when a release is tagged, new migration
+    numbers are appended. This eliminates a judgment call that AI agents
+    would otherwise need to make by inspecting git tags, and turns it
+    into a simple set-membership check.

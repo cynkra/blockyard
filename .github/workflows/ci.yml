@@ -61,6 +61,47 @@ jobs:
           fail-on-severity: high
           retry-on-snapshot-warnings: true
 
+  migration-lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: blockyard
+          POSTGRES_PASSWORD: blockyard
+          POSTGRES_DB: blockyard_lint
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blockyard"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Atlas Community
+        run: |
+          curl -fsSL https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.1.0 \
+            -o /usr/local/bin/atlas
+          curl -fsSL https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.1.0.sha256 \
+            -o /tmp/atlas.sha256
+          echo "$(cat /tmp/atlas.sha256)  /usr/local/bin/atlas" | sha256sum -c -
+          chmod +x /usr/local/bin/atlas
+      - name: Lint SQLite migrations
+        run: |
+          atlas migrate lint \
+            --dir "file://internal/db/migrations/sqlite?format=golang-migrate" \
+            --dev-url "sqlite://dev?mode=memory" \
+            --latest 1
+      - name: Lint PostgreSQL migrations
+        run: |
+          atlas migrate lint \
+            --dir "file://internal/db/migrations/postgres?format=golang-migrate" \
+            --dev-url "postgres://blockyard:blockyard@localhost:5432/blockyard_lint?sslmode=disable" \
+            --latest 1
+
   unit:
     needs: [changes]
     if: needs.changes.outputs.code == 'true' && github.event_name != 'merge_group' && (inputs.job == '' || inputs.job == 'unit')

@@ -48,6 +48,17 @@ RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architectu
       | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"
 
+# Atlas Community CLI (migration linting) — pin version, -latest is a canary.
+# Checksum published at release.ariga.io alongside the binary.
+ARG ATLAS_VERSION=v1.1.0
+RUN curl -fsSL "https://release.ariga.io/atlas/atlas-community-linux-amd64-${ATLAS_VERSION}" \
+      -o /usr/local/bin/atlas \
+    && curl -fsSL "https://release.ariga.io/atlas/atlas-community-linux-amd64-${ATLAS_VERSION}.sha256" \
+      -o /tmp/atlas.sha256 \
+    && echo "$(cat /tmp/atlas.sha256)  /usr/local/bin/atlas" | sha256sum -c - \
+    && chmod +x /usr/local/bin/atlas \
+    && rm /tmp/atlas.sha256
+
 # Switch to non-root user for user-local installs
 USER $USERNAME
 ENV GOPATH="/home/dev/go"
