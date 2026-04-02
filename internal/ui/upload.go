@@ -135,7 +135,7 @@ func repackageZip(fh *multipart.FileHeader) (io.ReadCloser, error) {
 			}
 			writeErr = tw.WriteHeader(&tar.Header{
 				Name: clean,
-				Size: int64(zf.UncompressedSize64),
+				Size: int64(zf.UncompressedSize64), //nolint:gosec // G115: zip entries > 8 EiB are not realistic
 				Mode: 0644,
 			})
 			if writeErr != nil {
@@ -146,7 +146,9 @@ func repackageZip(fh *multipart.FileHeader) (io.ReadCloser, error) {
 			if writeErr != nil {
 				return
 			}
-			_, writeErr = io.Copy(tw, rc)
+			// Limit decompressed size to guard against zip bombs.
+			// The bundle pipeline enforces its own 2 GiB limit downstream.
+			_, writeErr = io.Copy(tw, io.LimitReader(rc, 2<<30)) //nolint:gosec // G110: bounded by LimitReader
 			rc.Close()
 			if writeErr != nil {
 				return
