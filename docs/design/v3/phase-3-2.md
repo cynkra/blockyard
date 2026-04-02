@@ -320,12 +320,28 @@ still stops the goroutine, but without `CancelTokenRefresher` the
 cleans up the map. `cleanupLocal()` itself still handles directory
 and package-library cleanup unchanged.
 
-**`drainAndReplace` health-check failure needs cleanup (bugfix).**
-In `refresh.go` ~L211, `waitHealthy` failure currently just returns
-without cleaning up -- the new worker, its registry entry, its
-container, and its cancel token are all orphaned. This is a
-pre-existing bug (compare with `transfer.go` ~L156 which cleans up
-properly). Fix by adding cleanup before `return`:
+**`drainAndReplace` failure needs cleanup and rollback (bugfix).**
+In `refresh.go`, `drainAndReplace` marks old workers as draining
+_before_ spawning the new one. Three failure points follow --
+`Spawn`, `Addr`, and `waitHealthy` -- and all previously returned
+without cleaning up. This is a pre-existing bug (compare with
+`transfer.go` ~L156 which cleans up properly).
+
+Fix: add a `restoreOld` helper that un-drains the old workers
+(stale packages are better than no workers at all). Call it at
+every failure point after `MarkDraining`. For `waitHealthy`
+failure, also clean up the new worker's resources:
+
+```go
+restoreOld := func() {
+    for _, oldID := range oldWorkers {
+        if w, ok := srv.Workers.Get(oldID); ok {
+            w.Draining = false
+            srv.Workers.Set(oldID, w)
+        }
+    }
+}
+```
 
 ```go
 if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
@@ -335,6 +351,7 @@ if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
     srv.Workers.Delete(newWorkerID)
     srv.Registry.Delete(newWorkerID)
     srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
+    restoreOld()
     return
 }
 ```
@@ -580,6 +597,8 @@ func LoadOrCreateWorkerKey(
 // loadOrCreateWorkerKeyFile reads the key from disk if it exists,
 // or generates a new one and writes it. File permissions: 0600.
 func loadOrCreateWorkerKeyFile(path string) (*auth.SigningKey, error) {
+    path = filepath.Clean(path) // gosec G304
+
     // Try reading existing file.
     data, err := os.ReadFile(path)
     if err == nil {
@@ -697,7 +716,8 @@ func TestMemoryStoreImplementsStore(t *testing.T) {
 Same pattern for `internal/registry/registry_test.go` and
 `internal/server/workermap_memory_test.go`. The real enforcement is
 the `var _ Interface = (*Impl)(nil)` line -- the tests are
-documentation.
+documentation. In practice these were omitted as redundant; the
+compile-time checks are sufficient.
 
 #### Worker key round-trip: file path
 
@@ -915,7 +935,8 @@ No behavioral changes. Grep for these constructors and update.
 | `internal/integration/worker_key_test.go` | **create** | Vault path round-trip |
 | `internal/proxy/coldstart.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()`; add `srv.CancelTokenRefresher()` before post-registration `cleanupLocal()` |
 | `internal/server/transfer.go` | **update** | Same + replace local `cancelToken()` cleanup with `srv.CancelTokenRefresher()` |
-| `internal/server/refresh.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()`; fix missing cleanup on health-check failure in `drainAndReplace` |
+| `internal/server/refresh.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()`; fix `drainAndReplace` to clean up new worker and un-drain old workers on failure |
+| `internal/server/refresh_docker_test.go` | **update** | Handle health-check failure case where old workers are restored instead of draining |
 | `internal/ops/ops.go` | **update** | Replace `w.CancelToken()` with `srv.CancelTokenRefresher()` |
 | `internal/proxy/loadbalancer.go` | **update** | `Assign` params: `*server.WorkerMap` → `server.WorkerMap`, `*session.Store` → `session.Store` |
 | `internal/proxy/loadbalancer_test.go` | **update** | Match updated `Assign` parameter types |

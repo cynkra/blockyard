@@ -174,10 +174,22 @@ func (srv *Server) drainAndReplace(
 		sender.Write(fmt.Sprintf("Stopping previous worker (%s)...", oldID[:8]))
 	}
 
+	// restoreOld undoes draining if the replacement fails.
+	// Stale packages are better than no workers at all.
+	restoreOld := func() {
+		for _, oldID := range oldWorkers {
+			if w, ok := srv.Workers.Get(oldID); ok {
+				w.Draining = false
+				srv.Workers.Set(oldID, w)
+			}
+		}
+	}
+
 	spec := srv.defaultWorkerSpec(app.ID, newWorkerID, newLibDir, *app.ActiveBundle)
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {
 		sender.Write("Failed to start new worker.")
 		slog.Error("refresh: spawn worker", "error", err)
+		restoreOld()
 		return
 	}
 
@@ -185,6 +197,8 @@ func (srv *Server) drainAndReplace(
 	if err != nil {
 		sender.Write("Failed to start new worker.")
 		slog.Error("refresh: resolve worker address", "error", err)
+		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
+		restoreOld()
 		return
 	}
 
@@ -215,6 +229,7 @@ func (srv *Server) drainAndReplace(
 		srv.Workers.Delete(newWorkerID)
 		srv.Registry.Delete(newWorkerID)
 		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
+		restoreOld()
 		return
 	}
 

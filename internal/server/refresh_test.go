@@ -204,6 +204,58 @@ func TestDrainAndReplace(t *testing.T) {
 	}
 }
 
+func TestDrainAndReplace_HealthCheckFails(t *testing.T) {
+	srv, be := testServerWithMock(t)
+
+	// Set up store with a package so AssembleLibrary succeeds.
+	srv.PkgStore.SetPlatform("test-platform")
+	pkgDir := srv.PkgStore.Path("shiny", "src1", "cfg1")
+	os.MkdirAll(pkgDir, 0o755)
+	os.WriteFile(filepath.Join(pkgDir, "DESCRIPTION"), []byte("Package: shiny"), 0o644)
+	metaPath := srv.PkgStore.ConfigMetaPath("shiny", "src1", "cfg1")
+	os.WriteFile(metaPath, []byte(`{}`), 0o644)
+
+	// Set up an old worker.
+	srv.Workers.Set("old-w-000", ActiveWorker{AppID: "app-1", BundleID: "b-1"})
+	srv.Registry.Set("old-w-000", "localhost:1234")
+
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "store-manifest.json")
+	pkgstore.WriteStoreManifest(tmpDir, map[string]string{"shiny": "src1/cfg1"})
+
+	bundleID := "b-1"
+	app := &db.AppRow{
+		ID:           "app-1",
+		ActiveBundle: &bundleID,
+	}
+
+	// Make health check fail.
+	be.HealthOK.Store(false)
+
+	sender := srv.Tasks.Create("task-1", "app-1")
+	srv.drainAndReplace(context.Background(), app, manifestPath, sender)
+
+	// Old worker should NOT be draining — restored after failure.
+	if srv.Workers.IsDraining("app-1") {
+		t.Error("old workers should be un-drained after health-check failure")
+	}
+
+	// Only the old worker should remain.
+	count := srv.Workers.CountForApp("app-1")
+	if count != 1 {
+		t.Errorf("expected 1 worker (old restored), got %d", count)
+	}
+
+	// Old worker should still be accessible.
+	w, ok := srv.Workers.Get("old-w-000")
+	if !ok {
+		t.Fatal("old worker should still exist")
+	}
+	if w.Draining {
+		t.Error("old worker should not be draining")
+	}
+}
+
 func TestLinkNewPackages(t *testing.T) {
 	srv := setupRefreshTest(t)
 
