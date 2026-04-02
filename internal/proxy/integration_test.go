@@ -77,7 +77,7 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 	// Track background restore goroutines so cleanup waits for them.
 	var wg sync.WaitGroup
 	srv.RestoreWG = &wg
-	handler := api.NewRouter(srv)
+	handler := api.NewRouter(srv, func() {})
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	// Wait for restore goroutines before DB/TempDir cleanup (LIFO order).
@@ -1263,7 +1263,7 @@ func testProxyServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Serve
 	srv.SigningKey = auth.DeriveSigningKey("test-session-secret")
 	srv.UserSessions = auth.NewUserSessionStore()
 
-	handler := api.NewRouter(srv)
+	handler := api.NewRouter(srv, func() {})
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

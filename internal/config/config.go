@@ -52,6 +52,7 @@ type ServerConfig struct {
 	SessionSecret   *Secret  `toml:"session_secret"`   // required when [oidc] is set
 	ExternalURL     string   `toml:"external_url"`
 	ShutdownTimeout Duration `toml:"shutdown_timeout"`
+	DrainTimeout    Duration `toml:"drain_timeout"`
 	LogLevel             string   `toml:"log_level"`              // debug, info, warn, error (default: info)
 	TrustedProxies       []string `toml:"trusted_proxies"`        // CIDRs whose X-Forwarded-For to trust (e.g. ["10.0.0.0/8"])
 	SkipDockerPreflight  bool     `toml:"skip_docker_preflight"`  // skip Docker-dependent preflight checks at startup
@@ -164,6 +165,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Server.ShutdownTimeout.Duration == 0 {
 		cfg.Server.ShutdownTimeout.Duration = 30 * time.Second
+	}
+	if cfg.Server.DrainTimeout.Duration == 0 {
+		cfg.Server.DrainTimeout.Duration = 30 * time.Second
 	}
 	if cfg.Docker.Socket == "" {
 		cfg.Docker.Socket = "/var/run/docker.sock"

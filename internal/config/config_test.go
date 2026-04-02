@@ -52,6 +52,16 @@ func TestParseMinimalConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultShutdownAndDrainTimeouts(t *testing.T) {
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Server.ShutdownTimeout.Duration != 30*time.Second {
+		t.Errorf("expected ShutdownTimeout 30s, got %v", cfg.Server.ShutdownTimeout.Duration)
+	}
+	if cfg.Server.DrainTimeout.Duration != 30*time.Second {
+		t.Errorf("expected DrainTimeout 30s, got %v", cfg.Server.DrainTimeout.Duration)
+	}
+}
+
 // collectEnvVarNames walks Config struct tags and returns all derived
 // env var names. Used by tests only.
 func collectEnvVarNames(t reflect.Type, prefix string) []string {

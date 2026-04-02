@@ -49,7 +49,7 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 
-	handler := NewRouter(srv)
+	handler := NewRouter(srv, func() {})
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

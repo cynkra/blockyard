@@ -143,7 +143,7 @@ func swaggerDocJSON(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte(doc))
 }
 
-func NewRouter(srv *server.Server) http.Handler {
+func NewRouter(srv *server.Server, startBG func()) http.Handler {
 	r := chi.NewRouter()
 
 	// Request logging (outermost to capture status/duration for all routes).
@@ -170,6 +170,11 @@ func NewRouter(srv *server.Server) http.Handler {
 	// these move there. Otherwise serve them on the main listener.
 	if srv.Config.Server.ManagementBind == "" {
 		r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			if srv.Draining.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.Write([]byte("draining"))
+				return
+			}
 			w.Write([]byte("ok"))
 		})
 		r.Get("/readyz", readyzHandler(srv, false))
@@ -265,6 +270,9 @@ func NewRouter(srv *server.Server) http.Handler {
 		r.Use(apiCSP)
 		r.Use(APIAuth(srv))
 
+		// Activation endpoint — no request body, registered before limitBody.
+		r.Post("/admin/activate", activateHandler(srv, startBG))
+
 		// Bundle upload has its own body size limit (MaxBundleSize),
 		// so it is registered before the limitBody middleware below.
 		r.Post("/apps/{id}/bundles", UploadBundle(srv))
@@ -338,6 +346,11 @@ func NewManagementRouter(srv *server.Server) http.Handler {
 	r.Use(requestLogger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if srv.Draining.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("draining"))
+			return
+		}
 		w.Write([]byte("ok"))
 	})
 	r.Get("/readyz", readyzHandler(srv, true))

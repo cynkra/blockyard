@@ -78,6 +78,14 @@ type Server struct {
 	// serialized to Redis in phase 3-3.
 	cancelTokens sync.Map // workerID → func()
 
+	// Draining is set when the server enters drain mode (SIGUSR1) or
+	// shutdown (SIGTERM). Health endpoints return 503 when set.
+	Draining atomic.Bool
+
+	// Passive is true when BLOCKYARD_PASSIVE=1 is set. Background
+	// goroutines are deferred until POST /api/v1/admin/activate.
+	Passive atomic.Bool
+
 	// Bootstrap token state — one-time token that can be exchanged for
 	// a real PAT via POST /api/v1/bootstrap. Hash is set at startup;
 	// Redeemed is flipped to true on first successful exchange.

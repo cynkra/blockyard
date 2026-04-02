@@ -132,7 +132,7 @@ func TestMetricsEndpointEnabled(t *testing.T) {
 	srv := testServerForReadyz(t)
 	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: true}
 
-	router := NewRouter(srv)
+	router := NewRouter(srv, func() {})
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	req.Header.Set("Authorization", "Bearer "+testPAT)
 	rec := httptest.NewRecorder()
@@ -150,7 +150,7 @@ func TestMetricsEndpointDisabled(t *testing.T) {
 	srv := testServerForReadyz(t)
 	// Telemetry nil — /metrics should 404
 
-	router := NewRouter(srv)
+	router := NewRouter(srv, func() {})
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -504,7 +504,7 @@ func TestMainRouterOmitsOpsWhenManagementBind(t *testing.T) {
 	srv.Config.Server.ManagementBind = "127.0.0.1:9100"
 	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: true}
 
-	router := NewRouter(srv)
+	router := NewRouter(srv, func() {})
 
 	// /healthz should 404 on the main router
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -536,7 +536,7 @@ func TestMainRouterServesHealthzWithoutManagementBind(t *testing.T) {
 	srv := testServerForReadyz(t)
 	// ManagementBind is empty — ops endpoints should be on the main router.
 
-	router := NewRouter(srv)
+	router := NewRouter(srv, func() {})
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -726,6 +726,137 @@ func TestReadyzDeactivatedUserCookieHidesChecks(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&body)
 	if _, exists := body["checks"]; exists {
 		t.Error("deactivated user cookie should not expose checks")
+	}
+}
+
+func TestHealthzDraining(t *testing.T) {
+	srv := testServerForReadyz(t)
+	srv.Draining.Store(true)
+
+	r := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+
+	handler := NewManagementRouter(srv)
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+	if body := w.Body.String(); body != "draining" {
+		t.Errorf("expected body 'draining', got %q", body)
+	}
+}
+
+func TestHealthzOK(t *testing.T) {
+	srv := testServerForReadyz(t)
+
+	r := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+
+	handler := NewManagementRouter(srv)
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if body := w.Body.String(); body != "ok" {
+		t.Errorf("expected body 'ok', got %q", body)
+	}
+}
+
+func TestReadyzDraining(t *testing.T) {
+	srv := testServerForReadyz(t)
+	srv.Draining.Store(true)
+
+	r := httptest.NewRequest("GET", "/readyz", nil)
+	w := httptest.NewRecorder()
+
+	handler := NewManagementRouter(srv)
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(w.Body).Decode(&body)
+	if body["status"] != "draining" {
+		t.Errorf("expected status 'draining', got %v", body["status"])
+	}
+}
+
+func TestReadyzPassiveMode(t *testing.T) {
+	srv := testServerForReadyz(t)
+	srv.Passive.Store(true)
+
+	r := httptest.NewRequest("GET", "/readyz", nil)
+	w := httptest.NewRecorder()
+
+	handler := NewManagementRouter(srv)
+	handler.ServeHTTP(w, r)
+
+	// Should return 200 — passive servers are ready to serve.
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(w.Body).Decode(&body)
+	if body["mode"] != "passive" {
+		t.Errorf("expected mode 'passive', got %v", body["mode"])
+	}
+}
+
+func TestReadyzPassiveModeWithFailedDeps(t *testing.T) {
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestAdmin(t, database)
+
+	cfg := &config.Config{}
+	be := &failingBackend{MockBackend: mock.New()}
+	srv := server.NewServer(cfg, be, database)
+	srv.Passive.Store(true)
+
+	// Close DB so database check also fails.
+	database.Close()
+
+	handler := readyzHandler(srv, true)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["status"] != "not_ready" {
+		t.Errorf("expected status 'not_ready', got %v", body["status"])
+	}
+	if body["mode"] != "passive" {
+		t.Errorf("expected mode 'passive', got %v", body["mode"])
+	}
+}
+
+func TestMainRouterHealthzDraining(t *testing.T) {
+	srv := testServerForReadyz(t)
+	srv.Draining.Store(true)
+	// ManagementBind empty — /healthz is on the main router.
+
+	router := NewRouter(srv, func() {})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+	if body := rec.Body.String(); body != "draining" {
+		t.Errorf("expected body 'draining', got %q", body)
 	}
 }
 
