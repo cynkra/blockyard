@@ -80,8 +80,14 @@
         for (var i = 0; i < files.length; i++) {
             var li = document.createElement('li');
             li.className = 'file-list-item';
-            li.innerHTML = '<span class="file-list-name">' + files[i].name + '</span>' +
-                           '<span class="file-list-size">' + formatSize(files[i].size) + '</span>';
+            var nameSpan = document.createElement('span');
+            nameSpan.className = 'file-list-name';
+            nameSpan.textContent = files[i].name;
+            var sizeSpan = document.createElement('span');
+            sizeSpan.className = 'file-list-size';
+            sizeSpan.textContent = formatSize(files[i].size);
+            li.appendChild(nameSpan);
+            li.appendChild(sizeSpan);
             fileList.appendChild(li);
         }
 
