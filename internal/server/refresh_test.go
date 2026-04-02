@@ -190,7 +190,10 @@ func TestDrainAndReplace(t *testing.T) {
 	}
 
 	sender := srv.Tasks.Create("task-1", "app-1")
-	srv.drainAndReplace(context.Background(), app, manifestPath, sender)
+	err := srv.drainAndReplace(context.Background(), app, manifestPath, sender)
+	if err != nil {
+		t.Fatalf("drainAndReplace: %v", err)
+	}
 
 	// Old worker should be draining.
 	if !srv.Workers.IsDraining("app-1") {
@@ -233,7 +236,10 @@ func TestDrainAndReplace_HealthCheckFails(t *testing.T) {
 	be.HealthOK.Store(false)
 
 	sender := srv.Tasks.Create("task-1", "app-1")
-	srv.drainAndReplace(context.Background(), app, manifestPath, sender)
+	err := srv.drainAndReplace(context.Background(), app, manifestPath, sender)
+	if err == nil {
+		t.Fatal("expected drainAndReplace to return an error")
+	}
 
 	// Old worker should NOT be draining — restored after failure.
 	if srv.Workers.IsDraining("app-1") {
