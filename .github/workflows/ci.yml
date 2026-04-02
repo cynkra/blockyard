@@ -20,6 +20,7 @@ on:
           - openbao
           - pak
           - ui
+          - redis
 
 permissions:
   contents: read
@@ -267,6 +268,35 @@ jobs:
         with:
           phase: save
 
+  redis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [unit]
+    if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'redis')
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test -tags redis_test -count=1 -coverprofile=coverage-redis.out -coverpkg=./internal/...,./cmd/by/... ./internal/redisstate/... ./internal/session/... ./internal/registry/... ./internal/server/...
+        env:
+          REDIS_TEST_ADDR: localhost:6379
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-redis
+          path: coverage-redis.out
+          retention-days: 1
+
   ui:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -288,7 +318,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: github.event_name != 'merge_group' && github.event_name != 'push' && inputs.job == ''
-    needs: [unit, cli, docker, idp, openbao, pak, ui]
+    needs: [unit, cli, docker, idp, openbao, pak, redis, ui]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6

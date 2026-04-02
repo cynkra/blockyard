@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ type DockerDeps struct {
 	Config     *config.DockerConfig
 	StorePath  string // server-side .pkg-store root
 	BuilderBin string // path to cached by-builder binary (empty = skip check)
+	RedisURL   string // Redis connection URL; empty = Redis not configured
 }
 
 // RunDockerChecks evaluates checks that require Docker or filesystem
@@ -58,6 +60,7 @@ func RunDockerChecks(ctx context.Context, deps DockerDeps) *Report {
 	}
 	r.add(checkHardLink(deps.StorePath))
 	r.add(checkMetadataBlocking(deps.ServerID))
+	r.add(checkRedisOnServiceNetwork(ctx, deps))
 
 	return r
 }
@@ -265,6 +268,52 @@ func checkMetadataBlocking(serverID string) *Result {
 			Message: "cannot block cloud metadata endpoint (169.254.169.254); " +
 				"grant CAP_NET_ADMIN to the server container, or add a host-level rule: " +
 				"iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP",
+		}
+	}
+
+	return nil
+}
+
+// checkRedisOnServiceNetwork verifies that the Redis server is NOT
+// reachable on the Docker service network. If it is, worker containers
+// can reach Redis, which breaks network isolation.
+func checkRedisOnServiceNetwork(ctx context.Context, deps DockerDeps) *Result {
+	if deps.RedisURL == "" || deps.Config.ServiceNetwork == "" {
+		return nil
+	}
+
+	u, err := url.Parse(deps.RedisURL)
+	if err != nil {
+		return nil // malformed URL caught later during Redis init
+	}
+	redisHost := u.Hostname()
+	if redisHost == "" {
+		return nil
+	}
+
+	netResult, err := deps.Client.NetworkInspect(ctx, deps.Config.ServiceNetwork, client.NetworkInspectOptions{})
+	if err != nil {
+		return nil // service network may not exist yet
+	}
+
+	for _, ep := range netResult.Network.Containers {
+		if ep.Name == redisHost {
+			return &Result{
+				Name:     "redis_on_service_network",
+				Severity: SeverityError,
+				Message: fmt.Sprintf("redis host %q is a container on the service network %q; "+
+					"worker containers can reach it — move Redis to a separate network",
+					redisHost, deps.Config.ServiceNetwork),
+			}
+		}
+		if ep.IPv4Address.IsValid() && ep.IPv4Address.Addr().String() == redisHost {
+			return &Result{
+				Name:     "redis_on_service_network",
+				Severity: SeverityError,
+				Message: fmt.Sprintf("redis address %q matches a container on the service network %q; "+
+					"worker containers can reach it — move Redis to a separate network",
+					redisHost, deps.Config.ServiceNetwork),
+			}
 		}
 	}
 

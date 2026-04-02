@@ -189,6 +189,16 @@ func (m *MemoryWorkerMap) AppIDs() []string {
 	return ids
 }
 
+// ClearDraining clears the draining flag on a single worker by ID.
+func (m *MemoryWorkerMap) ClearDraining(workerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.workers[workerID]; ok {
+		w.Draining = false
+		m.workers[workerID] = w
+	}
+}
+
 // IsDraining returns true if any worker for the given app is draining.
 func (m *MemoryWorkerMap) IsDraining(appID string) bool {
 	m.mu.Lock()

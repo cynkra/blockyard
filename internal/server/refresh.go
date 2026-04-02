@@ -179,10 +179,7 @@ func (srv *Server) drainAndReplace(
 	// Stale packages are better than no workers at all.
 	restoreOld := func() {
 		for _, oldID := range oldWorkers {
-			if w, ok := srv.Workers.Get(oldID); ok {
-				w.Draining = false
-				srv.Workers.Set(oldID, w)
-			}
+			srv.Workers.ClearDraining(oldID)
 		}
 	}
 
