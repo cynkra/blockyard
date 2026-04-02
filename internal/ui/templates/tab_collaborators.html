@@ -24,14 +24,14 @@
          hx-target="#tab-content">
         <h3>Access grants</h3>
         {{if .Grants}}
-        <table class="acl-table data-table">
+        <table class="acl-table table table-sm w-full">
             <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
             <tbody>
             {{range .Grants}}
             <tr>
                 <td>{{.DisplayName}}</td>
                 <td>{{.Role}}</td>
-                <td><button class="btn btn-sm btn-danger"
+                <td><button class="btn btn-sm btn-error"
                             hx-delete="/api/v1/apps/{{$.App.ID}}/access/user/{{.Principal}}"
                             hx-target="closest tr"
                             hx-swap="outerHTML swap:0.2s">Remove</button></td>

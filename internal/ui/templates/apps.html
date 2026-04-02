@@ -5,9 +5,9 @@
 {{define "content"}}
 <div class="page-header">
     <h1>Apps</h1>
-    <form method="GET" action="/" class="search-form">
+    <form method="GET" action="/" class="flex gap-2">
         <input type="search" name="search" value="{{.Search}}"
-               placeholder="Search apps..." class="search-input" aria-label="Search apps">
+               placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps">
         <button type="submit" class="btn">Search</button>
     </form>
 </div>
