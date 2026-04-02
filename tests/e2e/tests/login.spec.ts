@@ -36,12 +36,12 @@ test.describe("login flow", () => {
 
     const overlay = page.locator("#session-expired-overlay");
     await expect(overlay).toBeHidden();
-    // Verify computed style — catches CSS specificity bugs where the
-    // class is present but overridden by a later rule.
-    const display = await overlay.evaluate(
-      (el) => getComputedStyle(el).display,
+    // DaisyUI modal uses display:grid + visibility:hidden when closed,
+    // not display:none. Check visibility to catch CSS specificity bugs.
+    const visibility = await overlay.evaluate(
+      (el) => getComputedStyle(el).visibility,
     );
-    expect(display).toBe("none");
+    expect(visibility).toBe("hidden");
   });
 });
 
