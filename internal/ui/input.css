@@ -14,16 +14,6 @@
   --color-nav-hover: #e0e0e0;
   --color-nav-active: #ffffff;
 
-  /* Status badge colors */
-  --color-status-ready-bg: #dcfce7;
-  --color-status-ready-text: #166534;
-  --color-status-building-bg: #fef3c7;
-  --color-status-building-text: #92400e;
-  --color-status-failed-bg: #fee2e2;
-  --color-status-failed-text: #b91c1c;
-  --color-status-stopped-bg: #f3f4f6;
-  --color-status-stopped-text: #6b7280;
-
   /* Log viewer terminal */
   --color-log-bg: #1e1e2e;
   --color-log-text: #cdd6f4;
@@ -34,15 +24,6 @@
   --color-nav: #0c1021;
   --color-nav-text: #94a3b8;
   --color-nav-hover: #e2e8f0;
-
-  --color-status-ready-bg: #052e16;
-  --color-status-ready-text: #4ade80;
-  --color-status-building-bg: #422006;
-  --color-status-building-text: #fbbf24;
-  --color-status-failed-bg: #450a0a;
-  --color-status-failed-text: #f87171;
-  --color-status-stopped-bg: #1e293b;
-  --color-status-stopped-text: #94a3b8;
 
   --color-log-bg: #0c0f1a;
 }
@@ -134,16 +115,16 @@
   /* ── Status badges ── */
   .status-badge { @apply badge text-xs font-medium; }
   .status-ready, .status-configured, .status-active, .status-running {
-    background: var(--color-status-ready-bg); color: var(--color-status-ready-text);
+    @apply badge-soft badge-success;
   }
   .status-building, .status-stopping, .status-draining {
-    background: var(--color-status-building-bg); color: var(--color-status-building-text);
+    @apply badge-soft badge-warning;
   }
   .status-failed {
-    background: var(--color-status-failed-bg); color: var(--color-status-failed-text);
+    @apply badge-soft badge-error;
   }
   .status-stopped, .status-not_set, .status-disabled, .status-ended {
-    background: var(--color-status-stopped-bg); color: var(--color-status-stopped-text);
+    @apply badge-ghost;
   }
 
   /* ── Page layout ── */
@@ -247,7 +228,7 @@
   .worker-active { @apply font-medium; }
   .worker-sessions-row td { padding-top: 0 !important; }
   .worker-sessions { @apply flex flex-wrap gap-1.5 py-1; }
-  .session-chip { @apply inline-block text-xs rounded-sm bg-info/10; padding: 0.15rem 0.5rem; }
+  .session-chip { @apply badge badge-xs badge-soft badge-info; }
 
   /* Worker detail */
   .worker-detail-header { @apply flex items-center gap-3 mb-4; }
@@ -269,8 +250,8 @@
   .pat-create-form { @apply flex gap-2 mb-4; }
   .pat-create-form input { @apply input input-sm flex-1 max-w-80 text-sm; }
   .pat-create-form select { @apply select select-sm text-sm; }
-  .pat-created { @apply bg-warning/15 border border-warning rounded-md p-4 mb-4; }
-  .pat-warning { @apply text-warning font-medium m-0 mb-2; }
+  .pat-created { @apply alert alert-warning mb-4 flex-col items-start; }
+  .pat-warning { @apply font-medium m-0 mb-2; }
   .pat-value { @apply flex items-center gap-2; }
   .pat-value code { @apply bg-base-200 px-2 py-1 border border-base-300 rounded-sm text-sm break-all; }
   .pat-expiry { @apply text-sm opacity-60 mt-2 mb-0; }
@@ -281,7 +262,7 @@
   .profile-field { @apply mb-4; }
   .profile-field label { @apply block text-xs text-base-content/60 mb-0.5; }
   .profile-field p { @apply m-0; }
-  .role-badge { @apply badge badge-sm badge-info; }
+
 
   /* ── Danger zone ── */
   .danger-zone { @apply mt-8 pt-6 border-t border-error; }
@@ -313,9 +294,6 @@
   .log-detail-row td { padding: 0 !important; }
   .log-detail-row .log-output { @apply max-h-80 mx-3 my-2; }
 
-  /* ── Copy button ── */
-  .copy-btn { @apply btn btn-ghost btn-xs; }
-
   /* ── Autocomplete ── */
   .autocomplete-wrap { @apply relative flex-1; }
   .autocomplete-list { @apply absolute top-full left-0 right-0 mt-0.5 bg-base-100 border border-base-300 rounded-md shadow-lg z-[300] max-h-48 overflow-y-auto; }
@@ -332,9 +310,6 @@
   /* ── Misc ── */
   .hidden { display: none !important; }
   .empty-state { @apply p-8 text-center text-base-content/50; }
-  .flash { @apply p-2 px-4 rounded-md mb-4; }
-  .flash--error { @apply bg-error/15 text-error; }
-  .flash--success { @apply bg-success/15 text-success; }
   .htmx-indicator { @apply hidden; }
   .htmx-request .htmx-indicator { @apply inline-block; }
   .htmx-request.htmx-indicator { @apply inline-block; }

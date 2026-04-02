@@ -1,6 +1,6 @@
 <div class="log-worker-view">
     <div class="log-controls">
-        <span class="log-worker-label monospace" title="{{.WorkerID}}">Worker {{.WorkerID | truncate}}</span>
+        <span class="log-worker-label font-mono text-xs" title="{{.WorkerID}}">Worker {{.WorkerID | truncate}}</span>
         {{if .Active}}
         <button id="log-toggle" onclick="toggleLogs('{{.WorkerID}}', '{{.AppID}}')">
             Start streaming

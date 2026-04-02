@@ -17,7 +17,7 @@
     <div class="overview-card">
         <h3>Bundle</h3>
         {{if .ActiveBundle}}
-        <p class="overview-stat monospace">{{.ActiveBundle.ID | truncate}}</p>
+        <p class="overview-stat font-mono text-xs">{{.ActiveBundle.ID | truncate}}</p>
         <span class="status-badge status-{{.ActiveBundle.Status}}">{{.ActiveBundle.Status}}</span>
         {{else}}
         <p class="overview-stat">None</p>
