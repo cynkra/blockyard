@@ -470,8 +470,8 @@ func TestAppsPageEmptyStateByRole(t *testing.T) {
 		roleName string
 		expected string
 	}{
-		{auth.RolePublisher, "publisher", "Deploy your first app"},
-		{auth.RoleAdmin, "admin", "No apps deployed"},
+		{auth.RolePublisher, "publisher", "New App"},
+		{auth.RoleAdmin, "admin", "New App"},
 		{auth.RoleViewer, "viewer", "No apps shared with you"},
 	}
 

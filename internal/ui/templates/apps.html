@@ -13,7 +13,14 @@
                placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps">
         <button type="submit" class="btn">Search</button>
     </form>
+    {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
+    <button class="btn btn-primary btn-sm"
+            hx-get="/ui/apps/new" hx-target="#new-app-container" hx-swap="innerHTML">
+        New App
+    </button>
+    {{end}}
 </div>
+<div id="new-app-container"></div>
 
 {{if .AllTags}}
 <div class="tag-browser">
@@ -69,10 +76,8 @@
 </section>
 {{else}}
 <section class="empty-state">
-    {{if eq .UserRole "publisher"}}
-    <p>No apps yet. Deploy your first app using the API.</p>
-    {{else if eq .UserRole "admin"}}
-    <p>No apps deployed.</p>
+    {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
+    <p>No apps yet. Click <strong>New App</strong> above to deploy your first app.</p>
     {{else}}
     <p>No apps shared with you.</p>
     {{end}}
@@ -126,6 +131,9 @@ function validateMemoryLimit(input) {
 document.body.addEventListener('htmx:afterSwap', function(e) {
     if (e.detail.target.id === 'sidebar') {
         document.getElementById('sidebar-toggle').checked = true;
+    }
+    if (e.detail.target.id === 'new-app-container') {
+        document.getElementById('new-app-modal').showModal();
     }
 });
 

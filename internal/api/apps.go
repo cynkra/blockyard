@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/cynkra/blockyard/internal/appname"
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/authz"
@@ -156,21 +157,7 @@ func accessRowToGrant(row db.AppAccessRow) authz.AccessGrant {
 
 // validateAppName checks that name is a valid URL-safe slug.
 func validateAppName(name string) error {
-	if len(name) == 0 || len(name) > 63 {
-		return fmt.Errorf("name must be 1-63 characters")
-	}
-	for _, c := range name {
-		if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '-' {
-			return fmt.Errorf("name must contain only lowercase letters, digits, and hyphens")
-		}
-	}
-	if name[0] < 'a' || name[0] > 'z' {
-		return fmt.Errorf("name must start with a lowercase letter")
-	}
-	if name[len(name)-1] == '-' {
-		return fmt.Errorf("name must not end with a hyphen")
-	}
-	return nil
+	return appname.Validate(name)
 }
 
 type createAppRequest struct {

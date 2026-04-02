@@ -1,0 +1,110 @@
+<dialog id="new-app-modal" class="modal">
+<div class="modal-box max-w-lg">
+    <h3 class="text-lg font-bold mb-4">New App</h3>
+
+    <form hx-post="/ui/apps/new"
+          hx-encoding="multipart/form-data"
+          hx-target="#new-app-error"
+          hx-swap="innerHTML"
+          hx-indicator="#new-app-spinner"
+          hx-disabled-elt="#new-app-submit">
+
+        <div id="new-app-error" class="mb-3"></div>
+
+        <fieldset class="fieldset mb-4">
+            <legend class="fieldset-legend">Files</legend>
+            <div id="drop-zone" class="drop-zone">
+                <p class="drop-zone-hint">Drop files here or click to browse</p>
+                <p class="text-xs opacity-60 mt-1">Single files, multiple files, or a .tar.gz / .zip archive</p>
+                <input type="file" name="files" multiple
+                       id="new-app-files"
+                       class="file-input file-input-bordered w-full mt-2">
+            </div>
+            <ul id="file-list" class="file-list hidden"></ul>
+        </fieldset>
+
+        <fieldset class="fieldset mb-4">
+            <legend class="fieldset-legend">App name</legend>
+            <input type="text" name="name" id="new-app-name"
+                   class="input input-bordered w-full"
+                   placeholder="my-app"
+                   pattern="[a-z][a-z0-9\-]*[a-z0-9]"
+                   maxlength="63"
+                   required>
+            <p class="text-xs opacity-60 mt-1">Lowercase letters, digits, and hyphens. Must start with a letter.</p>
+        </fieldset>
+
+        <div class="modal-action">
+            <button type="button" class="btn" onclick="document.getElementById('new-app-modal').close()">Cancel</button>
+            <button type="submit" id="new-app-submit" class="btn btn-primary">
+                <span id="new-app-spinner" class="loading loading-spinner loading-sm htmx-indicator"></span>
+                Create &amp; Deploy
+            </button>
+        </div>
+    </form>
+</div>
+<form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<script>
+(function() {
+    var zone = document.getElementById('drop-zone');
+    var input = document.getElementById('new-app-files');
+    var nameInput = document.getElementById('new-app-name');
+    var fileList = document.getElementById('file-list');
+
+    function sanitizeName(filename) {
+        var name = filename.replace(/\.(tar\.gz|tgz|zip|r)$/i, '');
+        name = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+        if (name.length > 0 && (name[0] < 'a' || name[0] > 'z')) {
+            name = name.replace(/^[^a-z]+/, '');
+        }
+        name = name.replace(/-$/, '');
+        return name.slice(0, 63);
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1048576).toFixed(1) + ' MB';
+    }
+
+    function updateFileList() {
+        fileList.innerHTML = '';
+        var files = input.files;
+        if (!files || files.length === 0) {
+            fileList.classList.add('hidden');
+            return;
+        }
+        fileList.classList.remove('hidden');
+        for (var i = 0; i < files.length; i++) {
+            var li = document.createElement('li');
+            li.className = 'file-list-item';
+            li.innerHTML = '<span class="file-list-name">' + files[i].name + '</span>' +
+                           '<span class="file-list-size">' + formatSize(files[i].size) + '</span>';
+            fileList.appendChild(li);
+        }
+
+        if (!nameInput.value && files.length > 0) {
+            nameInput.value = sanitizeName(files[0].name);
+        }
+    }
+
+    input.addEventListener('change', updateFileList);
+
+    zone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        zone.classList.add('active');
+    });
+    zone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        zone.classList.remove('active');
+    });
+    zone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        zone.classList.remove('active');
+        input.files = e.dataTransfer.files;
+        updateFileList();
+    });
+})();
+</script>
