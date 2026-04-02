@@ -3,7 +3,7 @@ package registry
 import "testing"
 
 func TestSetAndGet(t *testing.T) {
-	r := New()
+	r := NewMemoryRegistry()
 	r.Set("worker-1", "127.0.0.1:3838")
 
 	addr, ok := r.Get("worker-1")
@@ -16,7 +16,7 @@ func TestSetAndGet(t *testing.T) {
 }
 
 func TestGetMissing(t *testing.T) {
-	r := New()
+	r := NewMemoryRegistry()
 	_, ok := r.Get("nonexistent")
 	if ok {
 		t.Error("expected false for missing worker")
@@ -24,7 +24,7 @@ func TestGetMissing(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	r := New()
+	r := NewMemoryRegistry()
 	r.Set("worker-1", "127.0.0.1:3838")
 	r.Delete("worker-1")
 

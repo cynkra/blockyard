@@ -279,9 +279,9 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 
 	srv.Workers.Set(wid, server.ActiveWorker{
 		AppID: app.ID, BundleID: *app.ActiveBundle,
-		StartedAt:   time.Now(),
-		CancelToken: cancelToken,
+		StartedAt: time.Now(),
 	})
+	srv.SetCancelToken(wid, cancelToken)
 	srv.Registry.Set(wid, a)
 
 	// 6. Start log capture before health polling so startup output is captured.
@@ -293,6 +293,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 			"worker_id", wid, "app_id", app.ID,
 			"elapsed", time.Since(coldStartBegin).Round(time.Millisecond),
 			"error", err)
+		srv.CancelTokenRefresher(wid)
 		srv.Workers.Delete(wid)
 		srv.Registry.Delete(wid)
 		srv.Backend.Stop(context.Background(), wid) //nolint:errcheck // best-effort cleanup

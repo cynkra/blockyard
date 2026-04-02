@@ -134,7 +134,10 @@ func (srv *Server) RunRefresh(
 
 	// 7. Graceful drain: spawn new worker, drain old ones.
 	sender.Write("Dependencies updated — spawning new worker...")
-	srv.drainAndReplace(ctx, app, newManifestDst, sender)
+	if err := srv.drainAndReplace(ctx, app, newManifestDst, sender); err != nil {
+		slog.Error("refresh: drain-and-replace failed", "app_id", app.ID, "error", err)
+		status = task.Failed
+	}
 	return true
 }
 
@@ -145,12 +148,11 @@ func (srv *Server) drainAndReplace(
 	app *db.AppRow,
 	storeManifestPath string,
 	sender task.Sender,
-) {
+) error {
 	storeManifest, err := pkgstore.ReadStoreManifest(storeManifestPath)
 	if err != nil {
 		sender.Write("Failed to read dependency manifest.")
-		slog.Error("refresh: read store-manifest", "error", err)
-		return
+		return fmt.Errorf("read store-manifest: %w", err)
 	}
 
 	// 1. Spawn a new worker with the updated library.
@@ -159,8 +161,7 @@ func (srv *Server) drainAndReplace(
 	missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
 	if err != nil {
 		sender.Write("Failed to prepare package library.")
-		slog.Error("refresh: assemble library", "error", err)
-		return
+		return fmt.Errorf("assemble library: %w", err)
 	}
 	if len(missing) > 0 {
 		sender.Write(fmt.Sprintf("Warning: %d packages missing from cache.", len(missing)))
@@ -174,33 +175,50 @@ func (srv *Server) drainAndReplace(
 		sender.Write(fmt.Sprintf("Stopping previous worker (%s)...", oldID[:8]))
 	}
 
+	// restoreOld undoes draining if the replacement fails.
+	// Stale packages are better than no workers at all.
+	restoreOld := func() {
+		for _, oldID := range oldWorkers {
+			if w, ok := srv.Workers.Get(oldID); ok {
+				w.Draining = false
+				srv.Workers.Set(oldID, w)
+			}
+		}
+	}
+
 	spec := srv.defaultWorkerSpec(app.ID, newWorkerID, newLibDir, *app.ActiveBundle)
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {
 		sender.Write("Failed to start new worker.")
-		slog.Error("refresh: spawn worker", "error", err)
-		return
+		restoreOld()
+		return fmt.Errorf("spawn worker: %w", err)
 	}
 
 	addr, err := srv.Backend.Addr(ctx, newWorkerID)
 	if err != nil {
 		sender.Write("Failed to start new worker.")
-		slog.Error("refresh: resolve worker address", "error", err)
-		return
+		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
+		restoreOld()
+		return fmt.Errorf("resolve worker address: %w", err)
 	}
 
 	// Start token refresher for the new worker.
 	var cancelToken func()
 	if srv.WorkerTokenKey != nil {
-		_, cancelToken, _ = SpawnTokenRefresher(
+		var tokenErr error
+		_, cancelToken, tokenErr = SpawnTokenRefresher(
 			context.Background(), srv.Config.Storage.BundleServerPath,
 			srv.WorkerTokenKey, app.ID, newWorkerID)
+		if tokenErr != nil {
+			slog.Error("refresh: failed to start token refresher",
+				"worker_id", newWorkerID, "error", tokenErr)
+		}
 	}
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{
 		AppID: app.ID, BundleID: *app.ActiveBundle,
-		StartedAt:   time.Now(),
-		CancelToken: cancelToken,
+		StartedAt: time.Now(),
 	})
+	srv.SetCancelToken(newWorkerID, cancelToken)
 	srv.Registry.Set(newWorkerID, addr)
 
 	// Start log capture for the new worker.
@@ -210,11 +228,16 @@ func (srv *Server) drainAndReplace(
 
 	if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
 		sender.Write(fmt.Sprintf("New worker (%s) failed health check.", newWorkerID[:8]))
-		slog.Error("refresh: worker health check", "worker_id", newWorkerID, "error", err)
-		return
+		srv.CancelTokenRefresher(newWorkerID)
+		srv.Workers.Delete(newWorkerID)
+		srv.Registry.Delete(newWorkerID)
+		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
+		restoreOld()
+		return fmt.Errorf("worker health check: %w", err)
 	}
 
 	sender.Write(fmt.Sprintf("New worker (%s) ready.", newWorkerID[:8]))
+	return nil
 }
 
 // storeManifestsChanged compares two store-manifest files.
@@ -278,5 +301,8 @@ func (srv *Server) RunRollback(
 	}
 
 	// Reassemble workers with the rolled-back store-manifest.
-	srv.drainAndReplace(ctx, app, currentManifest, sender)
+	if err := srv.drainAndReplace(ctx, app, currentManifest, sender); err != nil {
+		slog.Error("rollback: drain-and-replace failed", "app_id", app.ID, "error", err)
+		status = task.Failed
+	}
 }

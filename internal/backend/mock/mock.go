@@ -18,6 +18,8 @@ type MockBackend struct {
 	logLines         []string
 	HealthOK         atomic.Bool      // configurable: default true
 	BuildSuccess     atomic.Bool      // configurable: default true
+	SpawnFails       atomic.Bool      // configurable: default false
+	AddrFails        atomic.Bool      // configurable: default false
 	wsHandler        http.HandlerFunc // optional WS handler for mock workers
 	httpHandler      http.HandlerFunc // optional HTTP handler for mock workers
 	BuildFn          func(context.Context, backend.BuildSpec) (backend.BuildResult, error) // optional build callback
@@ -87,6 +89,10 @@ func (b *MockBackend) SetLogLines(lines []string) {
 }
 
 func (b *MockBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
+	if b.SpawnFails.Load() {
+		return fmt.Errorf("mock: spawn failed for worker %q", spec.WorkerID)
+	}
+
 	b.mu.Lock()
 	wsH := b.wsHandler
 	httpH := b.httpHandler
@@ -162,6 +168,9 @@ func (b *MockBackend) Logs(_ context.Context, _ string) (backend.LogStream, erro
 }
 
 func (b *MockBackend) Addr(_ context.Context, id string) (string, error) {
+	if b.AddrFails.Load() {
+		return "", fmt.Errorf("mock: addr resolution failed for worker %q", id)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	w, ok := b.workers[id]

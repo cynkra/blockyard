@@ -140,16 +140,21 @@ func (srv *Server) completeTransfer(
 	// Start token refresher for the new worker.
 	var cancelToken func()
 	if srv.WorkerTokenKey != nil {
-		_, cancelToken, _ = SpawnTokenRefresher(
+		var tokenErr error
+		_, cancelToken, tokenErr = SpawnTokenRefresher(
 			context.Background(), srv.Config.Storage.BundleServerPath,
 			srv.WorkerTokenKey, appID, newWorkerID)
+		if tokenErr != nil {
+			slog.Error("transfer: failed to start token refresher",
+				"worker_id", newWorkerID, "error", tokenErr)
+		}
 	}
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{
 		AppID: oldWorker.AppID, BundleID: oldWorker.BundleID,
-		StartedAt:   time.Now(),
-		CancelToken: cancelToken,
+		StartedAt: time.Now(),
 	})
+	srv.SetCancelToken(newWorkerID, cancelToken)
 	srv.Registry.Set(newWorkerID, addr)
 
 	// Wait for new worker to become healthy.
@@ -157,9 +162,7 @@ func (srv *Server) completeTransfer(
 		slog.Error("transfer: worker not healthy, cleaning up",
 			"worker_id", newWorkerID, "error", err)
 		// Clean up the ghost worker.
-		if cancelToken != nil {
-			cancelToken()
-		}
+		srv.CancelTokenRefresher(newWorkerID)
 		srv.Workers.Delete(newWorkerID)
 		srv.Registry.Delete(newWorkerID)
 		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck

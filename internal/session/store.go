@@ -13,17 +13,18 @@ type Entry struct {
 	LastAccess time.Time // updated on every proxy request; used for idle sweep
 }
 
-type Store struct {
+// MemoryStore is a concurrent in-memory implementation of Store.
+type MemoryStore struct {
 	mu       sync.Mutex
 	sessions map[string]Entry // session ID → entry
 }
 
-func NewStore() *Store {
-	return &Store{sessions: make(map[string]Entry)}
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{sessions: make(map[string]Entry)}
 }
 
 // Get returns the entry for the given session ID.
-func (s *Store) Get(sessionID string) (Entry, bool) {
+func (s *MemoryStore) Get(sessionID string) (Entry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.sessions[sessionID]
@@ -31,7 +32,7 @@ func (s *Store) Get(sessionID string) (Entry, bool) {
 }
 
 // Set creates or replaces a session entry.
-func (s *Store) Set(sessionID string, entry Entry) {
+func (s *MemoryStore) Set(sessionID string, entry Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, exists := s.sessions[sessionID]
@@ -45,7 +46,7 @@ func (s *Store) Set(sessionID string, entry Entry) {
 
 // Touch updates the LastAccess timestamp for an existing session.
 // Returns false if the session does not exist.
-func (s *Store) Touch(sessionID string) bool {
+func (s *MemoryStore) Touch(sessionID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.sessions[sessionID]
@@ -57,7 +58,7 @@ func (s *Store) Touch(sessionID string) bool {
 	return true
 }
 
-func (s *Store) Delete(sessionID string) {
+func (s *MemoryStore) Delete(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e, ok := s.sessions[sessionID]; ok {
@@ -69,7 +70,7 @@ func (s *Store) Delete(sessionID string) {
 
 // DeleteByWorker removes all sessions mapped to the given worker.
 // Linear scan — acceptable at max_workers = 100.
-func (s *Store) DeleteByWorker(workerID string) int {
+func (s *MemoryStore) DeleteByWorker(workerID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
@@ -86,7 +87,7 @@ func (s *Store) DeleteByWorker(workerID string) int {
 	return n
 }
 
-func (s *Store) CountForWorker(workerID string) int {
+func (s *MemoryStore) CountForWorker(workerID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
@@ -99,7 +100,7 @@ func (s *Store) CountForWorker(workerID string) int {
 }
 
 // CountForWorkers returns the total session count across the given worker IDs.
-func (s *Store) CountForWorkers(workerIDs []string) int {
+func (s *MemoryStore) CountForWorkers(workerIDs []string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	set := make(map[string]bool, len(workerIDs))
@@ -117,7 +118,7 @@ func (s *Store) CountForWorkers(workerIDs []string) int {
 
 // RerouteWorker reassigns all sessions from oldWorkerID to newWorkerID.
 // Used by container transfer to migrate sessions to the new worker.
-func (s *Store) RerouteWorker(oldWorkerID, newWorkerID string) int {
+func (s *MemoryStore) RerouteWorker(oldWorkerID, newWorkerID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
@@ -137,7 +138,7 @@ func (s *Store) RerouteWorker(oldWorkerID, newWorkerID string) int {
 }
 
 // EntriesForWorker returns a snapshot of all sessions for a worker.
-func (s *Store) EntriesForWorker(workerID string) map[string]Entry {
+func (s *MemoryStore) EntriesForWorker(workerID string) map[string]Entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result := make(map[string]Entry)
@@ -151,7 +152,7 @@ func (s *Store) EntriesForWorker(workerID string) map[string]Entry {
 
 // SweepIdle removes sessions whose LastAccess is older than maxAge.
 // Returns the number of sessions removed.
-func (s *Store) SweepIdle(maxAge time.Duration) int {
+func (s *MemoryStore) SweepIdle(maxAge time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cutoff := time.Now().Add(-maxAge)
@@ -167,3 +168,5 @@ func (s *Store) SweepIdle(maxAge time.Duration) int {
 	}
 	return n
 }
+
+var _ Store = (*MemoryStore)(nil)

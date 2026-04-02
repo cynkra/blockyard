@@ -18,7 +18,7 @@ Depends on phase 3-1 (migration tooling). No new dependencies.
 
 ## Deliverables
 
-1. **SessionStore interface** (`internal/session/iface.go`) -- extracted
+1. **Store interface** (`internal/session/iface.go`) -- extracted
    from the existing `Store` type.
 2. **MemoryStore rename** -- `Store` becomes `MemoryStore`, constructor
    becomes `NewMemoryStore()`.
@@ -31,18 +31,21 @@ Depends on phase 3-1 (migration tooling). No new dependencies.
 6. **MemoryWorkerMap extraction** -- implementation moves to
    `workermap_memory.go`, renamed to `MemoryWorkerMap`, constructor
    becomes `NewMemoryWorkerMap()`.
-7. **Server struct update** -- field types change from concrete to
+7. **CancelToken extraction** -- move `CancelToken func()` out of
+   `ActiveWorker` into a `sync.Map` on `Server`, making
+   `ActiveWorker` fully serializable for Redis in phase 3-3.
+8. **Server struct update** -- field types change from concrete to
    interface.
-8. **Worker token: OpenBao storage** -- persist the signing key in
+9. **Worker token: OpenBao storage** -- persist the signing key in
    vault when `[openbao]` is configured.
-9. **Worker token: file-based fallback** -- persist the signing key to
-   disk when vault is not available.
-10. **Tests** -- interface compliance, worker key round-trip (both
+10. **Worker token: file-based fallback** -- persist the signing key to
+    disk when vault is not available.
+11. **Tests** -- interface compliance, worker key round-trip (both
     paths), existing tests pass unchanged.
 
 ## Step-by-step
 
-### Step 1: SessionStore interface
+### Step 1: Store interface
 
 New file `internal/session/iface.go`:
 
@@ -51,10 +54,10 @@ package session
 
 import "time"
 
-// SessionStore defines the contract for session state storage.
+// Store defines the contract for session state storage.
 // MemoryStore is the in-process implementation; Redis implements
 // the same interface for shared state during rolling updates.
-type SessionStore interface {
+type Store interface {
     Get(sessionID string) (Entry, bool)
     Set(sessionID string, entry Entry)
     Touch(sessionID string) bool
@@ -102,7 +105,7 @@ No logic changes. Add the compile-time interface check at the bottom
 of the file:
 
 ```go
-var _ SessionStore = (*MemoryStore)(nil)
+var _ Store = (*MemoryStore)(nil)
 ```
 
 ### Step 3: WorkerRegistry interface
@@ -237,7 +240,131 @@ After extraction, `state.go` retains:
 The `WorkerMap` struct, `NewWorkerMap()`, and all 16 `WorkerMap`
 methods are removed from `state.go`.
 
-### Step 7: Server struct update
+### Step 7: CancelToken extraction
+
+`ActiveWorker.CancelToken func()` is a process-local function pointer
+(it cancels the token-refresher goroutine). It cannot be serialized to
+Redis. Move it out of `ActiveWorker` into a `sync.Map` on `Server`,
+alongside the existing `installMus` and `transferring` maps which
+exist for the same reason -- process-local coordination state.
+
+In `internal/server/state.go`, remove `CancelToken` from `ActiveWorker`:
+
+```go
+// Before:
+type ActiveWorker struct {
+    AppID       string
+    BundleID    string
+    Draining    bool
+    IdleSince   time.Time
+    StartedAt   time.Time
+    CancelToken func()    // stops the token refresher goroutine; nil if no token
+}
+
+// After:
+type ActiveWorker struct {
+    AppID     string
+    BundleID  string
+    Draining  bool
+    IdleSince time.Time
+    StartedAt time.Time
+}
+```
+
+Add `cancelTokens sync.Map` and helpers to `Server`:
+
+```go
+// Server struct gains:
+cancelTokens sync.Map // workerID → func(); cancel token-refresher goroutine
+
+// SetCancelToken registers a cancel function for a worker's token refresher.
+func (srv *Server) SetCancelToken(workerID string, cancel func()) {
+    if cancel != nil {
+        srv.cancelTokens.Store(workerID, cancel)
+    }
+}
+
+// CancelTokenRefresher calls and removes the cancel function for a worker.
+// No-op if the worker has no registered cancel function.
+func (srv *Server) CancelTokenRefresher(workerID string) {
+    if v, ok := srv.cancelTokens.LoadAndDelete(workerID); ok {
+        v.(func())()
+    }
+}
+```
+
+**Call site updates** (6 locations):
+
+| Location | Before | After |
+|----------|--------|-------|
+| `proxy/coldstart.go` ~L280 | `CancelToken: cancelToken` in `Workers.Set` | Remove field; add `srv.SetCancelToken(wid, cancelToken)` after `Workers.Set` |
+| `proxy/coldstart.go` ~L299 | `cleanupLocal()` after health-check failure (post-registration) | Add `srv.CancelTokenRefresher(wid)` before `cleanupLocal()` |
+| `server/transfer.go` ~L148 | `CancelToken: cancelToken` in `Workers.Set` | Remove field; add `srv.SetCancelToken(newWorkerID, cancelToken)` after `Workers.Set` |
+| `server/transfer.go` ~L160 | `if cancelToken != nil { cancelToken() }` | `srv.CancelTokenRefresher(newWorkerID)` |
+| `server/refresh.go` ~L199 | `CancelToken: cancelToken` in `Workers.Set` | Remove field; add `srv.SetCancelToken(newWorkerID, cancelToken)` after `Workers.Set` |
+| `server/refresh.go` ~L211 | `return` after health-check failure (no cleanup) | Add `srv.CancelTokenRefresher(newWorkerID)`, `Workers.Delete`, `Registry.Delete`, `Backend.Stop` before `return` (see below) |
+| `ops/ops.go` ~L24 | `if w.CancelToken != nil { w.CancelToken() }` | `srv.CancelTokenRefresher(workerID)` |
+
+**Pre-registration cleanup is unchanged.** `cleanupLocal()` in
+`coldstart.go` is called from three sites. Two of them (spawn failure
+at ~L269, address resolution failure at ~L276) execute _before_
+`Workers.Set` -- the cancel token was never registered on the server,
+so calling `cancelToken()` from the local variable is correct.
+
+**Post-registration cleanup needs an extra call.** The third
+`cleanupLocal()` call (~L299, health-check failure) runs _after_
+`Workers.Set` and `SetCancelToken`. The local `cancelToken()` call
+still stops the goroutine, but without `CancelTokenRefresher` the
+`cancelTokens` map entry is orphaned. Adding
+`srv.CancelTokenRefresher(wid)` before `cleanupLocal()` at this site
+cleans up the map. `cleanupLocal()` itself still handles directory
+and package-library cleanup unchanged.
+
+**`drainAndReplace` failure needs cleanup, rollback, and error
+propagation (bugfix).** In `refresh.go`, `drainAndReplace` marks
+old workers as draining _before_ spawning the new one. Three
+failure points follow -- `Spawn`, `Addr`, and `waitHealthy` -- and
+all previously returned without cleaning up. Additionally, the
+function was void, so `RunRefresh` and `RunRollback` had no way to
+know the swap failed and always completed the task as success.
+
+Fix (three parts):
+
+1. Change `drainAndReplace` to return `error`. Each failure point
+   returns a wrapped error instead of bare `return`. `RunRefresh`
+   and `RunRollback` check the error and set `status = task.Failed`.
+
+2. Add a `restoreOld` helper that un-drains old workers (stale
+   packages are better than no workers at all). Call it at every
+   failure point after `MarkDraining`.
+
+3. For `waitHealthy` and `Addr` failures, also clean up the new
+   worker's container.
+
+```go
+restoreOld := func() {
+    for _, oldID := range oldWorkers {
+        if w, ok := srv.Workers.Get(oldID); ok {
+            w.Draining = false
+            srv.Workers.Set(oldID, w)
+        }
+    }
+}
+```
+
+```go
+if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
+    sender.Write(fmt.Sprintf("New worker (%s) failed health check.", newWorkerID[:8]))
+    srv.CancelTokenRefresher(newWorkerID)
+    srv.Workers.Delete(newWorkerID)
+    srv.Registry.Delete(newWorkerID)
+    srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
+    restoreOld()
+    return fmt.Errorf("worker health check: %w", err)
+}
+```
+
+### Step 8: Server struct update
 
 Change the three field types from concrete to interface in
 `internal/server/state.go`:
@@ -246,7 +373,7 @@ Change the three field types from concrete to interface in
 type Server struct {
     // ...
     Workers  WorkerMap                  // was *WorkerMap
-    Sessions session.SessionStore       // was *session.Store
+    Sessions session.Store               // was *session.Store
     Registry registry.WorkerRegistry    // was *registry.Registry
     // ...
 }
@@ -282,7 +409,7 @@ needed" note:
 // update. Independent of SessionSecret and OIDC.
 ```
 
-### Step 8: Call site updates
+### Step 9: Call site updates
 
 Mechanical rename. Every call site already uses the method-based API --
 the compiler verifies completeness. The changes are:
@@ -302,13 +429,64 @@ the compiler verifies completeness. The changes are:
 
 | Location | Before | After |
 |----------|--------|-------|
-| `srv.Sessions` field | `*session.Store` | `session.SessionStore` |
+| `srv.Sessions` field | `*session.Store` | `session.Store` |
 | `srv.Registry` field | `*registry.Registry` | `registry.WorkerRegistry` |
 | `srv.Workers` field | `*WorkerMap` | `WorkerMap` |
+| `LoadBalancer.Assign` param | `workers *server.WorkerMap` | `workers server.WorkerMap` |
+| `LoadBalancer.Assign` param | `sessions *session.Store` | `sessions session.Store` |
+| `appResponse` param | `workers *server.WorkerMap` | `workers server.WorkerMap` |
 
 No logic changes. No behavioral changes. The method sets are identical.
 
-### Step 9: Worker token -- OpenBao storage
+### Step 10a: `KVRead` sentinel error
+
+`KVRead` currently wraps both "not found" and transient failures into
+a generic `error`. Callers that do read-or-generate (like
+`ResolveSessionSecret` and `ResolveWorkerKey` below) need to
+distinguish the two: a missing key means generate, a vault error
+means abort.
+
+In `internal/integration/openbao.go`, add a sentinel and use it in
+`KVRead`:
+
+```go
+// ErrNotFound is returned by KVRead when the secret path does not
+// exist in vault. Callers can use errors.Is to distinguish this
+// from transient failures.
+var ErrNotFound = errors.New("secret not found")
+```
+
+```go
+if resp.StatusCode == http.StatusNotFound {
+    return nil, fmt.Errorf("openbao kv read: %s: %w", path, ErrNotFound)
+}
+```
+
+Then update `ResolveSessionSecret` in
+`internal/integration/session_secret.go`:
+
+```go
+// Before (buggy -- swallows transient vault errors and falls through
+// to generation, silently replacing the existing secret):
+data, err := client.KVRead(ctx, kvPath, client.AdminToken())
+if err == nil {
+    if v, ok := data["session_secret"]; ok {
+
+// After:
+data, err := client.KVRead(ctx, kvPath, client.AdminToken())
+if err != nil && !errors.Is(err, ErrNotFound) {
+    return "", fmt.Errorf("read session_secret from vault: %w", err)
+}
+if err == nil {
+    if v, ok := data["session_secret"]; ok {
+```
+
+Same pattern as `ResolveWorkerKey` below: `ErrNotFound` means
+generate, any other error is fatal. This is a behavior change --
+transient vault errors now abort startup instead of silently
+regenerating the secret -- but the old behavior was a bug.
+
+### Step 10b: Worker token -- OpenBao storage
 
 New file `internal/integration/worker_key.go`:
 
@@ -319,6 +497,7 @@ import (
     "context"
     "crypto/rand"
     "encoding/base64"
+    "errors"
     "fmt"
     "log/slog"
 )
@@ -327,9 +506,13 @@ const workerKeyKVPath = "blockyard/worker-signing-key"
 
 // ResolveWorkerKey reads or generates the worker signing key from vault.
 // Follows the same pattern as ResolveSessionSecret: read if exists,
-// generate + store if not.
+// generate + store if not. Transient vault errors are fatal --
+// only ErrNotFound triggers generation.
 func ResolveWorkerKey(ctx context.Context, client *Client) ([]byte, error) {
     data, err := client.KVRead(ctx, workerKeyKVPath, client.AdminToken())
+    if err != nil && !errors.Is(err, ErrNotFound) {
+        return nil, fmt.Errorf("read worker key from vault: %w", err)
+    }
     if err == nil {
         if v, ok := data["worker_signing_key"]; ok {
             if s, ok := v.(string); ok && s != "" {
@@ -346,7 +529,7 @@ func ResolveWorkerKey(ctx context.Context, client *Client) ([]byte, error) {
         }
     }
 
-    // Generate new key.
+    // ErrNotFound: generate new key.
     key := make([]byte, 32)
     if _, err := rand.Read(key); err != nil {
         return nil, fmt.Errorf("generate worker signing key: %w", err)
@@ -365,13 +548,11 @@ func ResolveWorkerKey(ctx context.Context, client *Client) ([]byte, error) {
 }
 ```
 
-This is structurally identical to `ResolveSessionSecret` -- same
-read-or-generate pattern, same KV v2 API calls, same admin token
-usage. The key is stored at `secret/data/blockyard/worker-signing-key`
+The key is stored at `secret/data/blockyard/worker-signing-key`
 under the field `worker_signing_key`, base64url-encoded (32 raw bytes
 = 43 encoded characters).
 
-### Step 10: Worker token -- file-based fallback
+### Step 11: Worker token -- file-based fallback
 
 New file `internal/server/workerkey.go`:
 
@@ -424,6 +605,8 @@ func LoadOrCreateWorkerKey(
 // loadOrCreateWorkerKeyFile reads the key from disk if it exists,
 // or generates a new one and writes it. File permissions: 0600.
 func loadOrCreateWorkerKeyFile(path string) (*auth.SigningKey, error) {
+    path = filepath.Clean(path) // gosec G304
+
     // Try reading existing file.
     data, err := os.ReadFile(path)
     if err == nil {
@@ -469,7 +652,7 @@ only).
 directory already exists (it holds bundle data and `.worker-tokens/`)
 and is persisted across restarts.
 
-### Step 11: Startup flow change
+### Step 12: Startup flow change
 
 In `cmd/blockyard/main.go`, replace the ephemeral key generation
 (lines 134-140):
@@ -484,7 +667,7 @@ if _, err := rand.Read(workerKeyBytes); err != nil {
 srv.WorkerTokenKey = auth.NewSigningKey(workerKeyBytes)
 
 // After:
-workerKey, err := server.LoadOrCreateWorkerKey(context.Background(), srv.VaultClient, &cfg)
+workerKey, err := server.LoadOrCreateWorkerKey(context.Background(), srv.VaultClient, cfg)
 if err != nil {
     slog.Error("failed to load or create worker signing key", "error", err)
     os.Exit(1)
@@ -500,9 +683,9 @@ The reordered sequence:
 ```go
 // 1. NewServer()
 // 2. Preflight checks
-// 3. OpenBao initialization (existing, sets srv.VaultClient)
-// 4. LoadOrCreateWorkerKey(ctx, srv.VaultClient, &cfg)  ← moved here
-// 5. Operation hooks
+// 3. Operation hooks (existing, unchanged)
+// 4. OpenBao initialization (existing, sets srv.VaultClient)
+// 5. LoadOrCreateWorkerKey(ctx, srv.VaultClient, &cfg)  ← moved here
 // 6. OIDC setup
 // 7. HTTP listeners
 ```
@@ -522,18 +705,18 @@ orphaned containers. No timing window exists.
 The `crypto/rand` import in `main.go` can be removed -- this was its
 only call site. Confirm with a grep before deleting.
 
-### Step 12: Tests
+### Step 13: Tests
 
 #### Interface compliance tests
 
 In `internal/session/store_test.go`:
 
 ```go
-func TestMemoryStoreImplementsSessionStore(t *testing.T) {
+func TestMemoryStoreImplementsStore(t *testing.T) {
     // Compile-time check is in store.go:
-    //   var _ SessionStore = (*MemoryStore)(nil)
+    //   var _ Store = (*MemoryStore)(nil)
     // This test exists as documentation.
-    var store SessionStore = NewMemoryStore()
+    var store Store = NewMemoryStore()
     _ = store
 }
 ```
@@ -541,7 +724,8 @@ func TestMemoryStoreImplementsSessionStore(t *testing.T) {
 Same pattern for `internal/registry/registry_test.go` and
 `internal/server/workermap_memory_test.go`. The real enforcement is
 the `var _ Interface = (*Impl)(nil)` line -- the tests are
-documentation.
+documentation. In practice these were omitted as redundant; the
+compile-time checks are sufficient.
 
 #### Worker key round-trip: file path
 
@@ -743,18 +927,28 @@ No behavioral changes. Grep for these constructors and update.
 
 | File | Action | Summary |
 |------|--------|---------|
-| `internal/session/iface.go` | **create** | `SessionStore` interface (10 methods) |
+| `internal/session/iface.go` | **create** | `Store` interface (10 methods) |
 | `internal/session/store.go` | **rename** | `Store` → `MemoryStore`, `NewStore()` → `NewMemoryStore()` |
 | `internal/registry/iface.go` | **create** | `WorkerRegistry` interface (3 methods) |
 | `internal/registry/registry.go` | **rename** | `Registry` → `MemoryRegistry`, `New()` → `NewMemoryRegistry()` |
 | `internal/server/workermap_iface.go` | **create** | `WorkerMap` interface (16 methods) |
 | `internal/server/workermap_memory.go` | **create** | `MemoryWorkerMap` implementation (extracted from `state.go`) |
-| `internal/server/state.go` | **update** | Remove `WorkerMap` impl, update `Server` field types, update `NewServer()` |
+| `internal/server/state.go` | **update** | Remove `WorkerMap` impl, extract `CancelToken` to `cancelTokens sync.Map`, update `Server` field types, update `NewServer()` |
+| `internal/integration/openbao.go` | **update** | Add `ErrNotFound` sentinel, wrap 404 in `KVRead` |
+| `internal/integration/session_secret.go` | **update** | Use `ErrNotFound` to distinguish missing from transient errors |
 | `internal/integration/worker_key.go` | **create** | `ResolveWorkerKey()` -- vault persistence |
 | `internal/server/workerkey.go` | **create** | `LoadOrCreateWorkerKey()` -- orchestrator + file fallback |
 | `cmd/blockyard/main.go` | **update** | Replace ephemeral key gen with `LoadOrCreateWorkerKey()`, reorder after OpenBao init |
 | `internal/server/workerkey_test.go` | **create** | File path round-trip, permissions, corrupt/wrong-length, no-vault integration |
 | `internal/integration/worker_key_test.go` | **create** | Vault path round-trip |
+| `internal/proxy/coldstart.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()`; add `srv.CancelTokenRefresher()` before post-registration `cleanupLocal()` |
+| `internal/server/transfer.go` | **update** | Same + replace local `cancelToken()` cleanup with `srv.CancelTokenRefresher()` |
+| `internal/server/refresh.go` | **update** | Replace `CancelToken` in `ActiveWorker` literal with `srv.SetCancelToken()`; fix `drainAndReplace` to clean up new worker and un-drain old workers on failure |
+| `internal/server/refresh_docker_test.go` | **update** | Handle health-check failure case where old workers are restored instead of draining |
+| `internal/ops/ops.go` | **update** | Replace `w.CancelToken()` with `srv.CancelTokenRefresher()` |
+| `internal/proxy/loadbalancer.go` | **update** | `Assign` params: `*server.WorkerMap` → `server.WorkerMap`, `*session.Store` → `session.Store` |
+| `internal/proxy/loadbalancer_test.go` | **update** | Match updated `Assign` parameter types |
+| `internal/api/apps.go` | **update** | `appResponse` param: `*server.WorkerMap` → `server.WorkerMap` |
 | call sites (mechanical) | **update** | Constructor renames across ~20 files |
 
 ## Design decisions
@@ -797,6 +991,26 @@ No behavioral changes. Grep for these constructors and update.
 
 7. **Interface fields, not pointer-to-interface, in `Server`.**
    The fields change from `*session.Store` (pointer to concrete) to
-   `session.SessionStore` (interface). Interfaces in Go are already
+   `session.Store` (interface). Interfaces in Go are already
    reference types -- no `*` needed. This is the standard Go pattern
    for interface-typed struct fields.
+
+8. **`CancelToken` extracted from `ActiveWorker` into `Server`.**
+   `CancelToken func()` is a process-local function pointer (it
+   cancels a goroutine). It cannot be serialized to Redis. Moving it
+   to a `sync.Map` on `Server` -- alongside the existing `installMus`
+   and `transferring` maps that exist for the same reason -- makes
+   `ActiveWorker` fully serializable. This avoids a forced refactor
+   in phase 3-3 when Redis needs to store `ActiveWorker` values.
+
+## Deferred to phase 3-3
+
+1. **Add `ClearDraining(workerID string)` to `WorkerMap`.**
+   `drainAndReplace` restores old workers on failure via
+   `Get` + modify `Draining` + `Set`. This is not atomic -- a
+   concurrent `SetIdleSince` or `ClearIdleSince` between `Get` and
+   `Set` would be clobbered. The window is microseconds and the
+   practical risk is low (the worker is in a failure-recovery path),
+   but a dedicated `ClearDraining` method that only touches the
+   `Draining` field under the lock would be correct. Add it when
+   the Redis implementation needs the same contract.

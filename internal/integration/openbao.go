@@ -3,12 +3,18 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// ErrNotFound is returned by KVRead when the secret path does not
+// exist in vault. Callers can use errors.Is to distinguish this
+// from transient failures.
+var ErrNotFound = errors.New("secret not found")
 
 // Client is a lightweight HTTP client for OpenBao's REST API.
 // It targets only the endpoints blockyard needs: JWT auth login,
@@ -192,7 +198,7 @@ func (c *Client) KVRead(ctx context.Context, path string, token string) (map[str
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("openbao kv read: secret not found at %s", path)
+		return nil, fmt.Errorf("openbao kv read: %s: %w", path, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("openbao kv read: status %d", resp.StatusCode)

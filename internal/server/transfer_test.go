@@ -119,9 +119,9 @@ func testServerWithMock(t *testing.T) (*Server, *mock.MockBackend) {
 	srv := &Server{
 		Config:   cfg,
 		Backend:  be,
-		Workers:  NewWorkerMap(),
-		Sessions: session.NewStore(),
-		Registry: registry.New(),
+		Workers:  NewMemoryWorkerMap(),
+		Sessions: session.NewMemoryStore(),
+		Registry: registry.NewMemoryRegistry(),
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
 		PkgStore: pkgstore.NewStore(storeRoot),
