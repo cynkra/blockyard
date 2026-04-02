@@ -1,7 +1,7 @@
 # Phase 3-3: Redis Shared State
 
 Implement Redis-backed versions of the three store interfaces extracted
-in phase 3-2 (SessionStore, WorkerRegistry, WorkerMap). When `[redis]`
+in phase 3-2 (`session.Store`, `WorkerRegistry`, `WorkerMap`). When `[redis]`
 is configured, the server uses Redis for shared state; otherwise it
 keeps the in-memory stores from phase 3-2. This is the prerequisite
 for two servers to share session routing and worker state during a
@@ -15,9 +15,10 @@ Depends on phase 3-2 (interface extraction). Adds one new dependency
 ## Prerequisites from Earlier Phases
 
 - **Phase 3-1** — migration tooling and conventions.
-- **Phase 3-2** — `SessionStore`, `WorkerRegistry`, and `WorkerMap`
+- **Phase 3-2** — `session.Store`, `WorkerRegistry`, and `WorkerMap`
   interfaces extracted; `Server` struct fields use interface types;
-  worker signing key persisted.
+  worker signing key persisted; `CancelToken` extracted from
+  `ActiveWorker` into `Server.cancelTokens` sync.Map.
 
 ## Deliverables
 
@@ -28,20 +29,24 @@ Depends on phase 3-2 (interface extraction). Adds one new dependency
 3. **Redis client package** (`internal/redisstate/`) — shared
    `*redis.Client` wrapper with health check, key prefix helper, and
    Lua script registration.
-4. **Redis SessionStore** (`internal/session/redis.go`) — implements
-   `SessionStore` using Redis hashes + TTL-based idle expiry.
+4. **Redis session Store** (`internal/session/redis.go`) — implements
+   `session.Store` using Redis hashes + TTL-based idle expiry.
 5. **Redis WorkerRegistry** (`internal/registry/redis.go`) — implements
    `WorkerRegistry` using simple string keys.
-6. **Redis WorkerMap** (`internal/server/workermap_redis.go`) —
+6. **`ClearDraining` interface addition** — add
+   `ClearDraining(workerID string)` to the `WorkerMap` interface,
+   with implementations in both `MemoryWorkerMap` and
+   `RedisWorkerMap`. Deferred from phase 3-2 (`0856ac8`).
+7. **Redis WorkerMap** (`internal/server/workermap_redis.go`) —
    implements `WorkerMap` using Redis hashes.
-7. **Startup store selection** — `cmd/blockyard/main.go` selects Redis
+8. **Startup store selection** — `cmd/blockyard/main.go` selects Redis
    or memory stores based on `cfg.Redis.URL`.
-8. **`/readyz` integration** — Redis ping included in readiness checks
+9. **`/readyz` integration** — Redis ping included in readiness checks
    when configured.
-9. **Tests** — unit tests using miniredis (no build tag, no external
-   dependencies). Integration tests using a real Redis container
-   (`redis_test` build tag).
-10. **Example docker-compose updates** — Redis service, dedicated
+10. **Tests** — unit tests using miniredis (no build tag, no external
+    dependencies). Integration tests using a real Redis container
+    (`redis_test` build tag).
+11. **Example docker-compose updates** — Redis service, dedicated
     internal network for state isolation.
 
 ## Step-by-step
@@ -216,7 +221,7 @@ import (
     "github.com/cynkra/blockyard/internal/redisstate"
 )
 
-// RedisStore implements SessionStore using Redis hashes.
+// RedisStore implements session.Store using Redis hashes.
 //
 // Key schema:
 //   {prefix}session:{sessionID}  →  hash {worker_id, user_sub, last_access}
@@ -242,10 +247,13 @@ fields:
 | `user_sub` | string | `"Cg1kZW1v..."` (empty if no OIDC) |
 | `last_access` | string (Unix seconds) | `"1712000000"` |
 
-**TTL strategy:** every session key gets a TTL equal to
-`proxy.session_idle_ttl` (default 1h). `Set` and `Touch` both reset
-the TTL via `EXPIRE`. `SweepIdle` becomes a no-op — Redis expires
-idle sessions automatically.
+**TTL strategy:** when `proxy.session_idle_ttl > 0`, every session
+key gets a TTL equal to `idleTTL`. `Set` and `Touch` both reset the
+TTL via `EXPIRE`. `SweepIdle` becomes a no-op — Redis expires idle
+sessions automatically. When `session_idle_ttl = 0` (the default,
+meaning disabled), no TTL is set — sessions persist until explicit
+deletion (matching the in-memory behavior where `SweepIdle` is
+never called with a zero duration).
 
 **Method implementations:**
 
@@ -376,7 +384,36 @@ no-op in practice), so this doesn't affect the in-memory path.
 **Error handling:** same pattern as RedisStore — log + return zero
 values.
 
-### Step 6: Redis WorkerMap
+### Step 6: `ClearDraining` interface addition
+
+Deferred from phase 3-2: `drainAndReplace` restores workers on
+failure via `Get` + modify `Draining` + `Set`, which is not atomic.
+Add a dedicated method that only touches the `Draining` field.
+
+Add to `internal/server/workermap_iface.go`:
+
+```go
+ClearDraining(workerID string)
+```
+
+Add to `internal/server/workermap_memory.go`:
+
+```go
+func (m *MemoryWorkerMap) ClearDraining(workerID string) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    if w, ok := m.workers[workerID]; ok {
+        w.Draining = false
+        m.workers[workerID] = w
+    }
+}
+```
+
+Update `internal/server/refresh.go` to use `ClearDraining` instead
+of the `Get` + modify + `Set` pattern in the `drainAndReplace`
+failure path.
+
+### Step 7: Redis WorkerMap
 
 New file `internal/server/workermap_redis.go`:
 
@@ -400,7 +437,6 @@ import (
 //   {prefix}worker:{workerID}  →  hash {app_id, bundle_id, draining, idle_since, started_at}
 //
 // No TTL — workers are explicitly deleted on eviction.
-// CancelToken is not serializable and is always nil when read from Redis.
 type RedisWorkerMap struct {
     client *redisstate.Client
 }
@@ -420,19 +456,10 @@ func NewRedisWorkerMap(client *redisstate.Client) *RedisWorkerMap {
 | `idle_since` | string | Unix seconds, `"0"` = not idle |
 | `started_at` | string | Unix seconds |
 
-**CancelToken handling:** `ActiveWorker.CancelToken` is a `func()`
-that stops the token refresher goroutine for vault-issued worker
-tokens. It cannot be serialized. When reading from Redis, CancelToken
-is always `nil`. This is safe because:
-
-- The token refresher goroutine runs on the server instance that
-  spawned the worker. That instance holds the CancelToken locally.
-- During a rolling update, the old server cancels its own token
-  refreshers when it drains and shuts down.
-- On server restart, the old process is dead — its goroutines are
-  already gone. The new process reads workers from Redis with
-  CancelToken=nil and evicts/re-spawns as needed.
-- Callers already nil-check CancelToken before calling it.
+**Serialization note:** `ActiveWorker` is fully serializable — phase
+3-2 extracted `CancelToken func()` from `ActiveWorker` into
+`Server.cancelTokens` (a process-local `sync.Map`). The Redis store
+only needs to persist the five data fields listed above.
 
 **Method implementations:**
 
@@ -448,6 +475,7 @@ is always `nil`. This is safe because:
 | `ForAppAvailable` | SCAN + HGETALL pipeline, filter `app_id` match + `draining == "0"` |
 | `MarkDraining` | Lua: SCAN + HSET `draining "1"` on `app_id` matches |
 | `SetDraining` | `HSET {prefix}worker:{id} draining "1"` |
+| `ClearDraining` | `HSET {prefix}worker:{id} draining "0"` |
 | `SetIdleSince` | `HSET {prefix}worker:{id} idle_since {unix}` |
 | `SetIdleSinceIfZero` | Lua: HGET `idle_since`, if `"0"` then HSET |
 | `ClearIdleSince` | Lua: HGET `idle_since`, HSET `"0"`, return whether was non-zero |
@@ -505,7 +533,7 @@ deployments.
 
 **Error handling:** same pattern as the other stores.
 
-### Step 7: Startup store selection
+### Step 8: Startup store selection
 
 In `cmd/blockyard/main.go`, after `NewServer()` and OpenBao init,
 add Redis initialization:
@@ -539,11 +567,12 @@ phase 3-2), so the assignment is a direct swap.
 The `maskRedisPassword` helper redacts the password from the URL
 before logging (replace password portion with `***`).
 
-**Placement:** after OpenBao init (so `srv.VaultClient` is available
-for the worker key resolution that immediately precedes this block),
-before operation hooks and HTTP listeners.
+**Placement:** after the worker key resolution block (~line 204 in
+`main.go`), before the OIDC and HTTP listener setup. The sequence
+is: operation hooks → OpenBao init → worker key → **Redis init** →
+OIDC → audit → telemetry → startup cleanup → HTTP listeners.
 
-### Step 8: `/readyz` integration
+### Step 9: `/readyz` integration
 
 In `internal/api/readyz.go`, add a Redis check when a Redis client
 is available. Add a `RedisClient` field to the `Server` struct:
@@ -574,7 +603,7 @@ The response includes a `"redis"` key only when Redis is configured,
 matching the pattern used by the `"idp"`, `"openbao"`, and
 `"vault_token"` checks.
 
-### Step 9: Tests
+### Step 10: Tests
 
 #### Unit tests (miniredis, no build tag)
 
@@ -623,8 +652,8 @@ func TestRedisWorkerMapBasicOps(t *testing.T) { ... }
 func TestRedisWorkerMapForApp(t *testing.T) { ... }
 func TestRedisWorkerMapDraining(t *testing.T) { ... }
 func TestRedisWorkerMapIdleWorkers(t *testing.T) { ... }
-func TestRedisWorkerMapCancelTokenNil(t *testing.T) {
-    // Set worker with CancelToken, read back, verify CancelToken is nil.
+func TestRedisWorkerMapRoundTrip(t *testing.T) {
+    // Set worker, read back, verify all fields preserved.
 }
 ```
 
@@ -695,7 +724,7 @@ redis-test:
         REDIS_TEST_ADDR: localhost:6379
 ```
 
-### Step 10: Example docker-compose updates
+### Step 11: Example docker-compose updates
 
 Update `examples/hello-shiny/docker-compose.yml` to add a Redis
 service and a dedicated internal network:
@@ -742,12 +771,15 @@ reach Redis."
 | `internal/redisstate/redisstate_test.go` | **create** | Unit tests (miniredis) |
 | `internal/redisstate/testutil.go` | **create** | `TestClient()` helper for test packages |
 | `internal/redisstate/redis_integration_test.go` | **create** | Integration tests (real Redis, `redis_test` tag) |
-| `internal/session/redis.go` | **create** | `RedisStore` implementing `SessionStore` (hashes + TTL + Lua scripts) |
+| `internal/session/redis.go` | **create** | `RedisStore` implementing `session.Store` (hashes + TTL + Lua scripts) |
 | `internal/session/redis_test.go` | **create** | Unit tests (miniredis) |
 | `internal/registry/redis.go` | **create** | `RedisRegistry` implementing `WorkerRegistry` (string keys) |
 | `internal/registry/redis_test.go` | **create** | Unit tests (miniredis) |
+| `internal/server/workermap_iface.go` | **update** | Add `ClearDraining(workerID string)` to `WorkerMap` interface |
+| `internal/server/workermap_memory.go` | **update** | Add `ClearDraining` to `MemoryWorkerMap` |
 | `internal/server/workermap_redis.go` | **create** | `RedisWorkerMap` implementing `WorkerMap` (hashes + Lua scripts) |
 | `internal/server/workermap_redis_test.go` | **create** | Unit tests (miniredis) |
+| `internal/server/refresh.go` | **update** | Use `ClearDraining` instead of `Get` + modify + `Set` in failure path |
 | `internal/server/state.go` | **update** | Add `RedisClient *redisstate.Client` field to `Server` |
 | `internal/ops/ops.go` | **update** | Add `registry.Set()` after successful health check (TTL refresh); add Redis worker map reconciliation to `StartupCleanup` |
 | `internal/api/readyz.go` | **update** | Add Redis health check |
@@ -804,10 +836,12 @@ reach Redis."
    would require choosing an expiry window that doesn't race with
    legitimate idle timeouts — complexity for minimal benefit.
 
-5. **CancelToken is nil when read from Redis.** See the detailed
-   explanation in step 6. The token refresher goroutine is
-   process-local; it's cancelled by the server that spawned it (on
-   drain or shutdown). Callers already nil-check before calling.
+5. **`ActiveWorker` is already serializable.** Phase 3-2 extracted
+   `CancelToken func()` from `ActiveWorker` into
+   `Server.cancelTokens` (`sync.Map`). The Redis WorkerMap only needs
+   to persist the five data fields (`AppID`, `BundleID`, `Draining`,
+   `IdleSince`, `StartedAt`). Process-local cancel functions remain
+   on the server that spawned the worker.
 
 6. **Inline Lua scripts, not separate files.** The Lua scripts are
    short (10-20 lines each) and tightly coupled to the Go method
