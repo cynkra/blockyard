@@ -3,6 +3,7 @@ package preflight
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -67,6 +68,89 @@ func TestCheckerRunDynamicUpdatesLatest(t *testing.T) {
 	}
 	if report == nil {
 		t.Error("RunDynamic should return a report")
+	}
+}
+
+func TestCheckerConcurrentAccess(t *testing.T) {
+	c := NewChecker(RuntimeDeps{
+		DBPing:     func(ctx context.Context) error { return nil },
+		DockerPing: func(ctx context.Context) error { return nil },
+	})
+	c.Init(context.Background(), &Report{}, nil)
+
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			c.RunDynamic(context.Background())
+		}()
+		go func() {
+			defer wg.Done()
+			c.Latest()
+		}()
+	}
+	wg.Wait()
+}
+
+func TestCheckerStaticResultsPreserved(t *testing.T) {
+	c := NewChecker(RuntimeDeps{
+		DBPing:     func(ctx context.Context) error { return nil },
+		DockerPing: func(ctx context.Context) error { return nil },
+	})
+
+	configReport := &Report{}
+	configReport.add(Result{Name: "static_check", Severity: SeverityWarning, Message: "static", Category: "config"})
+	c.Init(context.Background(), configReport, nil)
+
+	// Run dynamic several times.
+	for range 5 {
+		c.RunDynamic(context.Background())
+	}
+
+	report := c.Latest()
+	found := 0
+	for _, r := range report.Results {
+		if r.Name == "static_check" {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Errorf("expected exactly 1 static_check result, got %d", found)
+	}
+}
+
+func TestCheckerRunDynamicCancelledContext(t *testing.T) {
+	c := NewChecker(RuntimeDeps{
+		DBPing: func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		DockerPing: func(ctx context.Context) error { return nil },
+	})
+	c.Init(context.Background(), &Report{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	report := c.RunDynamic(ctx)
+	if report == nil {
+		t.Fatal("RunDynamic should return a report even with cancelled context")
+	}
+
+	// The database check should have failed due to cancellation.
+	var dbResult *Result
+	for i := range report.Results {
+		if report.Results[i].Name == "database" {
+			dbResult = &report.Results[i]
+			break
+		}
+	}
+	if dbResult == nil {
+		t.Fatal("expected database result in report")
+	}
+	if dbResult.Severity != SeverityError {
+		t.Errorf("expected database error with cancelled context, got %v", dbResult.Severity)
 	}
 }
 

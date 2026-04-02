@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -27,13 +30,13 @@ func GetSystemChecks(srv *server.Server) http.HandlerFunc {
 
 		report := srv.Checker.Latest()
 		if report == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"results":[],"summary":{"errors":0,"warnings":0,"info":0,"ok":0}}`))
-			return
+			report = &preflight.Report{RanAt: time.Now().UTC()}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(report)
+		if err := json.NewEncoder(w).Encode(report); err != nil {
+			slog.Error("failed to encode system checks response", "error", err)
+		}
 	}
 }
 
@@ -57,6 +60,8 @@ func RunSystemChecks(srv *server.Server) http.HandlerFunc {
 		report := srv.Checker.RunDynamic(r.Context())
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(report)
+		if err := json.NewEncoder(w).Encode(report); err != nil {
+			slog.Error("failed to encode system checks response", "error", err)
+		}
 	}
 }

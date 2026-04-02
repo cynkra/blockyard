@@ -32,6 +32,43 @@ func setupCheckerServer(t *testing.T) *server.Server {
 	return srv
 }
 
+func TestGetSystemChecks_NilLatest(t *testing.T) {
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	srv := server.NewServer(&config.Config{}, mock.New(), database)
+	// Checker with no Init call — Latest() returns nil.
+	srv.Checker = preflight.NewChecker(preflight.RuntimeDeps{})
+
+	handler := GetSystemChecks(srv)
+	req := httptest.NewRequest("GET", "/api/v1/system/checks", nil)
+	ctx := auth.ContextWithCaller(req.Context(), &auth.CallerIdentity{
+		Sub:  "admin",
+		Role: auth.RoleAdmin,
+	})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req.WithContext(ctx))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	var report preflight.Report
+	if err := json.NewDecoder(w.Body).Decode(&report); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if report.Results == nil {
+		// JSON decodes null array as nil, but empty array decodes as [].
+		// Either is acceptable — just verify the response is valid JSON.
+	}
+	if report.Summary.Errors != 0 || report.Summary.Warnings != 0 {
+		t.Errorf("expected empty summary, got %+v", report.Summary)
+	}
+}
+
 func TestGetSystemChecks_Forbidden(t *testing.T) {
 	srv := setupCheckerServer(t)
 	handler := GetSystemChecks(srv)

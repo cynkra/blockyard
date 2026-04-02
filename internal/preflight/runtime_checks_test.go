@@ -142,8 +142,8 @@ func TestCheckDiskSpace(t *testing.T) {
 
 func TestCheckDiskSpaceBadPath(t *testing.T) {
 	res := checkDiskSpace("/nonexistent/path/that/should/fail")
-	if res.Severity != SeverityWarning {
-		t.Errorf("expected Warning for bad path, got %v", res.Severity)
+	if res.Severity != SeverityError {
+		t.Errorf("expected Error for inaccessible path, got %v", res.Severity)
 	}
 }
 

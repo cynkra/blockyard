@@ -196,7 +196,7 @@ func checkDiskSpace(storePath string) Result {
 	if err := unix.Statfs(storePath, &stat); err != nil {
 		return Result{
 			Name:     name,
-			Severity: SeverityWarning,
+			Severity: SeverityError,
 			Message:  fmt.Sprintf("could not stat pkg-store volume: %v", err),
 			Category: category,
 		}

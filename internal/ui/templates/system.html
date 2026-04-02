@@ -9,7 +9,8 @@
             hx-post="/ui/system/run"
             hx-target="#check-results"
             hx-swap="innerHTML"
-            hx-indicator="#run-spinner">
+            hx-indicator="#run-spinner"
+            hx-disabled-elt="this">
         <span id="run-spinner" class="htmx-indicator loading loading-spinner loading-xs"></span>
         Run Checks
     </button>
