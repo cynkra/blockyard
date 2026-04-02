@@ -44,10 +44,8 @@ Depends on phase 3-2 (interface extraction). Adds one new dependency
 9. **`/readyz` integration** — Redis ping included in readiness checks
    when configured.
 10. **Tests** — unit tests using miniredis (no build tag, no external
-    dependencies). Integration tests using a real Redis container
-    (`redis_test` build tag).
-11. **Example docker-compose updates** — Redis service, dedicated
-    internal network for state isolation.
+    dependencies). Integration tests in respective packages using a
+    real Redis service container (`redis_test` build tag).
 
 ## Step-by-step
 
@@ -105,6 +103,19 @@ if cfg.Redis != nil && cfg.Redis.KeyPrefix == "" {
 }
 ```
 
+Add to `validate` (before the URL check):
+
+```go
+if cfg.Redis != nil && cfg.Redis.KeyPrefix != "" && !strings.HasSuffix(cfg.Redis.KeyPrefix, ":") {
+    cfg.Redis.KeyPrefix += ":"
+}
+```
+
+This ensures the prefix always ends with `:` so that `Key("session", "abc")`
+produces `"myprefix:session:abc"` rather than `"myprefixsession:abc"`.
+The same guarantee is needed by Lua scripts that concatenate
+`prefix .. "session:*"` for SCAN patterns.
+
 Add to `validate`:
 
 ```go
@@ -126,6 +137,7 @@ package redisstate
 import (
     "context"
     "fmt"
+    "log/slog"
     "time"
 
     "github.com/redis/go-redis/v9"
@@ -146,12 +158,12 @@ func New(ctx context.Context, cfg *config.RedisConfig) (*Client, error) {
         return nil, fmt.Errorf("parse redis url: %w", err)
     }
 
-    // Reject unauthenticated connections (design decision 8).
-    if opts.Password == "" {
-        return nil, fmt.Errorf("redis url has no password; AUTH is required")
-    }
-
     rdb := redis.NewClient(opts)
+
+    // Warn about unauthenticated connections (design decision 8).
+    if opts.Password == "" {
+        slog.Warn("redis connection has no authentication; consider enabling AUTH for production")
+    }
 
     pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
     defer cancel()
@@ -255,6 +267,13 @@ meaning disabled), no TTL is set — sessions persist until explicit
 deletion (matching the in-memory behavior where `SweepIdle` is
 never called with a zero duration).
 
+**Autoscaler interaction:** the autoscaler calls `SweepIdle` and logs
+the count. With Redis, the count is always 0 so the log line
+disappears. This is expected — TTL expiry replaces the sweep. The
+autoscaler's `SetIdleSinceIfZero` loop still works correctly: on
+the next tick after a session's TTL expires, `CountForWorker`
+returns 0 and the worker gets marked idle.
+
 **Method implementations:**
 
 | Method | Redis operations |
@@ -268,7 +287,7 @@ never called with a zero duration).
 | `CountForWorkers` | Lua: SCAN + count matching any of the given worker IDs |
 | `RerouteWorker` | Lua: SCAN + HSET `worker_id` on matches |
 | `EntriesForWorker` | SCAN + HGETALL pipeline (client-side; returns Go maps) |
-| `SweepIdle` | No-op (returns 0). Redis TTL handles expiry. |
+| `SweepIdle` | No-op (returns 0). Redis TTL handles expiry natively. |
 
 **Lua script for DeleteByWorker** (representative example — other
 batch scripts follow the same SCAN + filter + mutate pattern):
@@ -434,15 +453,16 @@ import (
 // RedisWorkerMap implements WorkerMap using Redis hashes.
 //
 // Key schema:
-//   {prefix}worker:{workerID}  →  hash {app_id, bundle_id, draining, idle_since, started_at}
+//   {prefix}worker:{workerID}  →  hash {app_id, bundle_id, draining, idle_since, started_at, server_id}
 //
 // No TTL — workers are explicitly deleted on eviction.
 type RedisWorkerMap struct {
-    client *redisstate.Client
+    client   *redisstate.Client
+    serverID string // os.Hostname(), written to every worker hash
 }
 
-func NewRedisWorkerMap(client *redisstate.Client) *RedisWorkerMap {
-    return &RedisWorkerMap{client: client}
+func NewRedisWorkerMap(client *redisstate.Client, serverID string) *RedisWorkerMap {
+    return &RedisWorkerMap{client: client, serverID: serverID}
 }
 ```
 
@@ -455,11 +475,19 @@ func NewRedisWorkerMap(client *redisstate.Client) *RedisWorkerMap {
 | `draining` | string | `"0"` or `"1"` |
 | `idle_since` | string | Unix seconds, `"0"` = not idle |
 | `started_at` | string | Unix seconds |
+| `server_id` | string | Hostname of the server that spawned this worker |
+
+**`server_id` field:** written on `Set`, not read by any phase 3-3
+code. Included now so phase 3-4 (multi-server) can scope
+`GracefulShutdown` and `StartupCleanup` to the current server's
+workers without migrating every existing worker hash. The value is
+`os.Hostname()`, captured once at `RedisWorkerMap` construction.
 
 **Serialization note:** `ActiveWorker` is fully serializable — phase
 3-2 extracted `CancelToken func()` from `ActiveWorker` into
 `Server.cancelTokens` (a process-local `sync.Map`). The Redis store
-only needs to persist the five data fields listed above.
+persists the five `ActiveWorker` data fields plus `server_id`
+(which lives only in Redis, not in the Go struct).
 
 **Method implementations:**
 
@@ -473,15 +501,57 @@ only needs to persist the five data fields listed above.
 | `All` | SCAN `{prefix}worker:*`, collect IDs (client-side) |
 | `ForApp` | SCAN + HGET `app_id` pipeline, filter |
 | `ForAppAvailable` | SCAN + HGETALL pipeline, filter `app_id` match + `draining == "0"` |
-| `MarkDraining` | Lua: SCAN + HSET `draining "1"` on `app_id` matches |
-| `SetDraining` | `HSET {prefix}worker:{id} draining "1"` |
-| `ClearDraining` | `HSET {prefix}worker:{id} draining "0"` |
-| `SetIdleSince` | `HSET {prefix}worker:{id} idle_since {unix}` |
-| `SetIdleSinceIfZero` | Lua: HGET `idle_since`, if `"0"` then HSET |
-| `ClearIdleSince` | Lua: HGET `idle_since`, HSET `"0"`, return whether was non-zero |
+| `MarkDraining` | Lua: SCAN + HSET `draining "1"` on `app_id` matches, return matched IDs |
+| `SetDraining` | Lua: `if EXISTS then HSET draining "1"` (guard against ghost entries) |
+| `ClearDraining` | Lua: `if EXISTS then HSET draining "0"` (guard against ghost entries) |
+| `SetIdleSince` | Lua: `if EXISTS then HSET idle_since {unix}` (guard against ghost entries) |
+| `SetIdleSinceIfZero` | Lua: `if EXISTS then HGET idle_since`, if `"0"` then HSET |
+| `ClearIdleSince` | Lua: `if EXISTS then HGET idle_since`, HSET `"0"`, return whether was non-zero |
 | `IdleWorkers` | Lua: SCAN + filter non-zero `idle_since` older than timeout, exclude draining |
 | `AppIDs` | Lua: SCAN + collect unique `app_id` values |
 | `IsDraining` | Lua: SCAN + check if any worker with matching `app_id` has `draining == "1"` |
+
+**Existence guards on single-field mutations:** `SetDraining`,
+`ClearDraining`, `SetIdleSince`, and `ClearIdleSince` all use a Lua
+script that checks `redis.call("EXISTS", key) == 1` before writing.
+Without the guard, a bare `HSET` on a non-existent key *creates* the
+hash — resurrecting a deleted worker as a ghost entry with only one
+field. This matters in the `restoreOld` failure path of
+`drainAndReplace`: the health poller may evict a worker between
+`SetDraining` and the `ClearDraining` rollback, so the key may
+already be gone. The memory implementations have the same guard
+(`if w, ok := m.workers[workerID]; ok`). Representative script:
+
+```lua
+local key = KEYS[1]
+if redis.call("EXISTS", key) == 1 then
+    redis.call("HSET", key, ARGV[1], ARGV[2])
+end
+return 0
+```
+
+**Lua script for MarkDraining** (SCAN + mutate + collect IDs):
+
+```lua
+local prefix = KEYS[1]
+local app_id = ARGV[1]
+local cursor = "0"
+local ids = {}
+repeat
+    local result = redis.call("SCAN", cursor, "MATCH", prefix .. "worker:*", "COUNT", 100)
+    cursor = result[1]
+    for _, key in ipairs(result[2]) do
+        if redis.call("HGET", key, "app_id") == app_id then
+            redis.call("HSET", key, "draining", "1")
+            -- Extract workerID from "{prefix}worker:{id}"
+            ids[#ids + 1] = string.sub(key, #prefix + #"worker:" + 1)
+        end
+    end
+until cursor == "0"
+return ids
+```
+
+The Go side deserializes the return value via `cmd.StringSlice()`.
 
 SCAN is used for all list operations, same rationale as the session
 store: at max 100 workers, SCAN completes in under 1ms. No secondary
@@ -502,17 +572,19 @@ running Docker containers. Add a new block after the existing
 `ListManaged` cleanup:
 
 ```go
-// Reconcile Redis worker map against running containers.
+// Reconcile Redis worker map against containers still running.
 // With in-memory stores this is a no-op (All() returns empty).
 workerIDs := srv.Workers.All()
 if len(workerIDs) > 0 {
-    managed := make(map[string]bool)
-    for _, r := range resources { // resources from ListManaged above
-        managed[r.ID] = true
+    // Re-query after the removal loop: what's actually running now?
+    remaining, _ := srv.Backend.ListManaged(ctx)
+    alive := make(map[string]bool, len(remaining))
+    for _, r := range remaining {
+        alive[r.ID] = true
     }
     var stale int
     for _, wid := range workerIDs {
-        if !managed[wid] {
+        if !alive[wid] {
             srv.Workers.Delete(wid)
             srv.Sessions.DeleteByWorker(wid)
             srv.Registry.Delete(wid)
@@ -526,7 +598,14 @@ if len(workerIDs) > 0 {
 }
 ```
 
-This reuses the `resources` slice already fetched by `ListManaged`.
+This re-queries `ListManaged` after the removal loop to reconcile
+against *current* container state, not the pre-cleanup snapshot.
+In the single-server case, all containers were just removed so all
+Redis entries are stale. In the future multi-server case (phase
+3-4+), when container cleanup becomes selective, the other
+instance's containers are still running so their Redis entries
+survive — no rework needed.
+
 For the in-memory path, `Workers.All()` returns empty (fresh map)
 so the block is a no-op — no behavioral change for existing
 deployments.
@@ -553,7 +632,8 @@ if cfg.Redis != nil {
     srv.Sessions = session.NewRedisStore(rc, cfg.Proxy.SessionIdleTTL.Duration)
     registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
     srv.Registry = registry.NewRedisRegistry(rc, registryTTL)
-    srv.Workers = server.NewRedisWorkerMap(rc)
+    hostname, _ := os.Hostname()
+    srv.Workers = server.NewRedisWorkerMap(rc, hostname)
     slog.Info("using redis for shared state",
         "url", maskRedisPassword(cfg.Redis.URL),
         "prefix", cfg.Redis.KeyPrefix)
@@ -666,45 +746,77 @@ func TestClientKeyPrefix(t *testing.T) {
 func TestClientPing(t *testing.T) { ... }
 ```
 
-**Shared test helper** (`internal/redisstate/testutil_test.go` or
-exported in `internal/redisstate/testutil.go`):
+**Shared test helper** (`internal/redisstate/testutil.go`):
 
 ```go
 // TestClient creates a redisstate.Client connected to the given addr
-// (typically miniredis). Exported so session/registry/server test
-// packages can use it.
-func TestClient(t *testing.T, addr string) *Client { ... }
+// (typically miniredis) with no authentication. Exported so
+// session/registry/server test packages can use it.
+func TestClient(t *testing.T, addr string) *Client {
+    cfg := &config.RedisConfig{URL: "redis://" + addr + "/0", KeyPrefix: "test:"}
+    c, err := New(context.Background(), cfg)
+    if err != nil {
+        t.Fatal("redisstate.TestClient:", err)
+    }
+    t.Cleanup(func() { c.Close() })
+    return c
+}
 ```
 
 #### Integration tests (real Redis, `redis_test` build tag)
 
-These use a real Redis container, following the pattern in
-`internal/integration/openbao_integration_test.go` (Docker client →
-pull image → create container → run tests → cleanup).
+These use a real Redis service container in CI, following the pattern
+of the `docker_test`, `idp_test`, and `openbao_test` suites.
+Integration tests live in their respective packages (not centralized
+in `redisstate`) so they can test each store without cross-package
+import awkwardness.
 
 **`internal/redisstate/redis_integration_test.go`:**
 
 ```go
 //go:build redis_test
 
-func TestMain(m *testing.M) {
-    // Start Redis container via Docker SDK.
-    // Set package-level redisAddr.
-    // Run tests, cleanup.
-}
-
 func TestRealRedisPing(t *testing.T) { ... }
+```
+
+**`internal/session/redis_integration_test.go`:**
+
+```go
+//go:build redis_test
+
 func TestRealRedisSessionStoreRoundTrip(t *testing.T) { ... }
+```
+
+**`internal/registry/redis_integration_test.go`:**
+
+```go
+//go:build redis_test
+
+func TestRealRedisRegistryRoundTrip(t *testing.T) { ... }
+```
+
+**`internal/server/workermap_redis_integration_test.go`:**
+
+```go
+//go:build redis_test
+
 func TestRealRedisWorkerMapRoundTrip(t *testing.T) { ... }
 ```
 
+Each integration test connects to the Redis instance at
+`REDIS_TEST_ADDR` (set by CI) using `redisstate.TestClient`.
+
 #### CI configuration
 
-Add a `redis-test` job to `.github/workflows/ci.yml`:
+Add a `redis` job to `.github/workflows/ci.yml`, matching the
+pattern of the `docker`, `idp`, and `openbao` jobs:
 
 ```yaml
-redis-test:
-  runs-on: ubuntu-latest
+redis:
+  runs-on: ubuntu-24.04
+  timeout-minutes: 10
+  needs: [unit]
+  if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'redis')
   services:
     redis:
       image: redis:7-alpine
@@ -716,50 +828,21 @@ redis-test:
       ports:
         - 6379:6379
   steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
+    - uses: actions/checkout@v6
+    - uses: actions/setup-go@v6
       with: { go-version-file: go.mod }
-    - run: go test -tags redis_test -count=1 ./internal/redisstate/...
+    - run: go test -tags redis_test -count=1 -coverprofile=coverage-redis.out -coverpkg=./internal/...,./cmd/by/... ./internal/redisstate/... ./internal/session/... ./internal/registry/... ./internal/server/...
       env:
         REDIS_TEST_ADDR: localhost:6379
+    - uses: actions/upload-artifact@v7
+      with:
+        name: coverage-redis
+        path: coverage-redis.out
+        retention-days: 1
 ```
 
-### Step 11: Example docker-compose updates
-
-Update `examples/hello-shiny/docker-compose.yml` to add a Redis
-service and a dedicated internal network:
-
-```yaml
-services:
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "blockyard-dev"]
-    networks: [state]
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "blockyard-dev", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  blockyard:
-    # ... existing config ...
-    networks: [default, state]
-    environment:
-      # ... existing env vars ...
-      BLOCKYARD_REDIS_URL: redis://:blockyard-dev@redis:6379/0
-
-networks:
-  state:
-    internal: true
-```
-
-**Network isolation:** the `state` network is `internal: true` — no
-external access. Only the `blockyard` server connects to both
-`default` (where workers run) and `state` (where Redis lives).
-Workers are on `default` only and cannot reach Redis.
-
-This matches the v3 plan's security requirement: "Workers must not
-reach Redis."
+Also update the `coverage` job's `needs` to include `redis`, and
+add `redis` to the `workflow_dispatch` job choices.
 
 ## Files changed
 
@@ -770,22 +853,24 @@ reach Redis."
 | `internal/redisstate/redisstate.go` | **create** | Redis client wrapper: `New()`, `Close()`, `Ping()`, `Key()`, `Redis()` |
 | `internal/redisstate/redisstate_test.go` | **create** | Unit tests (miniredis) |
 | `internal/redisstate/testutil.go` | **create** | `TestClient()` helper for test packages |
-| `internal/redisstate/redis_integration_test.go` | **create** | Integration tests (real Redis, `redis_test` tag) |
+| `internal/redisstate/redis_integration_test.go` | **create** | Integration ping test (`redis_test` tag) |
 | `internal/session/redis.go` | **create** | `RedisStore` implementing `session.Store` (hashes + TTL + Lua scripts) |
 | `internal/session/redis_test.go` | **create** | Unit tests (miniredis) |
+| `internal/session/redis_integration_test.go` | **create** | Integration round-trip test (`redis_test` tag) |
 | `internal/registry/redis.go` | **create** | `RedisRegistry` implementing `WorkerRegistry` (string keys) |
 | `internal/registry/redis_test.go` | **create** | Unit tests (miniredis) |
+| `internal/registry/redis_integration_test.go` | **create** | Integration round-trip test (`redis_test` tag) |
 | `internal/server/workermap_iface.go` | **update** | Add `ClearDraining(workerID string)` to `WorkerMap` interface |
 | `internal/server/workermap_memory.go` | **update** | Add `ClearDraining` to `MemoryWorkerMap` |
 | `internal/server/workermap_redis.go` | **create** | `RedisWorkerMap` implementing `WorkerMap` (hashes + Lua scripts) |
 | `internal/server/workermap_redis_test.go` | **create** | Unit tests (miniredis) |
+| `internal/server/workermap_redis_integration_test.go` | **create** | Integration round-trip test (`redis_test` tag) |
 | `internal/server/refresh.go` | **update** | Use `ClearDraining` instead of `Get` + modify + `Set` in failure path |
 | `internal/server/state.go` | **update** | Add `RedisClient *redisstate.Client` field to `Server` |
 | `internal/ops/ops.go` | **update** | Add `registry.Set()` after successful health check (TTL refresh); add Redis worker map reconciliation to `StartupCleanup` |
 | `internal/api/readyz.go` | **update** | Add Redis health check |
 | `cmd/blockyard/main.go` | **update** | Redis init + store selection + `srv.RedisClient` assignment |
-| `examples/hello-shiny/docker-compose.yml` | **update** | Add Redis service + `state` network |
-| `.github/workflows/ci.yml` | **update** | Add `redis-test` job |
+| `.github/workflows/ci.yml` | **update** | Add `redis` job |
 
 ## Design decisions
 
@@ -859,13 +944,14 @@ reach Redis."
    means the default `go test ./...` exercises both memory and Redis
    code paths.
 
-8. **Redis AUTH required — startup rejects unauthenticated URLs.**
-   Following the v3 plan, `redisstate.New()` parses the URL and
-   rejects it if no password is present. The docker-compose example
-   starts Redis with `--requirepass`, so the happy path always has
-   auth. Combined with network isolation (dedicated internal Docker
-   network), this provides defense-in-depth against workers reaching
-   session data.
+8. **Redis AUTH recommended — startup warns on unauthenticated URLs.**
+   `redisstate.New()` parses the URL and logs a warning at
+   `slog.Warn` level if no password is present. This avoids
+   rejecting legitimate test or development setups (e.g. miniredis,
+   local Redis without AUTH) while alerting operators to harden
+   production deployments. Combined with network isolation (dedicated
+   internal Docker network in production), this provides
+   defense-in-depth against workers reaching session data.
 
 9. **Single Redis client, not a pool per store.** All three stores
    share one `redisstate.Client` (and thus one go-redis connection
@@ -878,3 +964,14 @@ reach Redis."
     client is stored as `srv.RedisClient` (nilable) so readyz and
     any future health-dependent logic can access it without import
     cycles or globals. Same pattern as `srv.VaultClient`.
+
+11. **Single-instance Redis only — no Cluster support.** The Lua
+    scripts use `SCAN` (which is node-local in a cluster) and pass
+    the key prefix via `KEYS[1]` as a pattern, not an actual key.
+    Both assumptions break under Redis Cluster, where keys are
+    sharded and Lua scripts can only access keys on the same slot.
+    At the target scale (≤100 workers, hundreds of sessions), a
+    single Redis instance is more than sufficient. Cluster support
+    would require replacing SCAN-based Lua scripts with secondary
+    indexes or application-level sharding — complexity that isn't
+    justified at this scale.
