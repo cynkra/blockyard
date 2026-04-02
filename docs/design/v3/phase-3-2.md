@@ -1002,3 +1002,15 @@ No behavioral changes. Grep for these constructors and update.
    and `transferring` maps that exist for the same reason -- makes
    `ActiveWorker` fully serializable. This avoids a forced refactor
    in phase 3-3 when Redis needs to store `ActiveWorker` values.
+
+## Deferred to phase 3-3
+
+1. **Add `ClearDraining(workerID string)` to `WorkerMap`.**
+   `drainAndReplace` restores old workers on failure via
+   `Get` + modify `Draining` + `Set`. This is not atomic -- a
+   concurrent `SetIdleSince` or `ClearIdleSince` between `Get` and
+   `Set` would be clobbered. The window is microseconds and the
+   practical risk is low (the worker is in a failure-recovery path),
+   but a dedicated `ClearDraining` method that only touches the
+   `Draining` field under the lock would be correct. Add it when
+   the Redis implementation needs the same contract.
