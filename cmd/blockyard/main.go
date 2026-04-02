@@ -143,7 +143,7 @@ func main() {
 	srv.SpawnLogCaptureFn = ops.SpawnLogCapture
 
 	// Background goroutine context — used for vault token renewal and others.
-	bgCtx, bgCancel := context.WithCancel(context.Background())
+	bgCtx, bgCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: bgCancel is called by Drainer.Finish/Shutdown, not defer
 	var bgWg sync.WaitGroup
 
 	// ── Initialize OpenBao (must happen before OIDC for vault reference resolution) ──
