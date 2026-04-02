@@ -212,6 +212,7 @@ func New() *UI {
 		"tab_logs.html",
 		"tab_logs_worker.html",
 		"error_fragment.html",
+		"new_app_modal.html",
 	}
 	for _, name := range fragmentNames {
 		t := template.Must(
@@ -233,6 +234,10 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/api-keys", ui.apiKeysPage(srv))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
+
+	// New-app upload routes (before {name} wildcard).
+	r.Get("/ui/apps/new", ui.newAppForm(srv))
+	r.Post("/ui/apps/new", ui.createApp(srv))
 
 	// Sidebar fragment routes (phase 2-11).
 	r.Get("/ui/apps/{name}/sidebar", ui.sidebarHandler(srv))

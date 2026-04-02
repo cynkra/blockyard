@@ -307,6 +307,20 @@
   /* ── Table header styling ── */
   .table th { @apply text-left text-sm font-medium text-base-content/60; }
 
+  /* ── Drop zone (new-app upload) ── */
+  .drop-zone {
+    @apply border-2 border-dashed border-base-300 rounded-lg p-6 text-center cursor-pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .drop-zone:hover, .drop-zone.active {
+    @apply border-primary bg-primary/5;
+  }
+  .drop-zone-hint { @apply m-0 text-sm text-base-content/60; }
+  .file-list { @apply list-none p-0 m-0 mt-2 text-sm; }
+  .file-list-item { @apply flex items-center justify-between py-1 px-2 rounded-sm odd:bg-base-200; }
+  .file-list-name { @apply truncate mr-2; }
+  .file-list-size { @apply shrink-0 text-xs text-base-content/50; }
+
   /* ── Misc ── */
   .hidden { display: none !important; }
   .empty-state { @apply p-8 text-center text-base-content/50; }
