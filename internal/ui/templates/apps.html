@@ -12,7 +12,7 @@
     <form method="GET" action="/" class="flex gap-2">
         <input type="search" name="search" value="{{.Search}}"
                placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps">
-        <button type="submit" class="btn">Search</button>
+        <button type="submit" class="btn btn-sm">Search</button>
     </form>
     {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
     <button class="btn btn-primary btn-sm"
@@ -86,7 +86,7 @@
 {{end}}
 </div><!-- drawer-content -->
 <div class="drawer-side z-[200]">
-    <label for="sidebar-toggle" class="drawer-overlay" onclick="closeSidebar()"></label>
+    <label for="sidebar-toggle" class="drawer-overlay"></label>
     <aside id="sidebar" class="bg-base-100 min-w-[28rem] w-1/2 max-w-[720px] h-full overflow-y-auto"></aside>
 </div>
 </div><!-- drawer -->
@@ -141,6 +141,14 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
 document.body.addEventListener('htmx:beforeSwap', function(e) {
     if (e.detail.target.id === 'tab-content' && typeof stopLogs === 'function') {
         stopLogs();
+    }
+});
+
+/* Close sidebar when drawer overlay is clicked (checkbox unchecked) */
+document.getElementById('sidebar-toggle').addEventListener('change', function() {
+    if (!this.checked) {
+        if (typeof stopLogs === 'function') stopLogs();
+        document.getElementById('sidebar').innerHTML = '';
     }
 });
 </script>

@@ -8,9 +8,12 @@
     <script>
     (function() {
         var t = localStorage.getItem('theme');
-        if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches)) {
+        var isDark = t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches);
+        if (isDark) {
             document.documentElement.classList.add('dark');
-            document.documentElement.setAttribute('data-theme', 'dark');
+            document.documentElement.setAttribute('data-theme', 'night');
+        } else {
+            document.documentElement.setAttribute('data-theme', 'light');
         }
     })();
     </script>
@@ -91,7 +94,7 @@
         function toggleDarkMode() {
             document.documentElement.classList.toggle('dark');
             var isDark = document.documentElement.classList.contains('dark');
-            document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+            document.documentElement.setAttribute('data-theme', isDark ? 'night' : 'light');
             localStorage.setItem('theme', isDark ? 'dark' : 'light');
         }
         </script>

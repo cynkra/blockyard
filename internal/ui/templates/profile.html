@@ -7,21 +7,18 @@
     <h1>Profile</h1>
 </div>
 <div class="profile-section">
-    <div class="profile-field">
-        <label>Display name</label>
-        <p>{{.User.DisplayName}}</p>
+    <div class="card card-border p-5">
+        <div class="flex items-center justify-between mb-4">
+            <div>
+                <p class="text-lg font-semibold m-0">{{.User.DisplayName}}</p>
+                <p class="text-sm text-base-content/60 m-0">{{.User.Email}}</p>
+            </div>
+            <span class="badge badge-soft badge-info">{{.User.Role}}</span>
+        </div>
+        <form method="POST" action="/logout">
+            <button type="submit" class="btn btn-sm btn-outline">Sign out</button>
+        </form>
     </div>
-    <div class="profile-field">
-        <label>Email</label>
-        <p>{{.User.Email}}</p>
-    </div>
-    <div class="profile-field">
-        <label>Role</label>
-        <span class="badge badge-sm badge-info">{{.User.Role}}</span>
-    </div>
-    <form method="POST" action="/logout">
-        <button type="submit" class="btn">Sign out</button>
-    </form>
 </div>
 
 <div id="tokens" class="pat-section">
@@ -34,7 +31,7 @@
           hx-target="#pat-result"
           hx-swap="innerHTML">
         <input type="text" name="name" placeholder="Token name (e.g., CI deploy)" required>
-        <select name="expires_in">
+        <select name="expires_in" class="select select-sm text-sm">
             <option value="30d">30 days</option>
             <option value="90d" selected>90 days</option>
             <option value="365d">1 year</option>

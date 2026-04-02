@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-//go:embed dist
+//go:embed all:dist
 var content embed.FS
 
 // Handler returns an http.Handler that serves the embedded documentation
