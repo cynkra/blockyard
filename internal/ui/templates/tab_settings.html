@@ -219,7 +219,7 @@
                        value="{{.App.Name}}"
                        data-original="{{.App.Name}}"
                        oninput="toggleSaveBtn(this)">
-                <button class="btn btn-danger btn-sm hidden"
+                <button class="btn btn-error btn-sm hidden"
                         hx-patch="/api/v1/apps/{{.App.ID}}"
                         hx-include="[name='name']"
                         hx-confirm="Rename {{.App.Name}} to this new name? The old name will redirect for 7 days."
@@ -227,7 +227,7 @@
                         onclick="this.classList.add('hidden')">Rename</button>
             </div>
         </div>
-        <button class="btn btn-danger"
+        <button class="btn btn-error"
                 hx-delete="/api/v1/apps/{{.App.ID}}"
                 hx-confirm="Delete {{.App.Name}}? This can be undone within 30 days."
                 hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }">

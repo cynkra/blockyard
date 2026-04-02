@@ -624,8 +624,8 @@ func TestAppsPageSidebarShell(t *testing.T) {
 	if !strings.Contains(body, `id="sidebar"`) {
 		t.Error("expected sidebar container")
 	}
-	if !strings.Contains(body, "sidebar-overlay") {
-		t.Error("expected sidebar overlay")
+	if !strings.Contains(body, "drawer-overlay") {
+		t.Error("expected drawer overlay")
 	}
 	if !strings.Contains(body, "closeSidebar") {
 		t.Error("expected closeSidebar function")
@@ -1353,8 +1353,8 @@ func TestSidebarReturnsHTMLForOwner(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	body := readBody(t, resp)
-	if !strings.Contains(body, "sidebar-header") {
-		t.Error("expected sidebar-header in response")
+	if !strings.Contains(body, "sidebar-tabs") {
+		t.Error("expected sidebar-tabs in response")
 	}
 	if !strings.Contains(body, "my-app") {
 		t.Error("expected app name in sidebar")
@@ -1383,8 +1383,8 @@ func TestSidebarReturnsHTMLForCollaborator(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	body := readBody(t, resp)
-	if !strings.Contains(body, "sidebar-header") {
-		t.Error("expected sidebar-header")
+	if !strings.Contains(body, "sidebar-tabs") {
+		t.Error("expected sidebar-tabs")
 	}
 	// Collaborator should NOT see Collaborators tab (owner+ only).
 	if strings.Contains(body, "Collaborators") {

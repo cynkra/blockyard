@@ -5,14 +5,14 @@
 {{define "content"}}
 <div class="page-header">
     <h1>Deployment History</h1>
-    <form method="GET" action="/deployments" class="search-form">
+    <form method="GET" action="/deployments" class="flex gap-2">
         <input type="search" name="search" placeholder="Search by app name..."
-               class="search-input" value="{{.Search}}">
+               class="input input-sm flex-1 text-sm" value="{{.Search}}">
         <button type="submit" class="btn">Search</button>
     </form>
 </div>
 {{if .Deployments}}
-<table class="data-table">
+<table class="table table-sm w-full">
     <thead>
         <tr>
             <th class="sortable-header"><a href="?sort=app_name&dir={{if and (eq .Sort "app_name") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{if .Search}}&search={{urlquery .Search}}{{end}}">App{{if eq .Sort "app_name"}} {{if eq .SortDir "asc"}}<svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>{{else}}<svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>{{end}}{{end}}</a></th>
@@ -27,7 +27,7 @@
         <tr class="deployment-row" style="cursor:pointer"
             onclick="toggleDeploymentLog(this, '{{.BundleID}}')">
             <td>{{.AppName}}</td>
-            <td class="monospace" title="{{.BundleID}}">{{.BundleID | truncate}}</td>
+            <td class="font-mono text-xs" title="{{.BundleID}}">{{.BundleID | truncate}}</td>
             <td>{{.DeployedByName}}</td>
             <td><span class="time-ago" data-timestamp="{{deref .DeployedAt}}">{{.DeployedAt | timeAgo}}</span></td>
             <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>

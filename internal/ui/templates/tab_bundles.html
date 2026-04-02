@@ -3,7 +3,7 @@
      hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
      hx-target="#tab-content">
     {{if .Bundles}}
-    <table class="data-table">
+    <table class="table table-sm w-full">
         <thead>
             <tr>
                 <th>Bundle</th>
@@ -15,7 +15,7 @@
         <tbody>
         {{range .Bundles}}
         <tr>
-            <td class="monospace">
+            <td class="font-mono text-xs">
                 <span title="{{.ID}}">{{.ID | truncate}}</span>
                 {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}
                 <span class="status-badge status-ready">active</span>

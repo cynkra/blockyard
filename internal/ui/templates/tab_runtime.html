@@ -5,7 +5,7 @@
                 hx-target="#tab-content">Refresh</button>
     </div>
     {{if .Workers}}
-    <table class="data-table">
+    <table class="table table-sm w-full">
         <thead>
             <tr>
                 <th>Worker</th>
@@ -20,7 +20,7 @@
             <tr style="cursor:pointer"
                 hx-get="/ui/apps/{{$.App.Name}}/tab/runtime/worker/{{.ID}}"
                 hx-target="#tab-content">
-                <td class="monospace" title="{{.ID}}">{{.ID | truncate}}</td>
+                <td class="font-mono text-xs" title="{{.ID}}">{{.ID | truncate}}</td>
                 <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
                 <td>{{printf "%.1f" .CPUPercent}}%</td>
                 <td>{{.MemoryUsageBytes | humanBytes}} / {{.MemoryLimitBytes | humanBytes}}</td>

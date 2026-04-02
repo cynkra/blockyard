@@ -3,11 +3,14 @@
 {{define "title"}}Apps — blockyard{{end}}
 
 {{define "content"}}
+<div class="drawer drawer-end">
+<input id="sidebar-toggle" type="checkbox" class="drawer-toggle" />
+<div class="drawer-content">
 <div class="page-header">
     <h1>Apps</h1>
-    <form method="GET" action="/" class="search-form">
+    <form method="GET" action="/" class="flex gap-2">
         <input type="search" name="search" value="{{.Search}}"
-               placeholder="Search apps..." class="search-input" aria-label="Search apps">
+               placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps">
         <button type="submit" class="btn">Search</button>
     </form>
 </div>
@@ -42,6 +45,7 @@
 <section class="app-grid">
     {{range .Apps}}
     <a href="/app/{{.Name}}/" class="app-card">
+        <div class="card-body p-4">
         {{if .CanManage}}
         <button class="app-card-gear"
                 hx-get="/ui/apps/{{.Name}}/sidebar"
@@ -59,6 +63,7 @@
             {{range .Tags}}<span class="tag">{{.}}</span>{{end}}
         </span>
         {{end}}
+        </div>
     </a>
     {{end}}
 </section>
@@ -73,22 +78,24 @@
     {{end}}
 </section>
 {{end}}
-
-<aside id="sidebar" class="sidebar"></aside>
-<div id="sidebar-overlay" class="sidebar-overlay" hx-on:click="closeSidebar()"></div>
+</div><!-- drawer-content -->
+<div class="drawer-side z-[200]">
+    <label for="sidebar-toggle" class="drawer-overlay" onclick="closeSidebar()"></label>
+    <aside id="sidebar" class="bg-base-100 min-w-[28rem] w-1/2 max-w-[720px] h-full overflow-y-auto"></aside>
+</div>
+</div><!-- drawer -->
 
 <script>
 function closeSidebar() {
     if (typeof stopLogs === 'function') stopLogs();
-    document.getElementById('sidebar').classList.remove('open');
-    document.getElementById('sidebar-overlay').classList.remove('open');
+    document.getElementById('sidebar-toggle').checked = false;
     document.getElementById('sidebar').innerHTML = '';
 }
 
 function setActiveTab(btn) {
     btn.closest('.sidebar-tabs').querySelectorAll('.tab').forEach(
-        function(t) { t.classList.remove('active'); });
-    btn.classList.add('active');
+        function(t) { t.classList.remove('tab-active'); });
+    btn.classList.add('tab-active');
 }
 
 function toggleSaveBtn(input) {
@@ -118,8 +125,7 @@ function validateMemoryLimit(input) {
 
 document.body.addEventListener('htmx:afterSwap', function(e) {
     if (e.detail.target.id === 'sidebar') {
-        document.getElementById('sidebar').classList.add('open');
-        document.getElementById('sidebar-overlay').classList.add('open');
+        document.getElementById('sidebar-toggle').checked = true;
     }
 });
 
