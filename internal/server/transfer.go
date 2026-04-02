@@ -147,9 +147,9 @@ func (srv *Server) completeTransfer(
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{
 		AppID: oldWorker.AppID, BundleID: oldWorker.BundleID,
-		StartedAt:   time.Now(),
-		CancelToken: cancelToken,
+		StartedAt: time.Now(),
 	})
+	srv.SetCancelToken(newWorkerID, cancelToken)
 	srv.Registry.Set(newWorkerID, addr)
 
 	// Wait for new worker to become healthy.
@@ -157,9 +157,7 @@ func (srv *Server) completeTransfer(
 		slog.Error("transfer: worker not healthy, cleaning up",
 			"worker_id", newWorkerID, "error", err)
 		// Clean up the ghost worker.
-		if cancelToken != nil {
-			cancelToken()
-		}
+		srv.CancelTokenRefresher(newWorkerID)
 		srv.Workers.Delete(newWorkerID)
 		srv.Registry.Delete(newWorkerID)
 		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck

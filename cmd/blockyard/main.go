@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -131,14 +130,6 @@ func main() {
 		}
 	}
 
-	// Generate ephemeral HMAC key for worker tokens.
-	workerKeyBytes := make([]byte, 32)
-	if _, err := rand.Read(workerKeyBytes); err != nil {
-		slog.Error("failed to generate worker token key", "error", err)
-		os.Exit(1)
-	}
-	srv.WorkerTokenKey = auth.NewSigningKey(workerKeyBytes)
-
 	// Set operation hooks to avoid import cycles.
 	srv.EvictWorkerFn = ops.EvictWorker
 	srv.SpawnLogCaptureFn = ops.SpawnLogCapture
@@ -203,6 +194,14 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	// Resolve worker signing key (vault if available, file fallback otherwise).
+	workerKey, err := server.LoadOrCreateWorkerKey(context.Background(), srv.VaultClient, cfg)
+	if err != nil {
+		slog.Error("failed to load or create worker signing key", "error", err)
+		os.Exit(1)
+	}
+	srv.WorkerTokenKey = workerKey
 
 	// Deferred validation: session_secret must be present if OIDC is configured.
 	if cfg.OIDC != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -16,6 +17,9 @@ func ResolveSessionSecret(ctx context.Context, client *Client) (string, error) {
 
 	// Try reading existing.
 	data, err := client.KVRead(ctx, kvPath, client.AdminToken())
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", fmt.Errorf("read session_secret from vault: %w", err)
+	}
 	if err == nil {
 		if v, ok := data["session_secret"]; ok {
 			if s, ok := v.(string); ok && s != "" {

@@ -47,7 +47,7 @@ type AppResponse struct {
 	Workers              []string `json:"workers"`
 }
 
-func appResponse(app *db.AppRow, workers *server.WorkerMap) AppResponse {
+func appResponse(app *db.AppRow, workers server.WorkerMap) AppResponse {
 	status := "stopped"
 	workerIDs := workers.ForApp(app.ID)
 	if len(workerIDs) > 0 {

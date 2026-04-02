@@ -198,9 +198,9 @@ func (srv *Server) drainAndReplace(
 
 	srv.Workers.Set(newWorkerID, ActiveWorker{
 		AppID: app.ID, BundleID: *app.ActiveBundle,
-		StartedAt:   time.Now(),
-		CancelToken: cancelToken,
+		StartedAt: time.Now(),
 	})
+	srv.SetCancelToken(newWorkerID, cancelToken)
 	srv.Registry.Set(newWorkerID, addr)
 
 	// Start log capture for the new worker.
@@ -211,6 +211,10 @@ func (srv *Server) drainAndReplace(
 	if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
 		sender.Write(fmt.Sprintf("New worker (%s) failed health check.", newWorkerID[:8]))
 		slog.Error("refresh: worker health check", "worker_id", newWorkerID, "error", err)
+		srv.CancelTokenRefresher(newWorkerID)
+		srv.Workers.Delete(newWorkerID)
+		srv.Registry.Delete(newWorkerID)
+		srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
 		return
 	}
 

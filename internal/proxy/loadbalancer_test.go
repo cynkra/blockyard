@@ -9,8 +9,8 @@ import (
 
 func TestAssignEmptyWorkers(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	wid, err := lb.Assign("app-1", workers, sessions, 5, nil)
 	if err != nil {
@@ -23,8 +23,8 @@ func TestAssignEmptyWorkers(t *testing.T) {
 
 func TestAssignSingleWorkerWithCapacity(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	workers.Set("w1", server.ActiveWorker{AppID: "app-1"})
 	sessions.Set("s1", session.Entry{WorkerID: "w1"})
@@ -40,8 +40,8 @@ func TestAssignSingleWorkerWithCapacity(t *testing.T) {
 
 func TestAssignLeastLoaded(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	workers.Set("w1", server.ActiveWorker{AppID: "app-1"})
 	workers.Set("w2", server.ActiveWorker{AppID: "app-1"})
@@ -63,8 +63,8 @@ func TestAssignLeastLoaded(t *testing.T) {
 
 func TestAssignNoCapacityCanScale(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	workers.Set("w1", server.ActiveWorker{AppID: "app-1"})
 	sessions.Set("s1", session.Entry{WorkerID: "w1"})
@@ -82,8 +82,8 @@ func TestAssignNoCapacityCanScale(t *testing.T) {
 
 func TestAssignNoCapacityCanScaleWithLimit(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	workers.Set("w1", server.ActiveWorker{AppID: "app-1"})
 	sessions.Set("s1", session.Entry{WorkerID: "w1"})
@@ -101,8 +101,8 @@ func TestAssignNoCapacityCanScaleWithLimit(t *testing.T) {
 
 func TestAssignCapacityExhausted(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	workers.Set("w1", server.ActiveWorker{AppID: "app-1"})
 	workers.Set("w2", server.ActiveWorker{AppID: "app-1"})
@@ -122,8 +122,8 @@ func TestAssignCapacityExhausted(t *testing.T) {
 
 func TestAssignIgnoresOtherApps(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	workers.Set("w1", server.ActiveWorker{AppID: "app-1"})
 	workers.Set("w2", server.ActiveWorker{AppID: "app-2"})
@@ -140,8 +140,8 @@ func TestAssignIgnoresOtherApps(t *testing.T) {
 
 func TestAssignWorkerAtExactCapacity(t *testing.T) {
 	lb := LoadBalancer{}
-	workers := server.NewWorkerMap()
-	sessions := session.NewStore()
+	workers := server.NewMemoryWorkerMap()
+	sessions := session.NewMemoryStore()
 
 	workers.Set("w1", server.ActiveWorker{AppID: "app-1"})
 	sessions.Set("s1", session.Entry{WorkerID: "w1"})

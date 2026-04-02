@@ -6,7 +6,7 @@ import (
 )
 
 func TestSetAndGet(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("sess-1", Entry{WorkerID: "worker-1", UserSub: "user-a", LastAccess: time.Now()})
 
 	e, ok := s.Get("sess-1")
@@ -22,7 +22,7 @@ func TestSetAndGet(t *testing.T) {
 }
 
 func TestGetMissing(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	_, ok := s.Get("nonexistent")
 	if ok {
 		t.Error("expected false for missing session")
@@ -30,7 +30,7 @@ func TestGetMissing(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("sess-1", Entry{WorkerID: "worker-1"})
 	s.Delete("sess-1")
 
@@ -41,7 +41,7 @@ func TestDelete(t *testing.T) {
 }
 
 func TestDeleteByWorker(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("sess-1", Entry{WorkerID: "worker-1"})
 	s.Set("sess-2", Entry{WorkerID: "worker-1"})
 	s.Set("sess-3", Entry{WorkerID: "worker-2"})
@@ -62,7 +62,7 @@ func TestDeleteByWorker(t *testing.T) {
 }
 
 func TestCountForWorker(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("sess-1", Entry{WorkerID: "worker-1"})
 	s.Set("sess-2", Entry{WorkerID: "worker-1"})
 	s.Set("sess-3", Entry{WorkerID: "worker-2"})
@@ -79,7 +79,7 @@ func TestCountForWorker(t *testing.T) {
 }
 
 func TestTouch(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	old := time.Now().Add(-time.Hour)
 	s.Set("sess-1", Entry{WorkerID: "w1", LastAccess: old})
 
@@ -97,7 +97,7 @@ func TestTouch(t *testing.T) {
 }
 
 func TestRerouteWorker(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("s1", Entry{WorkerID: "old-worker", LastAccess: time.Now()})
 	s.Set("s2", Entry{WorkerID: "old-worker", LastAccess: time.Now()})
 	s.Set("s3", Entry{WorkerID: "other-worker", LastAccess: time.Now()})
@@ -118,7 +118,7 @@ func TestRerouteWorker(t *testing.T) {
 }
 
 func TestCountForWorkers(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("sess-1", Entry{WorkerID: "worker-1"})
 	s.Set("sess-2", Entry{WorkerID: "worker-1"})
 	s.Set("sess-3", Entry{WorkerID: "worker-2"})
@@ -139,7 +139,7 @@ func TestCountForWorkers(t *testing.T) {
 }
 
 func TestEntriesForWorker(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("s1", Entry{WorkerID: "w1", UserSub: "user-a", LastAccess: time.Now()})
 	s.Set("s2", Entry{WorkerID: "w1", UserSub: "user-b", LastAccess: time.Now()})
 	s.Set("s3", Entry{WorkerID: "w2", UserSub: "user-c", LastAccess: time.Now()})
@@ -162,7 +162,7 @@ func TestEntriesForWorker(t *testing.T) {
 }
 
 func TestSweepIdle(t *testing.T) {
-	s := NewStore()
+	s := NewMemoryStore()
 	s.Set("old", Entry{WorkerID: "w1", LastAccess: time.Now().Add(-2 * time.Hour)})
 	s.Set("recent", Entry{WorkerID: "w1", LastAccess: time.Now()})
 

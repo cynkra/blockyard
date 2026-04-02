@@ -24,8 +24,8 @@ type LoadBalancer struct{}
 // per-app limit has been reached.
 func (lb *LoadBalancer) Assign(
 	appID string,
-	workers *server.WorkerMap,
-	sessions *session.Store,
+	workers server.WorkerMap,
+	sessions session.Store,
 	maxSessionsPerWorker int,
 	maxWorkersPerApp *int,
 ) (string, error) {

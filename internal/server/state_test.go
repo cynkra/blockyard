@@ -12,7 +12,7 @@ import (
 )
 
 func TestWorkerMapCountForApp(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 	m.Set("w2", ActiveWorker{AppID: "app-a"})
 	m.Set("w3", ActiveWorker{AppID: "app-b"})
@@ -29,7 +29,7 @@ func TestWorkerMapCountForApp(t *testing.T) {
 }
 
 func TestWorkerMapForApp(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 	m.Set("w2", ActiveWorker{AppID: "app-b"})
 	m.Set("w3", ActiveWorker{AppID: "app-a"})
@@ -46,7 +46,7 @@ func TestWorkerMapForApp(t *testing.T) {
 }
 
 func TestWorkerMapCRUD(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 
 	if m.Count() != 0 {
 		t.Fatalf("expected empty map, got %d", m.Count())
@@ -70,7 +70,7 @@ func TestWorkerMapCRUD(t *testing.T) {
 }
 
 func TestWorkerMapAll(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 	m.Set("w2", ActiveWorker{AppID: "app-b"})
 
@@ -81,7 +81,7 @@ func TestWorkerMapAll(t *testing.T) {
 }
 
 func TestIdleWorkersScaleToZero(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	// Single worker for app, idle beyond timeout — should be returned.
 	m.Set("w1", ActiveWorker{
 		AppID:     "app-a",
@@ -95,7 +95,7 @@ func TestIdleWorkersScaleToZero(t *testing.T) {
 }
 
 func TestIdleWorkersExcludesDraining(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{
 		AppID:     "app-a",
 		Draining:  true,
@@ -109,7 +109,7 @@ func TestIdleWorkersExcludesDraining(t *testing.T) {
 }
 
 func TestIdleWorkersExcludesNotYetIdle(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{
 		AppID:     "app-a",
 		IdleSince: time.Now().Add(-1 * time.Minute),
@@ -122,7 +122,7 @@ func TestIdleWorkersExcludesNotYetIdle(t *testing.T) {
 }
 
 func TestClearIdleSinceReturnsBool(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{
 		AppID:     "app-a",
 		IdleSince: time.Now().Add(-5 * time.Minute),
@@ -194,7 +194,7 @@ func TestBundlePaths(t *testing.T) {
 }
 
 func TestSetDraining(t *testing.T) {
-	wm := NewWorkerMap()
+	wm := NewMemoryWorkerMap()
 	wm.Set("w-1", ActiveWorker{AppID: "app-1"})
 
 	wm.SetDraining("w-1")
@@ -211,7 +211,7 @@ func TestSetDraining(t *testing.T) {
 }
 
 func TestSetDraining_NonExistent(t *testing.T) {
-	wm := NewWorkerMap()
+	wm := NewMemoryWorkerMap()
 	// Should not panic for non-existent worker.
 	wm.SetDraining("w-missing")
 }
@@ -348,7 +348,7 @@ func TestAuthDeps(t *testing.T) {
 }
 
 func TestAppIDs(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 	m.Set("w2", ActiveWorker{AppID: "app-b"})
 	m.Set("w3", ActiveWorker{AppID: "app-a"})
@@ -360,7 +360,7 @@ func TestAppIDs(t *testing.T) {
 }
 
 func TestForAppAvailable(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 	m.Set("w2", ActiveWorker{AppID: "app-a", Draining: true})
 	m.Set("w3", ActiveWorker{AppID: "app-a"})
@@ -377,7 +377,7 @@ func TestForAppAvailable(t *testing.T) {
 }
 
 func TestSetIdleSince(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 
 	ts := time.Now().Add(-5 * time.Minute)
@@ -390,7 +390,7 @@ func TestSetIdleSince(t *testing.T) {
 }
 
 func TestSetIdleSinceIfZero(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 
 	ts1 := time.Now().Add(-5 * time.Minute)
@@ -412,7 +412,7 @@ func TestSetIdleSinceIfZero(t *testing.T) {
 }
 
 func TestMarkDraining(t *testing.T) {
-	m := NewWorkerMap()
+	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
 	m.Set("w2", ActiveWorker{AppID: "app-a"})
 

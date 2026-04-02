@@ -46,7 +46,7 @@ func credentialServer(t *testing.T, vaultClient *integration.Client) *server.Ser
 	}
 	return &server.Server{
 		Config:          cfg,
-		Workers:         server.NewWorkerMap(),
+		Workers:         server.NewMemoryWorkerMap(),
 		UserSessions:    auth.NewUserSessionStore(),
 		SessionTokenKey: auth.DeriveSessionTokenKey("test-secret"),
 		VaultClient:     vaultClient,

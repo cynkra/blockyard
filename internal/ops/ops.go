@@ -21,9 +21,7 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
 	srv.Workers.Delete(workerID)
 	if found {
 		// Cancel the token refresher goroutine.
-		if w.CancelToken != nil {
-			w.CancelToken()
-		}
+		srv.CancelTokenRefresher(workerID)
 		slog.Info("evicting worker", "worker_id", workerID, "app_id", w.AppID)
 		if err := srv.Backend.Stop(ctx, workerID); err != nil {
 			slog.Warn("evict: failed to stop worker",
