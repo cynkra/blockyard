@@ -10,10 +10,11 @@ import (
 func TestCheckRedisOnServiceNetwork_SkipNoRedis(t *testing.T) {
 	deps := DockerDeps{
 		Config: &config.DockerConfig{ServiceNetwork: "my-net"},
-		// RedisURL is empty — should skip.
+		// RedisURL is empty — should return OK.
 	}
-	if res := checkRedisOnServiceNetwork(context.Background(), deps); res != nil {
-		t.Errorf("expected nil when RedisURL is empty, got %q", res.Message)
+	res := checkRedisOnServiceNetwork(context.Background(), deps)
+	if res.Severity != SeverityOK {
+		t.Errorf("expected SeverityOK when RedisURL is empty, got %v: %q", res.Severity, res.Message)
 	}
 }
 
@@ -22,8 +23,9 @@ func TestCheckRedisOnServiceNetwork_SkipNoServiceNetwork(t *testing.T) {
 		Config:   &config.DockerConfig{}, // ServiceNetwork empty
 		RedisURL: "redis://redis:6379",
 	}
-	if res := checkRedisOnServiceNetwork(context.Background(), deps); res != nil {
-		t.Errorf("expected nil when ServiceNetwork is empty, got %q", res.Message)
+	res := checkRedisOnServiceNetwork(context.Background(), deps)
+	if res.Severity != SeverityOK {
+		t.Errorf("expected SeverityOK when ServiceNetwork is empty, got %v: %q", res.Severity, res.Message)
 	}
 }
 
@@ -32,7 +34,8 @@ func TestCheckRedisOnServiceNetwork_SkipBadURL(t *testing.T) {
 		Config:   &config.DockerConfig{ServiceNetwork: "my-net"},
 		RedisURL: "://bad",
 	}
-	if res := checkRedisOnServiceNetwork(context.Background(), deps); res != nil {
-		t.Errorf("expected nil for malformed URL, got %q", res.Message)
+	res := checkRedisOnServiceNetwork(context.Background(), deps)
+	if res.Severity != SeverityOK {
+		t.Errorf("expected SeverityOK for malformed URL, got %v: %q", res.Severity, res.Message)
 	}
 }

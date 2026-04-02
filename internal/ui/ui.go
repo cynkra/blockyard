@@ -18,6 +18,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -183,7 +184,7 @@ var funcMap = template.FuncMap{
 // New parses all embedded templates and prepares the static file server.
 func New() *UI {
 	pages := make(map[string]*template.Template)
-	for _, name := range []string{"landing.html", "apps.html", "deployments.html", "api_keys.html", "profile.html"} {
+	for _, name := range []string{"landing.html", "apps.html", "deployments.html", "api_keys.html", "profile.html", "system.html"} {
 		t := template.Must(
 			template.New("").Funcs(funcMap).ParseFS(
 				content, "templates/base.html", "templates/"+name,
@@ -197,11 +198,19 @@ func New() *UI {
 			content, "templates/base.html", "templates/profile.html", "templates/token_list.html",
 		),
 	)
+	// Re-parse system.html with the shared system_checks fragment.
+	pages["system.html"] = template.Must(
+		template.New("").Funcs(funcMap).ParseFS(
+			content, "templates/base.html", "templates/system.html", "templates/system_checks.html",
+		),
+	)
 
 	fragments := make(map[string]*template.Template)
 	fragmentNames := []string{
 		"token_list.html",
 		"pat_created.html",
+		"system_checks.html",
+		"system_banner.html",
 		"sidebar.html",
 		"tab_overview.html",
 		"tab_settings.html",
@@ -232,8 +241,11 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/", ui.appsPage(srv))
 	r.Get("/deployments", ui.deploymentsPage(srv))
 	r.Get("/api-keys", ui.apiKeysPage(srv))
+	r.Get("/system", ui.systemPage(srv))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
+	r.Post("/ui/system/run", ui.systemRunFragment(srv))
+	r.Get("/ui/system/banner", ui.systemBannerFragment(srv))
 
 	// New-app upload routes (before {name} wildcard).
 	r.Get("/ui/apps/new", ui.newAppForm(srv))
@@ -259,8 +271,9 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 // --- Shared layout data ---
 
 type layoutData struct {
-	ActivePage     string // "apps", "deployments", "api-keys", "profile"; empty for landing
+	ActivePage     string // "apps", "deployments", "api-keys", "system", "profile"; empty for landing
 	OpenbaoEnabled bool
+	IsAdmin        bool
 	Version        string
 }
 
@@ -301,6 +314,11 @@ type profileData struct {
 	layoutData
 	User   profileUser
 	Tokens []tokenEntry
+}
+
+type systemData struct {
+	layoutData
+	Report *preflight.Report
 }
 
 type catalogEntry struct {
@@ -371,10 +389,12 @@ func openbaoEnabled(srv *server.Server) bool {
 	return srv.Config.Openbao != nil && len(srv.Config.Openbao.Services) > 0
 }
 
-func baseLayout(srv *server.Server, activePage string) layoutData {
+func baseLayout(srv *server.Server, activePage string, caller *auth.CallerIdentity) layoutData {
+	isAdmin := caller != nil && caller.Role >= auth.RoleAdmin
 	return layoutData{
 		ActivePage:     activePage,
 		OpenbaoEnabled: openbaoEnabled(srv),
+		IsAdmin:        isAdmin,
 		Version:        srv.Version,
 	}
 }
@@ -429,7 +449,7 @@ func (ui *UI) appsPage(srv *server.Server) http.HandlerFunc {
 		}
 
 		data := appsData{
-			layoutData: baseLayout(srv, "apps"),
+			layoutData: baseLayout(srv, "apps", caller),
 			UserRole:   role,
 			Search:     search,
 			ActiveTags: activeTags,
@@ -458,7 +478,7 @@ func (ui *UI) renderLanding(w http.ResponseWriter, r *http.Request, srv *server.
 
 	entries := buildLandingEntries(apps, srv)
 	if err := ui.pages["landing.html"].ExecuteTemplate(w, "base", landingData{
-		layoutData: baseLayout(srv, ""),
+		layoutData: baseLayout(srv, "", nil),
 		PublicApps: entries,
 	}); err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -523,7 +543,7 @@ func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
 		}
 
 		data := deploymentsData{
-			layoutData:  baseLayout(srv, "deployments"),
+			layoutData:  baseLayout(srv, "deployments", caller),
 			Search:      search,
 			Sort:        sort,
 			SortDir:     sortDir,
@@ -553,10 +573,11 @@ func (ui *UI) apiKeysPage(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
+		caller := auth.CallerFromContext(r.Context())
 		services := buildServiceEntries(srv, user.Sub)
 
 		data := apiKeysData{
-			layoutData: baseLayout(srv, "api-keys"),
+			layoutData: baseLayout(srv, "api-keys", caller),
 			Services:   services,
 		}
 
@@ -607,7 +628,7 @@ func (ui *UI) profilePage(srv *server.Server) http.HandlerFunc {
 		}
 
 		data := profileData{
-			layoutData: baseLayout(srv, "profile"),
+			layoutData: baseLayout(srv, "profile", caller),
 			User: profileUser{
 				DisplayName: displayName,
 				Email:       email,
@@ -617,6 +638,76 @@ func (ui *UI) profilePage(srv *server.Server) http.HandlerFunc {
 		}
 
 		if err := ui.pages["profile.html"].ExecuteTemplate(w, "base", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+func (ui *UI) systemPage(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := requireAuth(w, r)
+		if user == nil {
+			return
+		}
+
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || caller.Role < auth.RoleAdmin {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+
+		data := systemData{
+			layoutData: baseLayout(srv, "system", caller),
+			Report:     srv.Checker.Latest(),
+		}
+
+		if err := ui.pages["system.html"].ExecuteTemplate(w, "base", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+func (ui *UI) systemRunFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || caller.Role < auth.RoleAdmin {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		report := srv.Checker.RunDynamic(r.Context())
+
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["system_checks.html"].ExecuteTemplate(w, "checkResults", systemData{
+			Report: report,
+		}); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+func (ui *UI) systemBannerFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		isAdmin := caller != nil && caller.Role >= auth.RoleAdmin
+
+		var hasWarnings bool
+		var errors, warnings int
+		if isAdmin && srv.Checker != nil {
+			if report := srv.Checker.Latest(); report != nil {
+				hasWarnings = report.HasWarnings()
+				errors = report.Summary.Errors
+				warnings = report.Summary.Warnings
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["system_banner.html"].Execute(w, struct {
+			IsAdmin     bool
+			HasWarnings bool
+			Errors      int
+			Warnings    int
+		}{isAdmin, hasWarnings, errors, warnings}); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}

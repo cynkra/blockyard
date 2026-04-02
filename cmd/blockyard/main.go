@@ -107,6 +107,7 @@ func main() {
 	}
 
 	// ── Preflight: Docker-dependent checks ──
+	var dockerReport *preflight.Report
 	if !cfg.Server.SkipDockerPreflight {
 		builderBin, builderErr := buildercache.EnsureCached(
 			filepath.Join(cfg.Storage.BundleServerPath, ".by-builder-cache"), version)
@@ -121,7 +122,7 @@ func main() {
 		if cfg.Redis != nil {
 			redisURL = cfg.Redis.URL
 		}
-		dockerReport := preflight.RunDockerChecks(preflightCtx, preflight.DockerDeps{
+		dockerReport = preflight.RunDockerChecks(preflightCtx, preflight.DockerDeps{
 			Client:     be.Client(),
 			ServerID:   be.ServerID(),
 			MountCfg:   be.MountCfg(),
@@ -408,6 +409,36 @@ func main() {
 	} else {
 		srv.Passive.Store(true)
 	}
+
+	// ── System checker (re-runnable checks + cached startup results) ──
+	checkerDeps := preflight.RuntimeDeps{
+		StorePath:     storePath,
+		ServerVersion: version,
+		DBPing:        database.Ping,
+		DockerPing: func(ctx context.Context) error {
+			_, err := be.ListManaged(ctx)
+			return err
+		},
+		UpdateVersion: func() *string { return srv.UpdateAvailable.Load() },
+	}
+	if srv.Config.OIDC != nil {
+		checkerDeps.IDPCheck = func(ctx context.Context) error {
+			return api.CheckIDP(ctx, srv)
+		}
+	}
+	if srv.VaultClient != nil {
+		checkerDeps.VaultCheck = func(ctx context.Context) error {
+			return srv.VaultClient.Health(ctx)
+		}
+	}
+	if srv.RedisClient != nil {
+		checkerDeps.RedisPing = srv.RedisClient.Ping
+	}
+	if srv.VaultTokenHealthy != nil {
+		checkerDeps.VaultTokenOK = srv.VaultTokenHealthy
+	}
+	srv.Checker = preflight.NewChecker(checkerDeps)
+	srv.Checker.Init(context.Background(), configReport, dockerReport)
 
 	handler := api.NewRouter(srv, startBG)
 
