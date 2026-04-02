@@ -320,17 +320,26 @@ still stops the goroutine, but without `CancelTokenRefresher` the
 cleans up the map. `cleanupLocal()` itself still handles directory
 and package-library cleanup unchanged.
 
-**`drainAndReplace` failure needs cleanup and rollback (bugfix).**
-In `refresh.go`, `drainAndReplace` marks old workers as draining
-_before_ spawning the new one. Three failure points follow --
-`Spawn`, `Addr`, and `waitHealthy` -- and all previously returned
-without cleaning up. This is a pre-existing bug (compare with
-`transfer.go` ~L156 which cleans up properly).
+**`drainAndReplace` failure needs cleanup, rollback, and error
+propagation (bugfix).** In `refresh.go`, `drainAndReplace` marks
+old workers as draining _before_ spawning the new one. Three
+failure points follow -- `Spawn`, `Addr`, and `waitHealthy` -- and
+all previously returned without cleaning up. Additionally, the
+function was void, so `RunRefresh` and `RunRollback` had no way to
+know the swap failed and always completed the task as success.
 
-Fix: add a `restoreOld` helper that un-drains the old workers
-(stale packages are better than no workers at all). Call it at
-every failure point after `MarkDraining`. For `waitHealthy`
-failure, also clean up the new worker's resources:
+Fix (three parts):
+
+1. Change `drainAndReplace` to return `error`. Each failure point
+   returns a wrapped error instead of bare `return`. `RunRefresh`
+   and `RunRollback` check the error and set `status = task.Failed`.
+
+2. Add a `restoreOld` helper that un-drains old workers (stale
+   packages are better than no workers at all). Call it at every
+   failure point after `MarkDraining`.
+
+3. For `waitHealthy` and `Addr` failures, also clean up the new
+   worker's container.
 
 ```go
 restoreOld := func() {
@@ -346,13 +355,12 @@ restoreOld := func() {
 ```go
 if err := srv.waitHealthy(ctx, newWorkerID); err != nil {
     sender.Write(fmt.Sprintf("New worker (%s) failed health check.", newWorkerID[:8]))
-    slog.Error("refresh: worker health check", "worker_id", newWorkerID, "error", err)
     srv.CancelTokenRefresher(newWorkerID)
     srv.Workers.Delete(newWorkerID)
     srv.Registry.Delete(newWorkerID)
     srv.Backend.Stop(ctx, newWorkerID) //nolint:errcheck
     restoreOld()
-    return
+    return fmt.Errorf("worker health check: %w", err)
 }
 ```
 
