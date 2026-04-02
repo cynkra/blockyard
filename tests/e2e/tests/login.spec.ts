@@ -15,33 +15,33 @@ async function dexLogin(page: Page) {
 test.describe("login flow", () => {
   test("landing page shows sign-in button", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator(".sign-in")).toBeVisible();
+    await expect(page.locator('main a[href="/login"]')).toBeVisible();
     await expect(page.locator(".left-nav")).not.toBeVisible();
   });
 
   test("login redirects to authenticated apps page", async ({ page }) => {
     await page.goto("/");
-    await page.locator('.sign-in a[href="/login"]').click();
+    await page.locator('main a[href="/login"]').click();
     await dexLogin(page);
 
     await expect(page).toHaveURL("/");
     await expect(page.locator(".left-nav")).toBeVisible();
-    await expect(page.locator(".sign-in")).not.toBeVisible();
+    await expect(page.locator('main a[href="/login"]')).not.toBeVisible();
   });
 
   test("session-expired overlay is hidden after login", async ({ page }) => {
     await page.goto("/");
-    await page.locator('.sign-in a[href="/login"]').click();
+    await page.locator('main a[href="/login"]').click();
     await dexLogin(page);
 
     const overlay = page.locator("#session-expired-overlay");
     await expect(overlay).toBeHidden();
-    // Verify computed style — catches CSS specificity bugs where the
-    // class is present but overridden by a later rule.
-    const display = await overlay.evaluate(
-      (el) => getComputedStyle(el).display,
+    // DaisyUI modal uses display:grid + visibility:hidden when closed,
+    // not display:none. Check visibility to catch CSS specificity bugs.
+    const visibility = await overlay.evaluate(
+      (el) => getComputedStyle(el).visibility,
     );
-    expect(display).toBe("none");
+    expect(visibility).toBe("hidden");
   });
 });
 
@@ -69,7 +69,7 @@ test.describe("authenticated navigation", () => {
   test("session persists across page navigations", async ({ page }) => {
     await page.goto("/deployments");
     await expect(page.locator(".left-nav")).toBeVisible();
-    await expect(page.locator(".sign-in")).not.toBeVisible();
+    await expect(page.locator('main a[href="/login"]')).not.toBeVisible();
 
     await page.goto("/");
     await expect(page.locator(".left-nav")).toBeVisible();
