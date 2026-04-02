@@ -60,10 +60,6 @@ func TestGetSystemChecks_NilLatest(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&report); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if report.Results == nil {
-		// JSON decodes null array as nil, but empty array decodes as [].
-		// Either is acceptable — just verify the response is valid JSON.
-	}
 	if report.Summary.Errors != 0 || report.Summary.Warnings != 0 {
 		t.Errorf("expected empty summary, got %+v", report.Summary)
 	}
