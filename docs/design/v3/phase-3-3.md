@@ -87,34 +87,42 @@ type Config struct {
 }
 ```
 
-Add to `applyEnvOverrides`:
+New defaults helper (follows the `oidcDefaults` / `openbaoDefaults`
+pattern):
 
 ```go
-if cfg.Redis == nil && envPrefixExists("BLOCKYARD_REDIS_") {
-    cfg.Redis = &RedisConfig{}
+func redisDefaults(c *RedisConfig) {
+    if c.KeyPrefix == "" {
+        c.KeyPrefix = "blockyard:"
+    }
+    // Normalize: ensure prefix ends with ":" so Key("session", "abc")
+    // produces "myprefix:session:abc" rather than "myprefixsession:abc".
+    // The same guarantee is needed by Lua scripts that concatenate
+    // prefix .. "session:*" for SCAN patterns.
+    if !strings.HasSuffix(c.KeyPrefix, ":") {
+        c.KeyPrefix += ":"
+    }
 }
 ```
 
 Add to `applyDefaults`:
 
 ```go
-if cfg.Redis != nil && cfg.Redis.KeyPrefix == "" {
-    cfg.Redis.KeyPrefix = "blockyard:"
+if cfg.Redis != nil {
+    redisDefaults(cfg.Redis)
 }
 ```
 
-Add to `validate` (before the URL check):
+Add to `applyEnvOverrides` (matching the OIDC/Openbao pattern —
+defaults are applied at the auto-construction site so they take
+effect even when Redis is configured purely via env vars):
 
 ```go
-if cfg.Redis != nil && cfg.Redis.KeyPrefix != "" && !strings.HasSuffix(cfg.Redis.KeyPrefix, ":") {
-    cfg.Redis.KeyPrefix += ":"
+if cfg.Redis == nil && envPrefixExists("BLOCKYARD_REDIS_") {
+    cfg.Redis = &RedisConfig{}
+    redisDefaults(cfg.Redis)
 }
 ```
-
-This ensures the prefix always ends with `:` so that `Key("session", "abc")`
-produces `"myprefix:session:abc"` rather than `"myprefixsession:abc"`.
-The same guarantee is needed by Lua scripts that concatenate
-`prefix .. "session:*"` for SCAN patterns.
 
 Add to `validate`:
 
@@ -477,11 +485,19 @@ func NewRedisWorkerMap(client *redisstate.Client, serverID string) *RedisWorkerM
 | `started_at` | string | Unix seconds |
 | `server_id` | string | Hostname of the server that spawned this worker |
 
-**`server_id` field:** written on `Set`, not read by any phase 3-3
-code. Included now so phase 3-4 (multi-server) can scope
+**`server_id` field:** written on every `Set` call, not read by any
+phase 3-3 code. Included now so phase 3-4 (multi-server) can scope
 `GracefulShutdown` and `StartupCleanup` to the current server's
 workers without migrating every existing worker hash. The value is
 `os.Hostname()`, captured once at `RedisWorkerMap` construction.
+
+**Phase 3-4 note:** `Set` unconditionally writes `server_id` from
+the local `RedisWorkerMap.serverID`. In single-server this is fine.
+In multi-server, phase 3-4 must ensure that only the owning server
+calls `Set` with the full `ActiveWorker` struct, or `Set` must
+preserve the existing `server_id` when the caller is not the
+original spawner. Single-field mutations (`SetDraining`, etc.) use
+Lua scripts that don't touch `server_id`, so they are safe.
 
 **Serialization note:** `ActiveWorker` is fully serializable — phase
 3-2 extracted `CancelToken func()` from `ActiveWorker` into
@@ -645,7 +661,21 @@ default. The `Server` struct fields are already interface-typed (from
 phase 3-2), so the assignment is a direct swap.
 
 The `maskRedisPassword` helper redacts the password from the URL
-before logging (replace password portion with `***`).
+before logging:
+
+```go
+// maskRedisPassword replaces the password in a Redis URL with "***".
+func maskRedisPassword(rawURL string) string {
+    u, err := url.Parse(rawURL)
+    if err != nil {
+        return rawURL
+    }
+    if _, hasPwd := u.User.Password(); hasPwd {
+        u.User = url.UserPassword(u.User.Username(), "***")
+    }
+    return u.String()
+}
+```
 
 **Placement:** after the worker key resolution block (~line 204 in
 `main.go`), before the OIDC and HTTP listener setup. The sequence
