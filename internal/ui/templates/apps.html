@@ -8,19 +8,22 @@
 <div class="drawer-content">
 <div id="system-banner" hx-get="/ui/system/banner" hx-trigger="load" hx-swap="innerHTML"></div>
 <div class="page-header">
-    <h1>Apps</h1>
+    <div class="flex items-center justify-between mb-4">
+        <h1 class="!m-0">Apps</h1>
+        {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
+        <button class="btn btn-primary btn-sm"
+                hx-get="/ui/apps/new" hx-target="#new-app-container" hx-swap="innerHTML">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg>
+            New App
+        </button>
+        {{end}}
+    </div>
     <form method="GET" action="/" class="flex gap-2">
         <input type="search" name="search" value="{{.Search}}"
                placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps"
                oninput="filterApps(this.value)">
         <button type="submit" class="btn btn-sm">Search</button>
     </form>
-    {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
-    <button class="btn btn-primary btn-sm"
-            hx-get="/ui/apps/new" hx-target="#new-app-container" hx-swap="innerHTML">
-        New App
-    </button>
-    {{end}}
 </div>
 <div id="new-app-container"></div>
 

@@ -131,7 +131,7 @@
   .page-layout { @apply flex min-h-screen; }
   .container { @apply max-w-5xl mx-auto p-6; }
   .page-header { @apply mb-6; }
-  .page-header h1 { @apply m-0 mb-2 text-2xl; }
+  .page-header h1 { @apply m-0 text-2xl; }
   .page-description { @apply text-base-content/50 m-0; }
 
 

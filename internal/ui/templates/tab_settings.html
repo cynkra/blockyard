@@ -43,12 +43,13 @@
             </span>
             {{end}}
         </div>
-        <form class="tag-add-form"
+        <form class="tag-add-form flex gap-2 items-center"
               hx-post="/ui/apps/{{.App.Name}}/tags"
               hx-target="#tab-content"
               hx-swap="innerHTML">
-            <div class="autocomplete-wrap">
+            <div class="autocomplete-wrap flex-1">
                 <input type="text" name="name" placeholder="Add or create tag..."
+                       class="input input-sm text-sm w-full"
                        autocomplete="off"
                        oninput="filterTagSuggestions(this)"
                        onfocus="this.nextElementSibling.classList.remove('hidden')"
@@ -61,7 +62,7 @@
                     <div class="autocomplete-item tag-create hidden" onmousedown="selectTagOption(this)"></div>
                 </div>
             </div>
-            <button type="submit" class="btn btn-sm">Add</button>
+            <button type="submit" class="btn btn-sm shrink-0">Add</button>
         </form>
         <script>
         function filterTagSuggestions(input) {
