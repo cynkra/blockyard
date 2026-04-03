@@ -78,6 +78,75 @@ func TestFinishPreservesWorkers(t *testing.T) {
 	}
 }
 
+func TestFinishWithMgmtServer(t *testing.T) {
+	be := mock.New()
+	srv := server.NewServer(&config.Config{}, be, testDB(t))
+
+	mainTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer mainTs.Close()
+
+	mgmtTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer mgmtTs.Close()
+
+	var wg sync.WaitGroup
+	_, cancel := context.WithCancel(context.Background())
+
+	tracingCalled := false
+	d := &Drainer{
+		Srv:        srv,
+		MainServer: mainTs.Config,
+		MgmtServer: mgmtTs.Config,
+		BGCancel:   cancel,
+		BGWait:     &wg,
+		TracingShutdown: func(ctx context.Context) error {
+			tracingCalled = true
+			return nil
+		},
+	}
+
+	d.Finish(5 * time.Second)
+
+	if !tracingCalled {
+		t.Error("expected TracingShutdown to be called")
+	}
+}
+
+func TestShutdownWithMgmtServerAndTracing(t *testing.T) {
+	be := mock.New()
+	srv := server.NewServer(&config.Config{}, be, testDB(t))
+
+	mainTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer mainTs.Close()
+
+	mgmtTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer mgmtTs.Close()
+
+	var wg sync.WaitGroup
+	_, cancel := context.WithCancel(context.Background())
+
+	tracingCalled := false
+	d := &Drainer{
+		Srv:        srv,
+		MainServer: mainTs.Config,
+		MgmtServer: mgmtTs.Config,
+		BGCancel:   cancel,
+		BGWait:     &wg,
+		TracingShutdown: func(ctx context.Context) error {
+			tracingCalled = true
+			return nil
+		},
+	}
+
+	d.Shutdown(5 * time.Second)
+
+	if !srv.Draining.Load() {
+		t.Error("expected Draining=true")
+	}
+	if !tracingCalled {
+		t.Error("expected TracingShutdown to be called")
+	}
+}
+
 func TestShutdownEvictsWorkers(t *testing.T) {
 	be := mock.New()
 	srv := server.NewServer(&config.Config{}, be, testDB(t))

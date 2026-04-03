@@ -1476,3 +1476,129 @@ func TestValidationRejectsOidcWithoutExternalURL(t *testing.T) {
 		t.Errorf("expected external_url error, got: %v", err)
 	}
 }
+
+func TestUpdateDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	tomlContent := `
+[server]
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "` + dbPath + `"
+
+[update]
+`
+	cfg := loadFromString(t, tomlContent)
+	if cfg.Update == nil {
+		t.Fatal("expected Update section to be non-nil")
+	}
+	if cfg.Update.Channel != "stable" {
+		t.Errorf("default channel = %q, want %q", cfg.Update.Channel, "stable")
+	}
+	if cfg.Update.WatchPeriod.Duration != 5*time.Minute {
+		t.Errorf("default watch_period = %v, want 5m", cfg.Update.WatchPeriod.Duration)
+	}
+}
+
+func TestRedisDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	tomlContent := `
+[server]
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "` + dbPath + `"
+
+[redis]
+url = "redis://localhost:6379"
+`
+	cfg := loadFromString(t, tomlContent)
+	if cfg.Redis == nil {
+		t.Fatal("expected Redis section to be non-nil")
+	}
+	if cfg.Redis.KeyPrefix != "blockyard:" {
+		t.Errorf("default key_prefix = %q, want %q", cfg.Redis.KeyPrefix, "blockyard:")
+	}
+}
+
+func TestRedisDefaultsAppendColon(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	tomlContent := `
+[server]
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "` + dbPath + `"
+
+[redis]
+url = "redis://localhost:6379"
+key_prefix = "myprefix"
+`
+	cfg := loadFromString(t, tomlContent)
+	if cfg.Redis.KeyPrefix != "myprefix:" {
+		t.Errorf("key_prefix = %q, want %q (colon appended)", cfg.Redis.KeyPrefix, "myprefix:")
+	}
+}
+
+func TestEnvVarCreatesRedisSection(t *testing.T) {
+	t.Setenv("BLOCKYARD_REDIS_URL", "redis://localhost:6379")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Redis == nil {
+		t.Fatal("expected Redis section created from env var")
+	}
+	if cfg.Redis.URL != "redis://localhost:6379" {
+		t.Errorf("Redis.URL = %q", cfg.Redis.URL)
+	}
+}
+
+func TestEnvVarCreatesUpdateSection(t *testing.T) {
+	t.Setenv("BLOCKYARD_UPDATE_CHANNEL", "main")
+	cfg := loadFromString(t, minimalTOML)
+	if cfg.Update == nil {
+		t.Fatal("expected Update section created from env var")
+	}
+	if cfg.Update.Channel != "main" {
+		t.Errorf("Update.Channel = %q, want %q", cfg.Update.Channel, "main")
+	}
+}
+
+func TestLogLevelParsing(t *testing.T) {
+	tests := []struct {
+		input string
+		want  slog.Level
+	}{
+		{"debug", slog.LevelDebug},
+		{"DEBUG", slog.LevelDebug},
+		{"info", slog.LevelInfo},
+		{"warn", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"", slog.LevelInfo},
+		{"unknown", slog.LevelInfo},
+	}
+	for _, tt := range tests {
+		if got := ParseLogLevel(tt.input); got != tt.want {
+			t.Errorf("ParseLogLevel(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}

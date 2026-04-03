@@ -411,6 +411,120 @@ func TestSetIdleSinceIfZero(t *testing.T) {
 	}
 }
 
+func TestSetUpdateAvailable(t *testing.T) {
+	srv := &Server{}
+	srv.SetUpdateAvailable("2.0.0")
+	got := srv.UpdateAvailable.Load()
+	if got == nil || *got != "2.0.0" {
+		t.Errorf("expected 2.0.0, got %v", got)
+	}
+}
+
+func TestGetVersion(t *testing.T) {
+	srv := &Server{Version: "1.5.0"}
+	if got := srv.GetVersion(); got != "1.5.0" {
+		t.Errorf("got %q, want %q", got, "1.5.0")
+	}
+}
+
+func TestSetCancelToken(t *testing.T) {
+	srv := &Server{}
+
+	// nil cancel should be a no-op (no store).
+	srv.SetCancelToken("w-1", nil)
+	srv.CancelTokenRefresher("w-1") // should not panic
+
+	// Set a real cancel function.
+	called := false
+	srv.SetCancelToken("w-2", func() { called = true })
+	srv.CancelTokenRefresher("w-2")
+	if !called {
+		t.Error("expected cancel function to be called")
+	}
+
+	// Calling again should be a no-op (already deleted).
+	srv.CancelTokenRefresher("w-2")
+}
+
+func TestTransferringState(t *testing.T) {
+	srv := &Server{}
+
+	if srv.IsTransferring("w-1") {
+		t.Error("expected not transferring initially")
+	}
+
+	srv.SetTransferring("w-1")
+	if !srv.IsTransferring("w-1") {
+		t.Error("expected transferring after Set")
+	}
+
+	// Another worker should not be affected.
+	if srv.IsTransferring("w-2") {
+		t.Error("expected w-2 not transferring")
+	}
+
+	srv.ClearTransferring("w-1")
+	if srv.IsTransferring("w-1") {
+		t.Error("expected not transferring after Clear")
+	}
+}
+
+func TestInternalAPIURL_ServiceNetworkNoBind(t *testing.T) {
+	// Bind without port — should fall back to 8080.
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: "invalid-no-port"},
+			Docker: config.DockerConfig{ServiceNetwork: "mynet"},
+		},
+	}
+	if got := srv.InternalAPIURL(); got != "http://blockyard:8080" {
+		t.Errorf("got %q, want fallback port 8080", got)
+	}
+}
+
+func TestWorkerEnv_OpenbaoNoServices(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: ":8080"},
+			Openbao: &config.OpenbaoConfig{
+				Address: "https://vault:8200",
+			},
+		},
+	}
+	env := WorkerEnv(srv)
+	if env["VAULT_ADDR"] != "https://vault:8200" {
+		t.Errorf("VAULT_ADDR = %q", env["VAULT_ADDR"])
+	}
+	if _, ok := env["BLOCKYARD_VAULT_SERVICES"]; ok {
+		t.Error("should not set BLOCKYARD_VAULT_SERVICES when no services")
+	}
+}
+
+func TestWorkerEnv_NoBoardStorage(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: ":8080"},
+		},
+	}
+	env := WorkerEnv(srv)
+	if _, ok := env["POSTGREST_URL"]; ok {
+		t.Error("should not set POSTGREST_URL when no board storage")
+	}
+}
+
+func TestWorkerEnv_BoardStorageEmptyURL(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server:       config.ServerConfig{Bind: ":8080"},
+			BoardStorage: &config.BoardStorageConfig{PostgrestURL: ""},
+		},
+	}
+	env := WorkerEnv(srv)
+	if _, ok := env["POSTGREST_URL"]; ok {
+		t.Error("should not set POSTGREST_URL when URL is empty")
+	}
+}
+
 func TestMarkDraining(t *testing.T) {
 	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})

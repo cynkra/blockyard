@@ -246,6 +246,71 @@ func TestCheckTrustedProxiesTooBroad(t *testing.T) {
 		r := RunConfigChecks(cfg)
 		assertOK(t, r, "trusted_proxies_too_broad")
 	})
+
+	t.Run("fires on IPv6 /8", func(t *testing.T) {
+		cfg := &config.Config{
+			Server: config.ServerConfig{
+				TrustedProxies: []string{"2001:db8::/8"},
+			},
+		}
+		r := RunConfigChecks(cfg)
+		if !hasFinding(r, "trusted_proxies_too_broad") {
+			t.Error("expected trusted_proxies_too_broad for IPv6 /8")
+		}
+	})
+
+	t.Run("ok on IPv6 /16", func(t *testing.T) {
+		cfg := &config.Config{
+			Server: config.ServerConfig{
+				TrustedProxies: []string{"2001:db8::/16"},
+			},
+		}
+		r := RunConfigChecks(cfg)
+		assertOK(t, r, "trusted_proxies_too_broad")
+	})
+
+	t.Run("skips invalid CIDR", func(t *testing.T) {
+		cfg := &config.Config{
+			Server: config.ServerConfig{
+				TrustedProxies: []string{"not-a-cidr"},
+			},
+		}
+		r := RunConfigChecks(cfg)
+		assertOK(t, r, "trusted_proxies_too_broad")
+	})
+
+	t.Run("multiple CIDRs first broad", func(t *testing.T) {
+		cfg := &config.Config{
+			Server: config.ServerConfig{
+				TrustedProxies: []string{"10.0.0.0/24", "0.0.0.0/0"},
+			},
+		}
+		r := RunConfigChecks(cfg)
+		if !hasFinding(r, "trusted_proxies_too_broad") {
+			t.Error("expected finding when any CIDR is too broad")
+		}
+	})
+}
+
+func TestIsWildcardBind(t *testing.T) {
+	tests := []struct {
+		bind string
+		want bool
+	}{
+		{"0.0.0.0:8080", true},
+		{"[::]:8080", true},
+		{":8080", true},
+		{"127.0.0.1:8080", false},
+		{"10.0.0.1:8080", false},
+		{"0.0.0.0", true},
+		{"::", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		if got := isWildcardBind(tt.bind); got != tt.want {
+			t.Errorf("isWildcardBind(%q) = %v, want %v", tt.bind, got, tt.want)
+		}
+	}
 }
 
 func TestResultCategory(t *testing.T) {
