@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+
+	"github.com/cynkra/blockyard/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -740,6 +742,77 @@ func roundtrip(t *testing.T, db *DB) {
 		t.Errorf("schema differs after up-down-up roundtrip:\n--- after first up ---\n%s\n--- after roundtrip ---\n%s",
 			schemaAfterUp, schemaAfterRoundtrip)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3-5: MigrationVersion / MigrateDown / CheckDownMigrationSafety
+// ---------------------------------------------------------------------------
+
+func TestMigrationVersion(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DatabaseConfig{Driver: "sqlite", Path: dir + "/v.db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ver, dirty, err := db.MigrationVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty {
+		t.Error("expected clean state")
+	}
+	if ver == 0 {
+		t.Error("expected non-zero version after Open")
+	}
+}
+
+func TestMigrateDownNoop(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DatabaseConfig{Driver: "sqlite", Path: dir + "/d.db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ver, _, _ := db.MigrationVersion()
+	if err := db.MigrateDown(ver); err != nil {
+		t.Errorf("MigrateDown to current version should noop: %v", err)
+	}
+}
+
+func TestCheckDownMigrationSafetyOK(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DatabaseConfig{Driver: "sqlite", Path: dir + "/s.db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Range that includes real migration 1 — no irreversible marker.
+	if err := db.CheckDownMigrationSafety(0, 1); err != nil {
+		t.Errorf("expected safe: %v", err)
+	}
+	// Nonexistent range — empty files are safe.
+	if err := db.CheckDownMigrationSafety(100, 105); err != nil {
+		t.Errorf("expected safe for missing range: %v", err)
+	}
+}
+
+func TestReadDownMigrationMissing(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(config.DatabaseConfig{Driver: "sqlite", Path: dir + "/r.db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if c := db.readDownMigration(999); c != "" {
+		t.Error("expected empty for nonexistent migration")
+	}
+	// Version 1 exists — should return something (or empty if no down file).
+	_ = db.readDownMigration(1)
 }
 
 func openRawSQLite(t *testing.T) *DB {

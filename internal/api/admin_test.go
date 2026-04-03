@@ -139,6 +139,54 @@ func TestActivateWithWrongToken(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateReturnsTaskID(t *testing.T) {
+	srv := testServerForReadyz(t)
+	orch := orchestrator.NewForTest()
+	handler := handleAdminUpdate(srv, orch)
+
+	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
+		Role: auth.RoleAdmin,
+	})
+	r := httptest.NewRequest("POST", "/api/v1/admin/update", nil).WithContext(adminCtx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["task_id"] == "" {
+		t.Error("expected non-empty task_id")
+	}
+}
+
+func TestAdminRollbackReturnsTaskID(t *testing.T) {
+	srv := testServerForReadyz(t)
+	orch := orchestrator.NewForTest()
+	handler := handleAdminRollback(srv, orch)
+
+	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
+		Role: auth.RoleAdmin,
+	})
+	r := httptest.NewRequest("POST", "/api/v1/admin/rollback", nil).WithContext(adminCtx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["task_id"] == "" {
+		t.Error("expected non-empty task_id")
+	}
+}
+
 // TestAdminUpdateConflict verifies that a second update returns 409
 // when the orchestrator is already updating. We use a minimal
 // orchestrator for this since we only need the state machine.

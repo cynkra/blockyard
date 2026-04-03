@@ -90,12 +90,25 @@ func New(
 
 // NewForTest creates a minimal Orchestrator for API tests that only need
 // state management (no Docker client, no DB).
+// NewForTest creates a minimal Orchestrator for API tests that only need
+// state management. The update checker returns "already up to date" so
+// background goroutines spawned by handlers exit quickly without panics.
 func NewForTest() *Orchestrator {
 	o := &Orchestrator{
 		exitFn: func() {},
+		update: noopChecker{},
+		tasks:  task.NewStore(),
+		log:    slog.Default(),
+		cfg:    &config.Config{},
 	}
 	o.state.Store("idle")
 	return o
+}
+
+type noopChecker struct{}
+
+func (noopChecker) CheckLatest(_, _ string) (*update.Result, error) {
+	return &update.Result{UpdateAvailable: false}, nil
 }
 
 // State returns the current orchestrator phase.
