@@ -226,9 +226,9 @@ function deleteGlobalTag(id, name) {
     });
 }
 
-/* Live-update: re-fetch app card when settings change in sidebar */
+/* Live-update: re-fetch app card when settings change in sidebar.
+   Uses HTMX to reload only the card, keeping the sidebar open. */
 document.body.addEventListener('appSettingsChanged', function() {
-    /* Find which app is currently open in the sidebar */
     var sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
     var header = sidebar.querySelector('h2');
@@ -236,8 +236,8 @@ document.body.addEventListener('appSettingsChanged', function() {
     var appName = header.textContent.trim();
     var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
     if (card) {
-        /* Reload the page to reflect changes (lightweight — HTMX partial would be better but requires a card fragment endpoint) */
-        location.reload();
+        /* Re-fetch the sidebar content to reflect updated metadata */
+        htmx.ajax('GET', '/ui/apps/' + appName + '/sidebar', {target: '#sidebar', swap: 'innerHTML'});
     }
 });
 </script>
