@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/cynkra/blockyard/internal/auth"
@@ -92,6 +93,60 @@ func TestAdminStatusIdle(t *testing.T) {
 	}
 	if body["state"] != "idle" {
 		t.Errorf("expected state idle, got %q", body["state"])
+	}
+}
+
+func TestAdminStatusNonIdle(t *testing.T) {
+	orch := orchestrator.NewForTest()
+	orch.SetState("watching")
+	handler := handleAdminUpdateStatus(orch)
+
+	r := httptest.NewRequest("GET", "/api/v1/admin/update/status", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	var body map[string]string
+	json.NewDecoder(w.Body).Decode(&body)
+	if body["state"] != "watching" {
+		t.Errorf("expected state watching, got %q", body["state"])
+	}
+}
+
+func TestAdminUpdateChannelOverride(t *testing.T) {
+	srv := testServerForReadyz(t)
+	orch := orchestrator.NewForTest()
+	handler := handleAdminUpdate(srv, orch)
+
+	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
+		Role: auth.RoleAdmin,
+	})
+	body := strings.NewReader(`{"channel":"main"}`)
+	r := httptest.NewRequest("POST", "/api/v1/admin/update", body).WithContext(adminCtx)
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestActivateWithNoTokenNoAuth(t *testing.T) {
+	// No activation token env var, no admin auth → should be rejected.
+	t.Setenv("BLOCKYARD_ACTIVATION_TOKEN", "")
+	srv := testServerForReadyz(t)
+	srv.Passive.Store(true)
+
+	handler := activateHandler(srv, func() {
+		t.Error("startBG should not be called")
+	})
+
+	r := httptest.NewRequest("POST", "/api/v1/admin/activate", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
 	}
 }
 

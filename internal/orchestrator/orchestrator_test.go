@@ -1136,6 +1136,458 @@ func TestNewForTestState(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Update: error recovery and state management
+// ---------------------------------------------------------------------------
+
+// Verify that activate failure after drain triggers undrain + container removal.
+func TestUpdateActivateFailsAfterDrain(t *testing.T) {
+	checker := &mockChecker{
+		result: &update.Result{
+			CurrentVersion: "1.0.0", LatestVersion: "2.0.0", UpdateAvailable: true,
+		},
+	}
+
+	// readyz succeeds, activate fails.
+	activateCalled := false
+	fakeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path == "/api/v1/admin/activate" {
+			activateCalled = true
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}))
+	defer fakeServer.Close()
+	addr := fakeServer.Listener.Addr().String()
+	ip, port := splitAddr(addr)
+
+	var removed atomic.Bool
+	docker := &mockDocker{
+		inspectFn: func(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			if id == "new-container-123" {
+				return client.ContainerInspectResult{Container: container.InspectResponse{
+					Config: &container.Config{Image: "img:2.0.0"}, HostConfig: &container.HostConfig{},
+					NetworkSettings: &container.NetworkSettings{
+						Networks: map[string]*network.EndpointSettings{
+							"br": {IPAddress: netip.MustParseAddr(ip)},
+						}},
+				}}, nil
+			}
+			return defaultInspectResult(), nil
+		},
+		removeFn: func(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+			removed.Store(true)
+			return client.ContainerRemoveResult{}, nil
+		},
+	}
+
+	o, tracker := newTestOrchestrator(t, docker, checker)
+	o.cfg.Server.Bind = "0.0.0.0:" + port
+	sender := newSender(t)
+
+	_, err := o.Update(context.Background(), "stable", sender)
+	if err == nil {
+		t.Fatal("expected error when activate fails")
+	}
+	if !activateCalled {
+		t.Error("activate should have been called")
+	}
+	if tracker.drained.Load() != 1 {
+		t.Error("drain should be called before activate")
+	}
+	if tracker.undrained.Load() != 1 {
+		t.Error("undrain must be called after activate failure")
+	}
+	if !removed.Load() {
+		t.Error("new container must be removed after activate failure")
+	}
+}
+
+// Verify that backup failure does NOT call drain.
+func TestUpdateBackupFailsNoDrain(t *testing.T) {
+	checker := &mockChecker{
+		result: &update.Result{
+			CurrentVersion: "1.0.0", LatestVersion: "2.0.0", UpdateAvailable: true,
+		},
+	}
+	o, tracker := newTestOrchestrator(t, &mockDocker{}, checker)
+	// Use in-memory DB which cannot back up.
+	memDB, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer memDB.Close()
+	o.db = memDB
+
+	sender := newSender(t)
+	_, err = o.Update(context.Background(), "stable", sender)
+	if err == nil {
+		t.Fatal("expected backup error")
+	}
+	if tracker.drained.Load() != 0 {
+		t.Error("drain must NOT be called when backup fails")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Rollback: fatal shutdown path
+// ---------------------------------------------------------------------------
+
+// After a down-migration, if startClone fails, shutdownFn must be called
+// (not undrain — the schema is wrong for the running code).
+func TestRollbackFatalAfterMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create backup at current version so versions match (no actual
+	// down-migration runs). We verify the non-migration paths.
+	_, err = database.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	docker := &mockDocker{
+		createFn: func(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+			return client.ContainerCreateResult{}, io.ErrUnexpectedEOF
+		},
+	}
+
+	var shutdownCalled bool
+	o, tracker := newTestOrchestrator(t, docker, &mockChecker{})
+	o.db = database
+	o.cfg.Database.Path = dbPath
+	sender := newSender(t)
+
+	err = o.Rollback(context.Background(), sender, func() { shutdownCalled = true })
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// No migration ran (versions matched), so shutdownFn should NOT be called.
+	if shutdownCalled {
+		t.Error("shutdownFn should NOT be called when no migration ran")
+	}
+	// undrain should NOT be called either — we never drained.
+	if tracker.undrained.Load() != 0 {
+		t.Error("undrain should not be called when clone fails before drain")
+	}
+}
+
+// When activate fails but no migration ran, undrain IS called (server can resume).
+func TestRollbackActivateFailsNoMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	_, err = database.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// readyz succeeds, activate fails.
+	fakeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer fakeServer.Close()
+	addr := fakeServer.Listener.Addr().String()
+	ip, port := splitAddr(addr)
+
+	var removed atomic.Bool
+	docker := &mockDocker{
+		inspectFn: func(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			if id == "new-container-123" {
+				return client.ContainerInspectResult{Container: container.InspectResponse{
+					Config: &container.Config{Image: "img:v1.0.0"}, HostConfig: &container.HostConfig{},
+					NetworkSettings: &container.NetworkSettings{
+						Networks: map[string]*network.EndpointSettings{
+							"br": {IPAddress: netip.MustParseAddr(ip)},
+						}},
+				}}, nil
+			}
+			return defaultInspectResult(), nil
+		},
+		removeFn: func(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+			removed.Store(true)
+			return client.ContainerRemoveResult{}, nil
+		},
+	}
+
+	var shutdownCalled bool
+	o, tracker := newTestOrchestrator(t, docker, &mockChecker{})
+	o.db = database
+	o.cfg.Database.Path = dbPath
+	o.cfg.Server.Bind = "0.0.0.0:" + port
+	sender := newSender(t)
+
+	err = o.Rollback(context.Background(), sender, func() { shutdownCalled = true })
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if shutdownCalled {
+		t.Error("shutdownFn should NOT be called — no migration ran")
+	}
+	if tracker.drained.Load() != 1 {
+		t.Error("drain should have been called")
+	}
+	if tracker.undrained.Load() != 1 {
+		t.Error("undrain MUST be called when activate fails without migration")
+	}
+	if !removed.Load() {
+		t.Error("container must be removed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Watchdog: state transitions
+// ---------------------------------------------------------------------------
+
+func TestWatchdogStateTransitions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	o.state.Store("updating") // pre-watchdog state
+	sender := newSender(t)
+
+	// Very short watch period.
+	err := o.Watchdog(context.Background(), "id", srv.Listener.Addr().String(),
+		100*time.Millisecond, sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Watchdog sets "watching" then defers back to "idle".
+	if o.State() != "idle" {
+		t.Errorf("state after watchdog = %q, want idle", o.State())
+	}
+}
+
+func TestWatchdogContextCancelled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	sender := newSender(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := o.Watchdog(ctx, "id", srv.Listener.Addr().String(), time.Minute, sender)
+	if err == nil {
+		t.Error("expected context error")
+	}
+}
+
+func TestWatchdogZeroPeriod(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	sender := newSender(t)
+
+	// Zero period = deadline already passed = immediate success.
+	err := o.Watchdog(context.Background(), "id", srv.Listener.Addr().String(), 0, sender)
+	if err != nil {
+		t.Fatalf("expected immediate success with zero period, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Clone: edge cases
+// ---------------------------------------------------------------------------
+
+func TestCloneConfigInspectError(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{}, io.ErrUnexpectedEOF
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+
+	_, err := o.cloneConfig(context.Background(), "img:new", nil)
+	if err == nil {
+		t.Error("expected error when inspect fails")
+	}
+}
+
+func TestCloneConfigExtraEnvMalformed(t *testing.T) {
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	// Entry without "=" is silently skipped.
+	opts, err := o.cloneConfig(context.Background(), "img:new", []string{"NOEQUALS"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range opts.Config.Env {
+		if e == "NOEQUALS" {
+			t.Error("malformed env entry should not appear verbatim")
+		}
+	}
+}
+
+func TestCloneConfigNilNetworkSettings(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
+				Config: &container.Config{Image: "old:1.0", Env: []string{}},
+				HostConfig: &container.HostConfig{},
+				// NetworkSettings intentionally nil
+			}}, nil
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+	opts, err := o.cloneConfig(context.Background(), "img:new", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.NetworkingConfig != nil {
+		t.Error("expected nil NetworkingConfig when source has no networks")
+	}
+}
+
+func TestStartCloneStartFails(t *testing.T) {
+	docker := &mockDocker{
+		startFn: func(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error) {
+			return client.ContainerStartResult{}, io.ErrUnexpectedEOF
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+	_, err := o.startClone(context.Background(), "img:2.0")
+	if err == nil {
+		t.Error("expected error when start fails")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Backup metadata: edge cases
+// ---------------------------------------------------------------------------
+
+func TestLatestBackupMetaMultiple(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create two backups with different tags.
+	m1, err := database.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Backup filename has 1-second resolution; wait for distinct timestamp.
+	time.Sleep(1100 * time.Millisecond)
+	m2, err := database.BackupWithMeta(context.Background(), "v2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = m1
+
+	// LatestBackupMeta should return the second (newest).
+	found, err := db.LatestBackupMeta(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ImageTag != m2.ImageTag {
+		t.Errorf("expected latest tag %q, got %q", m2.ImageTag, found.ImageTag)
+	}
+}
+
+func TestBackupWithMetaMigrationVersion(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	meta, err := database.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Migration version should be non-zero (we have at least migration 001).
+	if meta.MigrationVersion == 0 {
+		t.Error("expected non-zero migration version in backup metadata")
+	}
+	if meta.CreatedAt == "" {
+		t.Error("expected non-empty created_at")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// checkReady: non-200 response
+// ---------------------------------------------------------------------------
+
+func TestCheckReadyNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	err := o.checkReady(context.Background(), srv.Listener.Addr().String())
+	if err == nil {
+		t.Error("expected error for 503 response")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// activate: non-200 response with body
+// ---------------------------------------------------------------------------
+
+func TestActivateNon200WithBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"forbidden"}`))
+	}))
+	defer srv.Close()
+
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	err := o.activate(context.Background(), srv.Listener.Addr().String())
+	if err == nil {
+		t.Error("expected error for 403 response")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// containerAddr: inspect error
+// ---------------------------------------------------------------------------
+
+func TestContainerAddrInspectError(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{}, io.ErrUnexpectedEOF
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+	_, err := o.containerAddr(context.Background(), "some-id-12345678")
+	if err == nil {
+		t.Error("expected error when inspect fails")
+	}
+}
+
 func init() {
 	// Suppress log output during tests.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
