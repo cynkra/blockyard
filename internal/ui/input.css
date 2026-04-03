@@ -177,19 +177,36 @@
   .app-card-gear:hover { @apply text-base-content bg-base-200; }
   .app-card-gear svg { @apply w-4 h-4; }
 
-  /* ── Tag browser ── */
-  .tag-browser { @apply flex flex-wrap gap-1.5 items-center mb-4; }
-  .tag-browser-chip {
-    @apply badge badge-soft badge-neutral badge-sm cursor-pointer gap-1;
-    transition: background 0.15s, color 0.15s;
+  /* ── Apps page layout: cards + tag sidebar ── */
+  .apps-layout { @apply flex gap-6; }
+  .apps-main { @apply flex-1 min-w-0; }
+  .sort-controls-row { @apply flex justify-end mb-2; }
+
+  /* ── Tag sidebar ── */
+  .tag-sidebar {
+    @apply w-48 shrink-0 self-start sticky top-6;
+    @apply border border-base-300 rounded-box p-4;
   }
-  .tag-browser-chip:hover { @apply badge-primary; }
-  .tag-browser-chip.active { @apply badge-primary; }
-  .tag-browser-chip .tag-count { @apply text-[0.7rem] opacity-60 ml-1; }
-  .tag-admin { @apply mb-4 p-4 rounded-lg bg-base-200/50 border border-base-300; }
-  .dark .tag-admin { border-color: oklch(var(--bc) / 0.15); }
-  .tag-mode-toggle { @apply text-xs text-base-content/60; }
+  .dark .tag-sidebar { border-color: oklch(var(--bc) / 0.25); }
+  .tag-sidebar-title { @apply text-sm font-medium m-0 mb-3; }
+  .tag-sidebar-list { @apply flex flex-col gap-1.5; }
+  .tag-browser-chip {
+    @apply flex items-center justify-between text-sm no-underline rounded-lg px-2.5 py-1;
+    color: inherit;
+    transition: background 0.15s;
+  }
+  .tag-browser-chip:hover { @apply bg-base-200; }
+  .tag-browser-chip.active { @apply bg-primary/10 text-primary font-medium; }
+  .tag-browser-chip .tag-count { @apply text-xs opacity-50; }
+  .tag-admin-inline { @apply mt-4 pt-3 border-t border-base-300 flex flex-col gap-2; }
+  .dark .tag-admin-inline { border-color: oklch(var(--bc) / 0.15); }
+  .tag-deletable { @apply flex items-center justify-between text-xs text-base-content/60; }
+  .tag-mode-toggle { @apply text-xs text-base-content/60 mt-2; }
   .tag-mode-toggle a { @apply text-primary no-underline font-medium; }
+  @media (max-width: 768px) {
+    .apps-layout { @apply flex-col; }
+    .tag-sidebar { @apply w-full; }
+  }
 
   /* ── Tag chips (settings) ── */
   .tag-chips { @apply flex flex-wrap gap-1.5 mb-2; }
@@ -202,7 +219,7 @@
   /* ── Log viewer ── */
   .log-viewer { @apply flex flex-col gap-4; min-height: 20rem; }
   .log-output {
-    @apply flex-1 m-0 p-4 rounded-lg font-mono text-xs overflow-auto whitespace-pre-wrap break-all border border-base-300;
+    @apply flex-1 m-0 p-4 rounded-box font-mono text-xs overflow-auto whitespace-pre-wrap break-all border border-base-300;
     max-height: 24rem;
     background: var(--color-log-bg); color: var(--color-log-text);
   }
@@ -210,7 +227,7 @@
 
   /* ── Overview grid ── */
   .overview-grid { @apply grid grid-cols-2 gap-3; }
-  .overview-grid .stats { @apply rounded-lg border border-base-300; }
+  .overview-grid .stats { @apply rounded-box border border-base-300; }
   .dark .overview-grid .stats { border-color: oklch(var(--bc) / 0.15); }
   .overview-grid .stat { @apply p-4; }
   .overview-grid .stat-value { @apply text-lg; }
@@ -230,7 +247,7 @@
   .field-invalid { @apply !border-error; }
 
   /* ── Settings view (accordion) ── */
-  .settings-section { @apply rounded-lg mb-2 border border-base-300; }
+  .settings-section { @apply rounded-box mb-2 border border-base-300; }
   .dark .settings-section { border-color: oklch(var(--bc) / 0.15); }
   .settings-section .collapse-title { @apply text-sm min-h-0 py-3 px-4; }
   .settings-section .collapse-content { @apply px-4 pb-4; }
@@ -249,7 +266,7 @@
   .runtime-controls { @apply flex justify-end mb-3; }
   .runtime-summary { @apply mt-4 text-sm text-base-content/60; }
   .runtime-summary p { @apply my-1; }
-  .worker-list { @apply shrink-0 max-h-56 overflow-y-auto rounded-lg border border-base-300 p-3; }
+  .worker-list { @apply shrink-0 max-h-56 overflow-y-auto rounded-box border border-base-300 p-3; }
   .dark .worker-list { border-color: oklch(var(--bc) / 0.15); }
   .worker-list h3 { @apply m-0 mb-2 text-sm font-medium; }
   .worker-entry { @apply cursor-pointer; }

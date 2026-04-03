@@ -27,99 +27,97 @@
 </div>
 <div id="new-app-container"></div>
 
+<div class="apps-layout">
+<div class="apps-main">
+{{if .Apps}}
+    <div class="sort-controls-row">
+        <div class="sort-controls">
+            Sort by:
+            <a href="?sort=name&dir={{if and (eq .Sort "name") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if eq .Sort "name"}}active{{end}}">Name</a> |
+            <a href="?sort=status&dir={{if and (eq .Sort "status") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if eq .Sort "status"}}active{{end}}">Status</a> |
+            <a href="?sort=last_deployed&dir={{if and (eq .Sort "last_deployed") (eq .SortDir "desc")}}asc{{else}}desc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if or (eq .Sort "last_deployed") (eq .Sort "")}}active{{end}}">Last deployed</a>
+        </div>
+    </div>
+    <section class="app-grid">
+        {{range .Apps}}
+        <a href="/app/{{.Name}}/" class="app-card" data-app-name="{{.Name}}">
+            <div class="card-body p-4 flex flex-col gap-0">
+            {{if .CanManage}}
+            <button class="app-card-gear"
+                    hx-get="/ui/apps/{{.Name}}/sidebar"
+                    hx-target="#sidebar"
+                    hx-swap="innerHTML"
+                    aria-label="Manage {{.Name}}"
+                    onclick="event.stopPropagation(); event.preventDefault()">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            {{end}}
+            <div class="app-card-header">
+                <div class="tooltip tooltip-right" data-tip="{{.Status}}">
+                    <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
+                </div>
+                <span class="app-name">{{.Name}}</span>
+            </div>
+            {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
+            {{if .Description}}<span class="app-desc">{{deref .Description}}</span>{{end}}
+            {{if .Tags}}
+            <span class="app-tags">
+                {{range .Tags}}<span class="tag">{{.}}</span>{{end}}
+            </span>
+            {{end}}
+            </div>
+        </a>
+        {{end}}
+    </section>
+{{else}}
+    <section class="empty-state">
+        {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
+        <p>No apps yet. Click <strong>New App</strong> above to deploy your first app.</p>
+        {{else}}
+        <p>No apps shared with you.</p>
+        {{end}}
+    </section>
+{{end}}
+</div>
 {{if .AllTags}}
-<div class="tag-browser">
-    {{range .AllTags}}
-    {{$tagName := .Name}}
-    <a href="?{{if contains $.ActiveTags .Name}}{{else}}tag={{.Name}}&{{end}}{{range $.ActiveTags}}{{if ne . $tagName}}{{if ne . ""}}tag={{.}}&{{end}}{{end}}{{end}}{{if $.Search}}search={{$.Search}}&{{end}}tag_mode={{$.TagMode}}"
-       class="tag-browser-chip {{if contains $.ActiveTags .Name}}active{{end}}">
-        {{.Name}}<span class="tag-count">{{.AppCount}}</span>
-    </a>
-    {{end}}
+<aside class="tag-sidebar">
+    <h3 class="tag-sidebar-title">Tags</h3>
+    <div class="tag-sidebar-list">
+        {{range .AllTags}}
+        {{$tagName := .Name}}
+        <a href="?{{if contains $.ActiveTags .Name}}{{else}}tag={{.Name}}&{{end}}{{range $.ActiveTags}}{{if ne . $tagName}}{{if ne . ""}}tag={{.}}&{{end}}{{end}}{{end}}{{if $.Search}}search={{$.Search}}&{{end}}tag_mode={{$.TagMode}}"
+           class="tag-browser-chip {{if contains $.ActiveTags .Name}}active{{end}}">
+            {{.Name}}<span class="tag-count">{{.AppCount}}</span>
+        </a>
+        {{end}}
+    </div>
     {{if gt (len .ActiveTags) 1}}
-    <span class="tag-mode-toggle">
+    <div class="tag-mode-toggle">
         {{if eq .TagMode "and"}}<span>AND</span> | <a href="?{{range .ActiveTags}}tag={{.}}&{{end}}tag_mode=or{{if .Search}}&search={{.Search}}{{end}}">OR</a>
         {{else}}<a href="?{{range .ActiveTags}}tag={{.}}&{{end}}tag_mode=and{{if .Search}}&search={{.Search}}{{end}}">AND</a> | <span>OR</span>{{end}}
-    </span>
+    </div>
     {{end}}
     {{if eq $.UserRole "admin"}}
-    <button class="btn btn-ghost btn-xs ml-auto" onclick="document.getElementById('tag-admin').classList.toggle('hidden')" title="Manage tags">
-        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-    </button>
-    {{end}}
-</div>
-{{if eq .UserRole "admin"}}
-<div id="tag-admin" class="tag-admin hidden">
-    <div class="flex gap-2 items-center mb-3">
-        <input type="text" id="new-global-tag" placeholder="New tag name..."
-               class="input input-sm text-sm flex-1 max-w-64">
-        <button class="btn btn-soft btn-sm" onclick="createGlobalTag()">Create tag</button>
-    </div>
-    <div class="flex flex-wrap gap-1.5">
+    <div class="tag-admin-inline">
+        <div class="flex gap-2 items-center">
+            <input type="text" id="new-global-tag" placeholder="New tag..."
+                   class="input input-sm text-sm flex-1">
+            <button class="btn btn-soft btn-sm btn-xs" onclick="createGlobalTag()">Add</button>
+        </div>
         {{range .AllTags}}
-        <span class="tag-chip">
-            {{.Name}}
-            <span class="tag-count text-xs ml-1">{{.AppCount}}</span>
-            {{if eq .AppCount 0}}
+        {{if eq .AppCount 0}}
+        <div class="tag-deletable">
+            <span class="text-sm">{{.Name}}</span>
             <button class="tag-remove" onclick="deleteGlobalTag('{{.ID}}','{{.Name}}')"
                     title="Delete tag">&#10005;</button>
-            {{end}}
-        </span>
+        </div>
+        {{end}}
         {{end}}
     </div>
-</div>
-{{end}}
-{{end}}
-
-{{if .Apps}}
-<div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem">
-    <div class="sort-controls">
-        Sort by:
-        <a href="?sort=name&dir={{if and (eq .Sort "name") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if eq .Sort "name"}}active{{end}}">Name</a> |
-        <a href="?sort=status&dir={{if and (eq .Sort "status") (eq .SortDir "asc")}}desc{{else}}asc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if eq .Sort "status"}}active{{end}}">Status</a> |
-        <a href="?sort=last_deployed&dir={{if and (eq .Sort "last_deployed") (eq .SortDir "desc")}}asc{{else}}desc{{end}}{{range .ActiveTags}}&tag={{.}}{{end}}{{if .Search}}&search={{.Search}}{{end}}" class="{{if or (eq .Sort "last_deployed") (eq .Sort "")}}active{{end}}">Last deployed</a>
-    </div>
-</div>
-<section class="app-grid">
-    {{range .Apps}}
-    <a href="/app/{{.Name}}/" class="app-card" data-app-name="{{.Name}}">
-        <div class="card-body p-4 flex flex-col gap-0">
-        {{if .CanManage}}
-        <button class="app-card-gear"
-                hx-get="/ui/apps/{{.Name}}/sidebar"
-                hx-target="#sidebar"
-                hx-swap="innerHTML"
-                aria-label="Manage {{.Name}}"
-                onclick="event.stopPropagation(); event.preventDefault()">
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-        </button>
-        {{end}}
-        <div class="app-card-header">
-            <div class="tooltip tooltip-right" data-tip="{{.Status}}">
-                <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
-            </div>
-            <span class="app-name">{{.Name}}</span>
-        </div>
-        {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
-        {{if .Description}}<span class="app-desc">{{deref .Description}}</span>{{end}}
-        {{if .Tags}}
-        <span class="app-tags">
-            {{range .Tags}}<span class="tag">{{.}}</span>{{end}}
-        </span>
-        {{end}}
-        </div>
-    </a>
     {{end}}
-</section>
-{{else}}
-<section class="empty-state">
-    {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
-    <p>No apps yet. Click <strong>New App</strong> above to deploy your first app.</p>
-    {{else}}
-    <p>No apps shared with you.</p>
-    {{end}}
-</section>
+</aside>
 {{end}}
+</div>
 </div><!-- drawer-content -->
 <div class="drawer-side z-[200]">
     <label for="sidebar-toggle" class="drawer-overlay"></label>
@@ -226,8 +224,8 @@ function deleteGlobalTag(id, name) {
     });
 }
 
-/* Live-update: re-fetch app card when settings change in sidebar.
-   Uses HTMX to reload only the card, keeping the sidebar open. */
+/* Live-update: push settings changes to the card in the background.
+   Sidebar is NOT touched — user stays on the exact tab they're on. */
 document.body.addEventListener('appSettingsChanged', function() {
     var sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
@@ -235,9 +233,52 @@ document.body.addEventListener('appSettingsChanged', function() {
     if (!header) return;
     var appName = header.textContent.trim();
     var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
-    if (card) {
-        /* Re-fetch the sidebar content to reflect updated metadata */
-        htmx.ajax('GET', '/ui/apps/' + appName + '/sidebar', {target: '#sidebar', swap: 'innerHTML'});
+    if (!card) return;
+
+    /* Update title */
+    var titleInput = document.getElementById('title');
+    if (titleInput) {
+        var titleEl = card.querySelector('.app-title');
+        if (titleInput.value) {
+            if (!titleEl) {
+                titleEl = document.createElement('span');
+                titleEl.className = 'app-title';
+                card.querySelector('.app-card-header').after(titleEl);
+            }
+            titleEl.textContent = titleInput.value;
+        } else if (titleEl) {
+            titleEl.remove();
+        }
+    }
+
+    /* Update description */
+    var descInput = document.getElementById('description');
+    if (descInput) {
+        var descEl = card.querySelector('.app-desc');
+        if (descInput.value) {
+            if (!descEl) {
+                descEl = document.createElement('span');
+                descEl.className = 'app-desc';
+                var after = card.querySelector('.app-title') || card.querySelector('.app-card-header');
+                after.after(descEl);
+            }
+            descEl.textContent = descInput.value;
+        } else if (descEl) {
+            descEl.remove();
+        }
+    }
+
+    /* Update sidebar header title too */
+    var subtitleEl = sidebar.querySelector('.sidebar-subtitle');
+    if (titleInput && titleInput.value) {
+        if (!subtitleEl) {
+            subtitleEl = document.createElement('p');
+            subtitleEl.className = 'sidebar-subtitle';
+            sidebar.querySelector('.sidebar-header').after(subtitleEl);
+        }
+        subtitleEl.textContent = titleInput.value;
+    } else if (subtitleEl) {
+        subtitleEl.remove();
     }
 });
 </script>

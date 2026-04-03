@@ -59,22 +59,30 @@
     <p class="empty-state">No active workers.</p>
     {{end}}
 
-    <div class="stats shadow-sm bg-base-200/50 mt-4 w-full">
-        <div class="stat place-items-center">
-            <div class="stat-title">Sessions</div>
-            <div class="stat-value text-base">{{.ActiveSessions}}</div>
+    <div class="overview-grid mt-4">
+        <div class="stats bg-base-200/50">
+            <div class="stat">
+                <div class="stat-title">Sessions</div>
+                <div class="stat-value text-lg">{{.ActiveSessions}}</div>
+            </div>
         </div>
-        <div class="stat place-items-center">
-            <div class="stat-title">Visitors</div>
-            <div class="stat-value text-base">{{.UniqueVisitors}}</div>
+        <div class="stats bg-base-200/50">
+            <div class="stat">
+                <div class="stat-title">Visitors</div>
+                <div class="stat-value text-lg">{{.UniqueVisitors}}</div>
+            </div>
         </div>
-        <div class="stat place-items-center">
-            <div class="stat-title">Total views</div>
-            <div class="stat-value text-base">{{.TotalViews}}</div>
+        <div class="stats bg-base-200/50">
+            <div class="stat">
+                <div class="stat-title">Total views</div>
+                <div class="stat-value text-lg">{{.TotalViews}}</div>
+            </div>
         </div>
-        <div class="stat place-items-center">
-            <div class="stat-title">Last 7 days</div>
-            <div class="stat-value text-base">{{.RecentViews}}</div>
+        <div class="stats bg-base-200/50">
+            <div class="stat">
+                <div class="stat-title">Last 7 days</div>
+                <div class="stat-value text-lg">{{.RecentViews}}</div>
+            </div>
         </div>
     </div>
 </div>
