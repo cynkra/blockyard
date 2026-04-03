@@ -46,56 +46,62 @@ func (o *Orchestrator) RunScheduled(
 		case <-time.After(time.Until(next)):
 		}
 
-		slog.Info("update scheduler: checking for updates")
-		result, err := o.update.CheckLatest(channel, o.version)
-		if err != nil {
-			slog.Warn("update scheduler: check failed", "error", err)
-			continue
+		if o.runScheduledOnce(ctx, channel) {
+			return // update succeeded, main will exit
 		}
-		if !result.UpdateAvailable {
-			slog.Info("update scheduler: already up to date")
-			continue
-		}
-
-		if !o.CASState("idle", "updating") {
-			slog.Info("update scheduler: skipping, another operation in progress",
-				"state", o.State())
-			continue
-		}
-
-		slog.Info("update scheduler: starting update",
-			"current", result.CurrentVersion,
-			"latest", result.LatestVersion)
-
-		sender := o.tasks.Create(uuid.New().String(), "scheduled-update")
-		ur, err := o.Update(ctx, channel, sender)
-		if err != nil {
-			slog.Error("update scheduler: update failed", "error", err)
-			sender.Complete(task.Failed)
-			o.state.Store("idle")
-			continue
-		}
-		if ur == nil {
-			sender.Complete(task.Completed) // already up to date
-			o.state.Store("idle")
-			continue
-		}
-
-		// Enter watchdog — same as CLI-triggered flow.
-		// On success: signal main to exit. On failure: rollback + continue loop.
-		watchPeriod := 5 * time.Minute
-		if o.cfg.Update != nil && o.cfg.Update.WatchPeriod.Duration > 0 {
-			watchPeriod = o.cfg.Update.WatchPeriod.Duration
-		}
-		if err := o.Watchdog(ctx, ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
-			slog.Error("update scheduler: watchdog rollback", "error", err)
-			sender.Complete(task.Failed)
-			// state already reset to "idle" by Watchdog defer
-			continue
-		}
-
-		sender.Complete(task.Completed)
-		o.exitFn()
-		return // let bgWg.Done() fire before main calls Finish
 	}
+}
+
+// runScheduledOnce checks for an update and runs the full update+watchdog
+// flow if one is available. Returns true when the caller should exit
+// (successful update), false to continue the schedule loop.
+func (o *Orchestrator) runScheduledOnce(ctx context.Context, channel string) bool {
+	slog.Info("update scheduler: checking for updates")
+	result, err := o.update.CheckLatest(channel, o.version)
+	if err != nil {
+		slog.Warn("update scheduler: check failed", "error", err)
+		return false
+	}
+	if !result.UpdateAvailable {
+		slog.Info("update scheduler: already up to date")
+		return false
+	}
+
+	if !o.CASState("idle", "updating") {
+		slog.Info("update scheduler: skipping, another operation in progress",
+			"state", o.State())
+		return false
+	}
+
+	slog.Info("update scheduler: starting update",
+		"current", result.CurrentVersion,
+		"latest", result.LatestVersion)
+
+	sender := o.tasks.Create(uuid.New().String(), "scheduled-update")
+	ur, err := o.Update(ctx, channel, sender)
+	if err != nil {
+		slog.Error("update scheduler: update failed", "error", err)
+		sender.Complete(task.Failed)
+		o.state.Store("idle")
+		return false
+	}
+	if ur == nil {
+		sender.Complete(task.Completed)
+		o.state.Store("idle")
+		return false
+	}
+
+	watchPeriod := 5 * time.Minute
+	if o.cfg.Update != nil && o.cfg.Update.WatchPeriod.Duration > 0 {
+		watchPeriod = o.cfg.Update.WatchPeriod.Duration
+	}
+	if err := o.Watchdog(ctx, ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
+		slog.Error("update scheduler: watchdog rollback", "error", err)
+		sender.Complete(task.Failed)
+		return false
+	}
+
+	sender.Complete(task.Completed)
+	o.exitFn()
+	return true
 }

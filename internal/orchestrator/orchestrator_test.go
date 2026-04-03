@@ -949,6 +949,53 @@ func TestKillAndRemoveBestEffort(t *testing.T) {
 	o.killAndRemove(context.Background(), "some-container-id-1234")
 }
 
+func TestRunScheduledOnceNoUpdate(t *testing.T) {
+	checker := &mockChecker{
+		result: &update.Result{UpdateAvailable: false},
+	}
+	o, _ := newTestOrchestrator(t, &mockDocker{}, checker)
+	if o.runScheduledOnce(context.Background(), "stable") {
+		t.Error("expected false when no update available")
+	}
+}
+
+func TestRunScheduledOnceCheckError(t *testing.T) {
+	checker := &mockChecker{err: io.ErrUnexpectedEOF}
+	o, _ := newTestOrchestrator(t, &mockDocker{}, checker)
+	if o.runScheduledOnce(context.Background(), "stable") {
+		t.Error("expected false on check error")
+	}
+}
+
+func TestRunScheduledOnceCASFails(t *testing.T) {
+	checker := &mockChecker{
+		result: &update.Result{UpdateAvailable: true, CurrentVersion: "1.0.0", LatestVersion: "2.0.0"},
+	}
+	o, _ := newTestOrchestrator(t, &mockDocker{}, checker)
+	o.state.Store("updating") // block CAS
+	if o.runScheduledOnce(context.Background(), "stable") {
+		t.Error("expected false when CAS fails")
+	}
+}
+
+func TestRunScheduledOnceUpdateFails(t *testing.T) {
+	checker := &mockChecker{
+		result: &update.Result{UpdateAvailable: true, CurrentVersion: "1.0.0", LatestVersion: "2.0.0"},
+	}
+	docker := &mockDocker{
+		pullFn: func(context.Context, string, client.ImagePullOptions) (client.ImagePullResponse, error) {
+			return nil, io.ErrUnexpectedEOF
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, checker)
+	if o.runScheduledOnce(context.Background(), "stable") {
+		t.Error("expected false when update fails")
+	}
+	if o.State() != "idle" {
+		t.Errorf("state should reset to idle, got %q", o.State())
+	}
+}
+
 func TestRunScheduledNoUpdate(t *testing.T) {
 	// RunScheduled should check, find no update, and keep looping until cancelled.
 	checker := &mockChecker{
