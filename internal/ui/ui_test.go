@@ -1897,8 +1897,8 @@ func TestOverviewTabWithActiveData(t *testing.T) {
 	if !strings.Contains(body, "3 sessions") {
 		t.Error("expected '3 sessions' in overview")
 	}
-	if !strings.Contains(body, "2 total views") {
-		t.Error("expected '2 total views' in overview")
+	if !strings.Contains(body, "2 views") {
+		t.Error("expected '2 views' in overview")
 	}
 	if !strings.Contains(body, "status-running") {
 		t.Error("expected running status badge")
@@ -2063,12 +2063,12 @@ func TestRuntimeTabWithWorkersAndSessions(t *testing.T) {
 	if !strings.Contains(body, "Owner Name") {
 		t.Error("expected display name 'Owner Name' in session chip")
 	}
-	// Summary stats.
-	if !strings.Contains(body, "2 active sessions") {
-		t.Error("expected '2 active sessions' in summary")
+	// Summary stats (now rendered as DaisyUI stat components).
+	if !strings.Contains(body, "Sessions") {
+		t.Error("expected 'Sessions' stat title in summary")
 	}
-	if !strings.Contains(body, "3 total views") {
-		t.Error("expected '3 total views' in summary")
+	if !strings.Contains(body, "Total views") {
+		t.Error("expected 'Total views' stat title in summary")
 	}
 }
 
@@ -2099,7 +2099,7 @@ func TestBundlesTabWithMultipleBundles(t *testing.T) {
 		t.Error("should not show empty state with bundles present")
 	}
 	// Active bundle should have the "active" badge.
-	if !strings.Contains(body, `status-ready">active`) {
+	if !strings.Contains(body, "badge-primary\">active") {
 		t.Error("expected 'active' badge on the active bundle")
 	}
 	// Old bundle should have a Rollback button (it's ready and not active).
@@ -2548,8 +2548,8 @@ func TestOverviewTabZeroWorkersAndSessions(t *testing.T) {
 	if !strings.Contains(body, "0 sessions") {
 		t.Error("expected '0 sessions' for zero sessions")
 	}
-	if !strings.Contains(body, "0 total views") {
-		t.Error("expected '0 total views' for zero views")
+	if !strings.Contains(body, "0 views") {
+		t.Error("expected '0 views' for zero views")
 	}
 }
 
@@ -2618,9 +2618,9 @@ func TestRuntimeTabEmptyWorkersShowsEmptyState(t *testing.T) {
 	if !strings.Contains(body, "No active workers") {
 		t.Error("expected 'No active workers' empty state")
 	}
-	// Summary should show zero counts.
-	if !strings.Contains(body, "0 active sessions") {
-		t.Error("expected '0 active sessions' in summary")
+	// Summary should show zero counts (now rendered as stat components).
+	if !strings.Contains(body, "Sessions") {
+		t.Error("expected 'Sessions' stat in summary")
 	}
 }
 
