@@ -57,11 +57,8 @@ func TestCheckRedisOnServiceNetwork_Detected(t *testing.T) {
 		RedisURL: fmt.Sprintf("redis://%s:6379", containerName),
 	}
 	res := checkRedisOnServiceNetwork(ctx, deps)
-	if res == nil {
-		t.Fatal("expected error when Redis container is on the service network")
-	}
 	if res.Severity != SeverityError {
-		t.Errorf("severity = %d, want SeverityError", res.Severity)
+		t.Errorf("severity = %v, want SeverityError: %s", res.Severity, res.Message)
 	}
 }
 
@@ -89,7 +86,7 @@ func TestCheckRedisOnServiceNetwork_NotDetected(t *testing.T) {
 		RedisURL: "redis://some-other-host:6379",
 	}
 	res := checkRedisOnServiceNetwork(ctx, deps)
-	if res != nil {
-		t.Errorf("expected nil when Redis host is not on service network, got %q", res.Message)
+	if res.Severity != SeverityOK {
+		t.Errorf("severity = %v, want OK when Redis not on service network: %s", res.Severity, res.Message)
 	}
 }

@@ -39,3 +39,14 @@ func TestCheckRedisOnServiceNetwork_SkipBadURL(t *testing.T) {
 		t.Errorf("expected SeverityOK for malformed URL, got %v: %q", res.Severity, res.Message)
 	}
 }
+
+func TestCheckRedisOnServiceNetwork_SkipEmptyHost(t *testing.T) {
+	deps := DockerDeps{
+		Config:   &config.DockerConfig{ServiceNetwork: "my-net"},
+		RedisURL: "redis:///0", // valid URL but empty hostname
+	}
+	res := checkRedisOnServiceNetwork(context.Background(), deps)
+	if res.Severity != SeverityOK {
+		t.Errorf("expected SeverityOK for empty hostname, got %v: %q", res.Severity, res.Message)
+	}
+}
