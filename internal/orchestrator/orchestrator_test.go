@@ -636,6 +636,319 @@ func TestRollbackIrreversible(t *testing.T) {
 	_ = err
 }
 
+func TestNewConstructor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	cfg := &config.Config{
+		Server:   config.ServerConfig{Bind: "0.0.0.0:8080"},
+		Database: config.DatabaseConfig{Driver: "sqlite", Path: dbPath},
+	}
+
+	var exitCalled bool
+	o := New(
+		nil, // docker client (unused in this test)
+		"server-id",
+		database,
+		cfg,
+		"1.0.0",
+		task.NewStore(),
+		&DefaultChecker{},
+		slog.Default(),
+		func() {},
+		func() {},
+		func() { exitCalled = true },
+	)
+
+	if o.State() != "idle" {
+		t.Errorf("initial state = %q, want idle", o.State())
+	}
+
+	o.Exit()
+	if !exitCalled {
+		t.Error("Exit should call exitFn")
+	}
+}
+
+func TestRunScheduledCancellation(t *testing.T) {
+	checker := &mockChecker{
+		result: &update.Result{
+			CurrentVersion:  "1.0.0",
+			LatestVersion:   "1.0.0",
+			UpdateAvailable: false,
+		},
+	}
+	o, _ := newTestOrchestrator(t, &mockDocker{}, checker)
+	o.cfg.Update = &config.UpdateConfig{
+		Schedule:    "* * * * *",
+		Channel:     "stable",
+		WatchPeriod: config.Duration{Duration: 1 * time.Minute},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		o.RunScheduled(ctx, "* * * * *", "stable")
+		close(done)
+	}()
+
+	// Cancel immediately — RunScheduled should exit.
+	cancel()
+	select {
+	case <-done:
+		// OK
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunScheduled did not exit after context cancellation")
+	}
+}
+
+func TestRunScheduledInvalidCron(t *testing.T) {
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+
+	// Invalid cron should return immediately without panic.
+	o.RunScheduled(context.Background(), "not-a-cron", "stable")
+}
+
+func TestRollbackHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create a backup.
+	_, err = database.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up a fake readyz and activate endpoint.
+	readyzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer readyzServer.Close()
+
+	addr := readyzServer.Listener.Addr().String()
+	ip, port := splitAddr(addr)
+
+	docker := &mockDocker{
+		inspectFn: func(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			if id == "new-container-123" {
+				return client.ContainerInspectResult{
+					Container: container.InspectResponse{
+						Config:     &container.Config{Image: "ghcr.io/cynkra/blockyard:v1.0.0"},
+						HostConfig: &container.HostConfig{},
+						NetworkSettings: &container.NetworkSettings{
+							Networks: map[string]*network.EndpointSettings{
+								"bridge": {IPAddress: netip.MustParseAddr(ip)},
+							},
+						},
+					},
+				}, nil
+			}
+			return defaultInspectResult(), nil
+		},
+	}
+
+	o, tracker := newTestOrchestrator(t, docker, &mockChecker{})
+	o.db = database
+	o.cfg.Database.Path = dbPath
+	o.cfg.Server.Bind = "0.0.0.0:" + port
+	sender := newSender(t)
+
+	err = o.Rollback(context.Background(), sender, func() {})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tracker.drained.Load() != 1 {
+		t.Error("drain should be called during rollback")
+	}
+}
+
+func TestRollbackCloneFailsAfterMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	_, err = database.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	docker := &mockDocker{
+		createFn: func(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+			return client.ContainerCreateResult{}, io.ErrUnexpectedEOF
+		},
+	}
+
+	var shutdownCalled bool
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+	o.db = database
+	o.cfg.Database.Path = dbPath
+	sender := newSender(t)
+
+	// Since migration versions match (no down-migration needed),
+	// the clone failure won't trigger shutdownFn.
+	err = o.Rollback(context.Background(), sender, func() { shutdownCalled = true })
+	if err == nil {
+		t.Fatal("expected error when clone fails")
+	}
+	// shutdownFn should NOT be called when no migration ran.
+	if shutdownCalled {
+		t.Error("shutdownFn should not be called when no migration ran")
+	}
+}
+
+func TestUpdateReadyTimeout(t *testing.T) {
+	checker := &mockChecker{
+		result: &update.Result{
+			CurrentVersion:  "1.0.0",
+			LatestVersion:   "2.0.0",
+			UpdateAvailable: true,
+		},
+	}
+
+	var removed atomic.Bool
+	docker := &mockDocker{
+		inspectFn: func(_ context.Context, id string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			if id == "new-container-123" {
+				// Return an IP where nothing listens → readyz always fails.
+				return client.ContainerInspectResult{
+					Container: container.InspectResponse{
+						Config:     &container.Config{Image: "ghcr.io/cynkra/blockyard:2.0.0"},
+						HostConfig: &container.HostConfig{},
+						NetworkSettings: &container.NetworkSettings{
+							Networks: map[string]*network.EndpointSettings{
+								"bridge": {IPAddress: netip.MustParseAddr("192.0.2.1")},
+							},
+						},
+					},
+				}, nil
+			}
+			return defaultInspectResult(), nil
+		},
+		removeFn: func(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+			removed.Store(true)
+			return client.ContainerRemoveResult{}, nil
+		},
+	}
+
+	o, tracker := newTestOrchestrator(t, docker, checker)
+	// Very short timeout to make test fast.
+	o.cfg.Proxy.WorkerStartTimeout = config.Duration{Duration: 3 * time.Second}
+	sender := newSender(t)
+
+	_, err := o.Update(context.Background(), "stable", sender)
+	if err == nil {
+		t.Fatal("expected error from ready timeout")
+	}
+	if !removed.Load() {
+		t.Error("container should be removed after ready timeout")
+	}
+	if tracker.drained.Load() != 0 {
+		t.Error("drain should not be called when readyz times out")
+	}
+}
+
+func TestListenPort(t *testing.T) {
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+
+	o.cfg.Server.Bind = "0.0.0.0:9090"
+	if p := o.listenPort(); p != "9090" {
+		t.Errorf("listenPort = %q, want 9090", p)
+	}
+
+	o.cfg.Server.Bind = "8080"
+	if p := o.listenPort(); p != "8080" {
+		t.Errorf("listenPort = %q for no-colon addr, want 8080", p)
+	}
+}
+
+func TestGenerateActivationToken(t *testing.T) {
+	tok := generateActivationToken()
+	if tok == "" {
+		t.Error("token should not be empty")
+	}
+	if len(tok) < 16 {
+		t.Errorf("token too short: %q", tok)
+	}
+	// Should be different each time.
+	tok2 := generateActivationToken()
+	if tok == tok2 {
+		t.Error("consecutive tokens should differ")
+	}
+}
+
+func TestCurrentImageBaseAndTag(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Config:     &container.Config{Image: "ghcr.io/cynkra/blockyard:3.2.1"},
+					HostConfig: &container.HostConfig{},
+				},
+			}, nil
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+
+	base := o.currentImageBase(context.Background())
+	if base != "ghcr.io/cynkra/blockyard" {
+		t.Errorf("currentImageBase = %q", base)
+	}
+
+	tag := o.currentImageTag(context.Background())
+	if tag != "3.2.1" {
+		t.Errorf("currentImageTag = %q", tag)
+	}
+}
+
+func TestCurrentImageBaseNoTag(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Config:     &container.Config{Image: "blockyard"},
+					HostConfig: &container.HostConfig{},
+				},
+			}, nil
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+
+	base := o.currentImageBase(context.Background())
+	if base != "blockyard" {
+		t.Errorf("currentImageBase without tag = %q", base)
+	}
+}
+
+func TestKillAndRemoveBestEffort(t *testing.T) {
+	// killAndRemove should not panic even when stop/remove fail.
+	docker := &mockDocker{
+		stopFn: func(context.Context, string, client.ContainerStopOptions) (client.ContainerStopResult, error) {
+			return client.ContainerStopResult{}, io.ErrUnexpectedEOF
+		},
+		removeFn: func(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error) {
+			return client.ContainerRemoveResult{}, io.ErrUnexpectedEOF
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+
+	// Should not panic or return error.
+	o.killAndRemove(context.Background(), "some-container-id-1234")
+}
+
 func init() {
 	// Suppress log output during tests.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
