@@ -60,7 +60,7 @@ func adminUpdateCmd() *cobra.Command {
 				}
 				fmt.Printf("Update server to latest %s release? [y/N] ", ch)
 				var answer string
-				fmt.Scanln(&answer)
+				fmt.Scanln(&answer) //nolint:errcheck // interactive prompt, error is harmless
 				if answer != "y" && answer != "Y" {
 					fmt.Println("Cancelled.")
 					return nil
@@ -112,7 +112,7 @@ func adminRollbackCmd() *cobra.Command {
 			if !yes && !jsonOutput {
 				fmt.Print("Roll back server to previous version? [y/N] ")
 				var answer string
-				fmt.Scanln(&answer)
+				fmt.Scanln(&answer) //nolint:errcheck // interactive prompt, error is harmless
 				if answer != "y" && answer != "Y" {
 					fmt.Println("Cancelled.")
 					return nil
