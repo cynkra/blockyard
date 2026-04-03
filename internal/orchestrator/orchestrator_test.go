@@ -949,6 +949,146 @@ func TestKillAndRemoveBestEffort(t *testing.T) {
 	o.killAndRemove(context.Background(), "some-container-id-1234")
 }
 
+func TestRunScheduledNoUpdate(t *testing.T) {
+	// RunScheduled should check, find no update, and keep looping until cancelled.
+	checker := &mockChecker{
+		result: &update.Result{
+			CurrentVersion:  "1.0.0",
+			LatestVersion:   "1.0.0",
+			UpdateAvailable: false,
+		},
+	}
+	o, _ := newTestOrchestrator(t, &mockDocker{}, checker)
+	o.cfg.Update = &config.UpdateConfig{
+		WatchPeriod: config.Duration{Duration: 1 * time.Minute},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		// Use "* * * * *" (every minute) but cancel quickly.
+		// The scheduler sleeps until next cron tick, so we cancel during the sleep.
+		o.RunScheduled(ctx, "* * * * *", "stable")
+		close(done)
+	}()
+
+	// Let it run briefly, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunScheduled did not exit")
+	}
+}
+
+func TestRunScheduledCheckFails(t *testing.T) {
+	checker := &mockChecker{
+		err: io.ErrUnexpectedEOF,
+	}
+	o, _ := newTestOrchestrator(t, &mockDocker{}, checker)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		o.RunScheduled(ctx, "* * * * *", "stable")
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunScheduled did not exit after check failure")
+	}
+}
+
+func TestCurrentImageTagError(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{}, io.ErrUnexpectedEOF
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+
+	// Should fall back to version string.
+	tag := o.currentImageTag(context.Background())
+	if tag != "1.0.0" {
+		t.Errorf("expected fallback to version, got %q", tag)
+	}
+
+	base := o.currentImageBase(context.Background())
+	if base != "blockyard" {
+		t.Errorf("expected fallback base, got %q", base)
+	}
+}
+
+func TestActivateError(t *testing.T) {
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	// Call activate against a closed server → should return error.
+	err := o.activate(context.Background(), "127.0.0.1:1")
+	if err == nil {
+		t.Error("expected error from activate against closed port")
+	}
+}
+
+func TestCheckReadyError(t *testing.T) {
+	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
+	err := o.checkReady(context.Background(), "127.0.0.1:1")
+	if err == nil {
+		t.Error("expected error from checkReady against closed port")
+	}
+}
+
+func TestContainerAddrNoNetworks(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Config:          &container.Config{},
+					HostConfig:      &container.HostConfig{},
+					NetworkSettings: &container.NetworkSettings{},
+				},
+			}, nil
+		},
+	}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+	_, err := o.containerAddr(context.Background(), "some-id-12345678")
+	if err == nil {
+		t.Error("expected error when no networks")
+	}
+}
+
+func TestStartCloneActivationToken(t *testing.T) {
+	docker := &mockDocker{}
+	o, _ := newTestOrchestrator(t, docker, &mockChecker{})
+
+	_, err := o.startClone(context.Background(), "ghcr.io/cynkra/blockyard:2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.activationToken == "" {
+		t.Error("activation token should be set after startClone")
+	}
+}
+
+func TestDefaultChecker(t *testing.T) {
+	// Just verify DefaultChecker satisfies the interface.
+	var _ updateAPI = &DefaultChecker{}
+}
+
+func TestNewForTestState(t *testing.T) {
+	o := NewForTest()
+	if o.State() != "idle" {
+		t.Errorf("NewForTest state = %q, want idle", o.State())
+	}
+	o.SetState("updating")
+	if o.State() != "updating" {
+		t.Errorf("state = %q, want updating", o.State())
+	}
+}
+
 func init() {
 	// Suppress log output during tests.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
