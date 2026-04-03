@@ -33,7 +33,8 @@ func TestCheckRedisOnServiceNetwork_Detected(t *testing.T) {
 	}
 	defer cli.NetworkRemove(ctx, netResp.ID, client.NetworkRemoveOptions{}) //nolint:errcheck
 
-	// Create a container named "redis" on that network.
+	// Create and start a container on that network so it appears in inspect.
+	ensureAlpine(t, ctx, cli)
 	containerName := "blockyard-test-redis-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	resp, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Config: &container.Config{
@@ -49,6 +50,10 @@ func TestCheckRedisOnServiceNetwork_Detected(t *testing.T) {
 		t.Fatalf("create container: %v", err)
 	}
 	defer cli.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true}) //nolint:errcheck
+
+	if _, err := cli.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
 
 	// The check should detect the container by name.
 	deps := DockerDeps{
