@@ -3,10 +3,13 @@ package db
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -51,6 +54,74 @@ func (db *DB) backupSQLite(ctx context.Context) (string, error) {
 	}
 
 	return dest, nil
+}
+
+// BackupMeta records the state at the time of backup so rollback
+// knows what to restore.
+type BackupMeta struct {
+	BackupPath       string `json:"backup_path"`
+	ImageTag         string `json:"image_tag"`
+	MigrationVersion uint   `json:"migration_version"`
+	CreatedAt        string `json:"created_at"`
+}
+
+// ErrNoBackup is returned when no backup metadata file is found.
+var ErrNoBackup = errors.New("no backup metadata found")
+
+// BackupWithMeta creates a database backup and writes a metadata
+// sidecar. Returns the metadata on success.
+func (db *DB) BackupWithMeta(ctx context.Context, imageTag string) (*BackupMeta, error) {
+	backupPath, err := db.Backup(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ver, _, err := db.MigrationVersion()
+	if err != nil {
+		os.Remove(backupPath)
+		return nil, fmt.Errorf("backup: read migration version: %w", err)
+	}
+
+	meta := &BackupMeta{
+		BackupPath:       backupPath,
+		ImageTag:         imageTag,
+		MigrationVersion: ver,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+	}
+
+	metaPath := backupPath + ".meta.json"
+	data, _ := json.MarshalIndent(meta, "", "  ")
+	if err := os.WriteFile(metaPath, data, 0o600); err != nil {
+		os.Remove(backupPath)
+		return nil, fmt.Errorf("backup: write metadata: %w", err)
+	}
+
+	return meta, nil
+}
+
+// LatestBackupMeta finds the most recent backup metadata file in the
+// database directory. Returns ErrNoBackup if none exists.
+func LatestBackupMeta(dbPath string) (*BackupMeta, error) {
+	dir := filepath.Dir(dbPath)
+	pattern := filepath.Join(dir, "*.meta.json")
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) == 0 {
+		return nil, ErrNoBackup
+	}
+	sort.Strings(matches) // timestamp in filename → lexicographic = chronological
+	return readBackupMeta(matches[len(matches)-1])
+}
+
+func readBackupMeta(path string) (*BackupMeta, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reading our own backup metadata file
+	if err != nil {
+		return nil, fmt.Errorf("read backup metadata: %w", err)
+	}
+	var meta BackupMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse backup metadata: %w", err)
+	}
+	return &meta, nil
 }
 
 func (db *DB) backupPostgres(ctx context.Context) (string, error) {

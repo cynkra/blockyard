@@ -9,7 +9,7 @@ import (
 
 func TestDocsRedirect(t *testing.T) {
 	srv := testServerForReadyz(t)
-	router := NewRouter(srv, func() {})
+	router := NewRouter(srv, func() {}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/docs", nil)
 	rec := httptest.NewRecorder()
@@ -25,7 +25,7 @@ func TestDocsRedirect(t *testing.T) {
 
 func TestDocsServesHTML(t *testing.T) {
 	srv := testServerForReadyz(t)
-	router := NewRouter(srv, func() {})
+	router := NewRouter(srv, func() {}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/docs/", nil)
 	rec := httptest.NewRecorder()

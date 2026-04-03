@@ -18,9 +18,12 @@ endpoint). Completes the operations track.
   discovers backend containers via Docker labels or network membership.
   Rolling updates start the new container on the same Docker network
   without host port bindings; the proxy routes traffic by container IP.
-  Deployments that rely on host port bindings (`-p`) cannot use rolling
-  updates — the admin endpoints return `501 Not Implemented` when no
-  proxy-compatible setup is detected.
+  Deployments that rely solely on host port bindings (`-p`) without a
+  proxy cannot use rolling updates — the cloned container strips port
+  bindings to avoid conflicts, so it is only reachable via Docker
+  network. The admin endpoints return `501 Not Implemented` when the
+  server is not running as a Docker container (native mode or process
+  backend), since container cloning is not possible.
 - **Phase 3-2** — worker token persistence (both servers verify the
   same tokens), interface extraction (shared state contracts).
 - **Phase 3-3** — Redis-backed session store, worker registry, and
@@ -182,14 +185,18 @@ package orchestrator
 
 // Orchestrator manages rolling updates from inside the running server.
 type Orchestrator struct {
-    docker   dockerClient     // subset of Docker API (see interface below)
-    serverID string           // own container ID from DockerBackend.ServerID()
-    db       *db.DB
-    cfg      *config.Config
-    version  string           // current server version (from cfg.Server.Version)
-    tasks    *task.Store       // for creating tasks in scheduled updates
-    update   updateAPI        // interface for GitHub release checking
-    log      *slog.Logger
+    docker    dockerClient     // subset of Docker API (see interface below)
+    serverID  string           // own container ID from DockerBackend.ServerID()
+    db        *db.DB
+    cfg       *config.Config
+    version   string           // current server version (from srv.Version)
+    tasks     *task.Store      // for creating tasks in scheduled updates
+    update    updateAPI        // interface for GitHub release checking
+    log       *slog.Logger
+    drainFn   func()           // sets health → 503 (listeners stay alive)
+    undrainFn func()           // clears draining flag (health → 200)
+    exitFn    func()           // signals main goroutine to call Finish + exit
+    state     atomic.Value     // current phase: "idle"/"updating"/"watching"/"rolling_back"
 }
 
 // dockerClient is the subset of the Docker API needed by the orchestrator.
@@ -201,7 +208,7 @@ type dockerClient interface {
     ContainerStop(ctx context.Context, id string, opts client.ContainerStopOptions) (client.ContainerStopResult, error)
     ContainerRemove(ctx context.Context, id string, opts client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
     ContainerWait(ctx context.Context, id string, opts client.ContainerWaitOptions) client.ContainerWaitResult
-    ImagePull(ctx context.Context, ref string, opts client.ImagePullOptions) (io.ReadCloser, error)
+    ImagePull(ctx context.Context, ref string, opts client.ImagePullOptions) (client.ImagePullResponse, error)
 }
 
 // updateAPI abstracts the GitHub release check so tests can mock it.
@@ -299,11 +306,9 @@ func (o *Orchestrator) Update(
     ctx context.Context,
     channel string,
     sender task.Sender,
-    drainFn func(),       // sets health → 503 (listeners stay alive)
-    undrainFn func(),     // clears draining flag (health → 200)
 ) (*UpdateResult, error) {
     // 1. Check for newer version.
-    result, err := o.update.CheckLatest(channel, o.cfg.Server.Version)
+    result, err := o.update.CheckLatest(channel, o.version)
     if err != nil {
         return nil, fmt.Errorf("check latest: %w", err)
     }
@@ -346,13 +351,13 @@ func (o *Orchestrator) Update(
 
     // 6. Drain self.
     sender.Write("Draining current server ...")
-    drainFn()
+    o.drainFn()
 
     // 7. Activate new server (start background goroutines).
     sender.Write("Activating new server ...")
     if err := o.activate(ctx, newAddr); err != nil {
         o.killAndRemove(ctx, newID)
-        undrainFn()
+        o.undrainFn()
         return nil, fmt.Errorf("activate new server: %w", err)
     }
 
@@ -397,7 +402,6 @@ func (o *Orchestrator) Watchdog(
     newID string,
     newAddr string,
     watchPeriod time.Duration,
-    undrainFn func(),
     sender task.Sender,
 ) error {
     deadline := time.Now().Add(watchPeriod)
@@ -417,7 +421,7 @@ func (o *Orchestrator) Watchdog(
                 sender.Write(fmt.Sprintf(
                     "New server unhealthy: %v. Rolling back.", err))
                 o.killAndRemove(ctx, newID)
-                undrainFn()
+                o.undrainFn()
                 sender.Write("Rolled back. Old server resumed.")
                 return fmt.Errorf("watchdog: new server failed: %w", err)
             }
@@ -429,7 +433,7 @@ func (o *Orchestrator) Watchdog(
 The old server's HTTP listeners remain alive during drain — only the
 health endpoints return 503, causing the proxy to stop routing traffic.
 The watchdog goroutine runs in the background context. If the watchdog
-triggers a rollback, `undrainFn()` clears the draining flag so health
+triggers a rollback, `o.undrainFn()` clears the draining flag so health
 endpoints return 200 and the proxy resumes routing.
 
 ### Step 4: Rollback
@@ -441,17 +445,23 @@ triggers it when the new server is unhealthy.
 // Rollback restores the previous version using backup metadata.
 //
 // 1. Read latest backup metadata
-// 2. Pull old image
-// 3. Start old container (passive mode)
+// 2. Check for irreversible migrations
+// 3. Pull old image
 // 4. Run down migrations to the recorded version
-// 5. Poll /readyz on old container
-// 6. Drain current server
-// 7. Activate old container
+// 5. Start old container (passive mode)
+// 6. Poll /readyz on old container
+// 7. Drain current server
+// 8. Activate old container
+//
+// Steps 1–3 are side-effect-free. Step 4 (down-migration) is the
+// point of no return: if any subsequent step fails, the running
+// server's code no longer matches the database schema. Rather than
+// serve broken requests, the server shuts itself down and logs the
+// backup path for manual recovery.
 func (o *Orchestrator) Rollback(
     ctx context.Context,
     sender task.Sender,
-    drainFn func(),
-    undrainFn func(),
+    shutdownFn func(),
 ) error {
     // 1. Find backup metadata.
     dbPath := o.cfg.Database.Path
@@ -469,7 +479,8 @@ func (o *Orchestrator) Rollback(
     sender.Write(fmt.Sprintf("Rolling back to image %s (migration %d)",
         meta.ImageTag, meta.MigrationVersion))
 
-    // 2. Check for irreversible migrations.
+    // 2. Check for irreversible migrations (fail fast before any
+    //    side effects).
     currentVer, _, _ := o.db.MigrationVersion()
     if currentVer != meta.MigrationVersion {
         if err := o.db.CheckDownMigrationSafety(
@@ -487,7 +498,7 @@ func (o *Orchestrator) Rollback(
         return fmt.Errorf("pull old image: %w", err)
     }
 
-    // 4. Run down migrations.
+    // 4. Run down migrations — point of no return.
     if currentVer != meta.MigrationVersion {
         sender.Write(fmt.Sprintf(
             "Running down migrations: %d → %d ...",
@@ -498,24 +509,50 @@ func (o *Orchestrator) Rollback(
                 err, meta.BackupPath)
         }
     }
+    migrated := currentVer != meta.MigrationVersion
 
-    // 5-7. Same clone → wait → drain → activate flow as Update.
+    // fatal is called when a step after down-migration fails.
+    // The running server's code no longer matches the schema —
+    // shut down rather than serve broken requests.
+    fatal := func(msg string) error {
+        sender.Write("FATAL: " + msg)
+        sender.Write(fmt.Sprintf(
+            "Database is at version %d but server expects %d. "+
+                "Restore from backup: %s",
+            meta.MigrationVersion, currentVer, meta.BackupPath))
+        shutdownFn()
+        return fmt.Errorf("rollback failed after migration: %s", msg)
+    }
+
+    // 5-6. Start clone and wait for it to become healthy.
     newID, err := o.startClone(ctx, oldImage)
     if err != nil {
+        if migrated {
+            return fatal(fmt.Sprintf("start old container: %v", err))
+        }
         return fmt.Errorf("start old container: %w", err)
     }
 
     newAddr, err := o.waitReady(ctx, newID)
     if err != nil {
         o.killAndRemove(ctx, newID)
+        if migrated {
+            return fatal(fmt.Sprintf(
+                "old container never became ready: %v", err))
+        }
         return fmt.Errorf("old container never became ready: %w", err)
     }
 
-    drainFn()
+    // 7. Drain current server.
+    o.drainFn()
 
+    // 8. Activate old container.
     if err := o.activate(ctx, newAddr); err != nil {
         o.killAndRemove(ctx, newID)
-        undrainFn()
+        // Schema is wrong — cannot undrain and resume.
+        if migrated {
+            return fatal(fmt.Sprintf("activate old container: %v", err))
+        }
         return fmt.Errorf("activate old container: %w", err)
     }
 
@@ -586,69 +623,100 @@ spawn the orchestrator in a goroutine, and return the task ID. The
 CLI polls via the existing `GET /api/v1/tasks/{id}` endpoint for
 progress, same as bundle deploys.
 
-**Concurrency guard:** only one update or rollback can run at a time.
-An `atomic.Bool` on the orchestrator gates entry — concurrent
-requests return `409 Conflict`.
+**Concurrency guard and state tracking:** the orchestrator tracks its
+current phase as an `atomic.Value` holding one of `"idle"`,
+`"updating"`, `"watching"`, or `"rolling_back"`. Only one update or
+rollback can run at a time — the handlers CAS from `"idle"` to
+`"updating"`/`"rolling_back"` and return `409 Conflict` if the
+transition fails. The status endpoint reads this value directly.
 
 #### Route registration
 
-In `internal/api/router.go`, add to the management router (admin-only
-group):
+In `internal/api/router.go`, extract an `/admin` sub-route inside the
+existing authenticated `/api/v1` group (which already applies
+`APIAuth`). The activate endpoint moves here from its current
+location; the new handlers join it. All admin handlers are registered
+before the `limitBody` middleware (same as activate today):
 
 ```go
-r.Route("/api/v1/admin", func(r chi.Router) {
-    r.Post("/update", handleAdminUpdate(srv, orch))
-    r.Post("/rollback", handleAdminRollback(srv, orch))
-    r.Get("/update/status", handleAdminUpdateStatus(srv))
-    // POST /api/v1/admin/activate already exists (phase 3-4)
+r.Route("/api/v1", func(r chi.Router) {
+    r.Use(APIAuth(srv))
+    // ...existing middleware...
+
+    // Admin endpoints — before limitBody.
+    r.Route("/admin", func(r chi.Router) {
+        r.Post("/activate", activateHandler(srv, startBG))
+        r.Post("/update", handleAdminUpdate(srv, orch))
+        r.Post("/rollback", handleAdminRollback(srv, orch))
+        r.Get("/update/status", handleAdminUpdateStatus(orch))
+    })
+
+    // ...rest of routes with limitBody...
 })
 ```
+
+`NewRouter` gains an `orch *orchestrator.Orchestrator` parameter
+(nil-safe — the handlers return 501 when nil).
 
 ### Step 6: Orchestrator wiring in main.go
 
 In `cmd/blockyard/main.go`, after the Docker backend and server are
-constructed:
+constructed. The construction order is driven by a dependency cycle:
+the orchestrator needs drain closures → the closures reference the
+drainer → the drainer needs the HTTP server → the HTTP server needs
+the router → the router needs the orchestrator.
+
+The solution is **late-binding closures**: define closures that
+capture a `drainer` pointer variable *before* it's assigned. The
+closures are only invoked at request time, by which point the
+drainer exists:
 
 ```go
-// Set up update orchestrator (requires container mode).
+// 1. Late-binding drain closures — drainer is nil here, assigned below.
+var drainer *drain.Drainer
+
+drainFn := func() { drainer.Drain() }
+undrainFn := func() { drainer.Undrain() }
+
+// 2. Exit signal — the scheduled updater (a bgWg goroutine) cannot
+//    call Finish directly (deadlock), so both the API handler
+//    goroutine and RunScheduled use this channel to wake main.
+doneCh := make(chan struct{}, 1)
+exitFn := func() {
+    select {
+    case doneCh <- struct{}{}:
+    default:
+    }
+}
+
+// 3. Orchestrator (nil in native mode / process backend → 501 from API).
 var orch *orchestrator.Orchestrator
 if be, ok := srv.Backend.(*docker.DockerBackend); ok && be.ServerID() != "" {
     orch = orchestrator.New(
-        be.Client(),
-        be.ServerID(),
-        srv.DB,
-        cfg,
-        &update.DefaultChecker{},
-        slog.Default(),
+        be.Client(), be.ServerID(), srv.DB, cfg, srv.Version,
+        srv.Tasks, &orchestrator.DefaultChecker{}, slog.Default(),
+        drainFn, undrainFn, exitFn,
     )
 }
-```
 
-The orchestrator is `nil` when running in native mode (no Docker
-socket) or with the process backend. The API endpoints check for
-nil and return `501 Not Implemented` — these deployments use the
-basic restart path (`docker compose pull && up -d`).
+// 4. Router and HTTP server.
+handler := api.NewRouter(srv, startBG, orch)
+httpServer := &http.Server{Addr: cfg.Server.Bind, Handler: handler, ...}
 
-The drain and undrain functions are closures that reference the
-HTTP servers and background context:
-
-```go
-drainFn := func() {
-    drainer.Drain()
-}
-undrainFn := func() {
-    drainer.Undrain()
+// 5. Now assign the drainer — closures become safe to call.
+drainer = &drain.Drainer{
+    Srv:        srv,
+    MainServer: httpServer,
+    // ...
 }
 ```
-
-Where `drainer` is the `drain.Drainer` from phase 3-4.
 
 After a successful update, the old server runs the watchdog then
-calls `Finish()` to cleanly tear down:
+signals the main goroutine to tear down cleanly:
 
 ```go
 // In the update handler goroutine:
-ur, err := orch.Update(bgCtx, channel, sender, drainFn, undrainFn)
+ur, err := orch.Update(bgCtx, channel, sender)
 if err != nil {
     sender.Write(err.Error())
     sender.Complete(task.Failed)
@@ -664,16 +732,35 @@ watchPeriod := cfg.Update.WatchPeriod.Duration
 if watchPeriod == 0 {
     watchPeriod = 5 * time.Minute
 }
-if err := orch.Watchdog(bgCtx, ur.ContainerID, ur.Addr, watchPeriod, undrainFn, sender); err != nil {
+if err := orch.Watchdog(bgCtx, ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
     sender.Write(err.Error())
     sender.Complete(task.Failed)
     return // rollback happened, server is still running
 }
 
-// Watchdog passed — clean exit (workers survive via Redis).
+// Watchdog passed — signal the main goroutine to Finish + exit.
 sender.Write("Update successful. Shutting down old server.")
 sender.Complete(task.Completed)
-drainer.Finish(cfg.Server.DrainTimeout.Duration)
+exitFn() // wakes main select, which calls drainer.Finish()
+```
+
+The main goroutine's signal wait becomes a `select` over both signals
+and the update-complete channel:
+
+```go
+select {
+case sig := <-sigCh:
+    forceExitOnSecondSignal()
+    switch sig {
+    case syscall.SIGUSR1:
+        drainer.Drain()
+        drainer.Finish(cfg.Server.DrainTimeout.Duration)
+    default:
+        drainer.Shutdown(cfg.Server.ShutdownTimeout.Duration)
+    }
+case <-doneCh:
+    drainer.Finish(cfg.Server.DrainTimeout.Duration)
+}
 ```
 
 ### Step 7: `by admin` CLI subcommand group
@@ -829,18 +916,19 @@ type updateStatus struct {
 
 ### Step 8: Scheduled auto-updates
 
-In `cmd/blockyard/main.go`, alongside the other background goroutines:
+In `cmd/blockyard/main.go`, after the drainer is created (not inside
+`startBG` — the scheduled updater needs the drainer, which is created
+after the HTTP server). Gated by `!passive` so that a freshly
+deployed replacement server does not immediately try to update itself:
 
 ```go
-if cfg.Update != nil && cfg.Update.Schedule != "" {
-    finishFn := func() {
-        drainer.Finish(cfg.Server.DrainTimeout.Duration)
-    }
+// doneCh and exitFn are defined above (Step 6).
+
+if !passive && orch != nil && cfg.Update != nil && cfg.Update.Schedule != "" {
     bgWg.Add(1)
     go func() {
         defer bgWg.Done()
-        orch.RunScheduled(bgCtx, cfg.Update.Schedule, cfg.Update.Channel,
-            drainFn, undrainFn, finishFn)
+        orch.RunScheduled(bgCtx, cfg.Update.Schedule, cfg.Update.Channel)
     }()
 }
 ```
@@ -852,15 +940,13 @@ In `internal/orchestrator/scheduled.go`:
 // When an update is available, it triggers the full update + watchdog
 // flow. Blocks until ctx is cancelled.
 //
-// The drain/undrain/finish functions are closures from main.go —
-// same ones passed to the API handlers.
+// RunScheduled checks for updates on the configured cron schedule.
+// Uses o.exitFn to signal the main goroutine — RunScheduled is a
+// bgWg goroutine and cannot call Finish directly (deadlock).
 func (o *Orchestrator) RunScheduled(
     ctx context.Context,
     schedule string,
     channel string,
-    drainFn func(),
-    undrainFn func(),
-    finishFn func(),
 ) {
     if channel == "" {
         channel = "stable"
@@ -902,7 +988,7 @@ func (o *Orchestrator) RunScheduled(
             "latest", result.LatestVersion)
 
         sender := o.tasks.Create(uuid.New().String(), "scheduled-update")
-        ur, err := o.Update(ctx, channel, sender, drainFn, undrainFn)
+        ur, err := o.Update(ctx, channel, sender)
         if err != nil {
             slog.Error("update scheduler: update failed", "error", err)
             sender.Complete(task.Failed)
@@ -914,16 +1000,17 @@ func (o *Orchestrator) RunScheduled(
         }
 
         // Enter watchdog — same as CLI-triggered flow.
-        // On success: Finish() + exit. On failure: rollback + continue loop.
+        // On success: signal main to exit. On failure: rollback + continue loop.
         if err := o.Watchdog(ctx, ur.ContainerID, ur.Addr,
-            cfg.Update.WatchPeriod.Duration, undrainFn, sender); err != nil {
+            o.cfg.Update.WatchPeriod.Duration, sender); err != nil {
             slog.Error("update scheduler: watchdog rollback", "error", err)
             sender.Complete(task.Failed)
             continue
         }
 
         sender.Complete(task.Completed)
-        finishFn()
+        o.exitFn()
+        return // let bgWg.Done() fire before main calls Finish
     }
 }
 ```
@@ -1008,6 +1095,7 @@ type mockDocker struct {
 | `TestWatchdogHealthy` | Exits after watch period |
 | `TestWatchdogUnhealthy` | Kills new container, calls undrain |
 | `TestRollbackHappyPath` | Read meta, pull old, down migrations, clone, drain, activate |
+| `TestRollbackCloneFailsAfterMigration` | Clone fails after down-migration → shutdownFn called, not undrain |
 | `TestRollbackNoBackup` | Returns ErrNoBackup |
 | `TestRollbackIrreversible` | Aborts with manual restore instructions |
 | `TestCloneConfig` | Cloned config has new image, BLOCKYARD_PASSIVE=1, same volumes/networks/labels |
@@ -1047,7 +1135,7 @@ func TestBackupMetaRoundTrip(t *testing.T)  // write → read → compare
 | `internal/config/config.go` | **update** | Add `UpdateConfig` struct and `Update *UpdateConfig` field |
 | `internal/db/backup.go` | **update** | Add `BackupMeta`, `BackupWithMeta()`, `LatestBackupMeta()`, `ErrNoBackup` |
 | `internal/db/backup_test.go` | **update** | Add metadata round-trip tests |
-| `internal/db/migrate.go` | **update** | Add `MigrationVersion()`, `CheckDownMigrationSafety()`, and `MigrateDown()` |
+| `internal/db/migrate.go` | **create** | `MigrationVersion()`, `CheckDownMigrationSafety()`, and `MigrateDown()` |
 | `internal/orchestrator/orchestrator.go` | **create** | `Orchestrator` struct, `dockerClient` interface, `Update()` method |
 | `internal/orchestrator/rollback.go` | **create** | `Rollback()` method |
 | `internal/orchestrator/watchdog.go` | **create** | `Watchdog()` method |
@@ -1057,7 +1145,8 @@ func TestBackupMetaRoundTrip(t *testing.T)  // write → read → compare
 | `internal/orchestrator/orchestrator_test.go` | **create** | Mock Docker client, full orchestration test suite |
 | `internal/api/admin.go` | **create** | `handleAdminUpdate`, `handleAdminRollback`, `handleAdminUpdateStatus` |
 | `internal/api/admin_test.go` | **create** | Admin endpoint tests |
-| `internal/api/router.go` | **update** | Register `/api/v1/admin/` routes |
+| `internal/api/activate.go` | **update** | Move into `/api/v1/admin` route group |
+| `internal/api/router.go` | **update** | `NewRouter` gains `orch` param; extract `/admin` sub-route inside `/api/v1` |
 | `cmd/blockyard/main.go` | **update** | Wire orchestrator, scheduled updates, drain/undrain closures |
 | `cmd/by/admin.go` | **create** | `adminCmd()`, `adminUpdateCmd()`, `adminRollbackCmd()`, `adminStatusCmd()` |
 | `cmd/by/main.go` | **update** | Register `adminCmd()` |
@@ -1099,27 +1188,37 @@ func TestBackupMetaRoundTrip(t *testing.T)  // write → read → compare
    This is the right safety boundary — automated rollback should only
    handle the common case (expand-only migrations with clean reversal).
 
-6. **`501 Not Implemented` in native mode.** When the server runs
+6. **Shutdown on post-migration failure.** The down-migration is the
+   point of no return during rollback. If any subsequent step fails
+   (clone, readyz, activate), the running server's code no longer
+   matches the database schema. Rather than serve broken requests,
+   `Rollback` calls `shutdownFn` and logs the backup path for manual
+   recovery. This trades availability for correctness — a clean crash
+   with clear diagnostics is better than silent data corruption.
+
+7. **`501 Not Implemented` in native mode.** When the server runs
    without a Docker socket (native mode, process backend), the admin
    update/rollback endpoints return 501. These deployments use the
    basic restart path. The alternative — embedding update logic for
    systemd services — is out of scope.
 
-7. **Existing task polling for progress.** The update and rollback
+8. **Existing task polling for progress.** The update and rollback
    handlers use the existing `task.Store` and `task.Sender` to report
    progress. The CLI polls `GET /api/v1/tasks/{id}` — same pattern
    as bundle deploys. No new streaming protocol needed.
 
-8. **Scheduled updates gated by passive mode.** A newly started
+9. **Scheduled updates gated by passive mode.** A newly started
    replacement server (passive mode) does not run the update
    scheduler. This prevents the new server from immediately trying
    to update itself before the old server has exited and the watchdog
    has passed.
 
-9. **Concurrency guard via `atomic.Bool`.** Only one update or
-   rollback can run at a time. A second request returns `409
-   Conflict`. This is simpler than a queue and matches the expected
-   usage (infrequent admin operations, not high-throughput).
+10. **State tracking via `atomic.Value`.** The orchestrator's phase
+   (`idle`/`updating`/`watching`/`rolling_back`) doubles as a
+   concurrency guard — only one operation runs at a time, gated by a
+   CAS from `idle`. A second request returns `409 Conflict`. Simpler
+   than a queue and matches the expected usage (infrequent admin
+   operations, not high-throughput).
 
 ## Deferred
 

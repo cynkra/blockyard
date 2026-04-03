@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -18,8 +17,7 @@ import (
 func activateHandler(srv *server.Server, startBG func()) http.HandlerFunc {
 	var once sync.Once
 	return func(w http.ResponseWriter, r *http.Request) {
-		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
+		if !activationAuth(srv, r) {
 			forbidden(w, "admin only")
 			return
 		}

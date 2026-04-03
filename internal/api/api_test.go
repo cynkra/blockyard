@@ -59,7 +59,7 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	// Track background restore goroutines so cleanup waits for them.
 	var wg sync.WaitGroup
 	srv.RestoreWG = &wg
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	// Wait for restore goroutines before DB/TempDir cleanup (LIFO order).
@@ -605,7 +605,7 @@ func TestEnableAppSucceedsRegardlessOfWorkerLimit(t *testing.T) {
 	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts2 := httptest.NewServer(handler)
 	t.Cleanup(ts2.Close)
 
@@ -1074,7 +1074,7 @@ func TestUploadBundleOversized(t *testing.T) {
 	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -1199,7 +1199,7 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 	go auditLog.Run(ctx, auditPath)
 	t.Cleanup(cancel)
 
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 	t.Cleanup(wg.Wait)
@@ -1291,7 +1291,7 @@ func TestTracingMiddlewareEnabled(t *testing.T) {
 	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 
 	// Healthz should work even with tracing middleware enabled.
 	req := httptest.NewRequest("GET", "/healthz", nil)
@@ -1584,7 +1584,7 @@ func testServerWithBackend(t *testing.T, be backend.Backend) (*server.Server, *h
 	seedTestAdmin(t, database)
 
 	srv := server.NewServer(cfg, be, database)
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -2200,7 +2200,7 @@ func testServerWithSoftDelete(t *testing.T) (*server.Server, *httptest.Server) {
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -2485,7 +2485,7 @@ func TestUpdateAppCPULimitExceedsCeiling(t *testing.T) {
 	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -2533,7 +2533,7 @@ func TestUpdateAppCPULimitCeilingDisabled(t *testing.T) {
 	seedTestAdmin(t, database)
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -2742,7 +2742,7 @@ func testServerWithSoftDeleteAndAudit(t *testing.T) (*server.Server, *httptest.S
 	go auditLog.Run(ctx, auditPath)
 	t.Cleanup(cancel)
 
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil)
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

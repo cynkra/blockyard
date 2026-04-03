@@ -59,6 +59,7 @@ func main() {
 		logsCmd(),
 		usersCmd(),
 		selfUpdateCmd(),
+		adminCmd(),
 	)
 
 	// Aliases: create full copies so flags work correctly.
