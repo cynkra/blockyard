@@ -42,7 +42,33 @@
         {{else}}<a href="?{{range .ActiveTags}}tag={{.}}&{{end}}tag_mode=and{{if .Search}}&search={{.Search}}{{end}}">AND</a> | <span>OR</span>{{end}}
     </span>
     {{end}}
+    {{if eq $.UserRole "admin"}}
+    <button class="btn btn-ghost btn-xs ml-auto" onclick="document.getElementById('tag-admin').classList.toggle('hidden')" title="Manage tags">
+        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+    </button>
+    {{end}}
 </div>
+{{if eq .UserRole "admin"}}
+<div id="tag-admin" class="tag-admin hidden">
+    <div class="flex gap-2 items-center mb-3">
+        <input type="text" id="new-global-tag" placeholder="New tag name..."
+               class="input input-sm text-sm flex-1 max-w-64">
+        <button class="btn btn-sm btn-outline" onclick="createGlobalTag()">Create tag</button>
+    </div>
+    <div class="flex flex-wrap gap-1.5">
+        {{range .AllTags}}
+        <span class="tag-chip">
+            {{.Name}}
+            <span class="tag-count text-xs ml-1">{{.AppCount}}</span>
+            {{if eq .AppCount 0}}
+            <button class="tag-remove" onclick="deleteGlobalTag('{{.ID}}','{{.Name}}')"
+                    title="Delete tag">&#10005;</button>
+            {{end}}
+        </span>
+        {{end}}
+    </div>
+</div>
+{{end}}
 {{end}}
 
 {{if .Apps}}
@@ -56,20 +82,26 @@
 </div>
 <section class="app-grid">
     {{range .Apps}}
-    <a href="/app/{{.Name}}/" class="app-card">
-        <div class="card-body p-4">
+    <a href="/app/{{.Name}}/" class="app-card" data-app-name="{{.Name}}">
+        <div class="card-body p-4 flex flex-col gap-0">
         {{if .CanManage}}
         <button class="app-card-gear"
                 hx-get="/ui/apps/{{.Name}}/sidebar"
                 hx-target="#sidebar"
                 hx-swap="innerHTML"
                 aria-label="Manage {{.Name}}"
-                onclick="event.stopPropagation(); event.preventDefault()">&#9881;</button>
+                onclick="event.stopPropagation(); event.preventDefault()">
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
         {{end}}
-        <span class="app-name">{{.Name}}</span>
+        <div class="app-card-header">
+            <div class="tooltip tooltip-right" data-tip="{{.Status}}">
+                <span class="status status-{{.Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
+            </div>
+            <span class="app-name">{{.Name}}</span>
+        </div>
         {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
         {{if .Description}}<span class="app-desc">{{deref .Description}}</span>{{end}}
-        <span class="app-status app-status--{{.Status}}">{{.Status}}</span>
         {{if .Tags}}
         <span class="app-tags">
             {{range .Tags}}<span class="tag">{{.}}</span>{{end}}
@@ -169,6 +201,43 @@ document.getElementById('sidebar-toggle').addEventListener('change', function() 
     if (!this.checked) {
         if (typeof stopLogs === 'function') stopLogs();
         document.getElementById('sidebar').innerHTML = '';
+    }
+});
+
+/* Global tag management (admin only) */
+function createGlobalTag() {
+    var input = document.getElementById('new-global-tag');
+    var name = input.value.trim();
+    if (!name) return;
+    fetch('/api/v1/tags', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name})
+    }).then(function(r) {
+        if (r.ok) { showToast('Tag created', 'success'); location.reload(); }
+        else { r.json().then(function(d) { showToast(d.error || 'Failed', 'error'); }); }
+    });
+}
+function deleteGlobalTag(id, name) {
+    if (!confirm('Delete tag "' + name + '"?')) return;
+    fetch('/api/v1/tags/' + id, {method: 'DELETE'}).then(function(r) {
+        if (r.ok) { showToast('Tag deleted', 'success'); location.reload(); }
+        else { showToast('Failed to delete tag', 'error'); }
+    });
+}
+
+/* Live-update: re-fetch app card when settings change in sidebar */
+document.body.addEventListener('appSettingsChanged', function() {
+    /* Find which app is currently open in the sidebar */
+    var sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    var header = sidebar.querySelector('h2');
+    if (!header) return;
+    var appName = header.textContent.trim();
+    var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
+    if (card) {
+        /* Reload the page to reflect changes (lightweight — HTMX partial would be better but requires a card fragment endpoint) */
+        location.reload();
     }
 });
 </script>

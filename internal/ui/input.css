@@ -105,7 +105,12 @@
     transition: margin-left 0.2s ease;
   }
 
-  /* ── Sidebar tabs ── */
+  /* ── Sidebar header + tabs ── */
+  .sidebar-header {
+    @apply flex items-center gap-2 px-4 py-3;
+    border-bottom: 1px solid oklch(var(--bc) / 0.1);
+  }
+  .sidebar-subtitle { @apply text-sm text-base-content/50 m-0 px-4 pt-1; }
   .sidebar-tabs {
     @apply tabs tabs-border overflow-x-auto;
     padding: 0 1.25rem;
@@ -143,19 +148,37 @@
     transition: border-color 0.15s, box-shadow 0.15s;
   }
   .app-card:hover { @apply border-primary shadow-md; }
-  .app-name { @apply font-semibold; }
-  .app-title { @apply text-sm text-base-content/60; }
-  .app-desc { @apply text-sm text-base-content/50 mt-1; }
-  .app-status { @apply text-xs mt-auto pt-2; }
-  .app-status--running { @apply text-success; }
-  .app-status--stopped { @apply text-base-content/50; }
-  .app-tags { @apply flex gap-1 flex-wrap mt-1; }
+  .app-card .card-body { min-height: 7rem; }
+  .app-card-header { @apply flex items-center gap-2; }
+  .app-name { @apply font-semibold text-base; }
+  .app-title { @apply text-sm text-base-content/60 mt-0.5 line-clamp-1; }
+  .app-desc { @apply text-xs text-base-content/40 mt-0.5 line-clamp-2; }
+  .app-tags { @apply flex gap-1.5 flex-wrap mt-auto pt-3; }
   .tag { @apply badge badge-sm badge-ghost; }
+
+  /* Status dot colors */
+  .status { @apply inline-block w-2.5 h-2.5 rounded-full shrink-0; }
+  .status-running, .status-active { @apply bg-success; }
+  .status-stopping, .status-draining { @apply bg-warning; }
+  .status-error, .status-failed { @apply bg-error; }
+  .status-stopped, .status-disabled, .status-not_set { @apply bg-base-content/25; }
+  .status-building { @apply bg-info; }
+  .status-pulse { animation: status-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite; }
+  @keyframes status-ping {
+    0% { box-shadow: 0 0 0 0 currentColor; }
+    70% { box-shadow: 0 0 0 5px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .status-running.status-pulse, .status-active.status-pulse { color: oklch(var(--su)); }
+  .status-stopping.status-pulse { color: oklch(var(--wa)); }
+
+  /* Gear button */
   .app-card-gear {
-    @apply absolute top-2 right-2 bg-transparent border-none text-lg cursor-pointer p-0.5 leading-none rounded-sm text-base-content/40;
+    @apply absolute top-2 right-2 btn btn-ghost btn-sm btn-square text-base-content/40;
     transition: color 0.15s, background 0.15s;
   }
   .app-card-gear:hover { @apply text-base-content bg-base-200; }
+  .app-card-gear svg { @apply w-4 h-4; }
 
   /* ── Tag browser ── */
   .tag-browser { @apply flex flex-wrap gap-1.5 items-center mb-4; }
@@ -166,6 +189,7 @@
   .tag-browser-chip:hover { @apply border-primary; }
   .tag-browser-chip.active { @apply badge-primary; }
   .tag-browser-chip .tag-count { @apply text-[0.7rem] text-base-content/70 ml-1; }
+  .tag-admin { @apply mb-4 p-4 rounded-lg bg-base-200/50 border border-base-300; }
   .tag-mode-toggle { @apply text-xs text-base-content/60; }
   .tag-mode-toggle a { @apply text-primary no-underline font-medium; }
 
@@ -186,11 +210,10 @@
   }
 
   /* ── Overview grid ── */
-  .overview-grid { @apply grid grid-cols-2 gap-4; }
-  .overview-card { @apply card card-border bg-base-200 p-4; }
-  .overview-card h3 { @apply m-0 mb-2 text-sm text-base-content/60; }
-  .overview-stat { @apply m-0 text-xl font-semibold; }
-  .overview-meta { @apply mt-1 text-xs text-base-content/60; }
+  .overview-grid { @apply grid grid-cols-2 gap-3; }
+  .overview-grid .stats { @apply rounded-lg; }
+  .overview-grid .stat { @apply p-4; }
+  .overview-grid .stat-value { @apply text-lg; }
 
   /* ── Settings field editing ── */
   .field-group { @apply mb-5; }
@@ -200,15 +223,18 @@
   .field-row input { @apply input input-sm flex-1 text-sm; }
   .field-row select { @apply select select-sm flex-1 text-sm; }
   .field-row textarea { @apply textarea flex-1 text-sm; min-height: 4rem; }
-  .field-save { @apply btn btn-ghost btn-sm shrink-0 inline-flex items-center gap-1; }
+  .field-save { @apply btn btn-outline btn-sm shrink-0 inline-flex items-center gap-1; }
   .field-save svg { @apply align-middle; }
   .field-feedback { @apply text-xs shrink-0; }
   .field-error { @apply text-error text-xs mt-1; }
   .field-invalid { @apply !border-error; }
 
-  /* ── Settings view ── */
-  .settings-view h3 { @apply text-base mt-6 mb-3 pb-2 border-b border-base-300; }
-  .settings-view h3:first-child { @apply mt-0; }
+  /* ── Settings view (accordion) ── */
+  .settings-section { @apply rounded-lg mb-2; }
+  .settings-section .collapse-title { @apply text-sm min-h-0 py-3 px-4; }
+  .settings-section .collapse-content { @apply px-4 pb-4; }
+  .settings-danger { @apply bg-error/5 border border-error/20; }
+  .settings-danger .collapse-title { @apply text-error; }
 
 
   /* ── ACL ── */
@@ -265,21 +291,8 @@
   .profile-field p { @apply m-0; }
 
 
-  /* ── Danger zone ── */
-  .danger-zone {
-    @apply mt-8 p-4 rounded-lg border border-error/30 bg-error/5;
-  }
-  .danger-zone-title {
-    @apply text-sm font-semibold text-error m-0 mb-4 flex items-center gap-2;
-  }
-  .danger-zone-title svg {
-    @apply w-4 h-4 shrink-0;
-    stroke: currentColor; fill: none; stroke-width: 2;
-    stroke-linecap: round; stroke-linejoin: round;
-  }
-
   /* ── App controls ── */
-  .app-controls { @apply flex items-center gap-3 mb-4; }
+  .app-controls { @apply mb-2; }
 
   /* ── Pagination ── */
   .pagination { @apply flex items-center justify-center gap-4 mt-6; }
@@ -302,8 +315,9 @@
   .log-controls { @apply flex items-center gap-2 mb-2; }
   .log-controls button { @apply btn btn-ghost btn-sm text-xs; }
   .log-worker-label { @apply text-sm font-medium; }
+  .deployment-row-active { @apply bg-primary/5; box-shadow: inset 3px 0 0 oklch(var(--p)); }
   .log-detail-row td { padding: 0 !important; }
-  .log-detail-row .log-output { @apply max-h-80 mx-3 my-2; }
+  .log-detail-row .log-output { @apply max-h-80 mx-4 my-3 rounded-lg; }
 
   /* ── Autocomplete ── */
   .autocomplete-wrap { @apply relative flex-1; }

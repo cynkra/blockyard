@@ -1,26 +1,37 @@
 <div class="overview-grid">
-    <div class="overview-card">
-        <h3>Status</h3>
-        <span class="status-badge status-{{.Status}}">{{.Status}}</span>
-        <p class="overview-meta">Last deployed <span class="time-ago" data-timestamp="{{.LastDeployed}}">{{.LastDeployed | timeAgo}}</span></p>
+    <div class="stats bg-base-200/50 shadow-sm">
+        <div class="stat">
+            <div class="stat-title">Status</div>
+            <div class="stat-value text-lg flex items-center gap-2">
+                <span class="status status-{{.Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
+                {{.Status}}
+            </div>
+            <div class="stat-desc">Last deployed <span class="time-ago" data-timestamp="{{.LastDeployed}}">{{.LastDeployed | timeAgo}}</span></div>
+        </div>
     </div>
-    <div class="overview-card">
-        <h3>Workers</h3>
-        <p class="overview-stat">{{.ActiveWorkers}} active</p>
-        <p class="overview-meta">{{.ActiveSessions}} sessions</p>
+    <div class="stats bg-base-200/50 shadow-sm">
+        <div class="stat">
+            <div class="stat-title">Workers</div>
+            <div class="stat-value text-lg">{{.ActiveWorkers}} active</div>
+            <div class="stat-desc">{{.ActiveSessions}} sessions</div>
+        </div>
     </div>
-    <div class="overview-card">
-        <h3>Activity</h3>
-        <p class="overview-stat">{{.TotalViews}} total views</p>
-        <p class="overview-meta">{{.RecentViews}} last 7 days</p>
+    <div class="stats bg-base-200/50 shadow-sm">
+        <div class="stat">
+            <div class="stat-title">Activity</div>
+            <div class="stat-value text-lg">{{.TotalViews}} views</div>
+            <div class="stat-desc">{{.RecentViews}} last 7 days</div>
+        </div>
     </div>
-    <div class="overview-card">
-        <h3>Bundle</h3>
-        {{if .ActiveBundle}}
-        <p class="overview-stat font-mono text-xs">{{.ActiveBundle.ID | truncate}}</p>
-        <span class="status-badge status-{{.ActiveBundle.Status}}">{{.ActiveBundle.Status}}</span>
-        {{else}}
-        <p class="overview-stat">None</p>
-        {{end}}
+    <div class="stats bg-base-200/50 shadow-sm">
+        <div class="stat">
+            <div class="stat-title">Bundle</div>
+            {{if .ActiveBundle}}
+            <div class="stat-value text-lg font-mono text-xs" title="{{.ActiveBundle.ID}}">{{.ActiveBundle.ID | truncate}}</div>
+            <div class="stat-desc"><span class="status-badge status-{{.ActiveBundle.Status}}">{{.ActiveBundle.Status}}</span></div>
+            {{else}}
+            <div class="stat-value text-lg text-base-content/40">None</div>
+            {{end}}
+        </div>
     </div>
 </div>

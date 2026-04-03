@@ -21,6 +21,7 @@ import (
 
 type sidebarData struct {
 	App          *db.AppRow
+	Status       string
 	CanManageACL bool
 	OverviewHTML template.HTML
 }
@@ -234,6 +235,7 @@ func (ui *UI) sidebarHandler(srv *server.Server) http.HandlerFunc {
 
 		data := sidebarData{
 			App:          app,
+			Status:       overviewData.Status,
 			CanManageACL: relation.CanManageACL(),
 			OverviewHTML: template.HTML(buf.String()), //nolint:gosec // G203: markdown rendered from server-controlled DESCRIPTION file
 		}

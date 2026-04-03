@@ -3,46 +3,43 @@
      hx-get="/ui/apps/{{.App.Name}}/tab/bundles"
      hx-target="#tab-content">
     {{if .Bundles}}
-    <table class="table table-sm w-full">
-        <thead>
-            <tr>
-                <th>Bundle</th>
-                <th>Created</th>
-                <th>Status</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody>
-        {{range .Bundles}}
-        <tr>
-            <td class="font-mono text-xs">
-                <span title="{{.ID}}">{{.ID | truncate}}</span>
-                {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}
-                <span class="status-badge status-ready">active</span>
-                {{end}}
-            </td>
-            <td><span class="time-ago" data-timestamp="{{.UploadedAt}}">{{.UploadedAt | timeAgo}}</span></td>
-            <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
-            <td>
-                {{if and (eq .Status "ready") (or (not $.ActiveBundle) (ne .ID $.ActiveBundle.ID))}}
-                <button class="btn btn-sm"
-                        hx-post="/api/v1/apps/{{$.App.ID}}/rollback"
-                        hx-vals='{"bundle_id": "{{.ID}}"}'
-                        hx-confirm="Roll back to bundle {{.ID | truncate}}?"
-                        hx-swap="none">Rollback</button>
-                {{end}}
-            </td>
-        </tr>
-        {{end}}
-        </tbody>
-    </table>
+    <ul class="timeline timeline-vertical timeline-compact">
+    {{range .Bundles}}
+        <li>
+            <hr class="{{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}bg-primary{{end}}" />
+            <div class="timeline-middle">
+                <span class="status {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}status-running status-pulse{{else}}status-{{.Status}}{{end}}"></span>
+            </div>
+            <div class="timeline-end timeline-box {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}border-primary/30 bg-primary/5{{end}}">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-mono text-xs" title="{{.ID}}">{{.ID | truncate}}</span>
+                    {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}
+                    <span class="badge badge-sm badge-primary">active</span>
+                    {{end}}
+                    <span class="status-badge status-{{.Status}}">{{.Status}}</span>
+                </div>
+                <div class="flex items-center justify-between mt-1">
+                    <span class="text-xs text-base-content/50 time-ago" data-timestamp="{{.UploadedAt}}">{{.UploadedAt | timeAgo}}</span>
+                    {{if and (eq .Status "ready") (or (not $.ActiveBundle) (ne .ID $.ActiveBundle.ID))}}
+                    <button class="btn btn-xs btn-outline"
+                            hx-post="/api/v1/apps/{{$.App.ID}}/rollback"
+                            hx-vals='{"bundle_id": "{{.ID}}"}'
+                            hx-confirm="Roll back to bundle {{.ID | truncate}}?"
+                            hx-swap="none">Rollback</button>
+                    {{end}}
+                </div>
+            </div>
+            <hr class="{{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}bg-primary{{end}}" />
+        </li>
+    {{end}}
+    </ul>
     {{else}}
     <p class="empty-state">No bundles.</p>
     {{end}}
 
     {{if and .ActiveBundle (not .ActiveBundle.Pinned)}}
     <div class="refresh-section">
-        <button class="btn"
+        <button class="btn btn-sm"
                 hx-post="/api/v1/apps/{{.App.ID}}/refresh"
                 hx-swap="none">Refresh dependencies</button>
     </div>

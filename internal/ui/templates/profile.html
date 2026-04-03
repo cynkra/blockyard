@@ -7,18 +7,14 @@
     <h1>Profile</h1>
 </div>
 <div class="profile-section">
-    <div class="card card-border p-5">
-        <div class="flex items-center justify-between mb-4">
-            <div>
-                <p class="text-lg font-semibold m-0">{{.User.DisplayName}}</p>
-                <p class="text-sm text-base-content/60 m-0">{{.User.Email}}</p>
-            </div>
-            <span class="badge badge-soft badge-info">{{.User.Role}}</span>
-        </div>
-        <form method="POST" action="/logout">
-            <button type="submit" class="btn btn-sm btn-outline">Sign out</button>
-        </form>
+    <div class="flex items-center gap-3 mb-1">
+        <p class="text-lg font-semibold m-0">{{.User.DisplayName}}</p>
+        <span class="badge badge-soft badge-info badge-sm">{{.User.Role}}</span>
     </div>
+    <p class="text-sm text-base-content/60 m-0 mb-4">{{.User.Email}}</p>
+    <form method="POST" action="/logout">
+        <button type="submit" class="btn btn-sm btn-outline">Sign out</button>
+    </form>
 </div>
 
 <div id="tokens" class="pat-section">
@@ -37,7 +33,7 @@
             <option value="365d">1 year</option>
             <option value="">No expiry</option>
         </select>
-        <button type="submit" class="btn">Create token</button>
+        <button type="submit" class="btn btn-sm">Create token</button>
     </form>
     <div id="pat-result"></div>
 

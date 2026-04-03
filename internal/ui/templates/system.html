@@ -4,16 +4,18 @@
 
 {{define "content"}}
 <div class="page-header">
-    <h1>System Checks</h1>
-    <button class="btn btn-sm"
-            hx-post="/ui/system/run"
-            hx-target="#check-results"
-            hx-swap="innerHTML"
-            hx-indicator="#run-spinner"
-            hx-disabled-elt="this">
-        <span id="run-spinner" class="htmx-indicator loading loading-spinner loading-xs"></span>
-        Run Checks
-    </button>
+    <div class="flex items-center justify-between">
+        <h1 class="!m-0">System Checks</h1>
+        <button class="btn btn-sm"
+                hx-post="/ui/system/run"
+                hx-target="#check-results"
+                hx-swap="innerHTML"
+                hx-indicator="#run-spinner"
+                hx-disabled-elt="this">
+            <span id="run-spinner" class="htmx-indicator loading loading-spinner loading-xs"></span>
+            Run Checks
+        </button>
+    </div>
 </div>
 
 <div id="check-results">

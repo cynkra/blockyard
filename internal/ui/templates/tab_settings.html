@@ -1,242 +1,317 @@
 <div class="settings-view">
-    <h3>Metadata</h3>
-    <div class="field-group">
-        <label for="title">Title</label>
-        <div class="field-row">
-            <input type="text" id="title" name="title" value="{{deref .App.Title}}"
-                   data-original="{{deref .App.Title}}"
-                   oninput="toggleSaveBtn(this)">
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='title']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
-        </div>
-    </div>
-    <div class="field-group">
-        <label for="description">Description</label>
-        <div class="field-row">
-            <textarea id="description" name="description"
-                      data-original="{{deref .App.Description}}"
-                      oninput="toggleSaveBtn(this)">{{deref .App.Description}}</textarea>
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='description']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
-        </div>
-    </div>
-
-    <div class="field-group"
-         hx-trigger="tagAdded from:body, tagRemoved from:body"
-         hx-get="/ui/apps/{{.App.Name}}/tab/settings"
-         hx-target="#tab-content">
-        <label>Tags</label>
-        <div class="tag-chips">
-            {{range .Tags}}
-            <span class="tag-chip">
-                {{.Name}}
-                <button class="tag-remove"
-                        hx-delete="/api/v1/apps/{{$.App.ID}}/tags/{{.ID}}"
-                        hx-swap="none"
-                        aria-label="Remove tag {{.Name}}">&#10005;</button>
-            </span>
-            {{end}}
-        </div>
-        <form class="tag-add-form flex gap-2 items-center"
-              hx-post="/ui/apps/{{.App.Name}}/tags"
-              hx-target="#tab-content"
-              hx-swap="innerHTML">
-            <div class="autocomplete-wrap flex-1">
-                <input type="text" name="name" placeholder="Add or create tag..."
-                       class="input input-sm text-sm w-full"
-                       autocomplete="off"
-                       oninput="filterTagSuggestions(this)"
-                       onfocus="this.nextElementSibling.classList.remove('hidden')"
-                       onblur="setTimeout(function(){document.querySelector('.tag-suggest')?.classList.add('hidden')},200)">
-                <div class="autocomplete-list tag-suggest hidden">
-                    {{range .AvailableTags}}
-                    <div class="autocomplete-item tag-option" data-name="{{.Name}}"
-                         onmousedown="selectTagOption(this)">{{.Name}}</div>
-                    {{end}}
-                    <div class="autocomplete-item tag-create hidden" onmousedown="selectTagOption(this)"></div>
+    <!-- Metadata -->
+    <div class="collapse collapse-arrow bg-base-200/50 settings-section">
+        <input type="radio" name="settings-accordion" checked="checked" />
+        <div class="collapse-title font-medium">Metadata</div>
+        <div class="collapse-content">
+            <div class="field-group">
+                <label for="title">Title</label>
+                <div class="field-row">
+                    <input type="text" id="title" name="title" value="{{deref .App.Title}}"
+                           data-original="{{deref .App.Title}}"
+                           oninput="toggleSaveBtn(this)">
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='title']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
                 </div>
             </div>
-            <button type="submit" class="btn btn-sm shrink-0">Add</button>
-        </form>
-        <script>
-        function filterTagSuggestions(input) {
-            var val = input.value.toLowerCase().trim();
-            var list = input.nextElementSibling;
-            var options = list.querySelectorAll('.tag-option');
-            var createEl = list.querySelector('.tag-create');
-            var anyMatch = false;
-            var exactMatch = false;
-            options.forEach(function(opt) {
-                var name = opt.dataset.name.toLowerCase();
-                if (val === '' || name.indexOf(val) !== -1) {
-                    opt.classList.remove('hidden');
-                    anyMatch = true;
-                    if (name === val) exactMatch = true;
-                } else {
-                    opt.classList.add('hidden');
+            <div class="field-group">
+                <label for="description">Description</label>
+                <div class="field-row">
+                    <textarea id="description" name="description"
+                              data-original="{{deref .App.Description}}"
+                              oninput="toggleSaveBtn(this)">{{deref .App.Description}}</textarea>
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='description']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                </div>
+            </div>
+
+            <div class="field-group"
+                 hx-trigger="tagAdded from:body, tagRemoved from:body"
+                 hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+                 hx-target="#tab-content">
+                <label>Tags</label>
+                <div class="tag-chips">
+                    {{range .Tags}}
+                    <span class="tag-chip">
+                        {{.Name}}
+                        <button class="tag-remove"
+                                hx-delete="/api/v1/apps/{{$.App.ID}}/tags/{{.ID}}"
+                                hx-swap="none"
+                                aria-label="Remove tag {{.Name}}">&#10005;</button>
+                    </span>
+                    {{end}}
+                </div>
+                <form class="tag-add-form flex gap-2 items-center"
+                      hx-post="/ui/apps/{{.App.Name}}/tags"
+                      hx-target="#tab-content"
+                      hx-swap="innerHTML">
+                    <div class="autocomplete-wrap flex-1">
+                        <input type="text" name="name" placeholder="Add or create tag..."
+                               class="input input-sm text-sm w-full"
+                               autocomplete="off"
+                               oninput="filterTagSuggestions(this)"
+                               onfocus="this.nextElementSibling.classList.remove('hidden')"
+                               onblur="setTimeout(function(){document.querySelector('.tag-suggest')?.classList.add('hidden')},200)">
+                        <div class="autocomplete-list tag-suggest hidden">
+                            {{range .AvailableTags}}
+                            <div class="autocomplete-item tag-option" data-name="{{.Name}}"
+                                 onmousedown="selectTagOption(this)">{{.Name}}</div>
+                            {{end}}
+                            <div class="autocomplete-item tag-create hidden" onmousedown="selectTagOption(this)"></div>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-outline shrink-0">Add</button>
+                </form>
+                <script>
+                function filterTagSuggestions(input) {
+                    var val = input.value.toLowerCase().trim();
+                    var list = input.nextElementSibling;
+                    var options = list.querySelectorAll('.tag-option');
+                    var createEl = list.querySelector('.tag-create');
+                    var anyMatch = false;
+                    var exactMatch = false;
+                    options.forEach(function(opt) {
+                        var name = opt.dataset.name.toLowerCase();
+                        if (val === '' || name.indexOf(val) !== -1) {
+                            opt.classList.remove('hidden');
+                            anyMatch = true;
+                            if (name === val) exactMatch = true;
+                        } else {
+                            opt.classList.add('hidden');
+                        }
+                    });
+                    if (val && !exactMatch) {
+                        createEl.textContent = 'Create "' + input.value.trim() + '"';
+                        createEl.dataset.name = input.value.trim();
+                        createEl.classList.remove('hidden');
+                    } else {
+                        createEl.classList.add('hidden');
+                    }
+                    list.classList.remove('hidden');
                 }
-            });
-            if (val && !exactMatch) {
-                createEl.textContent = 'Create "' + input.value.trim() + '"';
-                createEl.dataset.name = input.value.trim();
-                createEl.classList.remove('hidden');
-            } else {
-                createEl.classList.add('hidden');
-            }
-            list.classList.remove('hidden');
-        }
-        function selectTagOption(el) {
-            var input = el.closest('.autocomplete-wrap').querySelector('input');
-            input.value = el.dataset.name;
-            el.closest('.autocomplete-list').classList.add('hidden');
-        }
-        </script>
-    </div>
-
-    <h3>Resource Configuration</h3>
-    <div class="field-group">
-        <label for="memory-limit">Memory limit</label>
-        <p class="field-description">Number with unit: <code>512m</code>, <code>1g</code>, <code>256mb</code>. Leave empty for system default.</p>
-        <div class="field-row">
-            <input type="text" id="memory-limit" name="memory_limit"
-                   value="{{deref .App.MemoryLimit}}"
-                   data-original="{{deref .App.MemoryLimit}}"
-                   placeholder="512m"
-                   oninput="validateMemoryLimit(this)">
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='memory_limit']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
-        </div>
-        <span class="field-error" id="memory-limit-error"></span>
-    </div>
-    <div class="field-group">
-        <label for="cpu-limit">CPU limit</label>
-        <div class="field-row">
-            <input type="number" id="cpu-limit" name="cpu_limit"
-                   value="{{derefFloat .App.CPULimit}}" step="0.25"
-                   data-original="{{derefFloat .App.CPULimit}}"
-                   oninput="toggleSaveBtn(this)">
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='cpu_limit']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
-        </div>
-    </div>
-    <div class="field-group">
-        <label for="max-workers">Max workers</label>
-        <div class="field-row">
-            <input type="number" id="max-workers" name="max_workers_per_app"
-                   value="{{derefInt .App.MaxWorkersPerApp}}"
-                   data-original="{{derefInt .App.MaxWorkersPerApp}}"
-                   oninput="toggleSaveBtn(this)">
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='max_workers_per_app']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
-        </div>
-    </div>
-    <div class="field-group">
-        <label for="max-sessions">Max sessions per worker</label>
-        <div class="field-row">
-            <input type="number" id="max-sessions" name="max_sessions_per_worker"
-                   value="{{.App.MaxSessionsPerWorker}}"
-                   data-original="{{.App.MaxSessionsPerWorker}}"
-                   oninput="toggleSaveBtn(this)">
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='max_sessions_per_worker']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
-        </div>
-    </div>
-    <div class="field-group">
-        <label for="pre-warmed-seats">Pre-warmed seats</label>
-        <div class="field-row">
-            <input type="number" id="pre-warmed-seats" name="pre_warmed_seats"
-                   value="{{.App.PreWarmedSeats}}"
-                   data-original="{{.App.PreWarmedSeats}}"
-                   oninput="toggleSaveBtn(this)">
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='pre_warmed_seats']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                function selectTagOption(el) {
+                    var input = el.closest('.autocomplete-wrap').querySelector('input');
+                    input.value = el.dataset.name;
+                    el.closest('.autocomplete-list').classList.add('hidden');
+                }
+                </script>
+            </div>
         </div>
     </div>
 
+    <!-- Resource Configuration -->
+    <div class="collapse collapse-arrow bg-base-200/50 settings-section">
+        <input type="radio" name="settings-accordion" />
+        <div class="collapse-title font-medium">Resources</div>
+        <div class="collapse-content">
+            <div class="field-group">
+                <label for="memory-limit">Memory limit</label>
+                <p class="field-description">Number with unit: <code>512m</code>, <code>1g</code>, <code>256mb</code>. Leave empty for system default.</p>
+                <div class="field-row">
+                    <input type="text" id="memory-limit" name="memory_limit"
+                           value="{{deref .App.MemoryLimit}}"
+                           data-original="{{deref .App.MemoryLimit}}"
+                           placeholder="512m"
+                           oninput="validateMemoryLimit(this)">
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='memory_limit']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                </div>
+                <span class="field-error" id="memory-limit-error"></span>
+            </div>
+            <div class="field-group">
+                <label for="cpu-limit">CPU limit</label>
+                <div class="field-row">
+                    <input type="number" id="cpu-limit" name="cpu_limit"
+                           value="{{derefFloat .App.CPULimit}}" step="0.25"
+                           data-original="{{derefFloat .App.CPULimit}}"
+                           oninput="toggleSaveBtn(this)">
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='cpu_limit']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                </div>
+            </div>
+            <div class="field-group">
+                <label for="max-workers">Max workers</label>
+                <div class="field-row">
+                    <input type="number" id="max-workers" name="max_workers_per_app"
+                           value="{{derefInt .App.MaxWorkersPerApp}}"
+                           data-original="{{derefInt .App.MaxWorkersPerApp}}"
+                           oninput="toggleSaveBtn(this)">
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='max_workers_per_app']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                </div>
+            </div>
+            <div class="field-group">
+                <label for="max-sessions">Max sessions per worker</label>
+                <div class="field-row">
+                    <input type="number" id="max-sessions" name="max_sessions_per_worker"
+                           value="{{.App.MaxSessionsPerWorker}}"
+                           data-original="{{.App.MaxSessionsPerWorker}}"
+                           oninput="toggleSaveBtn(this)">
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='max_sessions_per_worker']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                </div>
+            </div>
+            <div class="field-group">
+                <label for="pre-warmed-seats">Pre-warmed seats</label>
+                <div class="field-row">
+                    <input type="number" id="pre-warmed-seats" name="pre_warmed_seats"
+                           value="{{.App.PreWarmedSeats}}"
+                           data-original="{{.App.PreWarmedSeats}}"
+                           oninput="toggleSaveBtn(this)">
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='pre_warmed_seats']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Refresh Schedule -->
     {{if and .ActiveBundle (not .ActiveBundle.Pinned)}}
-    <div class="field-group">
-        <label for="refresh-schedule">Refresh schedule</label>
-        <p class="field-description">Cron expression for automatic dependency refresh (e.g. <code>0 2 * * 1</code> = every Monday at 2 AM). Leave empty to disable.</p>
-        <div class="field-row">
-            <input type="text" id="refresh-schedule" name="refresh_schedule"
-                   value="{{.App.RefreshSchedule}}"
-                   data-original="{{.App.RefreshSchedule}}"
-                   placeholder="0 2 * * *"
-                   oninput="toggleSaveBtn(this)">
-            <button class="field-save hidden"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='refresh_schedule']"
-                    hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+    <div class="collapse collapse-arrow bg-base-200/50 settings-section">
+        <input type="radio" name="settings-accordion" />
+        <div class="collapse-title font-medium">Refresh Schedule</div>
+        <div class="collapse-content">
+            <div class="field-group">
+                <p class="field-description">Schedule automatic dependency refreshes. Choose a preset or enter a custom cron expression.</p>
+                <div class="field-row">
+                    <select class="select select-sm text-sm" onchange="applyCronPreset(this)">
+                        <option value="">Choose preset...</option>
+                        <option value="0 2 * * *">Daily at 2 AM</option>
+                        <option value="0 2 * * 1">Weekly on Monday at 2 AM</option>
+                        <option value="0 */6 * * *">Every 6 hours</option>
+                        <option value="0 2 1 * *">Monthly (1st at 2 AM)</option>
+                        <option value="__custom__">Custom...</option>
+                        <option value="">Disabled</option>
+                    </select>
+                </div>
+                <div class="field-row mt-2">
+                    <input type="text" id="refresh-schedule" name="refresh_schedule"
+                           value="{{.App.RefreshSchedule}}"
+                           data-original="{{.App.RefreshSchedule}}"
+                           placeholder="0 2 * * *"
+                           oninput="toggleSaveBtn(this)">
+                    <button class="field-save hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='refresh_schedule']"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                </div>
+                <p class="field-description mt-1">Current: <code>{{if .App.RefreshSchedule}}{{.App.RefreshSchedule}}{{else}}disabled{{end}}</code></p>
+            </div>
         </div>
     </div>
     {{end}}
 
-    <h3>App Controls</h3>
-    <div class="app-controls"
-         hx-trigger="appEnabled from:body, appDisabled from:body"
-         hx-get="/ui/apps/{{.App.Name}}/tab/settings"
-         hx-target="#tab-content">
-        {{if eq .Status "stopping"}}
-        <span class="status-badge status-stopping">Disabling...</span>
-        {{else if .App.Enabled}}
-        <button class="btn btn-sm btn-outline" hx-post="/api/v1/apps/{{.App.ID}}/disable"
-                hx-swap="none">Disable</button>
-        <span class="status-badge status-{{.Status}}">{{.Status}}</span>
-        {{else}}
-        <button class="btn btn-sm btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/enable"
-                hx-swap="none">Enable</button>
-        <span class="status-badge status-disabled">Disabled</span>
-        {{end}}
-    </div>
-
-    <div class="danger-zone">
-        <p class="danger-zone-title">
-            <svg viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
-            Danger Zone
-        </p>
-        <div class="field-group">
-            <label for="rename-app">Rename app</label>
-            <p class="field-description">Changes the app URL. The old name redirects for 7 days.</p>
-            <div class="field-row">
-                <input type="text" id="rename-app" name="name"
-                       value="{{.App.Name}}"
-                       data-original="{{.App.Name}}"
-                       oninput="toggleSaveBtn(this)">
-                <button class="btn btn-error btn-sm hidden"
-                        hx-patch="/api/v1/apps/{{.App.ID}}"
-                        hx-include="[name='name']"
-                        hx-confirm="Rename {{.App.Name}} to this new name? The old name will redirect for 7 days."
-                        hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }"
-                        onclick="this.classList.add('hidden')">Rename</button>
+    <!-- App Controls -->
+    <div class="collapse collapse-arrow bg-base-200/50 settings-section">
+        <input type="radio" name="settings-accordion" />
+        <div class="collapse-title font-medium">
+            App Controls
+            <span class="status-badge status-{{.Status}} ml-2">{{.Status}}</span>
+        </div>
+        <div class="collapse-content">
+            <div class="app-controls"
+                 hx-trigger="appEnabled from:body, appDisabled from:body"
+                 hx-get="/ui/apps/{{.App.Name}}/tab/settings"
+                 hx-target="#tab-content">
+                {{if eq .Status "stopping"}}
+                <p class="text-sm text-base-content/60">The app is shutting down...</p>
+                <span class="status-badge status-stopping">Disabling...</span>
+                {{else if .App.Enabled}}
+                <p class="text-sm text-base-content/60 mb-3">The app is currently enabled and accepting connections.</p>
+                <button class="btn btn-sm btn-outline" hx-post="/api/v1/apps/{{.App.ID}}/disable"
+                        hx-swap="none">Disable app</button>
+                {{else}}
+                <p class="text-sm text-base-content/60 mb-3">The app is disabled. Enable it to start accepting connections.</p>
+                <button class="btn btn-sm btn-primary" hx-post="/api/v1/apps/{{.App.ID}}/enable"
+                        hx-swap="none">Enable app</button>
+                {{end}}
             </div>
         </div>
-        <button class="btn btn-error btn-sm"
-                hx-delete="/api/v1/apps/{{.App.ID}}"
-                hx-confirm="Delete {{.App.Name}}? This can be undone within 30 days."
-                hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }">
-            Delete app
-        </button>
     </div>
+
+    <!-- Danger Zone -->
+    <div class="collapse collapse-arrow settings-section settings-danger">
+        <input type="radio" name="settings-accordion" />
+        <div class="collapse-title font-medium text-error">
+            <svg viewBox="0 0 24 24" class="w-4 h-4 shrink-0 inline-block mr-1" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
+            Danger Zone
+        </div>
+        <div class="collapse-content">
+            <div class="field-group">
+                <label for="rename-app">Rename app</label>
+                <p class="field-description">Changes the app URL. The old name redirects for 7 days.</p>
+                <div class="field-row">
+                    <input type="text" id="rename-app" name="name"
+                           value="{{.App.Name}}"
+                           data-original="{{.App.Name}}"
+                           oninput="toggleSaveBtn(this)">
+                    <button class="btn btn-error btn-sm hidden"
+                            hx-patch="/api/v1/apps/{{.App.ID}}"
+                            hx-include="[name='name']"
+                            hx-confirm="Rename {{.App.Name}} to this new name? The old name will redirect for 7 days."
+                            hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }"
+                            onclick="this.classList.add('hidden')">Rename</button>
+                </div>
+            </div>
+            <button class="btn btn-error btn-sm mt-2"
+                    hx-delete="/api/v1/apps/{{.App.ID}}"
+                    hx-confirm="Delete {{.App.Name}}? This can be undone within 30 days."
+                    hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }">
+                Delete app
+            </button>
+        </div>
+    </div>
+
+    <script>
+    function applyCronPreset(select) {
+        var val = select.value;
+        var input = document.getElementById('refresh-schedule');
+        if (val === '__custom__') {
+            input.focus();
+            select.value = '';
+            return;
+        }
+        input.value = val;
+        input.dispatchEvent(new Event('input'));
+    }
+    /* Set the preset dropdown to match current cron value on load */
+    (function() {
+        var input = document.getElementById('refresh-schedule');
+        if (!input) return;
+        var select = input.closest('.collapse-content').querySelector('select');
+        if (!select) return;
+        var val = input.value.trim();
+        var found = false;
+        for (var i = 0; i < select.options.length; i++) {
+            if (select.options[i].value === val && val !== '' && val !== '__custom__') {
+                select.selectedIndex = i;
+                found = true;
+                break;
+            }
+        }
+        if (val && !found) select.value = '';
+    })();
+    </script>
 </div>

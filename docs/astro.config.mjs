@@ -30,6 +30,25 @@ export default defineConfig({
 		starlight({
 			title: 'Blockyard',
 			customCss: ['./src/styles/custom.css'],
+			head: [
+				{
+					tag: 'script',
+					content: `
+						// Sync theme from blockyard app (same origin only, not GH Pages)
+						(function() {
+							try {
+								if (window.location.hostname === 'cynkra.github.io') return;
+								var t = localStorage.getItem('theme');
+								if (!t) return;
+								var isDark = t === 'dark';
+								var sl = document.querySelector('html[data-theme]');
+								if (sl) sl.setAttribute('data-theme', isDark ? 'dark' : 'light');
+								document.documentElement.classList.toggle('dark', isDark);
+							} catch(e) {}
+						})();
+					`,
+				},
+			],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/cynkra/blockyard' }],
 			sidebar: [
 				{
