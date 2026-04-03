@@ -468,7 +468,7 @@ func main() {
 		)
 	}
 
-	handler := api.NewRouter(srv, startBG, orch)
+	handler := api.NewRouter(srv, startBG, orch, bgCtx)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Bind,

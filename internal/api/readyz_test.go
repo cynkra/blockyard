@@ -132,7 +132,7 @@ func TestMetricsEndpointEnabled(t *testing.T) {
 	srv := testServerForReadyz(t)
 	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: true}
 
-	router := NewRouter(srv, func() {}, nil)
+	router := NewRouter(srv, func() {}, nil, context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	req.Header.Set("Authorization", "Bearer "+testPAT)
 	rec := httptest.NewRecorder()
@@ -150,7 +150,7 @@ func TestMetricsEndpointDisabled(t *testing.T) {
 	srv := testServerForReadyz(t)
 	// Telemetry nil — /metrics should 404
 
-	router := NewRouter(srv, func() {}, nil)
+	router := NewRouter(srv, func() {}, nil, context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -504,7 +504,7 @@ func TestMainRouterOmitsOpsWhenManagementBind(t *testing.T) {
 	srv.Config.Server.ManagementBind = "127.0.0.1:9100"
 	srv.Config.Telemetry = &config.TelemetryConfig{MetricsEnabled: true}
 
-	router := NewRouter(srv, func() {}, nil)
+	router := NewRouter(srv, func() {}, nil, context.Background())
 
 	// /healthz should 404 on the main router
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -536,7 +536,7 @@ func TestMainRouterServesHealthzWithoutManagementBind(t *testing.T) {
 	srv := testServerForReadyz(t)
 	// ManagementBind is empty — ops endpoints should be on the main router.
 
-	router := NewRouter(srv, func() {}, nil)
+	router := NewRouter(srv, func() {}, nil, context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -846,7 +846,7 @@ func TestMainRouterHealthzDraining(t *testing.T) {
 	srv.Draining.Store(true)
 	// ManagementBind empty — /healthz is on the main router.
 
-	router := NewRouter(srv, func() {}, nil)
+	router := NewRouter(srv, func() {}, nil, context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()

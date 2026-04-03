@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,7 +18,7 @@ import (
 
 // handleAdminUpdate triggers a rolling update.
 // Returns 202 with a task ID for polling.
-func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
+func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCtx context.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
 		if caller == nil || !caller.Role.CanManageRoles() {
@@ -56,7 +58,7 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator) http
 		sender := srv.Tasks.Create(taskID, "admin-update")
 
 		go func() {
-			ur, err := orch.Update(r.Context(), channel, sender)
+			ur, err := orch.Update(bgCtx, channel, sender)
 			if err != nil {
 				sender.Write(err.Error())
 				sender.Complete(task.Failed)
@@ -70,14 +72,11 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator) http
 			}
 
 			// Enter watchdog mode.
-			watchPeriod := srv.Config.Server.DrainTimeout.Duration
+			watchPeriod := 5 * time.Minute
 			if srv.Config.Update != nil && srv.Config.Update.WatchPeriod.Duration > 0 {
 				watchPeriod = srv.Config.Update.WatchPeriod.Duration
 			}
-			if watchPeriod == 0 {
-				watchPeriod = 5 * 60e9 // 5 minutes
-			}
-			if err := orch.Watchdog(r.Context(), ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
+			if err := orch.Watchdog(bgCtx, ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
 				sender.Write(err.Error())
 				sender.Complete(task.Failed)
 				return // rollback happened, server is still running
@@ -97,7 +96,7 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator) http
 
 // handleAdminRollback triggers a rollback to the previous version.
 // Returns 202 with a task ID.
-func handleAdminRollback(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
+func handleAdminRollback(srv *server.Server, orch *orchestrator.Orchestrator, bgCtx context.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
 		if caller == nil || !caller.Role.CanManageRoles() {
@@ -122,7 +121,7 @@ func handleAdminRollback(srv *server.Server, orch *orchestrator.Orchestrator) ht
 		sender := srv.Tasks.Create(taskID, "admin-rollback")
 
 		go func() {
-			err := orch.Rollback(r.Context(), sender, orch.Exit)
+			err := orch.Rollback(bgCtx, sender, orch.Exit)
 			if err != nil {
 				sender.Write(err.Error())
 				sender.Complete(task.Failed)

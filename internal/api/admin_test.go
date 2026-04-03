@@ -16,7 +16,7 @@ func TestAdminUpdateRequiresAdmin(t *testing.T) {
 	srv := testServerForReadyz(t)
 	// Use a real orchestrator so the nil check doesn't mask the auth check.
 	orch := orchestrator.NewForTest()
-	handler := handleAdminUpdate(srv, orch)
+	handler := handleAdminUpdate(srv, orch, context.Background())
 
 	// No auth context → nil caller → 403.
 	r := httptest.NewRequest("POST", "/api/v1/admin/update", nil)
@@ -31,7 +31,7 @@ func TestAdminUpdateRequiresAdmin(t *testing.T) {
 func TestAdminUpdateNativeMode(t *testing.T) {
 	srv := testServerForReadyz(t)
 	// nil orchestrator → native mode.
-	handler := handleAdminUpdate(srv, nil)
+	handler := handleAdminUpdate(srv, nil, context.Background())
 
 	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
 		Role: auth.RoleAdmin,
@@ -48,7 +48,7 @@ func TestAdminUpdateNativeMode(t *testing.T) {
 func TestAdminRollbackRequiresAdmin(t *testing.T) {
 	srv := testServerForReadyz(t)
 	orch := orchestrator.NewForTest()
-	handler := handleAdminRollback(srv, orch)
+	handler := handleAdminRollback(srv, orch, context.Background())
 
 	r := httptest.NewRequest("POST", "/api/v1/admin/rollback", nil)
 	w := httptest.NewRecorder()
@@ -61,7 +61,7 @@ func TestAdminRollbackRequiresAdmin(t *testing.T) {
 
 func TestAdminRollbackNativeMode(t *testing.T) {
 	srv := testServerForReadyz(t)
-	handler := handleAdminRollback(srv, nil)
+	handler := handleAdminRollback(srv, nil, context.Background())
 
 	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
 		Role: auth.RoleAdmin,
@@ -115,7 +115,7 @@ func TestAdminStatusNonIdle(t *testing.T) {
 func TestAdminUpdateChannelOverride(t *testing.T) {
 	srv := testServerForReadyz(t)
 	orch := orchestrator.NewForTest()
-	handler := handleAdminUpdate(srv, orch)
+	handler := handleAdminUpdate(srv, orch, context.Background())
 
 	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
 		Role: auth.RoleAdmin,
@@ -197,7 +197,7 @@ func TestActivateWithWrongToken(t *testing.T) {
 func TestAdminUpdateReturnsTaskID(t *testing.T) {
 	srv := testServerForReadyz(t)
 	orch := orchestrator.NewForTest()
-	handler := handleAdminUpdate(srv, orch)
+	handler := handleAdminUpdate(srv, orch, context.Background())
 
 	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
 		Role: auth.RoleAdmin,
@@ -221,7 +221,7 @@ func TestAdminUpdateReturnsTaskID(t *testing.T) {
 func TestAdminRollbackReturnsTaskID(t *testing.T) {
 	srv := testServerForReadyz(t)
 	orch := orchestrator.NewForTest()
-	handler := handleAdminRollback(srv, orch)
+	handler := handleAdminRollback(srv, orch, context.Background())
 
 	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
 		Role: auth.RoleAdmin,
@@ -252,7 +252,7 @@ func TestAdminUpdateConflict(t *testing.T) {
 	orch := orchestrator.NewForTest()
 	orch.SetState("updating")
 
-	handler := handleAdminUpdate(srv, orch)
+	handler := handleAdminUpdate(srv, orch, context.Background())
 
 	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
 		Role: auth.RoleAdmin,

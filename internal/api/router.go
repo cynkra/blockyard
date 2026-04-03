@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -144,7 +145,7 @@ func swaggerDocJSON(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte(doc))
 }
 
-func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrator) http.Handler {
+func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrator, bgCtx context.Context) http.Handler {
 	r := chi.NewRouter()
 
 	// Request logging (outermost to capture status/duration for all routes).
@@ -274,8 +275,8 @@ func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrat
 		// Admin endpoints — no request body, registered before limitBody.
 		r.Route("/admin", func(r chi.Router) {
 			r.Post("/activate", activateHandler(srv, startBG))
-			r.Post("/update", handleAdminUpdate(srv, orch))
-			r.Post("/rollback", handleAdminRollback(srv, orch))
+			r.Post("/update", handleAdminUpdate(srv, orch, bgCtx))
+			r.Post("/rollback", handleAdminRollback(srv, orch, bgCtx))
 			r.Get("/update/status", handleAdminUpdateStatus(orch))
 		})
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -49,7 +50,7 @@ func testServerWithOIDC(t *testing.T, idp *testutil.MockIdP) (*server.Server, *h
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
 
-	handler := NewRouter(srv, func() {}, nil)
+	handler := NewRouter(srv, func() {}, nil, context.Background())
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

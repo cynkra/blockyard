@@ -596,7 +596,7 @@ In `internal/api/admin.go`, new handlers with inline admin checks
 //
 // Response:
 //   {"task_id": "..."}
-func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc
+func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCtx context.Context) http.HandlerFunc
 
 // POST /api/v1/admin/rollback
 // Triggers a rollback to the previous version.
@@ -604,18 +604,15 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator) http
 //
 // Response:
 //   {"task_id": "..."}
-func handleAdminRollback(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc
+func handleAdminRollback(srv *server.Server, orch *orchestrator.Orchestrator, bgCtx context.Context) http.HandlerFunc
 
 // GET /api/v1/admin/update/status
 // Returns the current update state: idle, in_progress, watching,
 // or the result of the last update/rollback.
 //
 // Response:
-//   {"state": "idle"|"updating"|"watching"|"rolling_back",
-//    "task_id": "...",
-//    "version": "...",
-//    "message": "..."}
-func handleAdminUpdateStatus(srv *server.Server) http.HandlerFunc
+//   {"state": "idle"|"updating"|"watching"|"rolling_back"}
+func handleAdminUpdateStatus(orch *orchestrator.Orchestrator) http.HandlerFunc
 ```
 
 The update and rollback handlers create a task via `srv.Tasks.Create`,
@@ -646,8 +643,8 @@ r.Route("/api/v1", func(r chi.Router) {
     // Admin endpoints — before limitBody.
     r.Route("/admin", func(r chi.Router) {
         r.Post("/activate", activateHandler(srv, startBG))
-        r.Post("/update", handleAdminUpdate(srv, orch))
-        r.Post("/rollback", handleAdminRollback(srv, orch))
+        r.Post("/update", handleAdminUpdate(srv, orch, bgCtx))
+        r.Post("/rollback", handleAdminRollback(srv, orch, bgCtx))
         r.Get("/update/status", handleAdminUpdateStatus(orch))
     })
 
@@ -655,8 +652,10 @@ r.Route("/api/v1", func(r chi.Router) {
 })
 ```
 
-`NewRouter` gains an `orch *orchestrator.Orchestrator` parameter
-(nil-safe — the handlers return 501 when nil).
+`NewRouter` gains `orch *orchestrator.Orchestrator` and
+`bgCtx context.Context` parameters. The handlers use `bgCtx` for
+long-running goroutines so client disconnects don't cancel in-flight
+updates. `orch` is nil-safe — the handlers return 501 when nil.
 
 ### Step 6: Orchestrator wiring in main.go
 
@@ -700,7 +699,7 @@ if be, ok := srv.Backend.(*docker.DockerBackend); ok && be.ServerID() != "" {
 }
 
 // 4. Router and HTTP server.
-handler := api.NewRouter(srv, startBG, orch)
+handler := api.NewRouter(srv, startBG, orch, bgCtx)
 httpServer := &http.Server{Addr: cfg.Server.Bind, Handler: handler, ...}
 
 // 5. Now assign the drainer — closures become safe to call.

@@ -33,10 +33,6 @@ func (o *Orchestrator) Watchdog(
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if time.Now().After(deadline) {
-				sender.Write("Watch period elapsed. New server healthy. Exiting.")
-				return nil // caller exits the process
-			}
 			if err := o.checkReady(ctx, newAddr); err != nil {
 				sender.Write(fmt.Sprintf(
 					"New server unhealthy: %v. Rolling back.", err))
@@ -44,6 +40,10 @@ func (o *Orchestrator) Watchdog(
 				o.undrainFn()
 				sender.Write("Rolled back. Old server resumed.")
 				return fmt.Errorf("watchdog: new server failed: %w", err)
+			}
+			if time.Now().After(deadline) {
+				sender.Write("Watch period elapsed. New server healthy. Exiting.")
+				return nil // caller exits the process
 			}
 		}
 	}

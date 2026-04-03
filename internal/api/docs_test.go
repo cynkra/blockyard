@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,7 +10,7 @@ import (
 
 func TestDocsRedirect(t *testing.T) {
 	srv := testServerForReadyz(t)
-	router := NewRouter(srv, func() {}, nil)
+	router := NewRouter(srv, func() {}, nil, context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/docs", nil)
 	rec := httptest.NewRecorder()
@@ -25,7 +26,7 @@ func TestDocsRedirect(t *testing.T) {
 
 func TestDocsServesHTML(t *testing.T) {
 	srv := testServerForReadyz(t)
-	router := NewRouter(srv, func() {}, nil)
+	router := NewRouter(srv, func() {}, nil, context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/docs/", nil)
 	rec := httptest.NewRecorder()
