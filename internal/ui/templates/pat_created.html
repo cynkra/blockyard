@@ -5,7 +5,7 @@
     </p>
     <div class="pat-value">
         <code id="pat-token-value">{{.Token}}</code>
-        <button onclick="copyToken(this)" class="btn btn-sm btn-outline" type="button">Copy</button>
+        <button onclick="copyToken(this)" class="btn btn-soft btn-sm" type="button">Copy</button>
     </div>
     <p class="pat-expiry">{{if .ExpiresAt}}Expires {{.ExpiresAt | timeUntil}}.{{else}}This token never expires.{{end}}</p>
 </div>

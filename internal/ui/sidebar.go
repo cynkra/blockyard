@@ -182,13 +182,17 @@ func (ui *UI) resolveAppForFragment(
 }
 
 // computeAppStatus derives display status from worker state.
+//
+// Returns "disabled" when the app is off, "ready" when it is enabled
+// but idle (cold-start, no workers), "running" when workers are active,
+// and "stopping" when all workers are draining.
 func computeAppStatus(srv *server.Server, app *db.AppRow) string {
 	if !app.Enabled {
 		return "disabled"
 	}
 	workerIDs := srv.Workers.ForApp(app.ID)
 	if len(workerIDs) == 0 {
-		return "stopped"
+		return "ready"
 	}
 	allDraining := true
 	for _, wid := range workerIDs {

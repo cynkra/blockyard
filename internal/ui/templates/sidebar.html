@@ -1,7 +1,7 @@
 <div class="sidebar-header">
     <div class="flex items-center gap-2 flex-1 min-w-0">
         <div class="tooltip tooltip-bottom" data-tip="{{.Status}}">
-            <span class="status status-{{.Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
+            <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
         </div>
         <h2 class="text-lg flex-1 m-0 font-semibold truncate">{{.App.Name}}</h2>
     </div>

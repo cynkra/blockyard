@@ -158,21 +158,16 @@
   .app-tags { @apply flex gap-1.5 flex-wrap mt-auto pt-3; }
   .tag { @apply badge badge-sm badge-soft badge-neutral; }
 
-  /* Status dot colors */
-  .status { @apply inline-block w-2.5 h-2.5 rounded-full shrink-0; }
-  .status-running, .status-active { @apply bg-success; }
-  .status-stopping, .status-draining { @apply bg-warning; }
-  .status-error, .status-failed { @apply bg-error; }
-  .status-stopped, .status-disabled, .status-not_set { @apply bg-base-content/25; }
-  .status-building { @apply bg-info; }
+  /* Status dot — uses DaisyUI's status component with its color classes.
+     Template maps app status → DaisyUI color via statusDotClass helper.
+     We only add sizing and pulse animation here. */
+  .status { @apply status-lg; }
   .status-pulse { animation: status-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite; }
   @keyframes status-ping {
     0% { box-shadow: 0 0 0 0 currentColor; }
-    70% { box-shadow: 0 0 0 5px transparent; }
+    70% { box-shadow: 0 0 0 6px transparent; }
     100% { box-shadow: 0 0 0 0 transparent; }
   }
-  .status-running.status-pulse, .status-active.status-pulse { color: oklch(var(--su)); }
-  .status-stopping.status-pulse { color: oklch(var(--wa)); }
 
   /* Gear button */
   .app-card-gear {
@@ -228,7 +223,7 @@
   .field-row input { @apply input input-sm flex-1 text-sm; }
   .field-row select { @apply select select-sm flex-1 text-sm; }
   .field-row textarea { @apply textarea flex-1 text-sm; min-height: 4rem; }
-  .field-save { @apply btn btn-outline btn-sm shrink-0 inline-flex items-center gap-1; }
+  .field-save { @apply btn btn-soft btn-sm shrink-0 inline-flex items-center gap-1; }
   .field-save svg { @apply align-middle; }
   .field-feedback { @apply text-xs shrink-0; }
   .field-error { @apply text-error text-xs mt-1; }

@@ -22,7 +22,7 @@
         <input type="search" name="search" value="{{.Search}}"
                placeholder="Search apps..." class="input input-sm flex-1 text-sm" aria-label="Search apps"
                oninput="filterApps(this.value)">
-        <button type="submit" class="btn btn-sm">Search</button>
+        <button type="submit" class="btn btn-soft btn-sm">Search</button>
     </form>
 </div>
 <div id="new-app-container"></div>
@@ -53,7 +53,7 @@
     <div class="flex gap-2 items-center mb-3">
         <input type="text" id="new-global-tag" placeholder="New tag name..."
                class="input input-sm text-sm flex-1 max-w-64">
-        <button class="btn btn-sm btn-outline" onclick="createGlobalTag()">Create tag</button>
+        <button class="btn btn-soft btn-sm" onclick="createGlobalTag()">Create tag</button>
     </div>
     <div class="flex flex-wrap gap-1.5">
         {{range .AllTags}}
@@ -96,7 +96,7 @@
         {{end}}
         <div class="app-card-header">
             <div class="tooltip tooltip-right" data-tip="{{.Status}}">
-                <span class="status status-{{.Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
+                <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
             </div>
             <span class="app-name">{{.Name}}</span>
         </div>

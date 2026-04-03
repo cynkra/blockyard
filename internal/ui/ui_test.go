@@ -568,8 +568,8 @@ func TestAppsPageAppStoppedStatus(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body := readBody(t, resp)
-	if !strings.Contains(body, "stopped") {
-		t.Error("expected 'stopped' status for app with no workers")
+	if !strings.Contains(body, "ready") {
+		t.Error("expected 'ready' status for enabled app with no workers")
 	}
 }
 
@@ -1900,8 +1900,8 @@ func TestOverviewTabWithActiveData(t *testing.T) {
 	if !strings.Contains(body, "2 views") {
 		t.Error("expected '2 views' in overview")
 	}
-	if !strings.Contains(body, "status-running") {
-		t.Error("expected running status badge")
+	if !strings.Contains(body, "status-success") {
+		t.Error("expected success status dot for running app")
 	}
 	// Bundle should be shown.
 	if !strings.Contains(body, "status-ready") {
@@ -2051,13 +2051,13 @@ func TestRuntimeTabWithWorkersAndSessions(t *testing.T) {
 	if !strings.Contains(body, "w-runtim...") {
 		t.Error("expected truncated worker ID 'w-runtim...' in table")
 	}
-	// Draining worker should show draining status.
-	if !strings.Contains(body, "status-draining") {
-		t.Error("expected draining status badge for worker 2")
+	// Draining worker should show warning dot.
+	if !strings.Contains(body, "status-warning") {
+		t.Error("expected warning status dot for draining worker")
 	}
-	// Active status for worker 1.
-	if !strings.Contains(body, "status-active") {
-		t.Error("expected active status badge for worker 1")
+	// Active worker should show success dot.
+	if !strings.Contains(body, "status-success") {
+		t.Error("expected success status dot for active worker")
 	}
 	// Session chip with display name.
 	if !strings.Contains(body, "Owner Name") {
@@ -2333,13 +2333,13 @@ func TestComputeAppStatusDisabled(t *testing.T) {
 	}
 }
 
-func TestComputeAppStatusStopped(t *testing.T) {
+func TestComputeAppStatusReady(t *testing.T) {
 	srv, _ := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
 	app, _ := srv.DB.CreateApp("status-stop", "u")
 
-	// Enabled, no workers → stopped.
-	if got := computeAppStatus(srv, app); got != "stopped" {
-		t.Errorf("computeAppStatus(no workers) = %q, want 'stopped'", got)
+	// Enabled, no workers → ready (idle, waiting for traffic).
+	if got := computeAppStatus(srv, app); got != "ready" {
+		t.Errorf("computeAppStatus(no workers) = %q, want 'ready'", got)
 	}
 }
 

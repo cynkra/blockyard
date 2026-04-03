@@ -66,7 +66,7 @@
                             <div class="autocomplete-item tag-create hidden" onmousedown="selectTagOption(this)"></div>
                         </div>
                     </div>
-                    <button type="submit" class="btn btn-sm btn-outline shrink-0">Add</button>
+                    <button type="submit" class="btn btn-soft btn-sm shrink-0">Add</button>
                 </form>
                 <script>
                 function filterTagSuggestions(input) {
@@ -240,7 +240,7 @@
                 <span class="status-badge status-stopping">Disabling...</span>
                 {{else if .App.Enabled}}
                 <p class="text-sm text-base-content/60 mb-3">The app is currently enabled and accepting connections.</p>
-                <button class="btn btn-sm btn-outline" hx-post="/api/v1/apps/{{.App.ID}}/disable"
+                <button class="btn btn-soft btn-sm" hx-post="/api/v1/apps/{{.App.ID}}/disable"
                         hx-swap="none">Disable app</button>
                 {{else}}
                 <p class="text-sm text-base-content/60 mb-3">The app is disabled. Enable it to start accepting connections.</p>
