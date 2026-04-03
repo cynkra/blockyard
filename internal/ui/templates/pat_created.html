@@ -1,9 +1,33 @@
 <div class="pat-created">
-    <p class="pat-warning">Copy this token now -- it will not be shown again.</p>
+    <p class="pat-warning">
+        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-2px"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
+        Copy this token now &mdash; it will not be shown again.
+    </p>
     <div class="pat-value">
-        <code>{{.Token}}</code>
-        <button onclick="navigator.clipboard.writeText('{{.Token}}')"
-                class="btn btn-sm">Copy</button>
+        <code id="pat-token-value">{{.Token}}</code>
+        <button onclick="copyToken(this)" class="btn btn-sm btn-outline" type="button">Copy</button>
     </div>
     <p class="pat-expiry">{{if .ExpiresAt}}Expires {{.ExpiresAt | timeUntil}}.{{else}}This token never expires.{{end}}</p>
 </div>
+<script>
+function copyToken(btn) {
+    var token = document.getElementById('pat-token-value').textContent;
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(token).then(function() {
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+        });
+    } else {
+        var ta = document.createElement('textarea');
+        ta.value = token;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        btn.textContent = 'Copied!';
+        setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+    }
+}
+</script>

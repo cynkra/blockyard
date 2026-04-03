@@ -7,8 +7,9 @@
     <h1>Deployment History</h1>
     <form method="GET" action="/deployments" class="flex gap-2">
         <input type="search" name="search" placeholder="Search by app name..."
-               class="input input-sm flex-1 text-sm" value="{{.Search}}">
-        <button type="submit" class="btn">Search</button>
+               class="input input-sm flex-1 text-sm" value="{{.Search}}"
+               oninput="filterDeployments(this.value)">
+        <button type="submit" class="btn btn-sm">Search</button>
     </form>
 </div>
 {{if .Deployments}}
@@ -50,6 +51,19 @@
 {{end}}
 
 <script>
+function filterDeployments(query) {
+    var q = query.toLowerCase().trim();
+    document.querySelectorAll('.deployment-row').forEach(function(row) {
+        var text = row.textContent.toLowerCase();
+        var show = !q || text.indexOf(q) !== -1;
+        row.style.display = show ? '' : 'none';
+        var next = row.nextElementSibling;
+        if (next && next.classList.contains('log-detail-row')) {
+            next.style.display = show ? '' : 'none';
+        }
+    });
+}
+
 function toggleDeploymentLog(row, bundleID) {
     var next = row.nextElementSibling;
     if (next && next.classList.contains('log-detail-row')) {

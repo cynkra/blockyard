@@ -3,7 +3,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { visit } from 'unist-util-visit';
 
-const BASE = process.env.DOCS_BASE || '/blockyard';
+const BASE = process.env.DOCS_BASE || '/docs';
 
 /** Rehype plugin: prepend base path to internal links in Markdown content. */
 function rehypeBaseLinks() {

@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @plugin "daisyui" {
-  themes: light --default, dark --prefersdark;
+  themes: light --default, night;
 }
 
 /* ── Custom dark-mode variant keyed off html.dark ── */
@@ -10,7 +10,7 @@
 @theme {
   /* Nav chrome (stays dark in both modes) */
   --color-nav: #1a1a2e;
-  --color-nav-text: #b0b0c0;
+  --color-nav-text: #9ca3b0;
   --color-nav-hover: #e0e0e0;
   --color-nav-active: #ffffff;
 
@@ -19,13 +19,13 @@
   --color-log-text: #cdd6f4;
 }
 
-/* Dark mode overrides for custom tokens */
+/* Dark mode: nav blends with night theme's deep navy base */
 .dark {
-  --color-nav: #0c1021;
-  --color-nav-text: #94a3b8;
-  --color-nav-hover: #e2e8f0;
+  --color-nav: #0d1117;
+  --color-nav-text: #8b949e;
+  --color-nav-hover: #e6edf3;
 
-  --color-log-bg: #0c0f1a;
+  --color-log-bg: #0d1117;
 }
 
 /* ══════════════════════════════════════════════════════
@@ -131,7 +131,7 @@
   .page-layout { @apply flex min-h-screen; }
   .container { @apply max-w-5xl mx-auto p-6; }
   .page-header { @apply mb-6; }
-  .page-header h1 { @apply m-0 mb-2 text-2xl; }
+  .page-header h1 { @apply m-0 text-2xl; }
   .page-description { @apply text-base-content/50 m-0; }
 
 
@@ -197,7 +197,8 @@
   .field-group label { @apply block text-sm font-medium mb-1; }
   .field-description { @apply text-sm text-base-content/60 mb-2; }
   .field-row { @apply flex items-center gap-2; }
-  .field-row input, .field-row select { @apply input input-sm flex-1 text-sm; }
+  .field-row input { @apply input input-sm flex-1 text-sm; }
+  .field-row select { @apply select select-sm flex-1 text-sm; }
   .field-row textarea { @apply textarea flex-1 text-sm; min-height: 4rem; }
   .field-save { @apply btn btn-ghost btn-sm shrink-0 inline-flex items-center gap-1; }
   .field-save svg { @apply align-middle; }
@@ -250,10 +251,10 @@
   .pat-create-form { @apply flex gap-2 mb-4; }
   .pat-create-form input { @apply input input-sm flex-1 max-w-80 text-sm; }
   .pat-create-form select { @apply select select-sm text-sm; }
-  .pat-created { @apply alert alert-warning mb-4 flex-col items-start; }
-  .pat-warning { @apply font-medium m-0 mb-2; }
-  .pat-value { @apply flex items-center gap-2; }
-  .pat-value code { @apply bg-base-200 px-2 py-1 border border-base-300 rounded-sm text-sm break-all; }
+  .pat-created { @apply mb-4 p-4 rounded-lg border border-info/30 bg-info/5 flex flex-col items-start gap-2; }
+  .pat-warning { @apply font-medium text-sm text-info m-0; }
+  .pat-value { @apply flex items-center gap-2 w-full; }
+  .pat-value code { @apply flex-1 bg-base-200 px-3 py-2 border border-base-300 rounded-md text-sm font-mono break-all; }
   .pat-expiry { @apply text-sm opacity-60 mt-2 mb-0; }
   .pat-error { @apply text-error text-sm my-2; }
 
@@ -265,10 +266,20 @@
 
 
   /* ── Danger zone ── */
-  .danger-zone { @apply mt-8 pt-6 border-t border-error; }
+  .danger-zone {
+    @apply mt-8 p-4 rounded-lg border border-error/30 bg-error/5;
+  }
+  .danger-zone-title {
+    @apply text-sm font-semibold text-error m-0 mb-4 flex items-center gap-2;
+  }
+  .danger-zone-title svg {
+    @apply w-4 h-4 shrink-0;
+    stroke: currentColor; fill: none; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
 
   /* ── App controls ── */
-  .app-controls { @apply flex items-center gap-3 mb-6; }
+  .app-controls { @apply flex items-center gap-3 mb-4; }
 
   /* ── Pagination ── */
   .pagination { @apply flex items-center justify-center gap-4 mt-6; }

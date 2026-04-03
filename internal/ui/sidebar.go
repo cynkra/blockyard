@@ -677,10 +677,17 @@ func (ui *UI) createAndAssignTag(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		name := strings.TrimSpace(r.FormValue("name")) //nolint:gosec // G120: auth-gated endpoint, bounded tag name
+		name := strings.ToLower(strings.TrimSpace(r.FormValue("name"))) //nolint:gosec // G120: auth-gated endpoint, bounded tag name
 		if name == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `<p class="error-message">Tag name is required.</p>`)
+			fmt.Fprint(w, `<p class="field-error">Tag name is required.</p>`)
+			return
+		}
+
+		// Validate tag name (same rules as API: lowercase letters, digits, hyphens).
+		if err := validateUITagName(name); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `<p class="field-error">%s</p>`, template.HTMLEscapeString(err.Error()))
 			return
 		}
 
@@ -735,4 +742,23 @@ func (ui *UI) createAndAssignTag(srv *server.Server) http.HandlerFunc {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// validateUITagName checks that a tag name is valid (mirrors API validation).
+func validateUITagName(name string) error {
+	if len(name) == 0 || len(name) > 63 {
+		return fmt.Errorf("tag name must be 1–63 characters")
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '-' {
+			return fmt.Errorf("tag name may only contain lowercase letters, digits, and hyphens")
+		}
+	}
+	if name[0] < 'a' || name[0] > 'z' {
+		return fmt.Errorf("tag name must start with a lowercase letter")
+	}
+	if name[len(name)-1] == '-' {
+		return fmt.Errorf("tag name must not end with a hyphen")
+	}
+	return nil
 }

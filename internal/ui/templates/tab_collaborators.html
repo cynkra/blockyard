@@ -3,7 +3,7 @@
         <label for="access-type">Access type</label>
         <p class="field-description">Controls who can access this app.</p>
         <div class="field-row">
-            <select id="access-type" name="access_type"
+            <select id="access-type" name="access_type" class="select select-sm text-sm"
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-trigger="change"
                     hx-target="next .field-feedback"
@@ -57,7 +57,7 @@
                        onblur="setTimeout(function(){document.querySelector('.user-suggest')?.classList.add('hidden')},200)">
                 <div class="autocomplete-list user-suggest hidden"></div>
             </div>
-            <select name="role">
+            <select name="role" class="select select-sm text-sm">
                 <option value="viewer">Viewer</option>
                 <option value="collaborator">Collaborator</option>
             </select>
