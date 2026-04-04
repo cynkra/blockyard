@@ -24,9 +24,9 @@ migration.
 1. **Admin-defined mount sources** — `[[storage.data_mounts]]` TOML
    config section with `name` + `path` pairs. Validated at startup
    for uniqueness and absolute paths.
-2. **App-level mount specification** — `data_mounts` JSON column on
-   the `apps` table. Each entry references a named source from config
-   and specifies a container target path.
+2. **App-level mount specification** — `app_data_mounts` table with
+   FK to `apps`. Each row references a named source from config and
+   specifies a container target path.
 3. **Mount validation** — source must exist in admin whitelist, no
    `..` path traversal, target must not collide with reserved paths,
    no duplicate targets.
@@ -138,25 +138,74 @@ a default, all apps without an explicit override pick it up on the
 next worker spawn. No migration needed — `RuntimeDefaults` is
 config-only.
 
+Add startup validation for `RuntimeDefaults` keys:
+
+```go
+func validateRuntimeDefaults(defaults map[string]string) error {
+    validAccessTypes := map[string]bool{
+        "acl": true, "logged_in": true, "public": true,
+    }
+    for key := range defaults {
+        if !validAccessTypes[key] {
+            return fmt.Errorf("runtime_defaults: unknown access type %q"+
+                " (valid: acl, logged_in, public)", key)
+        }
+    }
+    return nil
+}
+```
+
 ### Step 3: Migration — add app columns
 
-Migration `002_app_config` adds three columns to the `apps` table.
-All additive with defaults — backward-compatible per phase 3-1 rules.
+Migration `002_app_config` adds two columns to the `apps` table and
+a new `app_data_mounts` table. All additive with defaults —
+backward-compatible per phase 3-1 rules.
 
 **`internal/db/migrations/sqlite/002_app_config.up.sql`:**
 
 ```sql
+-- phase: expand
 ALTER TABLE apps ADD COLUMN image TEXT NOT NULL DEFAULT '';
 ALTER TABLE apps ADD COLUMN runtime TEXT NOT NULL DEFAULT '';
-ALTER TABLE apps ADD COLUMN data_mounts TEXT NOT NULL DEFAULT '[]';
+
+CREATE TABLE app_data_mounts (
+    app_id   TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    source   TEXT NOT NULL,
+    target   TEXT NOT NULL,
+    readonly INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(app_id, target)
+);
 ```
 
 **`internal/db/migrations/sqlite/002_app_config.down.sql`:**
 
 ```sql
+DROP TABLE IF EXISTS app_data_mounts;
+
 -- SQLite does not support DROP COLUMN before 3.35.0 (2021-03-12).
--- Recreate the table without the new columns.
-CREATE TABLE apps_backup AS SELECT
+-- Recreate the table with the original schema to preserve constraints.
+CREATE TABLE apps_new (
+    id                      TEXT PRIMARY KEY,
+    name                    TEXT NOT NULL,
+    owner                   TEXT NOT NULL DEFAULT 'admin',
+    access_type             TEXT NOT NULL DEFAULT 'acl'
+                            CHECK (access_type IN ('acl', 'logged_in', 'public')),
+    active_bundle           TEXT REFERENCES bundles(id) ON DELETE SET NULL,
+    max_workers_per_app     INTEGER,
+    max_sessions_per_worker INTEGER DEFAULT 1,
+    memory_limit            TEXT,
+    cpu_limit               REAL,
+    title                   TEXT,
+    description             TEXT,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    deleted_at              TEXT,
+    pre_warmed_seats        INTEGER NOT NULL DEFAULT 0,
+    refresh_schedule        TEXT NOT NULL DEFAULT '',
+    last_refresh_at         TEXT,
+    enabled                 INTEGER NOT NULL DEFAULT 1
+);
+INSERT INTO apps_new SELECT
     id, name, owner, access_type, active_bundle,
     max_workers_per_app, max_sessions_per_worker,
     memory_limit, cpu_limit, title, description,
@@ -164,30 +213,38 @@ CREATE TABLE apps_backup AS SELECT
     pre_warmed_seats, refresh_schedule, last_refresh_at, enabled
 FROM apps;
 DROP TABLE apps;
-ALTER TABLE apps_backup RENAME TO apps;
+ALTER TABLE apps_new RENAME TO apps;
+CREATE UNIQUE INDEX idx_apps_name_live ON apps(name) WHERE deleted_at IS NULL;
 ```
 
 **`internal/db/migrations/postgres/002_app_config.up.sql`:**
 
 ```sql
+-- phase: expand
 ALTER TABLE apps ADD COLUMN image TEXT NOT NULL DEFAULT '';
 ALTER TABLE apps ADD COLUMN runtime TEXT NOT NULL DEFAULT '';
-ALTER TABLE apps ADD COLUMN data_mounts TEXT NOT NULL DEFAULT '[]';
+
+CREATE TABLE app_data_mounts (
+    app_id   TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    source   TEXT NOT NULL,
+    target   TEXT NOT NULL,
+    readonly INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(app_id, target)
+);
 ```
 
 **`internal/db/migrations/postgres/002_app_config.down.sql`:**
 
 ```sql
+DROP TABLE IF EXISTS app_data_mounts;
 ALTER TABLE apps DROP COLUMN image;
 ALTER TABLE apps DROP COLUMN runtime;
-ALTER TABLE apps DROP COLUMN data_mounts;
 ```
 
 Empty string = use server default, matching the existing
-`memory_limit` / `cpu_limit` pattern. `data_mounts` is a JSON array
-stored as TEXT, validated at the application layer.
+`memory_limit` / `cpu_limit` pattern.
 
-### Step 4: DB layer — AppRow and AppUpdate
+### Step 4: DB layer — AppRow, AppUpdate, and data mount queries
 
 Add fields to `AppRow` in `internal/db/db.go` (after existing
 `Enabled` field, line 233):
@@ -195,9 +252,8 @@ Add fields to `AppRow` in `internal/db/db.go` (after existing
 ```go
 type AppRow struct {
     // ...existing fields...
-    Image      string `db:"image" json:"image"`
-    Runtime    string `db:"runtime" json:"runtime"`
-    DataMounts string `db:"data_mounts" json:"data_mounts"`
+    Image   string `db:"image" json:"image"`
+    Runtime string `db:"runtime" json:"runtime"`
 }
 ```
 
@@ -206,9 +262,8 @@ Add to `AppUpdate` (line 583):
 ```go
 type AppUpdate struct {
     // ...existing fields...
-    Image      *string
-    Runtime    *string
-    DataMounts *string // validated JSON string
+    Image   *string
+    Runtime *string
 }
 ```
 
@@ -221,9 +276,6 @@ if u.Image != nil {
 }
 if u.Runtime != nil {
     app.Runtime = *u.Runtime
-}
-if u.DataMounts != nil {
-    app.DataMounts = *u.DataMounts
 }
 ```
 
@@ -243,7 +295,6 @@ _, err = db.Exec(db.rebind(
         refresh_schedule = ?,
         image = ?,
         runtime = ?,
-        data_mounts = ?,
         updated_at = ?
     WHERE id = ?`),
     app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
@@ -252,16 +303,65 @@ _, err = db.Exec(db.rebind(
     app.Title, app.Description,
     app.PreWarmedSeats,
     app.RefreshSchedule,
-    app.Image, app.Runtime, app.DataMounts,
+    app.Image, app.Runtime,
     now, id,
 )
 ```
 
+**Data mount row type and queries:**
+
+```go
+type DataMountRow struct {
+    AppID    string `db:"app_id" json:"app_id"`
+    Source   string `db:"source" json:"source"`
+    Target   string `db:"target" json:"target"`
+    ReadOnly bool   `db:"readonly" json:"readonly"`
+}
+
+func (db *DB) ListAppDataMounts(appID string) ([]DataMountRow, error) {
+    var mounts []DataMountRow
+    err := db.DB.Select(&mounts,
+        db.rebind(`SELECT * FROM app_data_mounts WHERE app_id = ?`),
+        appID)
+    if err != nil {
+        return nil, fmt.Errorf("list data mounts: %w", err)
+    }
+    return mounts, nil
+}
+
+func (db *DB) SetAppDataMounts(appID string, mounts []DataMountRow) error {
+    tx, err := db.DB.Beginx()
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback()
+
+    _, err = tx.Exec(db.rebind(
+        `DELETE FROM app_data_mounts WHERE app_id = ?`), appID)
+    if err != nil {
+        return fmt.Errorf("clear data mounts: %w", err)
+    }
+
+    for _, m := range mounts {
+        _, err = tx.Exec(db.rebind(
+            `INSERT INTO app_data_mounts (app_id, source, target, readonly)
+             VALUES (?, ?, ?, ?)`),
+            appID, m.Source, m.Target, m.ReadOnly)
+        if err != nil {
+            return fmt.Errorf("insert data mount: %w", err)
+        }
+    }
+
+    return tx.Commit()
+}
+```
+
 ### Step 5: Mount validation package
 
-New package `internal/mount/` with type definitions and validation.
+New package `internal/mount/` with validation and resolution.
 This is separate from the API handler so the process backend
-(phase 3-7) can reuse it.
+(phase 3-7) can reuse it. Works with `db.DataMountRow` directly —
+no intermediate types or JSON parsing.
 
 **`internal/mount/mount.go`:**
 
@@ -269,29 +369,14 @@ This is separate from the API handler so the process backend
 package mount
 
 import (
-    "encoding/json"
     "fmt"
     "path/filepath"
     "strings"
 
     "github.com/cynkra/blockyard/internal/backend"
     "github.com/cynkra/blockyard/internal/config"
+    "github.com/cynkra/blockyard/internal/db"
 )
-
-// DataMount describes a single data mount for an app's workers.
-type DataMount struct {
-    Source   string `json:"source"`   // "models" or "models/v2"
-    Target   string `json:"target"`   // "/data/models"
-    ReadOnly *bool  `json:"readonly"` // default true
-}
-
-// IsReadOnly returns the effective read-only flag (default true).
-func (m DataMount) IsReadOnly() bool {
-    if m.ReadOnly == nil {
-        return true
-    }
-    return *m.ReadOnly
-}
 
 // ReservedPaths are container paths that mount targets cannot collide
 // with. Checked by prefix — "/app/foo" collides with "/app".
@@ -304,21 +389,9 @@ var ReservedPaths = []string{
     "/var/run/blockyard",
 }
 
-// Parse parses a JSON data_mounts string into a slice of DataMount.
-func Parse(raw string) ([]DataMount, error) {
-    if raw == "" || raw == "[]" {
-        return nil, nil
-    }
-    var mounts []DataMount
-    if err := json.Unmarshal([]byte(raw), &mounts); err != nil {
-        return nil, fmt.Errorf("invalid data_mounts JSON: %w", err)
-    }
-    return mounts, nil
-}
-
-// Validate checks a list of DataMounts against the admin-defined
+// Validate checks a list of data mount rows against the admin-defined
 // mount sources. Returns the first validation error found.
-func Validate(mounts []DataMount, sources []config.DataMountSource) error {
+func Validate(mounts []db.DataMountRow, sources []config.DataMountSource) error {
     sourceMap := make(map[string]string, len(sources))
     for _, s := range sources {
         sourceMap[s.Name] = s.Path
@@ -373,10 +446,12 @@ func Validate(mounts []DataMount, sources []config.DataMountSource) error {
     return nil
 }
 
-// Resolve converts validated DataMounts into host paths using the
-// admin-defined mount sources. Returns backend.MountEntry slices
-// ready for WorkerSpec.DataMounts.
-func Resolve(mounts []DataMount, sources []config.DataMountSource) []backend.MountEntry {
+// Resolve converts validated data mount rows into host paths using
+// the admin-defined mount sources. Returns an error if a source
+// references a name that no longer exists in the admin config
+// (can happen if the admin removes a source after apps were
+// configured to use it).
+func Resolve(mounts []db.DataMountRow, sources []config.DataMountSource) ([]backend.MountEntry, error) {
     sourceMap := make(map[string]string, len(sources))
     for _, s := range sources {
         sourceMap[s.Name] = s.Path
@@ -391,7 +466,10 @@ func Resolve(mounts []DataMount, sources []config.DataMountSource) []backend.Mou
             subpath = m.Source[idx+1:]
         }
 
-        hostPath := sourceMap[baseName]
+        hostPath, ok := sourceMap[baseName]
+        if !ok {
+            return nil, fmt.Errorf("mount source %q not found in config", baseName)
+        }
         if subpath != "" {
             hostPath = filepath.Join(hostPath, subpath)
         }
@@ -399,10 +477,10 @@ func Resolve(mounts []DataMount, sources []config.DataMountSource) []backend.Mou
         entries = append(entries, backend.MountEntry{
             Source:   hostPath,
             Target:   m.Target,
-            ReadOnly: m.IsReadOnly(),
+            ReadOnly: m.ReadOnly,
         })
     }
-    return entries
+    return entries, nil
 }
 ```
 
@@ -591,12 +669,15 @@ ensures system libraries and R version are consistent.
 in the three worker spawn sites:
 
 ```go
-if app.DataMounts != "" && app.DataMounts != "[]" {
-    parsed, err := mount.Parse(app.DataMounts)
+appMounts, err := srv.DB.ListAppDataMounts(app.ID)
+if err != nil {
+    slog.Error("failed to list data mounts", "app", app.Name, "error", err)
+} else if len(appMounts) > 0 {
+    resolved, err := mount.Resolve(appMounts, srv.Config.Storage.DataMounts)
     if err != nil {
-        slog.Error("invalid data_mounts for app", "app", app.Name, "error", err)
+        slog.Error("failed to resolve data mounts", "app", app.Name, "error", err)
     } else {
-        spec.DataMounts = mount.Resolve(parsed, srv.Config.Storage.DataMounts)
+        spec.DataMounts = resolved
     }
 }
 ```
@@ -612,11 +693,20 @@ Add to `updateAppRequest` in `internal/api/apps.go` (line 299):
 ```go
 type updateAppRequest struct {
     // ...existing fields...
-    Image      *string `json:"image"`
-    Runtime    *string `json:"runtime"`
-    DataMounts *string `json:"data_mounts"`
+    Image      *string          `json:"image"`
+    Runtime    *string          `json:"runtime"`
+    DataMounts []db.DataMountRow `json:"data_mounts,omitempty"`
 }
 ```
+
+The `DataMounts` field is a native JSON array — API consumers send:
+```json
+{"data_mounts": [{"source": "models", "target": "/data/models", "readonly": true}]}
+```
+
+To clear all mounts, send an empty array: `{"data_mounts": []}`.
+The `app_id` field in each entry is ignored on input — the handler
+fills it from the URL path parameter.
 
 Add validation in `UpdateApp()` handler (after existing validation,
 around line 380):
@@ -632,43 +722,46 @@ if body.Image != nil && *body.Image != "" {
 
 // Runtime changes require admin — runtime controls the container
 // isolation boundary (e.g., runc vs kata vs sysbox).
-if body.Runtime != nil && !caller.Role.CanManageRoles() {
+if body.Runtime != nil && (caller == nil || !caller.Role.CanManageRoles()) {
     forbidden(w, "runtime requires admin")
     return
 }
 
-if body.DataMounts != nil && *body.DataMounts != "" && *body.DataMounts != "[]" {
-    parsed, err := mount.Parse(*body.DataMounts)
-    if err != nil {
-        badRequest(w, fmt.Sprintf("invalid data_mounts: %v", err))
-        return
-    }
-    if err := mount.Validate(parsed, srv.Config.Storage.DataMounts); err != nil {
+if body.DataMounts != nil {
+    if err := mount.Validate(body.DataMounts, srv.Config.Storage.DataMounts); err != nil {
         badRequest(w, fmt.Sprintf("data_mounts: %v", err))
         return
     }
 }
 ```
 
-Convert `updateAppRequest` to `db.AppUpdate`:
+Convert `updateAppRequest` to `db.AppUpdate` and persist mounts:
 
 ```go
 u := db.AppUpdate{
     // ...existing field mappings...
-    Image:      body.Image,
-    Runtime:    body.Runtime,
-    DataMounts: body.DataMounts,
+    Image:   body.Image,
+    Runtime: body.Runtime,
 }
 ```
 
-**Dynamic resource limit updates** — after the DB update succeeds,
-when memory or CPU limits changed, update running workers:
+After the app update, persist mounts if provided:
 
 ```go
 updated, err := srv.DB.UpdateApp(app.ID, u)
 if err != nil {
-    serverError(w, err)
+    serverError(w, "update app: "+err.Error())
     return
+}
+
+if body.DataMounts != nil {
+    for i := range body.DataMounts {
+        body.DataMounts[i].AppID = app.ID
+    }
+    if err := srv.DB.SetAppDataMounts(app.ID, body.DataMounts); err != nil {
+        serverError(w, "set data mounts: "+err.Error())
+        return
+    }
 }
 
 // Live-update resource limits on running workers (best-effort).
@@ -704,6 +797,31 @@ if v := r.FormValue("runtime"); r.Form.Has("runtime") {
 // data_mounts not supported via form encoding — use JSON API.
 ```
 
+**API response** — add the new fields to `appResponseV2()` in
+`internal/api/runtime.go` (line 606, after `refresh_schedule`):
+
+```go
+"image":            app.Image,
+"runtime":          app.Runtime,
+```
+
+And add `data_mounts` from a DB query (the mount list lives in its
+own table, not on `AppRow`):
+
+```go
+dataMounts, _ := srv.DB.ListAppDataMounts(app.ID)
+// ...
+"data_mounts":      dataMounts,
+```
+
+Update the swagger response type in `internal/api/swagger_types.go`:
+
+```go
+Image      string          `json:"image"`
+Runtime    string          `json:"runtime"`
+DataMounts []db.DataMountRow `json:"data_mounts"`
+```
+
 ### Step 12: CLI — `by update --image` and `by scale` extensions
 
 **`by update`** in `cmd/by/scale.go` (the `updateCmd()` function at
@@ -730,7 +848,7 @@ if cmd.Flags().Changed("runtime") {
 }
 if cmd.Flags().Changed("data-mounts") {
     v, _ := cmd.Flags().GetString("data-mounts")
-    body["data_mounts"] = v
+    body["data_mounts"] = json.RawMessage(v)
 }
 ```
 
@@ -807,7 +925,7 @@ Configuration" heading (after pre-warmed seats, before app controls):
             <tr>
                 <td><code>{{.Source}}</code></td>
                 <td><code>{{.Target}}</code></td>
-                <td>{{if .IsReadOnly}}ro{{else}}rw{{end}}</td>
+                <td>{{if .ReadOnly}}ro{{else}}rw{{end}}</td>
             </tr>
         {{end}}
         </tbody>
@@ -822,9 +940,21 @@ The data mounts table is read-only in the UI — the inline save-per-field
 pattern does not work well for JSON arrays. Editing is done through the
 CLI or API.
 
-The template data needs a `DataMounts` field. In the UI handler that
-renders the settings tab, parse `app.DataMounts` JSON into
-`[]mount.DataMount` and pass it as `.DataMounts` in the template data.
+Add `IsAdmin bool` and `DataMounts []db.DataMountRow` to
+`settingsTabData` in `internal/ui/sidebar.go` (line 39). In the
+`settingsTab` handler (line 291), populate them:
+
+```go
+caller := auth.CallerFromContext(r.Context())
+isAdmin := caller != nil && caller.Role.CanManageRoles()
+dataMounts, _ := srv.DB.ListAppDataMounts(app.ID)
+
+data := settingsTabData{
+    // ...existing fields...
+    IsAdmin:    isAdmin,
+    DataMounts: dataMounts,
+}
+```
 
 ### Step 14: Tests
 
@@ -855,20 +985,8 @@ func TestValidate_ReservedTarget(t *testing.T)
 func TestValidate_DuplicateTargets(t *testing.T)
 // Two mounts with target "/data/models" → error.
 
-func TestParse_EmptyString(t *testing.T)
-// "" → nil, nil.
-
-func TestParse_EmptyArray(t *testing.T)
-// "[]" → nil, nil.
-
-func TestParse_InvalidJSON(t *testing.T)
-// "not json" → error.
-
 func TestResolve_SubpathJoin(t *testing.T)
 // Source "models/v2" with admin path "/data/shared" → "/data/shared/v2".
-
-func TestDataMount_ReadOnlyDefault(t *testing.T)
-// nil ReadOnly → IsReadOnly() returns true.
 ```
 
 #### Config validation tests
@@ -894,10 +1012,18 @@ func TestValidate_DataMountInvalidChars(t *testing.T)
 Extend `internal/db/db_test.go`:
 
 ```go
-func TestUpdateApp_ImageRuntimeDataMounts(t *testing.T)
-// Create app, update image/runtime/data_mounts, verify read-back.
+func TestUpdateApp_ImageRuntime(t *testing.T)
+// Create app, update image/runtime, verify read-back.
 // Verify empty string is the default for image and runtime.
-// Verify "[]" is the default for data_mounts.
+
+func TestSetAppDataMounts(t *testing.T)
+// Create app, set mounts, verify ListAppDataMounts returns them.
+// Verify SetAppDataMounts replaces previous mounts.
+// Verify empty slice clears all mounts.
+// Verify UNIQUE(app_id, target) constraint rejects duplicates.
+
+func TestDataMountsCascadeDelete(t *testing.T)
+// Create app with mounts, delete app, verify mounts are gone.
 ```
 
 #### API validation tests
@@ -909,7 +1035,7 @@ func TestUpdateApp_InvalidImage(t *testing.T)
 // Image with whitespace → 400.
 
 func TestUpdateApp_InvalidDataMountsJSON(t *testing.T)
-// Malformed JSON → 400.
+// Malformed JSON array → 400.
 
 func TestUpdateApp_UnknownMountSource(t *testing.T)
 // Source not in config → 400.
@@ -970,17 +1096,20 @@ phase 3-1 — runs up, down, up and verifies schema stability.
 | File | Action | Summary |
 |------|--------|---------|
 | `internal/config/config.go` | **update** | `DataMountSource` type, `DataMounts` on `StorageConfig`, `Runtime`/`RuntimeDefaults` on `DockerConfig`, validation |
-| `internal/db/db.go` | **update** | `Image`/`Runtime`/`DataMounts` on `AppRow` and `AppUpdate`, UPDATE SQL |
+| `internal/db/db.go` | **update** | `Image`/`Runtime` on `AppRow` and `AppUpdate`, UPDATE SQL, `DataMountRow` type, `ListAppDataMounts`/`SetAppDataMounts` queries |
 | `internal/backend/backend.go` | **update** | `DataMounts`/`Runtime` on `WorkerSpec`, `UpdateResources` on `Backend`, `ErrNotSupported` |
 | `internal/backend/docker/docker.go` | **update** | Data mount translation, `Runtime` on HostConfig, `UpdateResources` impl |
 | `internal/backend/mock/mock.go` | **update** | `UpdateResources` impl |
 | `internal/proxy/coldstart.go` | **update** | Per-app image/runtime fallback, data mount resolution |
 | `internal/api/apps.go` | **update** | New fields on request struct, validation, runtime admin check, dynamic resource updates, form parsing |
+| `internal/api/runtime.go` | **update** | Add `image`/`runtime`/`data_mounts` to `appResponseV2()` response map |
+| `internal/api/swagger_types.go` | **update** | Add `image`/`runtime`/`data_mounts` to swagger response type |
 | `internal/api/bundles.go` | **update** | Per-app image for build |
 | `internal/ui/upload.go` | **update** | Per-app image for UI upload build |
 | `internal/server/refresh.go` | **update** | Per-app image for dependency refresh |
 | `internal/server/packages.go` | **update** | Per-app image for runtime package install |
 | `internal/server/transfer.go` | **update** | Per-app image/runtime for transfer re-spawn |
+| `internal/ui/sidebar.go` | **update** | `IsAdmin`/`DataMounts` on `settingsTabData`, populate in handler |
 | `internal/ui/templates/tab_settings.html` | **update** | Image/runtime input fields, data mounts table |
 | `cmd/by/scale.go` | **update** | `--image` on `updateCmd`, `--runtime`/`--data-mounts` on `scaleCmd` |
 
@@ -988,7 +1117,7 @@ phase 3-1 — runs up, down, up and verifies schema stability.
 
 | File | Purpose |
 |------|---------|
-| `internal/mount/mount.go` | `DataMount` type, `Parse`, `Validate`, `Resolve`, `ReservedPaths` |
+| `internal/mount/mount.go` | `Validate`, `Resolve`, `ReservedPaths` |
 | `internal/mount/mount_test.go` | Mount validation unit tests |
 | `internal/db/migrations/sqlite/002_app_config.up.sql` | Migration up (SQLite) |
 | `internal/db/migrations/sqlite/002_app_config.down.sql` | Migration down (SQLite) |
@@ -1010,10 +1139,10 @@ phase 3-1 — runs up, down, up and verifies schema stability.
    mounts to bwrap `--bind` / `--ro-bind` arguments. A shared package
    avoids duplicating the security-sensitive path traversal checks.
 
-3. **ReadOnly defaults to true.** Data mounts are read-only unless
-   explicitly opted out. This matches the principle of least privilege
-   — most data mounts are shared model directories or reference data
-   that workers should not modify.
+3. **ReadOnly defaults to true.** The `readonly` column defaults to 1.
+   Most data mounts are shared model directories or reference data
+   that workers should not modify — read-only by default matches the
+   principle of least privilege.
 
 4. **Image override on `by update`, runtime on `by scale`.** The plan
    specifies `by update --image <ref>` for the image override. Runtime
@@ -1023,9 +1152,9 @@ phase 3-1 — runs up, down, up and verifies schema stability.
    handles resource allocation (memory, CPU, runtime, mounts).
 
 5. **Data mounts read-only in UI.** The settings tab's inline
-   save-per-field pattern does not extend to JSON arrays. Displaying
-   the mount table with a "use CLI" pointer is simpler and less
-   error-prone than building a JSON array editor in htmx.
+   save-per-field pattern does not extend well to multi-row relations.
+   Displaying the mount table with a "use CLI" pointer is simpler
+   and less error-prone than building a row editor in htmx.
 
 6. **Best-effort dynamic resource updates.** When memory/CPU limits
    change, running workers are updated live via `ContainerUpdate()`.
@@ -1036,8 +1165,9 @@ phase 3-1 — runs up, down, up and verifies schema stability.
 
 7. **`ErrNotSupported` for backend capabilities.** `UpdateResources`
    returns `ErrNotSupported` from backends that don't support live
-   updates (mock backend returns it for simplicity; future process
-   backend will return it because there are no per-worker cgroups).
+   updates (future process backend will return it because there are
+   no per-worker cgroups). The mock backend implements the update
+   (stores new values) so API tests can verify the call is made.
    Callers check for this sentinel and log rather than fail.
 
 8. **Empty string means server default.** Both `image` and `runtime`
