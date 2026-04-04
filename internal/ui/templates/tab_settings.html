@@ -43,6 +43,7 @@
                         <button class="tag-remove"
                                 hx-delete="/api/v1/apps/{{$.App.ID}}/tags/{{.ID}}"
                                 hx-swap="none"
+                                hx-on::after-request="if(event.detail.successful) htmx.trigger(document.body,'tagRemoved')"
                                 aria-label="Remove tag {{.Name}}">&#10005;</button>
                     </span>
                     {{end}}

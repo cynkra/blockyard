@@ -744,6 +744,7 @@ func (ui *UI) createAndAssignTag(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("HX-Trigger", "tagAdded")
 		if err := ui.fragments["tab_settings.html"].Execute(w, data); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}

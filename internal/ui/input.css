@@ -141,11 +141,10 @@
 
 
   /* ── App grid + card ── */
-  .app-grid { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); }
+  /* app-grid removed — cards are direct children of apps-grid now */
   .app-card {
-    @apply card card-border relative no-underline;
+    @apply card relative no-underline border border-base-300;
     color: inherit !important;
-    border-color: oklch(var(--bc) / 0.15);
     border-radius: var(--radius-field, 0.5rem);
     transition: border-color 0.15s, box-shadow 0.15s;
   }
@@ -157,7 +156,7 @@
   .app-title { @apply text-sm text-base-content/70 mt-0.5 line-clamp-1; }
   .app-desc { @apply text-xs text-base-content/50 mt-1 line-clamp-2; }
   .app-tags { @apply flex gap-1.5 flex-wrap mt-auto pt-3; }
-  .tag { @apply badge badge-sm badge-soft badge-neutral; }
+  .tag { @apply badge badge-sm badge-soft badge-primary; }
 
   /* Status dot — uses DaisyUI's status component with its color classes.
      Template maps app status → DaisyUI color via statusDotClass helper.
@@ -178,14 +177,27 @@
   .app-card-gear:hover { @apply text-base-content bg-base-200; }
   .app-card-gear svg { @apply w-4 h-4; }
 
-  /* ── Apps page layout: cards + tag sidebar ── */
-  .apps-layout { @apply flex gap-6; }
-  .apps-main { @apply flex-1 min-w-0; }
-  .sort-controls-row { @apply flex justify-end mb-2; }
+  /* ── Apps page: flat auto-fill grid (cards + tag sidebar same width) ── */
+  .apps-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.5rem;
+    align-items: start;
+  }
+  @media (max-width: 768px) {
+    .apps-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 500px) {
+    .apps-grid { grid-template-columns: 1fr; }
+  }
+  .apps-grid-empty { grid-column: 1 / -1; }
+  .sort-controls-row { @apply flex justify-end mb-3; }
 
   /* ── Tag sidebar ── */
   .tag-sidebar {
-    @apply w-52 shrink-0 self-start sticky top-6;
+    grid-column-end: -1;
+    order: 999;
+    @apply self-start sticky top-6;
     @apply border border-base-300 p-4;
     border-radius: var(--radius-field, 0.5rem);
   }
@@ -200,15 +212,14 @@
   }
   .tag-browser-chip:hover { @apply bg-base-200; }
   .tag-browser-chip.active { @apply bg-primary/10 text-primary font-medium; }
-  .tag-browser-chip .tag-count { @apply text-xs opacity-40; }
+  .tag-browser-chip .tag-count { @apply opacity-60; }
   .tag-admin-inline { @apply mt-4 flex flex-col gap-2; }
   .dark .tag-admin-inline { border-color: oklch(var(--bc) / 0.15); }
   .tag-deletable { @apply flex items-center justify-between text-xs text-base-content/60; }
   .tag-mode-toggle { @apply text-xs text-base-content/60 mt-2; }
   .tag-mode-toggle a { @apply text-primary no-underline font-medium; }
-  @media (max-width: 768px) {
-    .apps-layout { @apply flex-col; }
-    .tag-sidebar { @apply w-full; }
+  @media (max-width: 500px) {
+    .tag-sidebar { grid-column-end: auto; order: -1; }
   }
 
   /* ── Tag chips (settings) ── */
