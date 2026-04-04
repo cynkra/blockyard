@@ -347,33 +347,37 @@ requirement; the precondition check does not enforce it.
 ### Rolling Update Flow
 
 ```
-by admin update
+by admin update → POST /api/v1/admin/update (server-side orchestration)
   1. Pull         → docker pull ghcr.io/cynkra/blockyard:<tag>
   2. Backup       → copy SQLite file or pg_dump
-  3. Start new    → start new container (same network, same proxy labels)
+  3. Start new    → clone own container with new image (passive mode)
   4. Wait ready   → poll /readyz on new container
-  5. Drain old    → SIGUSR1 old server (health checks fail, proxy shifts)
-  6. Wait exit    → old container drains and exits
-  7. Cleanup      → remove old container, verify health
+  5. Drain self   → set health → 503 (proxy shifts traffic to new)
+  6. Activate new → POST /admin/activate (start background goroutines)
+  7. Watchdog     → monitor new container health for watch period
+  8. Exit         → old server shuts down (workers survive via Redis)
 ```
 
-**Step 3–4:** the new server starts, connects to Redis (finds existing
-worker state), runs any pending migrations, joins worker networks, and
-starts its background goroutines (health poller, autoscaler, token
-refreshers). It becomes ready when `/readyz` returns 200.
+**Step 3–4:** the new server starts in passive mode
+(`BLOCKYARD_PASSIVE=1`), connects to Redis (finds existing worker
+state), runs any pending migrations, and joins worker networks. It
+does **not** start background goroutines yet — those wait for
+activation in step 6. It becomes ready when `/readyz` returns 200.
 
 During the overlap between steps 3 and 5, the proxy load-balances across
 both servers. This is safe because they share all routing state via
 Redis. Both can serve any request.
 
-**Step 5:** `by admin update` sends SIGUSR1 to the old server process.
-The old server enters drain mode: health endpoints return 503
-immediately, the proxy detects this and stops routing new requests to it.
-No proxy-specific API call or label change is needed — the health check
-is the universal cutover signal.
+**Step 5:** the old server's orchestrator sets the draining flag
+internally. Health endpoints return 503 immediately, the proxy detects
+this and stops routing new requests to it. No proxy-specific API call
+or label change is needed — the health check is the universal cutover
+signal.
 
-**Step 6:** the old server finishes draining in-flight requests and
-exits. Workers remain running, managed by the new server via Redis.
+**Step 7–8:** the old server stays alive as a watchdog, monitoring the
+new server's `/readyz` endpoint. If the new server fails within the
+watch period, the old server kills it, un-drains, and resumes serving.
+If healthy, the old server exits cleanly (workers survive via Redis).
 
 ### Failure Modes
 

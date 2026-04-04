@@ -183,7 +183,7 @@ jobs:
           phase: setup
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
-      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/proxy/...
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags docker_test -coverprofile=coverage-docker.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/preflight/... ./internal/proxy/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-docker

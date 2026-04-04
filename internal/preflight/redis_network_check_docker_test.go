@@ -33,7 +33,8 @@ func TestCheckRedisOnServiceNetwork_Detected(t *testing.T) {
 	}
 	defer cli.NetworkRemove(ctx, netResp.ID, client.NetworkRemoveOptions{}) //nolint:errcheck
 
-	// Create a container named "redis" on that network.
+	// Create and start a container on that network so it appears in inspect.
+	ensureAlpine(t, ctx, cli)
 	containerName := "blockyard-test-redis-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	resp, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Config: &container.Config{
@@ -50,6 +51,10 @@ func TestCheckRedisOnServiceNetwork_Detected(t *testing.T) {
 	}
 	defer cli.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true}) //nolint:errcheck
 
+	if _, err := cli.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+
 	// The check should detect the container by name.
 	deps := DockerDeps{
 		Client:   cli,
@@ -57,11 +62,8 @@ func TestCheckRedisOnServiceNetwork_Detected(t *testing.T) {
 		RedisURL: fmt.Sprintf("redis://%s:6379", containerName),
 	}
 	res := checkRedisOnServiceNetwork(ctx, deps)
-	if res == nil {
-		t.Fatal("expected error when Redis container is on the service network")
-	}
 	if res.Severity != SeverityError {
-		t.Errorf("severity = %d, want SeverityError", res.Severity)
+		t.Errorf("severity = %v, want SeverityError: %s", res.Severity, res.Message)
 	}
 }
 
@@ -89,7 +91,7 @@ func TestCheckRedisOnServiceNetwork_NotDetected(t *testing.T) {
 		RedisURL: "redis://some-other-host:6379",
 	}
 	res := checkRedisOnServiceNetwork(ctx, deps)
-	if res != nil {
-		t.Errorf("expected nil when Redis host is not on service network, got %q", res.Message)
+	if res.Severity != SeverityOK {
+		t.Errorf("severity = %v, want OK when Redis not on service network: %s", res.Severity, res.Message)
 	}
 }

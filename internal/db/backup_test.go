@@ -62,6 +62,103 @@ func TestBackupSQLiteMemoryFails(t *testing.T) {
 	}
 }
 
+func TestBackupWithMeta(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	db, err := Open(config.DatabaseConfig{Driver: "sqlite", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.CreateApp("test-app", "admin")
+
+	meta, err := db.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ImageTag != "v1.0.0" {
+		t.Errorf("ImageTag = %q, want %q", meta.ImageTag, "v1.0.0")
+	}
+	if meta.MigrationVersion == 0 {
+		t.Error("expected non-zero migration version")
+	}
+	if meta.BackupPath == "" {
+		t.Error("expected non-empty backup path")
+	}
+
+	// Verify metadata file was written.
+	metaPath := meta.BackupPath + ".meta.json"
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Fatalf("metadata file not found: %v", err)
+	}
+}
+
+func TestLatestBackupMeta(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	db, err := Open(config.DatabaseConfig{Driver: "sqlite", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// No backups yet.
+	_, err = LatestBackupMeta(path)
+	if err != ErrNoBackup {
+		t.Errorf("expected ErrNoBackup, got %v", err)
+	}
+
+	// Create a backup.
+	meta, err := db.BackupWithMeta(context.Background(), "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now should find it.
+	latest, err := LatestBackupMeta(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.ImageTag != meta.ImageTag {
+		t.Errorf("ImageTag = %q, want %q", latest.ImageTag, meta.ImageTag)
+	}
+}
+
+func TestReadBackupMeta(t *testing.T) {
+	dir := t.TempDir()
+
+	// Valid metadata.
+	validJSON := `{"backup_path":"/tmp/test.db.backup","image_tag":"v1.0.0","migration_version":5}`
+	metaPath := filepath.Join(dir, "test.meta.json")
+	os.WriteFile(metaPath, []byte(validJSON), 0o600)
+
+	meta, err := readBackupMeta(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ImageTag != "v1.0.0" {
+		t.Errorf("ImageTag = %q", meta.ImageTag)
+	}
+	if meta.MigrationVersion != 5 {
+		t.Errorf("MigrationVersion = %d", meta.MigrationVersion)
+	}
+
+	// Invalid JSON.
+	badPath := filepath.Join(dir, "bad.meta.json")
+	os.WriteFile(badPath, []byte("not json"), 0o600)
+	_, err = readBackupMeta(badPath)
+	if err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+
+	// Missing file.
+	_, err = readBackupMeta(filepath.Join(dir, "missing.meta.json"))
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
 func TestBackupPostgres(t *testing.T) {
 	if pgBaseURL == "" {
 		t.Skip("BLOCKYARD_TEST_POSTGRES_URL not set")

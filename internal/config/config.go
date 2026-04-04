@@ -26,6 +26,7 @@ type Config struct {
 	BoardStorage *BoardStorageConfig `toml:"board_storage"` // nil when not configured
 	Audit        *AuditConfig        `toml:"audit"`         // nil when not configured
 	Telemetry    *TelemetryConfig    `toml:"telemetry"`     // nil when not configured
+	Update       *UpdateConfig       `toml:"update"`        // nil when not configured
 }
 
 type RedisConfig struct {
@@ -44,6 +45,12 @@ type AuditConfig struct {
 type TelemetryConfig struct {
 	MetricsEnabled bool   `toml:"metrics_enabled"` // default: false
 	OTLPEndpoint   string `toml:"otlp_endpoint"`   // e.g. http://otel-collector:4317
+}
+
+type UpdateConfig struct {
+	Schedule    string   `toml:"schedule"`      // cron expression; empty = disabled
+	Channel     string   `toml:"channel"`       // "stable" (default) or "main"
+	WatchPeriod Duration `toml:"watch_period"`  // health monitoring after update completes
 }
 
 type ServerConfig struct {
@@ -224,6 +231,9 @@ func applyDefaults(cfg *Config) {
 		v := 16.0
 		cfg.Proxy.MaxCPULimit = &v
 	}
+	if cfg.Update != nil {
+		updateDefaults(cfg.Update)
+	}
 	if cfg.Redis != nil {
 		redisDefaults(cfg.Redis)
 	}
@@ -232,6 +242,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Openbao != nil {
 		openbaoDefaults(cfg.Openbao)
+	}
+}
+
+func updateDefaults(c *UpdateConfig) {
+	if c.Channel == "" {
+		c.Channel = "stable"
+	}
+	if c.WatchPeriod.Duration == 0 {
+		c.WatchPeriod.Duration = 5 * time.Minute
 	}
 }
 
@@ -294,6 +313,12 @@ func applyEnvOverrides(cfg *Config) {
 	// Auto-construct [telemetry] section if any BLOCKYARD_TELEMETRY_* env var is set.
 	if cfg.Telemetry == nil && envPrefixExists("BLOCKYARD_TELEMETRY_") {
 		cfg.Telemetry = &TelemetryConfig{}
+	}
+
+	// Auto-construct [update] section if any BLOCKYARD_UPDATE_* env var is set.
+	if cfg.Update == nil && envPrefixExists("BLOCKYARD_UPDATE_") {
+		cfg.Update = &UpdateConfig{}
+		updateDefaults(cfg.Update)
 	}
 
 	applyEnvToStruct(reflect.ValueOf(cfg).Elem(), "BLOCKYARD")

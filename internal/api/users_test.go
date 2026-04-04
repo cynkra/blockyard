@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -73,7 +74,7 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 	srv.VaultClient = mockVaultForEnrollment(t)
 	srv.VaultTokenCache = integration.NewVaultTokenCache()
 
-	handler := NewRouter(srv, func() {})
+	handler := NewRouter(srv, func() {}, nil, context.Background())
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

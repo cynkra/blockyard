@@ -34,6 +34,26 @@ func TestParseContentRole(t *testing.T) {
 	}
 }
 
+func TestAppRelationString(t *testing.T) {
+	tests := []struct {
+		r    authz.AppRelation
+		want string
+	}{
+		{authz.RelationAdmin, "admin"},
+		{authz.RelationOwner, "owner"},
+		{authz.RelationContentCollaborator, "collaborator"},
+		{authz.RelationContentViewer, "viewer"},
+		{authz.RelationAnonymous, "anonymous"},
+		{authz.RelationNone, "none"},
+		{authz.AppRelation(99), "none"},
+	}
+	for _, tt := range tests {
+		if got := tt.r.String(); got != tt.want {
+			t.Errorf("AppRelation(%d).String() = %q, want %q", tt.r, got, tt.want)
+		}
+	}
+}
+
 func TestAppRelationPermissions(t *testing.T) {
 	tests := []struct {
 		relation    authz.AppRelation

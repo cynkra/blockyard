@@ -309,7 +309,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	srv.Workers.Set(workerID, server.ActiveWorker{AppID: app.ID})
 
 	// Create the HTTP test server with the full router.
-	handler := api.NewRouter(srv, func() {})
+	handler := api.NewRouter(srv, func() {}, nil, context.Background())
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 

@@ -26,6 +26,7 @@ import (
 	"github.com/cynkra/blockyard/internal/drain"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/ops"
+	"github.com/cynkra/blockyard/internal/orchestrator"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/proxy"
@@ -440,7 +441,34 @@ func main() {
 	srv.Checker = preflight.NewChecker(checkerDeps)
 	srv.Checker.Init(context.Background(), configReport, dockerReport)
 
-	handler := api.NewRouter(srv, startBG)
+	// Late-binding drain closures — drainer is nil here, assigned below.
+	var drainer *drain.Drainer
+
+	drainFn := func() { drainer.Drain() }
+	undrainFn := func() { drainer.Undrain() }
+
+	// Exit signal — the scheduled updater (a bgWg goroutine) cannot
+	// call Finish directly (deadlock), so both the API handler
+	// goroutine and RunScheduled use this channel to wake main.
+	doneCh := make(chan struct{}, 1)
+	exitFn := func() {
+		select {
+		case doneCh <- struct{}{}:
+		default:
+		}
+	}
+
+	// Orchestrator (nil in native mode / process backend → 501 from API).
+	var orch *orchestrator.Orchestrator
+	if be, ok := srv.Backend.(*docker.DockerBackend); ok && be.ServerID() != "" {
+		orch = orchestrator.New(
+			be.Client(), be.ServerID(), srv.DB, cfg, srv.Version,
+			srv.Tasks, &orchestrator.DefaultChecker{}, slog.Default(),
+			drainFn, undrainFn, exitFn,
+		)
+	}
+
+	handler := api.NewRouter(srv, startBG, orch, bgCtx)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Bind,
@@ -465,11 +493,8 @@ func main() {
 		}
 	}
 
-	// Set up signal channels.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
-
-	drainer := &drain.Drainer{
+	// Now assign the drainer — closures become safe to call.
+	drainer = &drain.Drainer{
 		Srv:             srv,
 		MainServer:      httpServer,
 		MgmtServer:      mgmtServer,
@@ -477,6 +502,20 @@ func main() {
 		BGWait:          &bgWg,
 		TracingShutdown: tracingShutdown,
 	}
+
+	// Scheduled auto-updates (not in passive mode — prevents the
+	// newly deployed replacement from immediately trying to update).
+	if !passive && orch != nil && cfg.Update != nil && cfg.Update.Schedule != "" {
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			orch.RunScheduled(bgCtx, cfg.Update.Schedule, cfg.Update.Channel)
+		}()
+	}
+
+	// Set up signal channels.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
 
 	// forceExitOnSecondSignal spawns a goroutine that force-exits if a
 	// second signal arrives during graceful drain/shutdown.
@@ -506,16 +545,20 @@ func main() {
 		}()
 	}
 
-	// Wait for signal.
-	sig := <-sigCh
-	forceExitOnSecondSignal()
-	switch sig {
-	case syscall.SIGUSR1:
-		drainer.Drain()
+	// Wait for signal or update-complete notification.
+	select {
+	case sig := <-sigCh:
+		forceExitOnSecondSignal()
+		switch sig {
+		case syscall.SIGUSR1:
+			drainer.Drain()
+			drainer.Finish(cfg.Server.DrainTimeout.Duration)
+		default:
+			// SIGTERM, SIGINT → full shutdown.
+			drainer.Shutdown(cfg.Server.ShutdownTimeout.Duration)
+		}
+	case <-doneCh:
 		drainer.Finish(cfg.Server.DrainTimeout.Duration)
-	default:
-		// SIGTERM, SIGINT → full shutdown.
-		drainer.Shutdown(cfg.Server.ShutdownTimeout.Duration)
 	}
 }
 
