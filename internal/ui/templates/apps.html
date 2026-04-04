@@ -53,9 +53,7 @@
             </button>
             {{end}}
             <div class="app-card-header">
-                <div class="tooltip tooltip-right" data-tip="{{.Status}}">
-                    <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
-                </div>
+                <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}" style="flex-shrink:0"></span>
                 <span class="app-name">{{.Name}}</span>
             </div>
             {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
@@ -79,7 +77,7 @@
     </section>
 {{end}}
 </div>
-{{if .AllTags}}
+{{if or .AllTags (eq .UserRole "admin")}}
 <aside class="tag-sidebar">
     <h3 class="tag-sidebar-title">Tags</h3>
     <div class="tag-sidebar-list">
@@ -102,7 +100,7 @@
         <div class="flex gap-2 items-center">
             <input type="text" id="new-global-tag" placeholder="New tag..."
                    class="input input-sm text-sm flex-1">
-            <button class="btn btn-soft btn-sm btn-xs" onclick="createGlobalTag()">Add</button>
+            <button class="btn btn-soft btn-xs" onclick="createGlobalTag()">Add</button>
         </div>
         {{range .AllTags}}
         {{if eq .AppCount 0}}
@@ -281,5 +279,9 @@ document.body.addEventListener('appSettingsChanged', function() {
         subtitleEl.remove();
     }
 });
+
+/* When tags change, update card badges and reload page to refresh tag sidebar. */
+document.body.addEventListener('tagAdded', function() { location.reload(); });
+document.body.addEventListener('tagRemoved', function() { location.reload(); });
 </script>
 {{end}}

@@ -146,12 +146,13 @@
     @apply card card-border relative no-underline;
     color: inherit !important;
     border-color: oklch(var(--bc) / 0.15);
+    border-radius: var(--radius-field, 0.5rem);
     transition: border-color 0.15s, box-shadow 0.15s;
   }
   .dark .app-card { border-color: oklch(var(--bc) / 0.25); }
   .app-card:hover { @apply border-primary shadow-md; }
   .app-card .card-body { min-height: 7rem; }
-  .app-card-header { @apply flex items-center gap-2; }
+  .app-card-header { @apply flex items-center gap-2 leading-none; }
   .app-name { @apply font-semibold text-sm; }
   .app-title { @apply text-sm text-base-content/70 mt-0.5 line-clamp-1; }
   .app-desc { @apply text-xs text-base-content/50 mt-1 line-clamp-2; }
@@ -184,21 +185,23 @@
 
   /* ── Tag sidebar ── */
   .tag-sidebar {
-    @apply w-48 shrink-0 self-start sticky top-6;
-    @apply border border-base-300 rounded-box p-4;
+    @apply w-52 shrink-0 self-start sticky top-6;
+    @apply border border-base-300 p-4;
+    border-radius: var(--radius-field, 0.5rem);
   }
   .dark .tag-sidebar { border-color: oklch(var(--bc) / 0.25); }
-  .tag-sidebar-title { @apply text-sm font-medium m-0 mb-3; }
-  .tag-sidebar-list { @apply flex flex-col gap-1.5; }
+  .tag-sidebar-title { @apply text-xs font-medium uppercase tracking-wide text-base-content/50 m-0 mb-3; }
+  .tag-sidebar-list { @apply flex flex-col gap-0.5; }
   .tag-browser-chip {
-    @apply flex items-center justify-between text-sm no-underline rounded-lg px-2.5 py-1;
+    @apply flex items-center justify-between text-sm no-underline px-2.5 py-1.5;
     color: inherit;
+    border-radius: var(--radius-field, 0.25rem);
     transition: background 0.15s;
   }
   .tag-browser-chip:hover { @apply bg-base-200; }
   .tag-browser-chip.active { @apply bg-primary/10 text-primary font-medium; }
-  .tag-browser-chip .tag-count { @apply text-xs opacity-50; }
-  .tag-admin-inline { @apply mt-4 pt-3 border-t border-base-300 flex flex-col gap-2; }
+  .tag-browser-chip .tag-count { @apply text-xs opacity-40; }
+  .tag-admin-inline { @apply mt-4 flex flex-col gap-2; }
   .dark .tag-admin-inline { border-color: oklch(var(--bc) / 0.15); }
   .tag-deletable { @apply flex items-center justify-between text-xs text-base-content/60; }
   .tag-mode-toggle { @apply text-xs text-base-content/60 mt-2; }

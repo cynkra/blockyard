@@ -568,8 +568,8 @@ func TestAppsPageAppStoppedStatus(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body := readBody(t, resp)
-	if !strings.Contains(body, "ready") {
-		t.Error("expected 'ready' status for enabled app with no workers")
+	if !strings.Contains(body, "status-success") {
+		t.Error("expected success status dot for enabled app with no workers")
 	}
 }
 
