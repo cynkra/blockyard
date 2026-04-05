@@ -291,6 +291,11 @@ func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port int) []s
         "--proc", "/proc",
         "--dev", "/dev",
 
+        // Working directory — /tmp is always writable (tmpfs above).
+        // Without --chdir the inherited cwd may not be accessible
+        // after --unshare-user remaps the UID.
+        "--chdir", "/tmp",
+
         // App bundle — shadow with the specific bundle path.
         "--ro-bind", spec.BundlePath, spec.WorkerMount,
     }
@@ -302,14 +307,16 @@ func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port int) []s
         args = append(args, "--ro-bind", spec.LibraryPath, "/rv-library")
     }
 
-    // Transfer directory (read-write, optional)
-    if spec.TransferDir != "" {
-        args = append(args, "--bind", spec.TransferDir, "/var/run/blockyard/transfer")
-    }
-
-    // Worker token directory (read-only, optional)
+    // Worker token directory (read-only, optional) — must come before
+    // the transfer mount so that the child mount shadows the parent.
     if spec.TokenDir != "" {
         args = append(args, "--ro-bind", spec.TokenDir, "/var/run/blockyard")
+    }
+
+    // Transfer directory (read-write, optional) — mounted after the
+    // parent /var/run/blockyard so it shadows the transfer subdirectory.
+    if spec.TransferDir != "" {
+        args = append(args, "--bind", spec.TransferDir, "/var/run/blockyard/transfer")
     }
 
     // Capability dropping — bwrap drops all by default with --unshare-user,
@@ -323,7 +330,7 @@ func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port int) []s
     } else {
         args = append(args,
             cfg.RPath, "-e",
-            fmt.Sprintf("shiny::runApp('%s', port=%s, host='0.0.0.0')",
+            fmt.Sprintf("shiny::runApp('%s', port=%s, host='127.0.0.1')",
                 spec.WorkerMount, strconv.Itoa(port)),
         )
     }
@@ -346,6 +353,7 @@ func bwrapBuildArgs(cfg *config.ProcessConfig, spec backend.BuildSpec) []string 
         "--tmpfs", "/tmp",
         "--proc", "/proc",
         "--dev", "/dev",
+        "--chdir", "/tmp",
     }
 
     // Build mounts — shadow specific paths with read-only or read-write
@@ -394,12 +402,33 @@ func applySeccomp(cmd *exec.Cmd, profilePath string) ([]string, error) {
     fd := 3 + len(cmd.ExtraFiles) - 1
     return []string{"--seccomp", strconv.Itoa(fd)}, nil
 }
+
+// spliceBeforeSeparator inserts extra into cmd.Args just before the
+// "--" separator. cmd.Args[0] is the program name (set by exec.Command).
+func spliceBeforeSeparator(cmd *exec.Cmd, extra []string) {
+    for i, arg := range cmd.Args {
+        if arg == "--" {
+            result := make([]string, 0, len(cmd.Args)+len(extra))
+            result = append(result, cmd.Args[:i]...)
+            result = append(result, extra...)
+            result = append(result, cmd.Args[i:]...)
+            cmd.Args = result
+            return
+        }
+    }
+    // No separator found — append before the end (shouldn't happen
+    // with well-formed bwrap args, but don't panic).
+    cmd.Args = append(cmd.Args, extra...)
+}
 ```
 
 The `Spawn` and `Build` methods call `applySeccomp` after creating the
-`exec.Cmd` and splice the returned args before the `--` separator. The
-file is closed by the OS when the child process execs (Go sets
-`O_CLOEXEC` by default, but bwrap reads the fd before exec).
+`exec.Cmd`, then `spliceBeforeSeparator` inserts the `--seccomp <fd>`
+flags before `--` in `cmd.Args`. The seccomp profile file is closed by
+the OS when the child process execs (Go sets `O_CLOEXEC` by default,
+but bwrap reads the fd before exec). When `SeccompProfile` is empty,
+`applySeccomp` returns nil and the splice is skipped — seccomp is
+optional until phase 3-8 ships the compiled BPF profile.
 
 ### Step 4: Log capture
 
@@ -419,76 +448,120 @@ import (
 )
 
 // logBuffer captures output from a child process and serves it as
-// a LogStream. Lines are stored in a bounded ring buffer and
-// new subscribers receive the buffered history plus live tail.
+// a LogStream. Lines are stored in a fixed-size circular buffer.
+// Subscribers track a global sequence number so their cursor stays
+// valid across ring wraps. Each subscriber gets its own notification
+// channel so broadcasts wake all viewers, not just one.
 type logBuffer struct {
-    mu       sync.Mutex
-    lines    []string
-    maxLines int
-    closed   bool
-    notify   chan struct{} // signaled on each new line or close
+    mu     sync.Mutex
+    buf    []string         // fixed-size ring buffer
+    size   int              // len(buf), set at init
+    seq    uint64           // total lines written (monotonic); buf index = seq % size
+    closed bool
+    subs   []chan struct{}   // per-subscriber notification channels
 }
 
 func newLogBuffer(maxLines int) *logBuffer {
     return &logBuffer{
-        maxLines: maxLines,
-        notify:   make(chan struct{}, 1),
+        buf:  make([]string, maxLines),
+        size: maxLines,
     }
 }
 
-// ingest reads lines from r until EOF and appends them to the buffer.
+// broadcast wakes all subscribers. Called with lb.mu held.
+func (lb *logBuffer) broadcast() {
+    for _, ch := range lb.subs {
+        select {
+        case ch <- struct{}{}:
+        default:
+        }
+    }
+}
+
+// subscribe registers a notification channel. Returns an unsubscribe func.
+func (lb *logBuffer) subscribe() (ch chan struct{}, unsub func()) {
+    ch = make(chan struct{}, 1)
+    lb.mu.Lock()
+    lb.subs = append(lb.subs, ch)
+    lb.mu.Unlock()
+    return ch, func() {
+        lb.mu.Lock()
+        for i, c := range lb.subs {
+            if c == ch {
+                lb.subs = append(lb.subs[:i], lb.subs[i+1:]...)
+                break
+            }
+        }
+        lb.mu.Unlock()
+    }
+}
+
+// ingest reads lines from r until EOF and writes them to the ring.
 func (lb *logBuffer) ingest(r io.Reader) {
     scanner := bufio.NewScanner(r)
     for scanner.Scan() {
         lb.mu.Lock()
-        lb.lines = append(lb.lines, scanner.Text())
-        if len(lb.lines) > lb.maxLines {
-            lb.lines = lb.lines[len(lb.lines)-lb.maxLines:]
-        }
+        lb.buf[lb.seq%uint64(lb.size)] = scanner.Text()
+        lb.seq++
+        lb.broadcast()
         lb.mu.Unlock()
-        // Non-blocking signal to subscribers.
-        select {
-        case lb.notify <- struct{}{}:
-        default:
-        }
     }
     lb.mu.Lock()
     lb.closed = true
+    lb.broadcast()
     lb.mu.Unlock()
-    select {
-    case lb.notify <- struct{}{}:
-    default:
-    }
 }
 
 // stream returns a LogStream that replays buffered lines and follows.
 func (lb *logBuffer) stream() backend.LogStream {
     ch := make(chan string, 64)
     done := make(chan struct{})
+    notify, unsub := lb.subscribe()
 
     go func() {
         defer close(ch)
-        cursor := 0
+        defer unsub()
+
+        // Start cursor at the oldest available line.
+        lb.mu.Lock()
+        cursor := lb.seq // start at current position (replay all available)
+        if lb.seq > uint64(lb.size) {
+            cursor = lb.seq - uint64(lb.size)
+        } else {
+            cursor = 0
+        }
+        lb.mu.Unlock()
+
         for {
             lb.mu.Lock()
-            snapshot := lb.lines
+            seq := lb.seq
             closed := lb.closed
+            // Copy out any lines between cursor and current seq.
+            var pending []string
+            for cursor < seq {
+                // The line at global sequence number `cursor` lives at
+                // buf[cursor % size] — but only if it hasn't been
+                // overwritten (cursor >= seq - size).
+                if cursor >= seq-uint64(lb.size) {
+                    pending = append(pending, lb.buf[cursor%uint64(lb.size)])
+                }
+                cursor++
+            }
             lb.mu.Unlock()
 
-            for cursor < len(snapshot) {
+            for _, line := range pending {
                 select {
-                case ch <- snapshot[cursor]:
-                    cursor++
+                case ch <- line:
                 case <-done:
                     return
                 }
             }
-            if closed {
+            if closed && cursor >= seq {
                 return
             }
             // Wait for new data.
             select {
-            case <-lb.notify:
+            case <-notify:
             case <-done:
                 return
             }
@@ -519,6 +592,7 @@ import (
     "net"
     "os"
     "os/exec"
+    "runtime"
     "strconv"
     "strings"
     "sync"
@@ -532,14 +606,21 @@ import (
 // Compile-time interface check.
 var _ backend.Backend = (*ProcessBackend)(nil)
 
+// cpuSample stores a previous CPU reading for delta computation.
+type cpuSample struct {
+    ticks uint64    // utime + stime in clock ticks
+    when  time.Time
+}
+
 // workerProc holds per-worker state.
 type workerProc struct {
-    cmd     *exec.Cmd
-    process *os.Process
-    port    int
-    spec    backend.WorkerSpec
-    logs    *logBuffer
-    done    chan struct{} // closed when process exits
+    cmd      *exec.Cmd
+    process  *os.Process
+    port     int
+    spec     backend.WorkerSpec
+    logs     *logBuffer
+    done     chan struct{} // closed when process exits
+    lastCPU  *cpuSample   // previous CPU sample for delta; nil on first call
 }
 
 // ProcessBackend implements backend.Backend using bubblewrap.
@@ -579,6 +660,21 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
     // lifecycle is managed by Stop() and --die-with-parent, not by ctx.
     cmd := exec.Command(b.cfg.BwrapPath, args...) //nolint:gosec // G204: args from validated config
 
+    // Kill bwrap if the blockyard server dies. --die-with-parent inside
+    // bwrap only kills R when bwrap exits — it does NOT kill bwrap when
+    // blockyard exits. Without Pdeathsig on the bwrap process itself,
+    // a server crash would leave orphaned bwrap+R processes.
+    cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+
+    // Seccomp — splice --seccomp <fd> args before the "--" separator.
+    // No-op when SeccompProfile is empty (phase 3-8 ships the profile).
+    if secArgs, err := applySeccomp(cmd, b.cfg.SeccompProfile); err != nil {
+        b.ports.Release(port)
+        return fmt.Errorf("process backend: seccomp: %w", err)
+    } else if len(secArgs) > 0 {
+        spliceBeforeSeparator(cmd, secArgs)
+    }
+
     // Minimal environment — do NOT inherit the server's env, which
     // contains database URLs, Redis credentials, OpenBao tokens, etc.
     cmd.Env = []string{
@@ -606,7 +702,14 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
         return fmt.Errorf("process backend: stderr pipe: %w", err)
     }
 
-    if err := cmd.Start(); err != nil {
+    // Pin this goroutine to its OS thread across the fork. Pdeathsig
+    // fires when the *thread* that forked the child exits — without
+    // LockOSThread the Go runtime may retire the thread and trigger
+    // a spurious SIGKILL to bwrap.
+    runtime.LockOSThread()
+    err = cmd.Start()
+    runtime.UnlockOSThread()
+    if err != nil {
         b.ports.Release(port)
         return fmt.Errorf("process backend: start bwrap: %w", err)
     }
@@ -723,6 +826,14 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
     // Context is appropriate here — builds are bounded, run-to-completion
     // tasks. If the caller cancels, the build should stop.
     cmd := exec.CommandContext(ctx, b.cfg.BwrapPath, args...) //nolint:gosec // G204: args from validated config
+    cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+
+    // Seccomp — same splice as Spawn.
+    if secArgs, err := applySeccomp(cmd, b.cfg.SeccompProfile); err != nil {
+        return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
+    } else if len(secArgs) > 0 {
+        spliceBeforeSeparator(cmd, secArgs)
+    }
 
     // Minimal env + build-specific vars from spec.Env ([]string KEY=VALUE).
     cmd.Env = []string{
@@ -794,21 +905,90 @@ func (b *ProcessBackend) ContainerStats(_ context.Context, id string) (*backend.
     if !ok {
         return nil, nil
     }
-    return readProcStats(w.process.Pid)
-}
 
-// readProcStats reads RSS and CPU usage from /proc/{pid}/stat and
-// /proc/{pid}/status. No cgroup access needed — these are available
-// for any process owned by the current user.
-func readProcStats(pid int) (*backend.ContainerStatsResult, error) {
-    // RSS from /proc/{pid}/status (VmRSS line, in kB).
-    statusPath := fmt.Sprintf("/proc/%d/status", pid)
-    statusData, err := os.ReadFile(statusPath)
-    if err != nil {
+    rssBytes, ticks := readProcTreeStats(w.process.Pid)
+    if rssBytes == 0 && ticks == 0 {
         return nil, nil // process exited between lookup and read
     }
 
-    var rssKB uint64
+    now := time.Now()
+    clockTick := uint64(100) // sysconf(_SC_CLK_TCK), 100 on Linux
+
+    // Compute CPU percentage from delta ticks / delta wall time,
+    // matching the Docker backend's semantics. First call returns 0%.
+    var cpuPercent float64
+    b.mu.Lock()
+    if w.lastCPU != nil {
+        dt := now.Sub(w.lastCPU.when).Seconds()
+        if dt > 0 {
+            deltaTicks := float64(ticks - w.lastCPU.ticks)
+            cpuPercent = (deltaTicks / float64(clockTick) / dt) * 100.0
+        }
+    }
+    w.lastCPU = &cpuSample{ticks: ticks, when: now}
+    b.mu.Unlock()
+
+    return &backend.ContainerStatsResult{
+        CPUPercent:       cpuPercent,
+        MemoryUsageBytes: rssBytes,
+        MemoryLimitBytes: 0, // no per-worker cgroup limit
+    }, nil
+}
+
+// readProcTreeStats aggregates RSS and CPU ticks across a process and
+// all its descendants. cmd.Process.Pid is the bwrap process; the actual
+// R process is a child of bwrap. Reading only the bwrap PID would show
+// trivial resource usage (bwrap is a tiny C program). We walk
+// /proc/{pid}/task/{tid}/children recursively to find all descendants
+// and sum their stats.
+//
+// Returns (totalRSSBytes, totalTicks). Both zero means the process tree
+// exited between lookup and read.
+func readProcTreeStats(pid int) (rssBytes uint64, ticks uint64) {
+    pids := collectDescendants(pid)
+    pids = append([]int{pid}, pids...)
+
+    var totalRSSKB uint64
+    var totalUtime, totalStime uint64
+
+    for _, p := range pids {
+        rss, ut, st := readOneProcStats(p)
+        totalRSSKB += rss
+        totalUtime += ut
+        totalStime += st
+    }
+
+    return totalRSSKB * 1024, totalUtime + totalStime
+}
+
+// collectDescendants returns all descendant PIDs of pid by walking
+// /proc/{pid}/task/{tid}/children recursively.
+func collectDescendants(pid int) []int {
+    var result []int
+    childrenPath := fmt.Sprintf("/proc/%d/task/%d/children", pid, pid)
+    data, err := os.ReadFile(childrenPath)
+    if err != nil {
+        return nil
+    }
+    for _, field := range strings.Fields(string(data)) {
+        child, err := strconv.Atoi(field)
+        if err != nil {
+            continue
+        }
+        result = append(result, child)
+        result = append(result, collectDescendants(child)...)
+    }
+    return result
+}
+
+// readOneProcStats reads VmRSS, utime, and stime for a single PID.
+// Returns zeros if the process is gone.
+func readOneProcStats(pid int) (rssKB, utime, stime uint64) {
+    // RSS from /proc/{pid}/status (VmRSS line, in kB).
+    statusData, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+    if err != nil {
+        return 0, 0, 0
+    }
     for _, line := range splitLines(string(statusData)) {
         if strings.HasPrefix(line, "VmRSS:") {
             fields := strings.Fields(line)
@@ -820,38 +1000,22 @@ func readProcStats(pid int) (*backend.ContainerStatsResult, error) {
     }
 
     // CPU from /proc/{pid}/stat (fields 14+15: utime + stime in clock ticks).
-    statPath := fmt.Sprintf("/proc/%d/stat", pid)
-    statData, err := os.ReadFile(statPath)
+    statData, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
     if err != nil {
-        return nil, nil
+        return rssKB, 0, 0
     }
-
-    // /proc/pid/stat format: pid (comm) state ... field14=utime field15=stime
-    // Find the closing ')' of comm to avoid issues with spaces in comm.
     statStr := string(statData)
     commEnd := strings.LastIndex(statStr, ")")
     if commEnd < 0 || commEnd+2 >= len(statStr) {
-        return nil, nil
+        return rssKB, 0, 0
     }
     fields := strings.Fields(statStr[commEnd+2:])
     // fields[0]=state, [1..]=field4+. utime=field14 → index 11, stime=field15 → index 12.
-    var cpuPercent float64
     if len(fields) > 12 {
-        utime, _ := strconv.ParseUint(fields[11], 10, 64)
-        stime, _ := strconv.ParseUint(fields[12], 10, 64)
-        // Total CPU ticks. To get a percentage we'd need a delta over
-        // time, but for a point-in-time snapshot we report cumulative
-        // seconds — the caller can diff successive calls.
-        clockTick := uint64(100) // sysconf(_SC_CLK_TCK), 100 on Linux
-        totalSec := float64(utime+stime) / float64(clockTick)
-        cpuPercent = totalSec // cumulative CPU seconds, not a percentage
+        utime, _ = strconv.ParseUint(fields[11], 10, 64)
+        stime, _ = strconv.ParseUint(fields[12], 10, 64)
     }
-
-    return &backend.ContainerStatsResult{
-        CPUPercent:       cpuPercent,
-        MemoryUsageBytes: rssKB * 1024,
-        MemoryLimitBytes: 0, // no per-worker cgroup limit
-    }, nil
+    return rssKB, utime, stime
 }
 
 // splitLines splits s into non-empty lines.
@@ -1288,6 +1452,7 @@ package process_test
 
 import (
     "context"
+    "os/exec"
     "testing"
     "time"
 
@@ -1427,8 +1592,8 @@ func TestContainerStatsLiveWorker(t *testing.T) {
 | File | Action | Summary |
 |------|--------|---------|
 | `internal/config/config.go` | **update** | Add `ProcessConfig` struct, `Backend` field on `ServerConfig`, process defaults, validation |
-| `internal/backend/process/process.go` | **create** | `ProcessBackend` struct, `New()`, `Spawn`, `Stop`, `HealthCheck`, `Logs`, `Addr`, `Build`, `ListManaged`, `RemoveResource`, `ContainerStats` |
-| `internal/backend/process/bwrap.go` | **create** | `bwrapArgs()` and `bwrapBuildArgs()` — construct bwrap command lines |
+| `internal/backend/process/process.go` | **create** | `ProcessBackend` struct implementing all nine `Backend` methods; `readProcTreeStats`, `collectDescendants`, `readOneProcStats` helpers |
+| `internal/backend/process/bwrap.go` | **create** | `bwrapArgs()`, `bwrapBuildArgs()`, `applySeccomp()`, `spliceBeforeSeparator()` |
 | `internal/backend/process/ports.go` | **create** | `portAllocator` with `Alloc()`, `Release()`, `InUse()` |
 | `internal/backend/process/logs.go` | **create** | `logBuffer` with `ingest()` and `stream()` for LogStream delivery |
 | `cmd/blockyard/main.go` | **update** | Backend selection switch; add `process` import; skip Docker preflight for process backend |
@@ -1459,14 +1624,19 @@ func TestContainerStatsLiveWorker(t *testing.T) {
    debugging without unbounded memory growth. The Docker backend has
    the same bounded behavior (Docker's log driver rotates).
 
-4. **`ContainerStats` reads `/proc/{pid}` — no cgroups needed.** RSS
-   comes from `/proc/{pid}/status` (VmRSS), CPU from
-   `/proc/{pid}/stat` (utime + stime). These are available for any
-   process owned by the current user — no cgroup delegation needed.
+4. **`ContainerStats` walks the process tree via `/proc` — no cgroups
+   needed.** `cmd.Process.Pid` is the bwrap process, not R. Reading
+   only bwrap's stats would show trivial usage (bwrap is a ~100KB C
+   program). `readProcTreeStats` walks `/proc/{pid}/task/{tid}/children`
+   recursively to find all descendants (R, its child processes) and
+   sums VmRSS and utime+stime across the tree. These are available for
+   any process owned by the current user — no cgroup delegation needed.
    `MemoryLimitBytes` is 0 (no per-worker limit), but usage is real.
-   CPU is reported as cumulative seconds rather than a percentage; the
-   caller diffs successive calls. Returns nil on process exit (race
-   between lookup and `/proc` read).
+   CPU is reported as a percentage matching the Docker backend's
+   semantics — each worker caches its previous `(ticks, timestamp)`
+   sample and `ContainerStats` computes `deltaCPU / deltaTime * 100`.
+   The first call returns 0% (no previous sample). Returns nil on
+   process exit (race between lookup and `/proc` read).
 
 5. **No network isolation.** Documented as a deliberate scope decision
    in `backends.md`. Workers share the host network stack. Network
@@ -1480,14 +1650,23 @@ func TestContainerStatsLiveWorker(t *testing.T) {
    ceiling in containerized mode.
 
 7. **SIGTERM → SIGKILL escalation with 10s grace.** Matches Docker's
-   default `docker stop` behavior. R/Shiny handles SIGTERM and shuts
-   down cleanly in most cases. The 10s fallback prevents hung processes
-   from blocking worker replacement indefinitely.
+   default `docker stop` behavior. `Stop()` sends SIGTERM to the bwrap
+   process, which forwards it to the sandboxed R child (bwrap installs
+   a signal handler that relays signals to the child). R/Shiny handles
+   SIGTERM and shuts down cleanly in most cases. The 10s fallback
+   prevents hung processes from blocking worker replacement
+   indefinitely.
 
-8. **`--die-with-parent` in bwrap args.** If the blockyard server
-   crashes, all bwrap children die immediately. No orphan processes.
-   This is critical — without it, a server restart would find port
-   conflicts from the previous run's still-alive workers.
+8. **Two-level death signal for orphan prevention.**
+   `--die-with-parent` in bwrap args sets `PR_SET_PDEATHSIG(SIGKILL)`
+   on the sandboxed R process — if bwrap dies, R dies. But
+   `--die-with-parent` alone does **not** kill bwrap when blockyard
+   crashes (bwrap's parent death signal refers to its own child, not
+   to its parent). We set `SysProcAttr.Pdeathsig = SIGKILL` on the
+   bwrap `exec.Cmd` so the kernel kills bwrap when blockyard exits,
+   then `--die-with-parent` cascades to R. `runtime.LockOSThread()`
+   around `cmd.Start()` prevents the Go runtime from retiring the
+   forking thread, which would trigger a spurious `PDEATHSIG`.
 
 9. **Build uses `CombinedOutput`, not pipes.** Build tasks run to
    completion (not long-lived), so capturing all output into a string
@@ -1537,8 +1716,8 @@ func TestContainerStatsLiveWorker(t *testing.T) {
     handler returns. `exec.CommandContext` sends SIGKILL on context
     cancellation, which would kill the worker moments after spawning.
     Worker lifecycle is managed explicitly by `Stop()` (SIGTERM →
-    SIGKILL) and `--die-with-parent` (server crash), not by context
-    propagation.
+    SIGKILL) and `SysProcAttr.Pdeathsig` + `--die-with-parent`
+    (server crash), not by context propagation.
 
 16. **Minimal environment, not inherited.** Workers get a clean env
     (`PATH`, `HOME=/tmp`, `TMPDIR=/tmp`, `LANG`, `PORT`, plus
@@ -1551,8 +1730,9 @@ func TestContainerStatsLiveWorker(t *testing.T) {
 
 17. **No PID file persistence.** Unlike the Docker backend (which can
     recover container IDs via Docker labels), the process backend tracks
-    workers only in memory. If the server crashes, `--die-with-parent`
-    ensures workers die too, so there are no orphans to recover. PID
+    workers only in memory. If the server crashes, `SysProcAttr.Pdeathsig`
+    on the bwrap process (see #8) ensures bwrap dies, and
+    `--die-with-parent` cascades to R — no orphans to recover. PID
     files would add complexity for a scenario that shouldn't occur.
 
 18. **`--ro-bind / /`, not path enumeration.** bwrap creates an empty
@@ -1566,3 +1746,17 @@ func TestContainerStatsLiveWorker(t *testing.T) {
     can't write to it. In containerized mode the root is the outer
     container's minimal filesystem; in native mode more is visible but
     still read-only.
+
+19. **`--chdir /tmp` in bwrap args.** Without `--chdir`, the sandboxed
+    process inherits blockyard's working directory. After `--unshare-user`
+    remaps the UID, the inherited cwd may not be accessible (e.g., if
+    blockyard runs from `/data` owned by root and the sandbox maps to
+    nobody). `/tmp` is always available because it's mounted as a fresh
+    tmpfs.
+
+20. **`host='127.0.0.1'` for Shiny, not `0.0.0.0`.** The process backend
+    does not use `--unshare-net`, so workers share the host network
+    stack. Binding to `0.0.0.0` would make the Shiny app directly
+    accessible on the host's external interface, bypassing the proxy
+    and authentication layer. `127.0.0.1` restricts access to the
+    loopback — only the blockyard proxy can reach it.
