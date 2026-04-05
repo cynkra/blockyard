@@ -1,6 +1,7 @@
 ---
 title: Observability
 description: Logging, metrics, tracing, and audit logging in Blockyard.
+weight: 5
 ---
 
 Blockyard provides four observability mechanisms: structured logging,

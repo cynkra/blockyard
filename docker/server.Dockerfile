@@ -1,9 +1,7 @@
-FROM node:22-alpine AS docs
+FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
-COPY docs/package.json docs/package-lock.json ./
-RUN npm ci
 COPY docs/ .
-RUN DOCS_BASE=/docs npm run build
+RUN hugo --minify --baseURL /docs/ --enableGitInfo=false
 
 FROM node:22-alpine AS css-builder
 WORKDIR /src/internal/ui
@@ -22,7 +20,7 @@ RUN go mod download
 
 COPY cmd/ cmd/
 COPY internal/ internal/
-COPY --from=docs /docs/dist internal/docs/dist
+COPY --from=docs /docs/public internal/docs/dist
 COPY --from=css-builder /src/internal/ui/static/style.css internal/ui/static/style.css
 
 ARG COVER=""

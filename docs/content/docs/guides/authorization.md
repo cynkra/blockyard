@@ -1,6 +1,7 @@
 ---
 title: Authorization
 description: How blockyard manages user roles, app access, and permissions.
+weight: 3
 ---
 
 Blockyard separates authentication from authorization. Your identity

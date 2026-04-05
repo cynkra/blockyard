@@ -1,6 +1,7 @@
 ---
 title: Credential Management
 description: How to set up OpenBao and manage per-user credentials for Shiny apps.
+weight: 4
 ---
 
 Blockyard integrates with [OpenBao](https://openbao.org/) (a Vault-compatible
@@ -11,7 +12,7 @@ sessions.
 
 ## Prerequisites
 
-- OIDC authentication must be configured (see [Configuration](/guides/configuration/))
+- OIDC authentication must be configured (see [Configuration](/docs/guides/configuration/))
 - An OpenBao (or HashiCorp Vault) instance, initialized and unsealed
 
 ## How it works

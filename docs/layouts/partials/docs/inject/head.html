@@ -1,0 +1,11 @@
+<script>
+// Sync dark mode with blockyard server UI.
+// Reads the theme preference stored by the server UI toggle.
+// Falls back to prefers-color-scheme when no preference is stored.
+(function() {
+  var t = localStorage.getItem('theme');
+  if (t === 'dark' || t === 'light') {
+    document.documentElement.setAttribute('data-theme', t);
+  }
+})();
+</script>

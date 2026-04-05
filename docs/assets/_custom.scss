@@ -1,0 +1,119 @@
+// Blockyard docs color palette
+// Aligns Hugo Book theme with the DaisyUI light/night themes
+// used by the blockyard server UI (internal/ui/input.css).
+
+// Override dark theme — matches DaisyUI "night"
+@mixin theme-dark {
+  --body-background: #0f172a;     // DaisyUI night base-100
+  --body-background-tint: none;
+  --body-font-color: #c9cbd0;    // DaisyUI night base-content
+
+  --color-link: #3abdf7;         // DaisyUI night primary
+  --color-visited-link: #3abdf7;
+
+  --icon-filter: brightness(0) invert(1);
+
+  --gray-100: #1e293b;           // DaisyUI night neutral (surfaces)
+  --gray-200: #2a3441;           // borders
+  --gray-500: #8691a1;           // muted text
+
+  @include accent("default", #8691a1);
+  @include accent("note", #0ca5e9);    // DaisyUI night info
+  @include accent("tip", #2fd4bf);     // DaisyUI night success
+  @include accent("important", #818cf8); // DaisyUI night secondary
+  @include accent("warning", #f4bf51); // DaisyUI night warning
+  @include accent("caution", #fb7085); // DaisyUI night error
+
+  @include accent("info", #0ca5e9);
+  @include accent("success", #2fd4bf);
+  @include accent("danger", #fb7085);
+}
+
+// Override light theme — matches DaisyUI "light"
+@mixin theme-light {
+  --body-background: #ffffff;     // DaisyUI light base-100
+  --body-background-tint: none;
+  --body-font-color: #18181b;    // DaisyUI light base-content
+
+  --color-link: #422ad5;         // DaisyUI light primary
+  --color-visited-link: #371fb0; // darker primary
+
+  --icon-filter: none;
+
+  --gray-100: #f8f8f8;           // DaisyUI light base-200
+  --gray-200: #eeeeee;           // DaisyUI light base-300
+  --gray-500: #71717a;           // muted text
+
+  @include accent("default", #71717a);
+  @include accent("note", #2563eb);    // DaisyUI light info (toned)
+  @include accent("tip", #16a34a);     // DaisyUI light success (toned)
+  @include accent("important", #7c3aed); // violet-600
+  @include accent("warning", #d97706); // DaisyUI light warning (toned)
+  @include accent("caution", #dc2626); // DaisyUI light error (toned)
+
+  @include accent("info", #2563eb);
+  @include accent("success", #16a34a);
+  @include accent("danger", #dc2626);
+}
+
+// When the server UI has stored an explicit theme preference,
+// override the prefers-color-scheme media query.
+// Specificity of html[data-theme] > :root ensures the override wins.
+html[data-theme="dark"] {
+  @include theme-dark;
+}
+
+html[data-theme="light"] {
+  @include theme-light;
+}
+
+// Card grid for homepage
+.blockyard-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.blockyard-card {
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--border-radius);
+
+  h3 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+  }
+
+  p {
+    margin: 0;
+    color: var(--gray-500);
+    font-size: var(--font-size-smaller);
+  }
+}
+
+.blockyard-link-card {
+  display: block;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--border-radius);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s;
+
+  &:hover {
+    border-color: var(--color-link);
+  }
+
+  h3 {
+    margin-top: 0;
+    margin-bottom: 0.25rem;
+    color: var(--color-link);
+  }
+
+  p {
+    margin: 0;
+    color: var(--gray-500);
+    font-size: var(--font-size-smaller);
+  }
+}

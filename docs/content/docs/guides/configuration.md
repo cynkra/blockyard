@@ -1,6 +1,7 @@
 ---
 title: Configuration
 description: How to configure a Blockyard server.
+weight: 2
 ---
 
 Blockyard is configured via a TOML file. By default, it looks for
@@ -28,7 +29,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 | `bind` | `127.0.0.1:8080` | Address and port the server listens on |
 | `shutdown_timeout` | `30s` | Time to drain in-flight requests on shutdown |
 | `log_level` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
-| `management_bind` | — | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Observability](/guides/observability/#management-listener). |
+| `management_bind` | — | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Observability](/docs/guides/observability/#management-listener). |
 | `session_secret` | — | Secret for signing session cookies. Required when `[oidc]` is set without `[openbao]`; auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | — | Public-facing URL of the server (used for OIDC redirect URIs) |
 | `trusted_proxies` | — | CIDRs whose `X-Forwarded-For` to trust (e.g. `["10.0.0.0/8"]`) |
@@ -68,7 +69,7 @@ BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.0
 
 | Field | Default | Description |
 |---|---|---|
-| `ws_cache_ttl` | `60s` | How long to keep a backend WebSocket open after client disconnect. Enables transparent reconnection on network blips — see [Reconnection on network interruptions](/guides/deploying/#reconnection-on-network-interruptions). |
+| `ws_cache_ttl` | `60s` | How long to keep a backend WebSocket open after client disconnect. Enables transparent reconnection on network blips — see [Reconnection on network interruptions](/docs/guides/deploying/#reconnection-on-network-interruptions). |
 | `health_interval` | `15s` | Interval between worker health checks |
 | `worker_start_timeout` | `60s` | Max time to wait for a worker to become healthy |
 | `max_workers` | `100` | Maximum number of concurrent worker containers |
@@ -87,11 +88,11 @@ Enable OIDC authentication. When configured, `server.session_secret` is required
 | Field | Default | Description |
 |---|---|---|
 | `issuer_url` | *(required)* | OIDC provider issuer URL (must match the `iss` claim in tokens) |
-| `issuer_discovery_url` | — | Internal URL for OIDC discovery when the IdP is at a different address server-side (e.g. Docker DNS). See [Configuration Reference](/reference/config/#split-url-oidc). |
+| `issuer_discovery_url` | — | Internal URL for OIDC discovery when the IdP is at a different address server-side (e.g. Docker DNS). See [Configuration Reference](/docs/reference/config/#split-url-oidc). |
 | `client_id` | *(required)* | OIDC client ID |
 | `client_secret` | *(required)* | OIDC client secret |
 | `cookie_max_age` | `24h` | Max lifetime of session cookies |
-| `initial_admin` | — | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
+| `initial_admin` | — | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/docs/guides/authorization/#first-admin-setup). |
 
 ### `[openbao]` *(optional)*
 
