@@ -197,7 +197,7 @@ func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrat
 		uiHandler.RegisterRoutes(r, srv)
 	})
 
-	// Self-hosted documentation (embedded Astro/Starlight build).
+	// Self-hosted documentation (embedded Hugo build).
 	r.Handle("/docs", http.RedirectHandler("/docs/", http.StatusMovedPermanently))
 	r.Handle("/docs/*", http.StripPrefix("/docs", docs.Handler()))
 
