@@ -1,6 +1,7 @@
 ---
 title: Deploying an App
 description: How to deploy and update Shiny applications on Blockyard.
+weight: 1
 ---
 
 ## Bundle structure
@@ -62,7 +63,7 @@ The app name defaults to the directory basename. Override it with `--name`:
 by deploy ./my-app --name sales-dashboard --wait
 ```
 
-See the [CLI reference](/reference/cli/#by-deploy-path) for the full flag list.
+See the [CLI reference](/docs/reference/cli/#by-deploy-path) for the full flag list.
 
 ## Deploying with the REST API
 
@@ -203,7 +204,7 @@ curl -X PATCH "$BLOCKYARD/api/v1/apps/my-app" \
 
 This example refreshes every Monday at 03:00. To remove the schedule, set
 `refresh_schedule` to an empty string. See
-[`PATCH /api/v1/apps/{id}`](/reference/api/#patch-apiv1appsid) for details.
+[`PATCH /api/v1/apps/{id}`](/docs/reference/api/#patch-apiv1appsid) for details.
 
 ## Disabling an app
 

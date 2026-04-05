@@ -1,6 +1,7 @@
 ---
 title: CLI Reference
 description: Complete reference for the by command-line interface.
+weight: 1
 ---
 
 `by` is the command-line client for Blockyard. It handles authentication,
@@ -20,7 +21,7 @@ pretty-printed JSON. Errors use the shape `{"error": "...", "message": "..."}`.
 ### `by login`
 
 Store credentials interactively. Opens a browser to create a
-[Personal Access Token](/guides/authorization/#personal-access-tokens), then
+[Personal Access Token](/docs/guides/authorization/#personal-access-tokens), then
 verifies it against the server.
 
 ```bash

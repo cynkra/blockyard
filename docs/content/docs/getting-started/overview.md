@@ -1,6 +1,7 @@
 ---
 title: What is Blockyard?
 description: An overview of Blockyard and what it does.
+weight: 1
 ---
 
 Blockyard is a hosting platform for [Shiny](https://shiny.posit.co/)
@@ -22,7 +23,7 @@ the right worker.
 Workers are isolated from each other via per-container bridge networks.
 Containers run with a read-only filesystem, all Linux capabilities dropped,
 `no-new-privileges` set, and cloud metadata endpoint access blocked
-(`169.254.169.254`). See [Deploying an App](/guides/deploying/#container-security)
+(`169.254.169.254`). See [Deploying an App](/docs/guides/deploying/#container-security)
 for the full list of security settings.
 
 ## Authentication & Authorization

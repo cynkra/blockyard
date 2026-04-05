@@ -1,16 +1,17 @@
 ---
 title: Quick Start
 description: Deploy your first Shiny app to Blockyard in under five minutes.
+weight: 3
 ---
 
 This guide walks through deploying a Shiny app using the `by` CLI. It assumes
-Blockyard is already running (see [Installation](/getting-started/installation/)).
+Blockyard is already running (see [Installation](/docs/getting-started/installation/)).
 
 ## 1. Install the CLI
 
 Download the `by` binary for your platform from the
 [releases page](https://github.com/cynkra/blockyard/releases) and place it on
-your `PATH`. See [Installation](/getting-started/installation/#cli) for details.
+your `PATH`. See [Installation](/docs/getting-started/installation/#cli) for details.
 
 ## 2. Log in
 
@@ -19,7 +20,7 @@ by login --server http://localhost:8080
 ```
 
 This opens your browser to create a
-[Personal Access Token](/guides/authorization/#personal-access-tokens), then
+[Personal Access Token](/docs/guides/authorization/#personal-access-tokens), then
 asks you to paste it back into the terminal.
 
 ## 3. Create your app
@@ -75,11 +76,11 @@ Blockyard spawns a worker container on demand when the first request arrives.
 
 ## Next steps
 
-- [`by deploy` reference](/reference/cli/#by-deploy-path) — all flags and
+- [`by deploy` reference](/docs/reference/cli/#by-deploy-path) — all flags and
   dependency detection modes
-- [Deploying an App](/guides/deploying/) — bundle structure, build process,
+- [Deploying an App](/docs/guides/deploying/) — bundle structure, build process,
   pinned vs. unpinned dependencies
-- [Authorization](/guides/authorization/) — roles, per-app ACLs, and
+- [Authorization](/docs/guides/authorization/) — roles, per-app ACLs, and
   visibility settings
 
 ---
@@ -111,4 +112,4 @@ curl "$BLOCKYARD/api/v1/tasks/<task-id>/logs" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-See the [REST API reference](/reference/api/) for the full endpoint list.
+See the [REST API reference](/docs/reference/api/) for the full endpoint list.

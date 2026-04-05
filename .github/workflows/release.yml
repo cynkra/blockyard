@@ -118,16 +118,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
-      - uses: actions/setup-node@v6
+      - uses: peaceiris/actions-hugo@v3
         if: matrix.cmd == 'blockyard'
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: docs/package-lock.json
+          hugo-version: "0.147.4"
+          extended: true
       - name: Build documentation
         if: matrix.cmd == 'blockyard'
-        run: cd docs && npm ci && DOCS_BASE=/docs npm run build && rm -rf ../internal/docs/dist && cp -r dist ../internal/docs/dist
+        run: cd docs && hugo --baseURL /docs/ --minify && rm -rf ../internal/docs/dist && cp -r public ../internal/docs/dist
 
       - uses: actions/setup-go@v6
         with:
