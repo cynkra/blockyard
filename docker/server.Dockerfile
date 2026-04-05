@@ -1,7 +1,7 @@
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
 COPY docs/ .
-RUN hugo --minify --baseURL /docs/
+RUN hugo --minify --baseURL /docs/ --enableGitInfo=false
 
 FROM node:22-alpine AS css-builder
 WORKDIR /src/internal/ui
