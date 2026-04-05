@@ -270,11 +270,11 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	// Resolve per-app data mounts.
 	appMounts, err := srv.DB.ListAppDataMounts(app.ID)
 	if err != nil {
-		slog.Error("failed to list data mounts", "app", app.Name, "error", err)
+		slog.Error("failed to list data mounts", "app", app.Name, "error", err) //nolint:gosec // G706: slog structured logging handles this
 	} else if len(appMounts) > 0 {
 		resolved, err := mount.Resolve(appMounts, srv.Config.Storage.DataMounts)
 		if err != nil {
-			slog.Error("failed to resolve data mounts", "app", app.Name, "error", err)
+			slog.Error("failed to resolve data mounts", "app", app.Name, "error", err) //nolint:gosec // G706: slog structured logging handles this
 		} else {
 			spec.DataMounts = resolved
 		}
