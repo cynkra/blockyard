@@ -1,6 +1,7 @@
 ---
 title: Installation
 description: How to install and run Blockyard.
+weight: 2
 ---
 
 ## Server
@@ -29,8 +30,8 @@ This gives Blockyard access to Docker for spawning worker containers, and
 persists application data (bundles, database) in a named volume.
 
 API authentication requires OIDC configuration and
-[Personal Access Tokens](/guides/authorization/#personal-access-tokens).
-See the [Authorization guide](/guides/authorization/) for details.
+[Personal Access Tokens](/docs/guides/authorization/#personal-access-tokens).
+See the [Authorization guide](/docs/guides/authorization/) for details.
 
 ### Running from source
 
@@ -65,7 +66,7 @@ curl http://localhost:8080/healthz
 ## CLI
 
 The `by` command-line client lets you deploy and manage apps from your
-terminal. See the [CLI Reference](/reference/cli/) for the full command list.
+terminal. See the [CLI Reference](/docs/reference/cli/) for the full command list.
 
 ### Download a release binary
 
@@ -112,5 +113,5 @@ by login --server https://blockyard.example.com
 ```
 
 This opens your browser to create a Personal Access Token and stores the
-credentials in `~/.config/by/config.json`. See [Quick Start](/getting-started/quickstart/)
+credentials in `~/.config/by/config.json`. See [Quick Start](/docs/getting-started/quickstart/)
 for a full walkthrough.

@@ -1,0 +1,28 @@
+baseURL = "/"
+languageCode = "en-us"
+title = "Blockyard"
+theme = "hugo-book"
+
+enableGitInfo = true
+
+[params]
+  BookTheme = "auto"
+  BookToC = true
+  BookSection = "docs"
+  BookRepo = "https://github.com/cynkra/blockyard"
+  BookSearch = true
+  BookDateFormat = "January 2, 2006"
+  BookPortableLinks = true
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+    [markup.goldmark.parser.attribute]
+      block = true
+
+[menu]
+  [[menu.after]]
+    name = "GitHub"
+    url = "https://github.com/cynkra/blockyard"
+    weight = 10

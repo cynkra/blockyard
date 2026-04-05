@@ -1,12 +1,13 @@
 ---
 title: REST API
 description: Complete reference for the Blockyard control plane API.
+weight: 2
 ---
 
 All endpoints are under `/api/v1/` and require authentication (except
 `/healthz`, `/readyz`, and `/metrics`).
 
-Authenticate with a [Personal Access Token](/guides/authorization/#personal-access-tokens)
+Authenticate with a [Personal Access Token](/docs/guides/authorization/#personal-access-tokens)
 (`Authorization: Bearer by_...`) or an OIDC session cookie (browser).
 
 ```bash
@@ -55,7 +56,7 @@ When OIDC and/or OpenBao are configured, their health is included in the checks
 (`openbao.role_id`), a `"vault_token"` check reports whether the token renewal
 goroutine is healthy.
 
-When served on the [management listener](/guides/observability/#management-listener),
+When served on the [management listener](/docs/guides/observability/#management-listener),
 `/readyz` always returns full per-component check details regardless of
 authentication.
 
@@ -64,7 +65,7 @@ authentication.
 Prometheus metrics endpoint. Only available when `telemetry.metrics_enabled` is
 `true`. Requires authentication (bearer token or session cookie) when served on
 the main listener. No authentication when served on the
-[management listener](/guides/observability/#management-listener).
+[management listener](/docs/guides/observability/#management-listener).
 
 ---
 
@@ -242,7 +243,7 @@ updated.
 |---|---|---|---|
 | `name` | `string` | — | Rename the app (new URL-safe slug). Requires owner or admin. The old name is preserved as an alias so existing links continue to work. |
 | `max_workers_per_app` | `integer` | unlimited | Max concurrent workers (must be >= 1) |
-| `max_sessions_per_worker` | `integer` | `1` | Sessions per worker (must be >= 1). `1` means single-tenant containers. See [Credential Management](/guides/credentials/) for how this affects credential injection. |
+| `max_sessions_per_worker` | `integer` | `1` | Sessions per worker (must be >= 1). `1` means single-tenant containers. See [Credential Management](/docs/guides/credentials/) for how this affects credential injection. |
 | `memory_limit` | `string` | none | Container memory limit (e.g. `"512m"`, `"2g"`) |
 | `cpu_limit` | `float` | none | CPU limit (e.g. `0.5` for half a core) |
 | `access_type` | `string` | `"acl"` | `"acl"`, `"logged_in"`, or `"public"` (requires owner or admin) |
@@ -261,7 +262,7 @@ example above: `max_workers_per_app`, `max_sessions_per_worker`,
 
 Delete an app. Stops all running workers.
 
-When [`soft_delete_retention`](/reference/config/#storage) is configured, the
+When [`soft_delete_retention`](/docs/reference/config/#storage) is configured, the
 app is **soft-deleted** — it is hidden from listings but retains its data for
 the configured retention period. Soft-deleted apps can be restored with
 `POST /api/v1/apps/{id}/restore`.
@@ -650,7 +651,7 @@ Both fields are optional. An admin cannot demote or deactivate themselves.
 ## Personal Access Tokens
 
 Manage personal access tokens for API access. See the
-[Authorization guide](/guides/authorization/#personal-access-tokens) for
+[Authorization guide](/docs/guides/authorization/#personal-access-tokens) for
 usage details.
 
 ### `POST /api/v1/users/me/tokens`

@@ -1,0 +1,108 @@
+// Blockyard docs color palette
+// Aligns Hugo Book theme with the Blockyard UI color palette.
+// Source: internal/ui/static/style.css
+
+// Override dark theme (Nord → Slate + Blue)
+@mixin theme-dark {
+  --body-background: #0f172a;     // slate-900
+  --body-background-tint: none;
+  --body-font-color: #f1f5f9;    // slate-100
+
+  --color-link: #3b82f6;         // blue-500
+  --color-visited-link: #3b82f6;
+
+  --icon-filter: brightness(0) invert(1);
+
+  --gray-100: #1e293b;           // slate-800
+  --gray-200: #334155;           // slate-700
+  --gray-500: #94a3b8;           // slate-400
+
+  @include accent("default", #64748b);
+  @include accent("note", #3b82f6);
+  @include accent("tip", #3bad3b);
+  @include accent("important", #8144dd);
+  @include accent("warning", #f59e42);
+  @include accent("caution", #d84747);
+
+  @include accent("info", #3b82f6);
+  @include accent("success", #3bad3b);
+  @include accent("danger", #d84747);
+}
+
+// Override light theme
+@mixin theme-light {
+  --body-background: #ffffff;     // white
+  --body-background-tint: none;
+  --body-font-color: #1a1a1a;    // text-primary
+
+  --color-link: #2563eb;         // blue-600
+  --color-visited-link: #1e40af; // blue-800
+
+  --icon-filter: none;
+
+  --gray-100: #f3f4f6;           // bg-muted
+  --gray-200: #e5e7eb;           // border-default
+  --gray-500: #888888;           // text-muted
+
+  @include accent("default", #555555);
+  @include accent("note", #2563eb);
+  @include accent("tip", #3bad3b);
+  @include accent("important", #8144dd);
+  @include accent("warning", #f59e42);
+  @include accent("caution", #d84747);
+
+  @include accent("info", #2563eb);
+  @include accent("success", #3bad3b);
+  @include accent("danger", #d84747);
+}
+
+// Card grid for homepage
+.blockyard-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.blockyard-card {
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--border-radius);
+
+  h3 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+  }
+
+  p {
+    margin: 0;
+    color: var(--gray-500);
+    font-size: var(--font-size-smaller);
+  }
+}
+
+.blockyard-link-card {
+  display: block;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--border-radius);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s;
+
+  &:hover {
+    border-color: var(--color-link);
+  }
+
+  h3 {
+    margin-top: 0;
+    margin-bottom: 0.25rem;
+    color: var(--color-link);
+  }
+
+  p {
+    margin: 0;
+    color: var(--gray-500);
+    font-size: var(--font-size-smaller);
+  }
+}

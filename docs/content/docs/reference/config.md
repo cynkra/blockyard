@@ -1,9 +1,8 @@
 ---
 title: Configuration File
 description: Full reference for the blockyard.toml configuration file.
+weight: 3
 ---
-
-import { Aside } from '@astrojs/starlight/components';
 
 Blockyard reads its configuration from a TOML file. The default path is
 `blockyard.toml` in the working directory. Override it with the
@@ -42,19 +41,18 @@ shutdown_timeout = "30s"
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `bind` | `string` | `127.0.0.1:8080` | No | Socket address to listen on |
-| `management_bind` | `string` | — | No | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Management listener](/guides/observability/#management-listener). |
+| `management_bind` | `string` | — | No | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Management listener](/docs/guides/observability/#management-listener). |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
 | `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn` (or `warning`), `error`. |
 | `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 | `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Each entry must be a valid CIDR. Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
-| `bootstrap_token` | `string` | — | No | One-time token that can be exchanged for a real PAT via `POST /api/v1/bootstrap`. Requires `oidc.initial_admin` to be set. Intended for dev/CI bootstrapping — do not use in production. See [Bootstrap tokens](/reference/api/#post-apiv1bootstrap). |
+| `bootstrap_token` | `string` | — | No | One-time token that can be exchanged for a real PAT via `POST /api/v1/bootstrap`. Requires `oidc.initial_admin` to be set. Intended for dev/CI bootstrapping — do not use in production. See [Bootstrap tokens](/docs/reference/api/#post-apiv1bootstrap). |
 
-<Aside type="note">
-  API authentication uses [Personal Access Tokens](/guides/authorization/#personal-access-tokens)
-  (for CLI/CI access) or OIDC session cookies (for browser access). The v0
-  static bearer token (`server.token`) has been removed.
-</Aside>
+> [!NOTE]
+> API authentication uses [Personal Access Tokens](/docs/guides/authorization/#personal-access-tokens)
+> (for CLI/CI access) or OIDC session cookies (for browser access). The v0
+> static bearer token (`server.token`) has been removed.
 
 ## `[docker]`
 
@@ -167,13 +165,12 @@ initial_admin        = "google-oauth2|abc123"
 | `client_id` | `string` | — | **Yes** | OIDC client ID |
 | `client_secret` | `string` | — | **Yes** | OIDC client secret. Supports [vault references](#vault-references). |
 | `cookie_max_age` | `duration` | `24h` | No | Maximum lifetime of session cookies |
-| `initial_admin` | `string` | — | No | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/guides/authorization/#first-admin-setup). |
+| `initial_admin` | `string` | — | No | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/docs/guides/authorization/#first-admin-setup). |
 
-<Aside type="caution">
-  When OIDC is configured, the proxy routes (`/app/{name}/`) enforce
-  authentication. Users must log in before accessing apps (except for apps
-  with `public` visibility).
-</Aside>
+> [!WARNING]
+> When OIDC is configured, the proxy routes (`/app/{name}/`) enforce
+> authentication. Users must log in before accessing apps (except for apps
+> with `public` visibility).
 
 ### Split-URL OIDC
 
@@ -223,18 +220,16 @@ jwt_auth_path = "jwt"
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in OpenBao |
 | `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during OpenBao bootstrap. Useful when the OpenBao policy format differs from what Blockyard expects. |
 
-<Aside type="tip">
-  With AppRole auth (`role_id`), the server authenticates to OpenBao using a
-  one-time `secret_id` (via `BLOCKYARD_OPENBAO_SECRET_ID`) and then renews
-  its own token indefinitely. After initial bootstrap, the env var is no
-  longer needed — the token is persisted to disk and reused across restarts.
-  `session_secret` is also auto-generated and stored in vault.
-</Aside>
+> [!TIP]
+> With AppRole auth (`role_id`), the server authenticates to OpenBao using a
+> one-time `secret_id` (via `BLOCKYARD_OPENBAO_SECRET_ID`) and then renews
+> its own token indefinitely. After initial bootstrap, the env var is no
+> longer needed — the token is persisted to disk and reused across restarts.
+> `session_secret` is also auto-generated and stored in vault.
 
-<Aside type="caution">
-  `admin_token` and `role_id` are mutually exclusive — setting both is a
-  configuration error.
-</Aside>
+> [!WARNING]
+> `admin_token` and `role_id` are mutually exclusive — setting both is a
+> configuration error.
 
 ### `[[openbao.services]]`
 
