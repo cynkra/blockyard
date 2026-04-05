@@ -171,6 +171,20 @@ var funcMap = template.FuncMap{
 	"subtract": func(a, b int) int {
 		return a - b
 	},
+	"statusDotClass": func(status string) string {
+		switch status {
+		case "running", "active", "ready", "configured":
+			return "status-success"
+		case "building":
+			return "status-info"
+		case "stopping", "draining":
+			return "status-warning"
+		case "error", "failed":
+			return "status-error"
+		default:
+			return "status-neutral"
+		}
+	},
 	"contains": func(slice []string, val string) bool {
 		for _, s := range slice {
 			if s == val {
@@ -819,9 +833,12 @@ func buildCatalogEntries(apps []db.CatalogRow, srv *server.Server) []catalogEntr
 			tagNames = strings.Split(app.Tags, ",")
 		}
 
-		status := "stopped"
-		if srv.Workers.CountForApp(app.ID) > 0 {
-			status = "running"
+		status := "disabled"
+		if app.Enabled {
+			status = "ready"
+			if srv.Workers.CountForApp(app.ID) > 0 {
+				status = "running"
+			}
 		}
 
 		canManage := app.Relation == "admin" || app.Relation == "owner" || app.Relation == "collaborator"
@@ -848,9 +865,12 @@ func buildLandingEntries(apps []db.AppRow, srv *server.Server) []catalogEntry {
 			tagNames[i] = t.Name
 		}
 
-		status := "stopped"
-		if srv.Workers.CountForApp(app.ID) > 0 {
-			status = "running"
+		status := "disabled"
+		if app.Enabled {
+			status = "ready"
+			if srv.Workers.CountForApp(app.ID) > 0 {
+				status = "running"
+			}
 		}
 
 		entries = append(entries, catalogEntry{

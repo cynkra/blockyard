@@ -568,8 +568,8 @@ func TestAppsPageAppStoppedStatus(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body := readBody(t, resp)
-	if !strings.Contains(body, "stopped") {
-		t.Error("expected 'stopped' status for app with no workers")
+	if !strings.Contains(body, "status-success") {
+		t.Error("expected success status dot for enabled app with no workers")
 	}
 }
 
@@ -1897,11 +1897,11 @@ func TestOverviewTabWithActiveData(t *testing.T) {
 	if !strings.Contains(body, "3 sessions") {
 		t.Error("expected '3 sessions' in overview")
 	}
-	if !strings.Contains(body, "2 total views") {
-		t.Error("expected '2 total views' in overview")
+	if !strings.Contains(body, "2 views") {
+		t.Error("expected '2 views' in overview")
 	}
-	if !strings.Contains(body, "status-running") {
-		t.Error("expected running status badge")
+	if !strings.Contains(body, "status-success") {
+		t.Error("expected success status dot for running app")
 	}
 	// Bundle should be shown.
 	if !strings.Contains(body, "status-ready") {
@@ -2051,24 +2051,24 @@ func TestRuntimeTabWithWorkersAndSessions(t *testing.T) {
 	if !strings.Contains(body, "w-runtim...") {
 		t.Error("expected truncated worker ID 'w-runtim...' in table")
 	}
-	// Draining worker should show draining status.
-	if !strings.Contains(body, "status-draining") {
-		t.Error("expected draining status badge for worker 2")
+	// Draining worker should show warning dot.
+	if !strings.Contains(body, "status-warning") {
+		t.Error("expected warning status dot for draining worker")
 	}
-	// Active status for worker 1.
-	if !strings.Contains(body, "status-active") {
-		t.Error("expected active status badge for worker 1")
+	// Active worker should show success dot.
+	if !strings.Contains(body, "status-success") {
+		t.Error("expected success status dot for active worker")
 	}
 	// Session chip with display name.
 	if !strings.Contains(body, "Owner Name") {
 		t.Error("expected display name 'Owner Name' in session chip")
 	}
-	// Summary stats.
-	if !strings.Contains(body, "2 active sessions") {
-		t.Error("expected '2 active sessions' in summary")
+	// Summary stats (now rendered as DaisyUI stat components).
+	if !strings.Contains(body, "Sessions") {
+		t.Error("expected 'Sessions' stat title in summary")
 	}
-	if !strings.Contains(body, "3 total views") {
-		t.Error("expected '3 total views' in summary")
+	if !strings.Contains(body, "Total views") {
+		t.Error("expected 'Total views' stat title in summary")
 	}
 }
 
@@ -2099,7 +2099,7 @@ func TestBundlesTabWithMultipleBundles(t *testing.T) {
 		t.Error("should not show empty state with bundles present")
 	}
 	// Active bundle should have the "active" badge.
-	if !strings.Contains(body, `status-ready">active`) {
+	if !strings.Contains(body, "badge-primary\">active") {
 		t.Error("expected 'active' badge on the active bundle")
 	}
 	// Old bundle should have a Rollback button (it's ready and not active).
@@ -2333,13 +2333,13 @@ func TestComputeAppStatusDisabled(t *testing.T) {
 	}
 }
 
-func TestComputeAppStatusStopped(t *testing.T) {
+func TestComputeAppStatusReady(t *testing.T) {
 	srv, _ := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
 	app, _ := srv.DB.CreateApp("status-stop", "u")
 
-	// Enabled, no workers → stopped.
-	if got := computeAppStatus(srv, app); got != "stopped" {
-		t.Errorf("computeAppStatus(no workers) = %q, want 'stopped'", got)
+	// Enabled, no workers → ready (idle, waiting for traffic).
+	if got := computeAppStatus(srv, app); got != "ready" {
+		t.Errorf("computeAppStatus(no workers) = %q, want 'ready'", got)
 	}
 }
 
@@ -2548,8 +2548,8 @@ func TestOverviewTabZeroWorkersAndSessions(t *testing.T) {
 	if !strings.Contains(body, "0 sessions") {
 		t.Error("expected '0 sessions' for zero sessions")
 	}
-	if !strings.Contains(body, "0 total views") {
-		t.Error("expected '0 total views' for zero views")
+	if !strings.Contains(body, "0 views") {
+		t.Error("expected '0 views' for zero views")
 	}
 }
 
@@ -2618,9 +2618,9 @@ func TestRuntimeTabEmptyWorkersShowsEmptyState(t *testing.T) {
 	if !strings.Contains(body, "No active workers") {
 		t.Error("expected 'No active workers' empty state")
 	}
-	// Summary should show zero counts.
-	if !strings.Contains(body, "0 active sessions") {
-		t.Error("expected '0 active sessions' in summary")
+	// Summary should show zero counts (now rendered as stat components).
+	if !strings.Contains(body, "Sessions") {
+		t.Error("expected 'Sessions' stat in summary")
 	}
 }
 

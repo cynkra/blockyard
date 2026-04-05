@@ -5,13 +5,13 @@
 {{define "content"}}
 <div class="page-header">
     <h1>Deployment History</h1>
-    <form method="GET" action="/deployments" class="flex gap-2">
-        <input type="search" name="search" placeholder="Search by app name..."
-               class="input input-sm flex-1 text-sm" value="{{.Search}}"
-               oninput="filterDeployments(this.value)">
-        <button type="submit" class="btn btn-sm">Search</button>
-    </form>
 </div>
+<form method="GET" action="/deployments" class="flex gap-2 mb-6">
+    <input type="search" name="search" placeholder="Search by app name..."
+           class="input input-sm flex-1 text-sm" value="{{.Search}}"
+           oninput="filterDeployments(this.value)">
+    <button type="submit" class="btn btn-soft btn-sm">Search</button>
+</form>
 {{if .Deployments}}
 <table class="table table-sm w-full">
     <thead>
@@ -28,7 +28,7 @@
         <tr class="deployment-row" style="cursor:pointer"
             onclick="toggleDeploymentLog(this, '{{.BundleID}}')">
             <td>{{.AppName}}</td>
-            <td class="font-mono text-xs" title="{{.BundleID}}">{{.BundleID | truncate}}</td>
+            <td class="font-mono text-xs">{{.BundleID}}</td>
             <td>{{.DeployedByName}}</td>
             <td><span class="time-ago" data-timestamp="{{deref .DeployedAt}}">{{.DeployedAt | timeAgo}}</span></td>
             <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
@@ -40,11 +40,11 @@
 {{if gt .TotalPages 1}}
 <nav class="pagination">
     {{if gt .Page 1}}
-    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}{{if $.Sort}}&sort={{$.Sort}}{{end}}{{if $.SortDir}}&dir={{$.SortDir}}{{end}}" class="btn btn-sm">&laquo; Prev</a>
+    <a href="?page={{subtract .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}{{if $.Sort}}&sort={{$.Sort}}{{end}}{{if $.SortDir}}&dir={{$.SortDir}}{{end}}" class="btn btn-soft btn-sm">&laquo; Prev</a>
     {{end}}
     <span class="pagination-info">Page {{.Page}} of {{.TotalPages}}</span>
     {{if lt .Page .TotalPages}}
-    <a href="?page={{add .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}{{if $.Sort}}&sort={{$.Sort}}{{end}}{{if $.SortDir}}&dir={{$.SortDir}}{{end}}" class="btn btn-sm">Next &raquo;</a>
+    <a href="?page={{add .Page 1}}{{if .Search}}&search={{urlquery .Search}}{{end}}{{if $.Sort}}&sort={{$.Sort}}{{end}}{{if $.SortDir}}&dir={{$.SortDir}}{{end}}" class="btn btn-soft btn-sm">Next &raquo;</a>
     {{end}}
 </nav>
 {{end}}
@@ -68,8 +68,16 @@ function toggleDeploymentLog(row, bundleID) {
     var next = row.nextElementSibling;
     if (next && next.classList.contains('log-detail-row')) {
         next.remove();
+        row.classList.remove('deployment-row-active');
         return;
     }
+    // Remove any existing active row
+    document.querySelectorAll('.deployment-row-active').forEach(function(r) {
+        r.classList.remove('deployment-row-active');
+        var n = r.nextElementSibling;
+        if (n && n.classList.contains('log-detail-row')) n.remove();
+    });
+    row.classList.add('deployment-row-active');
     var tr = document.createElement('tr');
     tr.className = 'log-detail-row';
     var td = document.createElement('td');

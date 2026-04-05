@@ -21,6 +21,7 @@ import (
 
 type sidebarData struct {
 	App          *db.AppRow
+	Status       string
 	CanManageACL bool
 	OverviewHTML template.HTML
 }
@@ -181,13 +182,17 @@ func (ui *UI) resolveAppForFragment(
 }
 
 // computeAppStatus derives display status from worker state.
+//
+// Returns "disabled" when the app is off, "ready" when it is enabled
+// but idle (cold-start, no workers), "running" when workers are active,
+// and "stopping" when all workers are draining.
 func computeAppStatus(srv *server.Server, app *db.AppRow) string {
 	if !app.Enabled {
 		return "disabled"
 	}
 	workerIDs := srv.Workers.ForApp(app.ID)
 	if len(workerIDs) == 0 {
-		return "stopped"
+		return "ready"
 	}
 	allDraining := true
 	for _, wid := range workerIDs {
@@ -234,6 +239,7 @@ func (ui *UI) sidebarHandler(srv *server.Server) http.HandlerFunc {
 
 		data := sidebarData{
 			App:          app,
+			Status:       overviewData.Status,
 			CanManageACL: relation.CanManageACL(),
 			OverviewHTML: template.HTML(buf.String()), //nolint:gosec // G203: markdown rendered from server-controlled DESCRIPTION file
 		}
@@ -738,6 +744,7 @@ func (ui *UI) createAndAssignTag(srv *server.Server) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("HX-Trigger", "tagAdded")
 		if err := ui.fragments["tab_settings.html"].Execute(w, data); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
