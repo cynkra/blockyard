@@ -3,16 +3,25 @@
         <label for="access-type">Access type</label>
         <p class="field-description">Controls who can access this app.</p>
         <div class="field-row">
-            <select id="access-type" name="access_type" class="select select-sm text-sm"
-                    hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-trigger="change"
-                    hx-target="next .field-feedback"
-                    hx-swap="innerHTML"
-                    hx-on::after-request="if(event.detail.successful) htmx.ajax('GET', '/ui/apps/{{.App.Name}}/tab/collaborators', '#tab-content')">
-                <option value="public" {{if eq .App.AccessType "public"}}selected{{end}}>Public</option>
-                <option value="logged_in" {{if eq .App.AccessType "logged_in"}}selected{{end}}>Logged in</option>
-                <option value="acl" {{if eq .App.AccessType "acl"}}selected{{end}}>ACL</option>
-            </select>
+            <div x-data="dropdown({value: '{{.App.AccessType}}'})" class="dd" @click.outside="open = false">
+                <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                        role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                    <span x-text="label" class="dd-label"></span>
+                    <svg class="dd-chevron" :class="open && 'rotate-180'" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <input type="hidden" id="access-type" name="access_type" x-ref="input" :value="value"
+                       hx-patch="/api/v1/apps/{{.App.ID}}"
+                       hx-trigger="change"
+                       hx-target="next .field-feedback"
+                       hx-swap="innerHTML"
+                       hx-on::after-request="if(event.detail.successful) htmx.ajax('GET', '/ui/apps/{{.App.Name}}/tab/collaborators', '#tab-content')">
+                <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                     @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
+                    <div role="option" class="dd-item" data-value="public">Public</div>
+                    <div role="option" class="dd-item" data-value="logged_in">Logged in</div>
+                    <div role="option" class="dd-item" data-value="acl">ACL</div>
+                </div>
+            </div>
             <span class="field-feedback"></span>
         </div>
     </div>
@@ -45,61 +54,38 @@
         <form class="acl-add-form"
               hx-post="/api/v1/apps/{{.App.ID}}/access"
               hx-swap="none"
-              hx-on::after-request="if(event.detail.successful){this.reset();document.getElementById('acl-principal').value='';}"
+              hx-on::after-request="if(event.detail.successful){this.querySelectorAll('.dd').forEach(function(el){el.dispatchEvent(new CustomEvent('dd-reset'))})}"
               onsubmit="return document.getElementById('acl-principal').value !== ''">
             <input type="hidden" name="kind" value="user">
-            <input type="hidden" id="acl-principal" name="principal" value="">
-            <div class="autocomplete-wrap">
-                <input type="text" id="acl-user-search" placeholder="Search users..."
-                       autocomplete="off" required
-                       oninput="searchUsers(this)"
-                       onfocus="if(this.value) searchUsers(this)"
-                       onblur="setTimeout(function(){document.querySelector('.user-suggest')?.classList.add('hidden')},200)">
-                <div class="autocomplete-list user-suggest hidden"></div>
+            <div x-data="combobox({url: '/ui/users/search?q='})" class="dd"
+                 @click.outside="open = false"
+                 @dd-reset="query=''; value=''; open=false">
+                <input type="text" x-model="query" @input="onInput()" @keydown="onKeydown($event)"
+                       @focus="onFocus()" @blur="setTimeout(function(){ open=false; activeIdx=-1 }, 150)"
+                       placeholder="Search users..." autocomplete="off" required
+                       class="dd-input" role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                <input type="hidden" id="acl-principal" name="principal" x-ref="input" :value="value">
+                <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                     @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
+                </div>
             </div>
-            <select name="role" class="select select-sm text-sm">
-                <option value="viewer">Viewer</option>
-                <option value="collaborator">Collaborator</option>
-            </select>
+            <div x-data="dropdown({value: 'viewer'})" class="dd"
+                 @click.outside="open = false"
+                 @dd-reset="value='viewer'; open=false">
+                <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                        role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                    <span x-text="label" class="dd-label"></span>
+                    <svg class="dd-chevron" :class="open && 'rotate-180'" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <input type="hidden" name="role" x-ref="input" :value="value">
+                <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                     @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
+                    <div role="option" class="dd-item" data-value="viewer">Viewer</div>
+                    <div role="option" class="dd-item" data-value="collaborator">Collaborator</div>
+                </div>
+            </div>
             <button type="submit" class="btn btn-soft btn-sm">Add</button>
         </form>
-        <script>
-        var _userSearchTimer;
-        function searchUsers(input) {
-            clearTimeout(_userSearchTimer);
-            document.getElementById('acl-principal').value = '';
-            var q = input.value.trim();
-            var list = input.nextElementSibling;
-            if (q.length < 2) {
-                list.classList.add('hidden');
-                return;
-            }
-            _userSearchTimer = setTimeout(function() {
-                fetch('/ui/users/search?q=' + encodeURIComponent(q), {credentials: 'same-origin'})
-                    .then(function(r) { return r.text(); })
-                    .then(function(html) {
-                        list.innerHTML = html;
-                        if (html.trim()) {
-                            list.querySelectorAll('.autocomplete-item').forEach(function(el) {
-                                el.onmousedown = function() { selectUser(el); };
-                            });
-                            list.classList.remove('hidden');
-                        } else {
-                            list.innerHTML = '<div class="autocomplete-item no-result">No users found</div>';
-                            list.classList.remove('hidden');
-                        }
-                    });
-            }, 200);
-        }
-        function selectUser(el) {
-            var input = document.getElementById('acl-user-search');
-            var nameEl = el.querySelector('.autocomplete-name');
-            var emailEl = el.querySelector('.autocomplete-email');
-            input.value = nameEl.textContent + (emailEl.textContent ? ' (' + emailEl.textContent + ')' : '');
-            document.getElementById('acl-principal').value = el.dataset.value;
-            el.closest('.autocomplete-list').classList.add('hidden');
-        }
-        </script>
     </div>
     {{end}}
 </div>
