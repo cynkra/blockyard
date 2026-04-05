@@ -255,7 +255,7 @@
   .field-description { @apply text-sm text-base-content/60 mb-2; }
   .field-row { @apply flex items-center gap-2; }
   .field-row input { @apply input input-sm flex-1 text-sm; }
-  .field-row select { @apply select select-sm flex-1 text-sm; }
+  .field-row .dd { @apply flex-1; }
   .field-row textarea { @apply textarea flex-1 text-sm; min-height: 4rem; }
   .field-save { @apply btn btn-soft btn-sm shrink-0 inline-flex items-center gap-1; }
   .field-save svg { @apply align-middle; }
@@ -277,7 +277,7 @@
   .acl-section h3 { @apply m-0 mb-3 text-base; }
   .acl-add-form { @apply flex gap-2 items-center mt-3; }
   .acl-add-form input { @apply input input-sm text-sm; }
-  .acl-add-form select { @apply select select-sm text-sm; }
+  .acl-add-form .dd { @apply shrink-0; }
 
   /* ── Runtime view ── */
   .runtime-controls { @apply flex justify-end mb-3; }
@@ -312,7 +312,7 @@
   .section-description { @apply text-sm text-base-content/60 mb-4; }
   .pat-create-form { @apply flex gap-2 mb-4; }
   .pat-create-form input { @apply input input-sm flex-1 max-w-80 text-sm; }
-  .pat-create-form select { @apply select select-sm text-sm; }
+  .pat-create-form .dd { @apply shrink-0; }
   .pat-created { @apply mb-4 p-4 rounded-lg border border-info/30 bg-info/5 flex flex-col items-start gap-2; }
   .pat-warning { @apply font-medium text-sm text-info m-0; }
   .pat-value { @apply flex items-center gap-2 w-full; }
@@ -355,15 +355,34 @@
   .log-detail-row td { padding: 0 !important; }
   .log-detail-row .log-output { @apply max-h-80 mx-4 my-3 rounded-lg; }
 
-  /* ── Autocomplete ── */
-  .autocomplete-wrap { @apply relative flex-1; }
-  .autocomplete-list { @apply absolute top-full left-0 right-0 mt-0.5 bg-base-100 border border-base-300 rounded-md shadow-lg z-[300] max-h-48 overflow-y-auto; }
-  .autocomplete-item { @apply px-2.5 py-1.5 cursor-pointer text-sm; }
-  .autocomplete-item:hover { @apply bg-base-200; }
-  .autocomplete-item.no-result { @apply opacity-60 cursor-default; }
-  .autocomplete-item.no-result:hover { @apply bg-base-100; }
-  .autocomplete-name { @apply font-medium; }
-  .autocomplete-email { @apply text-xs ml-2 text-base-content/60; }
+  /* ── Alpine dropdown / combobox ── */
+  [x-cloak] { display: none !important; }
+  .dd { @apply relative; }
+  .dd-trigger {
+    @apply flex items-center justify-between gap-2 w-full text-left text-sm bg-base-100 cursor-pointer;
+    height: 2rem;
+    padding-inline: 0.75rem;
+    border: 1px solid oklch(var(--bc) / 0.2);
+    border-radius: var(--radius-field, 0.25rem);
+  }
+  .dd-trigger:hover { border-color: oklch(var(--bc) / 0.4); }
+  .dd-trigger:focus-visible { @apply outline-2 outline-offset-2 outline-base-content/20; }
+  .dd-label { @apply truncate; }
+  .dd-chevron {
+    @apply w-3.5 h-3.5 shrink-0 opacity-50 transition-transform duration-150;
+    stroke: currentColor; fill: none; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .rotate-180 { transform: rotate(180deg); }
+  .dd-input { @apply input input-sm text-sm w-full; }
+  .dd-menu { @apply absolute top-full left-0 right-0 mt-0.5 bg-base-100 border border-base-300 rounded-md shadow-lg z-[300] max-h-48 overflow-y-auto; }
+  .dd-item { @apply px-2.5 py-1.5 cursor-pointer text-sm; transition: background 0.1s; }
+  .dd-item:hover, .dd-item.active { @apply bg-base-200; }
+  .dd-item[aria-selected="true"] { @apply font-medium text-primary; }
+  .dd-item[aria-disabled="true"] { @apply opacity-50 cursor-default; }
+  .dd-item[aria-disabled="true"]:hover { @apply bg-transparent; }
+  .dd-item-name { @apply font-medium; }
+  .dd-item-detail { @apply text-xs ml-2 text-base-content/60; }
 
   /* ── Table header styling ── */
   .table th { @apply text-left text-sm font-medium text-base-content/60; }

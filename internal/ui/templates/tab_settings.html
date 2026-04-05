@@ -52,56 +52,22 @@
                       hx-post="/ui/apps/{{.App.Name}}/tags"
                       hx-target="#tab-content"
                       hx-swap="innerHTML">
-                    <div class="autocomplete-wrap flex-1">
-                        <input type="text" name="name" placeholder="Add or create tag..."
-                               class="input input-sm text-sm w-full"
-                               autocomplete="off"
-                               oninput="filterTagSuggestions(this)"
-                               onfocus="this.nextElementSibling.classList.remove('hidden')"
-                               onblur="setTimeout(function(){document.querySelector('.tag-suggest')?.classList.add('hidden')},200)">
-                        <div class="autocomplete-list tag-suggest hidden">
+                    <div x-data="combobox({create: true})" class="dd flex-1"
+                         @click.outside="open = false">
+                        <input type="text" name="name" x-model="query" @input="onInput()" @keydown="onKeydown($event)"
+                               @focus="onFocus()" @blur="setTimeout(function(){ open=false; activeIdx=-1 }, 150)"
+                               placeholder="Add or create tag..." autocomplete="off"
+                               class="dd-input" role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                        <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                             @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
                             {{range .AvailableTags}}
-                            <div class="autocomplete-item tag-option" data-name="{{.Name}}"
-                                 onmousedown="selectTagOption(this)">{{.Name}}</div>
+                            <div role="option" class="dd-item" data-value="{{.Name}}">{{.Name}}</div>
                             {{end}}
-                            <div class="autocomplete-item tag-create hidden" onmousedown="selectTagOption(this)"></div>
+                            <div role="option" class="dd-item dd-create" data-value="" hidden></div>
                         </div>
                     </div>
                     <button type="submit" class="btn btn-soft btn-sm shrink-0">Add</button>
                 </form>
-                <script>
-                function filterTagSuggestions(input) {
-                    var val = input.value.toLowerCase().trim();
-                    var list = input.nextElementSibling;
-                    var options = list.querySelectorAll('.tag-option');
-                    var createEl = list.querySelector('.tag-create');
-                    var anyMatch = false;
-                    var exactMatch = false;
-                    options.forEach(function(opt) {
-                        var name = opt.dataset.name.toLowerCase();
-                        if (val === '' || name.indexOf(val) !== -1) {
-                            opt.classList.remove('hidden');
-                            anyMatch = true;
-                            if (name === val) exactMatch = true;
-                        } else {
-                            opt.classList.add('hidden');
-                        }
-                    });
-                    if (val && !exactMatch) {
-                        createEl.textContent = 'Create "' + input.value.trim() + '"';
-                        createEl.dataset.name = input.value.trim();
-                        createEl.classList.remove('hidden');
-                    } else {
-                        createEl.classList.add('hidden');
-                    }
-                    list.classList.remove('hidden');
-                }
-                function selectTagOption(el) {
-                    var input = el.closest('.autocomplete-wrap').querySelector('input');
-                    input.value = el.dataset.name;
-                    el.closest('.autocomplete-list').classList.add('hidden');
-                }
-                </script>
             </div>
         </div>
     </div>
@@ -196,15 +162,35 @@
             <div class="field-group">
                 <p class="field-description">Schedule automatic dependency refreshes. Choose a preset or enter a custom cron expression.</p>
                 <div class="field-row">
-                    <select class="select select-sm text-sm" onchange="applyCronPreset(this)">
-                        <option value="">Choose preset...</option>
-                        <option value="0 2 * * *">Daily at 2 AM</option>
-                        <option value="0 2 * * 1">Weekly on Monday at 2 AM</option>
-                        <option value="0 */6 * * *">Every 6 hours</option>
-                        <option value="0 2 1 * *">Monthly (1st at 2 AM)</option>
-                        <option value="__custom__">Custom...</option>
-                        <option value="">Disabled</option>
-                    </select>
+                    <div x-data="dropdown({value: '{{.App.RefreshSchedule}}', placeholder: 'Choose preset...'})" class="dd"
+                         @click.outside="open = false"
+                         x-init="
+                             var self = this;
+                             $watch('value', function(v) {
+                                 if (v === '__custom__') {
+                                     self.$nextTick(function() { document.getElementById('refresh-schedule').focus(); });
+                                     return;
+                                 }
+                                 var inp = document.getElementById('refresh-schedule');
+                                 if (inp) { inp.value = v; inp.dispatchEvent(new Event('input')); }
+                             });
+                         ">
+                        <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                                role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                            <span x-text="label" class="dd-label"></span>
+                            <svg class="dd-chevron" :class="open && 'rotate-180'" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                        </button>
+                        <input type="hidden" x-ref="input" :value="value">
+                        <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                             @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
+                            <div role="option" class="dd-item" data-value="0 2 * * *">Daily at 2 AM</div>
+                            <div role="option" class="dd-item" data-value="0 2 * * 1">Weekly on Monday at 2 AM</div>
+                            <div role="option" class="dd-item" data-value="0 */6 * * *">Every 6 hours</div>
+                            <div role="option" class="dd-item" data-value="0 2 1 * *">Monthly (1st at 2 AM)</div>
+                            <div role="option" class="dd-item" data-value="__custom__">Custom...</div>
+                            <div role="option" class="dd-item" data-value="">Disabled</div>
+                        </div>
+                    </div>
                 </div>
                 <div class="field-row mt-2">
                     <input type="text" id="refresh-schedule" name="refresh_schedule"
@@ -285,34 +271,4 @@
         </div>
     </div>
 
-    <script>
-    function applyCronPreset(select) {
-        var val = select.value;
-        var input = document.getElementById('refresh-schedule');
-        if (val === '__custom__') {
-            input.focus();
-            select.value = '';
-            return;
-        }
-        input.value = val;
-        input.dispatchEvent(new Event('input'));
-    }
-    /* Set the preset dropdown to match current cron value on load */
-    (function() {
-        var input = document.getElementById('refresh-schedule');
-        if (!input) return;
-        var select = input.closest('.collapse-content').querySelector('select');
-        if (!select) return;
-        var val = input.value.trim();
-        var found = false;
-        for (var i = 0; i < select.options.length; i++) {
-            if (select.options[i].value === val && val !== '' && val !== '__custom__') {
-                select.selectedIndex = i;
-                found = true;
-                break;
-            }
-        }
-        if (val && !found) select.value = '';
-    })();
-    </script>
 </div>
