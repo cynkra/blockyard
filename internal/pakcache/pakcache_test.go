@@ -34,6 +34,9 @@ func (b *stubBackend) RemoveResource(context.Context, backend.ManagedResource) e
 func (b *stubBackend) ContainerStats(context.Context, string) (*backend.ContainerStatsResult, error) {
 	return &backend.ContainerStatsResult{}, nil
 }
+func (b *stubBackend) UpdateResources(_ context.Context, _ string, _ int64, _ int64) error {
+	return nil
+}
 
 // --- EnsureInstalled tests ---
 

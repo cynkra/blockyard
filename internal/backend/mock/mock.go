@@ -202,6 +202,22 @@ func (b *MockBackend) ContainerStats(_ context.Context, _ string) (*backend.Cont
 	return &backend.ContainerStatsResult{}, nil
 }
 
+func (b *MockBackend) UpdateResources(_ context.Context, id string, mem int64, nanoCPUs int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w, ok := b.workers[id]
+	if !ok {
+		return fmt.Errorf("worker %s not found", id)
+	}
+	if mem > 0 {
+		w.spec.MemoryLimit = fmt.Sprintf("%dm", mem/1024/1024)
+	}
+	if nanoCPUs > 0 {
+		w.spec.CPULimit = float64(nanoCPUs) / 1e9
+	}
+	return nil
+}
+
 func (b *MockBackend) RemoveResource(_ context.Context, r backend.ManagedResource) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

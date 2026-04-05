@@ -311,7 +311,7 @@ func (ui *UI) createApp(srv *server.Server) http.HandlerFunc {
 			AppID:            app.ID,
 			BundleID:         bundleID,
 			Paths:            paths,
-			Image:            srv.Config.Docker.Image,
+			Image:            server.AppImage(app, srv.Config.Docker.Image),
 			PakVersion:       srv.Config.Docker.PakVersion,
 			PakCachePath:     filepath.Join(srv.Config.Storage.BundleServerPath, ".pak-cache"),
 			BuilderVersion:   srv.Version,

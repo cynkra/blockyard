@@ -2597,3 +2597,144 @@ func TestRenameTagUniqueConflict(t *testing.T) {
 		}
 	})
 }
+
+func TestUpdateApp_ImageRuntime(t *testing.T) {
+	db := testDB(t)
+
+	app, err := db.CreateApp("img-rt-test", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Image != "" {
+		t.Errorf("default image should be empty, got %q", app.Image)
+	}
+	if app.Runtime != "" {
+		t.Errorf("default runtime should be empty, got %q", app.Runtime)
+	}
+
+	img := "custom:latest"
+	rt := "kata-runtime"
+	app, err = db.UpdateApp(app.ID, AppUpdate{Image: &img, Runtime: &rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Image != img {
+		t.Errorf("Image = %q, want %q", app.Image, img)
+	}
+	if app.Runtime != rt {
+		t.Errorf("Runtime = %q, want %q", app.Runtime, rt)
+	}
+
+	// Clear back to empty.
+	empty := ""
+	app, err = db.UpdateApp(app.ID, AppUpdate{Image: &empty, Runtime: &empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Image != "" {
+		t.Errorf("Image should be cleared, got %q", app.Image)
+	}
+	if app.Runtime != "" {
+		t.Errorf("Runtime should be cleared, got %q", app.Runtime)
+	}
+}
+
+func TestSetAppDataMounts(t *testing.T) {
+	db := testDB(t)
+
+	app, err := db.CreateApp("mount-test", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Initially empty.
+	mounts, err := db.ListAppDataMounts(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 0 {
+		t.Fatalf("expected 0 mounts, got %d", len(mounts))
+	}
+
+	// Set mounts.
+	err = db.SetAppDataMounts(app.ID, []DataMountRow{
+		{AppID: app.ID, Source: "models", Target: "/data/models", ReadOnly: true},
+		{AppID: app.ID, Source: "scratch", Target: "/data/scratch", ReadOnly: false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mounts, err = db.ListAppDataMounts(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(mounts))
+	}
+
+	// Replace with single mount.
+	err = db.SetAppDataMounts(app.ID, []DataMountRow{
+		{AppID: app.ID, Source: "models/v2", Target: "/data/models", ReadOnly: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mounts, err = db.ListAppDataMounts(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(mounts))
+	}
+	if mounts[0].Source != "models/v2" {
+		t.Errorf("Source = %q, want %q", mounts[0].Source, "models/v2")
+	}
+
+	// Clear all.
+	err = db.SetAppDataMounts(app.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, err = db.ListAppDataMounts(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 0 {
+		t.Fatalf("expected 0 mounts, got %d", len(mounts))
+	}
+}
+
+func TestDataMountsCascadeDelete(t *testing.T) {
+	db := testDB(t)
+
+	app, err := db.CreateApp("cascade-test", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.SetAppDataMounts(app.ID, []DataMountRow{
+		{AppID: app.ID, Source: "models", Target: "/data/models", ReadOnly: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Soft-delete, then hard-delete to trigger CASCADE.
+	if err := db.SoftDeleteApp(app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.HardDeleteApp(app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mounts should be gone.
+	mounts, err := db.ListAppDataMounts(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 0 {
+		t.Fatalf("expected 0 mounts after cascade delete, got %d", len(mounts))
+	}
+}

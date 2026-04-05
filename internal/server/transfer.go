@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 )
 
@@ -110,6 +112,16 @@ func (srv *Server) completeTransfer(
 		return
 	}
 
+	// Look up the app for per-app configuration (image, runtime, data mounts).
+	var app *db.AppRow
+	if srv.DB != nil {
+		app, _ = srv.DB.GetApp(appID)
+	}
+	if app == nil {
+		// Fallback: minimal AppRow with just the ID so defaultWorkerSpec works.
+		app = &db.AppRow{ID: appID}
+	}
+
 	newWorkerID := uuid.New().String()
 	newLibDir := srv.PkgStore.WorkerLibDir(newWorkerID)
 	missing, err := srv.PkgStore.AssembleLibrary(newLibDir, storeManifest)
@@ -125,7 +137,7 @@ func (srv *Server) completeTransfer(
 
 	// Spawn new worker with updated library and old worker's
 	// transfer dir (containing board.json).
-	spec := srv.buildTransferWorkerSpec(appID, newWorkerID, newLibDir, transferDir, oldWorker.BundleID)
+	spec := srv.buildTransferWorkerSpec(app, newWorkerID, newLibDir, transferDir, oldWorker.BundleID)
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {
 		slog.Error("transfer: spawn worker", "error", err)
 		return
@@ -184,9 +196,9 @@ func (srv *Server) completeTransfer(
 // buildTransferWorkerSpec creates a WorkerSpec for a transfer target worker.
 // The old worker's transfer directory is mounted read-only (contains board.json).
 func (srv *Server) buildTransferWorkerSpec(
-	appID, workerID, libDir, oldTransferDir, bundleID string,
+	app *db.AppRow, workerID, libDir, oldTransferDir, bundleID string,
 ) backend.WorkerSpec {
-	spec := srv.defaultWorkerSpec(appID, workerID, libDir, bundleID)
+	spec := srv.defaultWorkerSpec(app, workerID, libDir, bundleID)
 
 	if oldTransferDir != "" {
 		spec.TransferDir = oldTransferDir
@@ -202,16 +214,16 @@ func (srv *Server) buildTransferWorkerSpec(
 // defaultWorkerSpec builds a WorkerSpec with standard settings.
 // Used by both container transfer and refresh drain-and-replace.
 func (srv *Server) defaultWorkerSpec(
-	appID, workerID, libDir, bundleID string,
+	app *db.AppRow, workerID, libDir, bundleID string,
 ) backend.WorkerSpec {
-	hostPaths := srv.BundlePaths(appID, bundleID)
+	hostPaths := srv.BundlePaths(app.ID, bundleID)
 	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", workerID)
 	_ = os.MkdirAll(transferDir, 0o755) //nolint:gosec // G301: transfer dir, not secrets
 
-	return backend.WorkerSpec{
-		AppID:    appID,
+	spec := backend.WorkerSpec{
+		AppID:    app.ID,
 		WorkerID: workerID,
-		Image:    srv.Config.Docker.Image,
+		Image:    AppImage(app, srv.Config.Docker.Image),
 		Cmd: []string{"R", "-e",
 			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
 				srv.Config.Storage.BundleWorkerPath)},
@@ -223,12 +235,25 @@ func (srv *Server) defaultWorkerSpec(
 		ShinyPort:   srv.Config.Docker.ShinyPort,
 		Labels: map[string]string{
 			"dev.blockyard/managed":   "true",
-			"dev.blockyard/app-id":    appID,
+			"dev.blockyard/app-id":    app.ID,
 			"dev.blockyard/worker-id": workerID,
 			"dev.blockyard/role":      "worker",
 		},
-		Env: WorkerEnv(srv),
+		Env:     WorkerEnv(srv),
+		Runtime: AppRuntime(app, srv.Config.Docker),
 	}
+
+	// Resolve per-app data mounts.
+	if srv.DB != nil {
+		appMounts, _ := srv.DB.ListAppDataMounts(app.ID)
+		if len(appMounts) > 0 {
+			if resolved, err := mount.Resolve(appMounts, srv.Config.Storage.DataMounts); err == nil {
+				spec.DataMounts = resolved
+			}
+		}
+	}
+
+	return spec
 }
 
 // waitHealthy polls the backend until the worker is healthy or the

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -67,22 +68,32 @@ type ServerConfig struct {
 }
 
 type DockerConfig struct {
-	Socket             string   `toml:"socket"`
-	Image              string   `toml:"image"`
-	ShinyPort          int      `toml:"shiny_port"`
-	PakVersion         string   `toml:"pak_version"`           // "stable" (default), or pinned version
-	ServiceNetwork     string   `toml:"service_network"`       // Docker network whose containers are made reachable from workers
-	StoreRetention     Duration `toml:"store_retention"`        // 0 = disabled (store grows indefinitely)
-	DefaultMemoryLimit string   `toml:"default_memory_limit"`  // fallback memory limit for workers (e.g. "2g"); 0 = unlimited
-	DefaultCPULimit    float64  `toml:"default_cpu_limit"`     // fallback CPU limit for workers (e.g. 4.0); 0 = unlimited
+	Socket             string            `toml:"socket"`
+	Image              string            `toml:"image"`
+	ShinyPort          int               `toml:"shiny_port"`
+	PakVersion         string            `toml:"pak_version"`           // "stable" (default), or pinned version
+	ServiceNetwork     string            `toml:"service_network"`       // Docker network whose containers are made reachable from workers
+	StoreRetention     Duration          `toml:"store_retention"`        // 0 = disabled (store grows indefinitely)
+	DefaultMemoryLimit string            `toml:"default_memory_limit"`  // fallback memory limit for workers (e.g. "2g"); 0 = unlimited
+	DefaultCPULimit    float64           `toml:"default_cpu_limit"`     // fallback CPU limit for workers (e.g. 4.0); 0 = unlimited
+	Runtime            string            `toml:"runtime"`               // OCI runtime; empty = Docker daemon default
+	RuntimeDefaults    map[string]string `toml:"runtime_defaults"`      // per-access-type defaults (e.g. public=kata-runtime)
 }
 
 type StorageConfig struct {
-	BundleServerPath    string   `toml:"bundle_server_path"`
-	BundleWorkerPath    string   `toml:"bundle_worker_path"`
-	BundleRetention     int      `toml:"bundle_retention"`
-	MaxBundleSize       int64    `toml:"max_bundle_size"`
-	SoftDeleteRetention Duration `toml:"soft_delete_retention"`
+	BundleServerPath    string            `toml:"bundle_server_path"`
+	BundleWorkerPath    string            `toml:"bundle_worker_path"`
+	BundleRetention     int               `toml:"bundle_retention"`
+	MaxBundleSize       int64             `toml:"max_bundle_size"`
+	SoftDeleteRetention Duration          `toml:"soft_delete_retention"`
+	DataMounts          []DataMountSource `toml:"data_mounts"`
+}
+
+// DataMountSource defines an admin-approved mount source.
+// The Name is referenced by apps; the Path is the host-side location.
+type DataMountSource struct {
+	Name string `toml:"name"`
+	Path string `toml:"path"`
 }
 
 type DatabaseConfig struct {
@@ -340,6 +351,8 @@ var (
 	secretType           = reflect.TypeOf(Secret{})
 	secretPtrType        = reflect.TypeOf((*Secret)(nil))
 	stringSliceType      = reflect.TypeOf([]string{})
+	dataMountSliceType   = reflect.TypeOf([]DataMountSource{})
+	mapStringStringType  = reflect.TypeOf(map[string]string{})
 )
 
 func applyEnvToStruct(v reflect.Value, prefix string) {
@@ -406,6 +419,53 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 		// which are struct wrappers).
 		if field.Type.Kind() == reflect.Struct && field.Type != durationType && field.Type != secretType {
 			applyEnvToStruct(fv, envName)
+			continue
+		}
+
+		// []DataMountSource: semicolon-separated name:path pairs.
+		if fv.Type() == dataMountSliceType {
+			val, ok := os.LookupEnv(envName)
+			if !ok || val == "" {
+				continue
+			}
+			var mounts []DataMountSource
+			for _, entry := range strings.Split(val, ";") {
+				entry = strings.TrimSpace(entry)
+				if entry == "" {
+					continue
+				}
+				name, path, ok := strings.Cut(entry, ":")
+				if !ok {
+					continue
+				}
+				mounts = append(mounts, DataMountSource{
+					Name: strings.TrimSpace(name),
+					Path: strings.TrimSpace(path),
+				})
+			}
+			fv.Set(reflect.ValueOf(mounts))
+			continue
+		}
+
+		// map[string]string: semicolon-separated key:value pairs.
+		if fv.Type() == mapStringStringType {
+			val, ok := os.LookupEnv(envName)
+			if !ok || val == "" {
+				continue
+			}
+			m := make(map[string]string)
+			for _, entry := range strings.Split(val, ";") {
+				entry = strings.TrimSpace(entry)
+				if entry == "" {
+					continue
+				}
+				k, v, ok := strings.Cut(entry, ":")
+				if !ok {
+					continue
+				}
+				m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+			}
+			fv.Set(reflect.ValueOf(m))
 			continue
 		}
 
@@ -531,6 +591,14 @@ func validate(cfg *Config) error {
 		}
 	}
 
+	if err := validateDataMounts(cfg.Storage.DataMounts); err != nil {
+		return fmt.Errorf("config: storage.%w", err)
+	}
+
+	if err := validateRuntimeDefaults(cfg.Docker.RuntimeDefaults); err != nil {
+		return fmt.Errorf("config: docker.%w", err)
+	}
+
 	for _, cidr := range cfg.Server.TrustedProxies {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
 			return fmt.Errorf("config: server.trusted_proxies: invalid CIDR %q: %w", cidr, err)
@@ -555,6 +623,41 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("config: database.driver must be \"sqlite\" or \"postgres\", got %q", cfg.Database.Driver)
 	}
 
+	return nil
+}
+
+var dataMountNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func validateDataMounts(mounts []DataMountSource) error {
+	seen := make(map[string]bool)
+	for _, m := range mounts {
+		if m.Name == "" {
+			return fmt.Errorf("data_mounts: name must not be empty")
+		}
+		if !dataMountNameRe.MatchString(m.Name) {
+			return fmt.Errorf("data_mounts: name %q contains invalid characters", m.Name)
+		}
+		if !filepath.IsAbs(m.Path) {
+			return fmt.Errorf("data_mounts: path %q must be absolute", m.Path)
+		}
+		if seen[m.Name] {
+			return fmt.Errorf("data_mounts: duplicate name %q", m.Name)
+		}
+		seen[m.Name] = true
+	}
+	return nil
+}
+
+func validateRuntimeDefaults(defaults map[string]string) error {
+	validAccessTypes := map[string]bool{
+		"acl": true, "logged_in": true, "public": true,
+	}
+	for key := range defaults {
+		if !validAccessTypes[key] {
+			return fmt.Errorf("runtime_defaults: unknown access type %q"+
+				" (valid: acl, logged_in, public)", key)
+		}
+	}
 	return nil
 }
 

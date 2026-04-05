@@ -89,6 +89,10 @@ func (m *mockDockerClient) ContainerStats(context.Context, string, client.Contai
 	panic("not implemented")
 }
 
+func (m *mockDockerClient) ContainerUpdate(ctx context.Context, containerID string, options client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+	return client.ContainerUpdateResult{}, nil
+}
+
 func (m *mockDockerClient) ContainerStop(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error) {
 	if m.containerStopFn != nil {
 		return m.containerStopFn(ctx, containerID, options)

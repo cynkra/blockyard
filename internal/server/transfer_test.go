@@ -10,6 +10,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/logstore"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/registry"
@@ -134,7 +135,8 @@ func testServerWithMock(t *testing.T) (*Server, *mock.MockBackend) {
 func TestDefaultWorkerSpec(t *testing.T) {
 	srv, _ := testServerWithMock(t)
 
-	spec := srv.defaultWorkerSpec("app-1", "w-1", "/lib/w-1", "bundle-abc")
+	app := &db.AppRow{ID: "app-1", Name: "test-app"}
+	spec := srv.defaultWorkerSpec(app, "w-1", "/lib/w-1", "bundle-abc")
 	if spec.AppID != "app-1" {
 		t.Errorf("AppID = %q, want %q", spec.AppID, "app-1")
 	}
@@ -162,7 +164,8 @@ func TestDefaultWorkerSpec(t *testing.T) {
 func TestBuildTransferWorkerSpec(t *testing.T) {
 	srv, _ := testServerWithMock(t)
 
-	spec := srv.buildTransferWorkerSpec("app-1", "w-2", "/lib/w-2", "/transfer/w-1", "bundle-abc")
+	app := &db.AppRow{ID: "app-1", Name: "test-app"}
+	spec := srv.buildTransferWorkerSpec(app, "w-2", "/lib/w-2", "/transfer/w-1", "bundle-abc")
 	if spec.TransferDir != "/transfer/w-1" {
 		t.Errorf("TransferDir = %q, want %q", spec.TransferDir, "/transfer/w-1")
 	}
@@ -175,7 +178,8 @@ func TestBuildTransferWorkerSpec(t *testing.T) {
 func TestBuildTransferWorkerSpec_EmptyTransferDir(t *testing.T) {
 	srv, _ := testServerWithMock(t)
 
-	spec := srv.buildTransferWorkerSpec("app-1", "w-2", "/lib/w-2", "", "bundle-abc")
+	app := &db.AppRow{ID: "app-1", Name: "test-app"}
+	spec := srv.buildTransferWorkerSpec(app, "w-2", "/lib/w-2", "", "bundle-abc")
 	if _, ok := spec.Env["BLOCKYARD_TRANSFER_PATH"]; ok {
 		t.Error("expected no BLOCKYARD_TRANSFER_PATH when transfer dir is empty")
 	}
