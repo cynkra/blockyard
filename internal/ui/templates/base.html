@@ -19,6 +19,214 @@
     </script>
     <link rel="stylesheet" href="/static/style.css">
     <script src="/static/htmx.min.js"></script>
+    <script>
+    document.addEventListener('alpine:init', function() {
+
+        /* ── Dropdown (replaces native <select>) ── */
+        Alpine.data('dropdown', function(config) {
+            return {
+                open: false,
+                value: (config && config.value != null) ? config.value : '',
+                activeIdx: -1,
+
+                get items() {
+                    return this.$refs.menu ? [].slice.call(this.$refs.menu.querySelectorAll('[role="option"]')) : [];
+                },
+
+                get label() {
+                    var v = this.value, items = this.items;
+                    for (var i = 0; i < items.length; i++) {
+                        if (items[i].dataset.value === v) return items[i].textContent.trim();
+                    }
+                    return (config && config.placeholder) || '';
+                },
+
+                toggle() {
+                    this.open = !this.open;
+                    if (this.open) this.activeIdx = this.items.findIndex(function(el) { return el.dataset.value === this.value; }.bind(this));
+                },
+
+                select(el) {
+                    this.value = el.dataset.value;
+                    this.open = false;
+                    this.activeIdx = -1;
+                    this.syncAria();
+                    var self = this;
+                    this.$nextTick(function() {
+                        if (self.$refs.input) self.$refs.input.dispatchEvent(new Event('change', { bubbles: true }));
+                    });
+                },
+
+                syncAria() {
+                    var v = this.value;
+                    this.items.forEach(function(el) { el.setAttribute('aria-selected', el.dataset.value === v); });
+                },
+
+                onKeydown(e) {
+                    var items = this.items;
+                    if (!items.length) return;
+                    switch (e.key) {
+                        case 'ArrowDown':
+                            e.preventDefault();
+                            if (!this.open) { this.open = true; this.activeIdx = 0; return; }
+                            this.activeIdx = Math.min(this.activeIdx + 1, items.length - 1);
+                            items[this.activeIdx].scrollIntoView({ block: 'nearest' });
+                            break;
+                        case 'ArrowUp':
+                            e.preventDefault();
+                            if (!this.open) { this.open = true; this.activeIdx = items.length - 1; return; }
+                            this.activeIdx = Math.max(this.activeIdx - 1, 0);
+                            items[this.activeIdx].scrollIntoView({ block: 'nearest' });
+                            break;
+                        case 'Enter': case ' ':
+                            e.preventDefault();
+                            if (!this.open) { this.toggle(); return; }
+                            if (this.activeIdx >= 0 && items[this.activeIdx]) this.select(items[this.activeIdx]);
+                            break;
+                        case 'Escape': case 'Tab':
+                            this.open = false; this.activeIdx = -1;
+                            break;
+                    }
+                },
+
+                init() {
+                    this.syncAria();
+                    var self = this;
+                    this.$watch('activeIdx', function() {
+                        var idx = self.activeIdx;
+                        self.items.forEach(function(el, i) { el.classList.toggle('active', i === idx); });
+                    });
+                }
+            };
+        });
+
+        /* ── Combobox (replaces autocomplete widgets) ── */
+        Alpine.data('combobox', function(config) {
+            return {
+                open: false,
+                query: (config && config.display) || '',
+                value: (config && config.value) || '',
+                activeIdx: -1,
+                _timer: null,
+
+                get visibleItems() {
+                    return this.$refs.menu ? [].slice.call(this.$refs.menu.querySelectorAll('[role="option"]:not([hidden])')) : [];
+                },
+
+                onInput() {
+                    this.value = '';
+                    this.activeIdx = -1;
+                    this.open = true;
+                    if (config && config.url) this.remoteSearch();
+                    else this.localFilter();
+                },
+
+                onFocus() {
+                    if (config && config.url) {
+                        if (this.query.trim().length >= 2) this.remoteSearch();
+                    } else {
+                        this.localFilter();
+                        this.open = true;
+                    }
+                },
+
+                localFilter() {
+                    var q = this.query.toLowerCase().trim();
+                    var all = this.$refs.menu ? [].slice.call(this.$refs.menu.querySelectorAll('[role="option"]')) : [];
+                    var exactMatch = false;
+                    all.forEach(function(el) {
+                        if (el.classList.contains('dd-create')) return;
+                        var name = (el.dataset.value || '').toLowerCase();
+                        el.hidden = !!(q && name.indexOf(q) === -1);
+                        if (name === q) exactMatch = true;
+                    });
+                    var createEl = this.$refs.menu ? this.$refs.menu.querySelector('.dd-create') : null;
+                    if (createEl) {
+                        if (q && !exactMatch && config && config.create) {
+                            createEl.hidden = false;
+                            createEl.textContent = 'Create \u201c' + this.query.trim() + '\u201d';
+                            createEl.dataset.value = this.query.trim();
+                        } else {
+                            createEl.hidden = true;
+                        }
+                    }
+                },
+
+                remoteSearch() {
+                    clearTimeout(this._timer);
+                    var q = this.query.trim();
+                    var self = this;
+                    if (q.length < 2) { this.open = false; return; }
+                    this._timer = setTimeout(function() {
+                        fetch(config.url + encodeURIComponent(q), { credentials: 'same-origin' })
+                            .then(function(r) { return r.text(); })
+                            .then(function(html) {
+                                if (!self.$refs.menu) return;
+                                self.$refs.menu.innerHTML = html.trim()
+                                    ? html
+                                    : '<div role="option" class="dd-item dd-empty" aria-disabled="true">No users found</div>';
+                                self.open = true;
+                                self.activeIdx = -1;
+                            });
+                    }, 200);
+                },
+
+                select(el) {
+                    if (el.getAttribute('aria-disabled') === 'true') return;
+                    this.value = el.dataset.value;
+                    if (config && config.url) {
+                        var name = el.querySelector('.dd-item-name');
+                        var detail = el.querySelector('.dd-item-detail');
+                        this.query = name ? name.textContent + (detail && detail.textContent ? ' (' + detail.textContent + ')' : '') : el.textContent.trim();
+                    } else {
+                        this.query = el.dataset.value;
+                    }
+                    this.open = false;
+                    this.activeIdx = -1;
+                    var self = this;
+                    this.$nextTick(function() {
+                        if (self.$refs.input) self.$refs.input.dispatchEvent(new Event('change', { bubbles: true }));
+                    });
+                },
+
+                onKeydown(e) {
+                    var items = this.visibleItems.filter(function(el) { return el.getAttribute('aria-disabled') !== 'true'; });
+                    switch (e.key) {
+                        case 'ArrowDown':
+                            e.preventDefault();
+                            if (!this.open) { this.onFocus(); return; }
+                            this.activeIdx = Math.min(this.activeIdx + 1, items.length - 1);
+                            if (items[this.activeIdx]) items[this.activeIdx].scrollIntoView({ block: 'nearest' });
+                            break;
+                        case 'ArrowUp':
+                            e.preventDefault();
+                            this.activeIdx = Math.max(this.activeIdx - 1, 0);
+                            if (items[this.activeIdx]) items[this.activeIdx].scrollIntoView({ block: 'nearest' });
+                            break;
+                        case 'Enter':
+                            if (this.activeIdx >= 0 && items[this.activeIdx]) {
+                                e.preventDefault();
+                                this.select(items[this.activeIdx]);
+                            }
+                            break;
+                        case 'Escape':
+                            this.open = false; this.activeIdx = -1;
+                            break;
+                    }
+                },
+
+                init() {
+                    var self = this;
+                    this.$watch('activeIdx', function() {
+                        var idx = self.activeIdx;
+                        self.visibleItems.forEach(function(el, i) { el.classList.toggle('active', i === idx); });
+                    });
+                }
+            };
+        });
+    });
+    </script>
+    <script defer src="/static/alpine.min.js"></script>
 </head>
 <body>
     <div id="toast-container" class="toast toast-end toast-bottom z-[10000]"></div>
