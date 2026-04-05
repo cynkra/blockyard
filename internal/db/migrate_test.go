@@ -56,7 +56,7 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
 		FROM information_schema.columns
 		WHERE table_schema = 'public'
 		  AND table_name != 'schema_migrations'
-		ORDER BY table_name, ordinal_position`)
+		ORDER BY table_name, column_name`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,20 +122,25 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
 		lines = append(lines, fmt.Sprintf("CHECK %s.%s: %s", tbl, name, clause))
 	}
 
-	// Foreign key constraints
+	// Foreign key constraints — use pg_catalog for deterministic column
+	// ordering (information_schema.constraint_column_usage cross-joins
+	// on composite FKs).
 	fkRows, err := db.Query(`
-		SELECT tc.table_name, tc.constraint_name,
-		       kcu.column_name, ccu.table_name, ccu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-		    ON tc.constraint_name = kcu.constraint_name
-		   AND tc.table_schema = kcu.table_schema
-		JOIN information_schema.constraint_column_usage ccu
-		    ON tc.constraint_name = ccu.constraint_name
-		   AND tc.table_schema = ccu.table_schema
-		WHERE tc.constraint_type = 'FOREIGN KEY'
-		  AND tc.table_schema = 'public'
-		ORDER BY tc.table_name, tc.constraint_name`)
+		SELECT c.conrelid::regclass AS table_name,
+		       c.conname,
+		       a1.attname AS column_name,
+		       c.confrelid::regclass AS ref_table,
+		       a2.attname AS ref_column
+		FROM pg_constraint c
+		JOIN LATERAL unnest(c.conkey, c.confkey)
+		     WITH ORDINALITY AS u(attnum, refattnum, ord) ON true
+		JOIN pg_attribute a1
+		     ON a1.attrelid = c.conrelid AND a1.attnum = u.attnum
+		JOIN pg_attribute a2
+		     ON a2.attrelid = c.confrelid AND a2.attnum = u.refattnum
+		WHERE c.contype = 'f'
+		  AND c.connamespace = 'public'::regnamespace
+		ORDER BY c.conrelid::regclass::text, c.conname, u.ord`)
 	if err != nil {
 		t.Fatal(err)
 	}
