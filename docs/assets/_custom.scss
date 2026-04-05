@@ -1,59 +1,70 @@
 // Blockyard docs color palette
-// Aligns Hugo Book theme with the Blockyard UI color palette.
-// Source: internal/ui/static/style.css
+// Aligns Hugo Book theme with the DaisyUI light/night themes
+// used by the blockyard server UI (internal/ui/input.css).
 
-// Override dark theme (Nord → Slate + Blue)
+// Override dark theme — matches DaisyUI "night"
 @mixin theme-dark {
-  --body-background: #0f172a;     // slate-900
+  --body-background: #0f172a;     // DaisyUI night base-100
   --body-background-tint: none;
-  --body-font-color: #f1f5f9;    // slate-100
+  --body-font-color: #c9cbd0;    // DaisyUI night base-content
 
-  --color-link: #3b82f6;         // blue-500
-  --color-visited-link: #3b82f6;
+  --color-link: #3abdf7;         // DaisyUI night primary
+  --color-visited-link: #3abdf7;
 
   --icon-filter: brightness(0) invert(1);
 
-  --gray-100: #1e293b;           // slate-800
-  --gray-200: #334155;           // slate-700
-  --gray-500: #94a3b8;           // slate-400
+  --gray-100: #1e293b;           // DaisyUI night neutral (surfaces)
+  --gray-200: #2a3441;           // borders
+  --gray-500: #8691a1;           // muted text
 
-  @include accent("default", #64748b);
-  @include accent("note", #3b82f6);
-  @include accent("tip", #3bad3b);
-  @include accent("important", #8144dd);
-  @include accent("warning", #f59e42);
-  @include accent("caution", #d84747);
+  @include accent("default", #8691a1);
+  @include accent("note", #0ca5e9);    // DaisyUI night info
+  @include accent("tip", #2fd4bf);     // DaisyUI night success
+  @include accent("important", #818cf8); // DaisyUI night secondary
+  @include accent("warning", #f4bf51); // DaisyUI night warning
+  @include accent("caution", #fb7085); // DaisyUI night error
 
-  @include accent("info", #3b82f6);
-  @include accent("success", #3bad3b);
-  @include accent("danger", #d84747);
+  @include accent("info", #0ca5e9);
+  @include accent("success", #2fd4bf);
+  @include accent("danger", #fb7085);
 }
 
-// Override light theme
+// Override light theme — matches DaisyUI "light"
 @mixin theme-light {
-  --body-background: #ffffff;     // white
+  --body-background: #ffffff;     // DaisyUI light base-100
   --body-background-tint: none;
-  --body-font-color: #1a1a1a;    // text-primary
+  --body-font-color: #18181b;    // DaisyUI light base-content
 
-  --color-link: #2563eb;         // blue-600
-  --color-visited-link: #1e40af; // blue-800
+  --color-link: #422ad5;         // DaisyUI light primary
+  --color-visited-link: #371fb0; // darker primary
 
   --icon-filter: none;
 
-  --gray-100: #f3f4f6;           // bg-muted
-  --gray-200: #e5e7eb;           // border-default
-  --gray-500: #888888;           // text-muted
+  --gray-100: #f8f8f8;           // DaisyUI light base-200
+  --gray-200: #eeeeee;           // DaisyUI light base-300
+  --gray-500: #71717a;           // muted text
 
-  @include accent("default", #555555);
-  @include accent("note", #2563eb);
-  @include accent("tip", #3bad3b);
-  @include accent("important", #8144dd);
-  @include accent("warning", #f59e42);
-  @include accent("caution", #d84747);
+  @include accent("default", #71717a);
+  @include accent("note", #2563eb);    // DaisyUI light info (toned)
+  @include accent("tip", #16a34a);     // DaisyUI light success (toned)
+  @include accent("important", #7c3aed); // violet-600
+  @include accent("warning", #d97706); // DaisyUI light warning (toned)
+  @include accent("caution", #dc2626); // DaisyUI light error (toned)
 
   @include accent("info", #2563eb);
-  @include accent("success", #3bad3b);
-  @include accent("danger", #d84747);
+  @include accent("success", #16a34a);
+  @include accent("danger", #dc2626);
+}
+
+// When the server UI has stored an explicit theme preference,
+// override the prefers-color-scheme media query.
+// Specificity of html[data-theme] > :root ensures the override wins.
+html[data-theme="dark"] {
+  @include theme-dark;
+}
+
+html[data-theme="light"] {
+  @include theme-light;
 }
 
 // Card grid for homepage
