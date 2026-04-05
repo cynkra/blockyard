@@ -70,12 +70,18 @@ type DataMountSource struct {
 ```toml
 [[storage.data_mounts]]
 name = "models"
-path = "/data/shared-models"
+path = "/host/data/shared-models"
 
 [[storage.data_mounts]]
 name = "scratch"
-path = "/data/scratch"
+path = "/host/data/scratch"
 ```
+
+Paths are **host paths** — the actual location on the Docker host
+filesystem, not paths inside the blockyard server container. The server
+never accesses these paths itself; it passes them to the Docker API
+as bind-mount sources for worker containers. This is the same
+coordinate system as Docker `-v /host/path:/container/path`.
 
 These define the admin-approved mount sources. App-level specifications
 reference sources by name. This is a config-only construct — no schema
@@ -173,7 +179,7 @@ CREATE TABLE app_data_mounts (
     source   TEXT NOT NULL,
     target   TEXT NOT NULL,
     readonly INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(app_id, target)
+    PRIMARY KEY (app_id, target)
 );
 ```
 
@@ -229,7 +235,7 @@ CREATE TABLE app_data_mounts (
     source   TEXT NOT NULL,
     target   TEXT NOT NULL,
     readonly INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(app_id, target)
+    PRIMARY KEY (app_id, target)
 );
 ```
 
@@ -446,11 +452,12 @@ func Validate(mounts []db.DataMountRow, sources []config.DataMountSource) error 
     return nil
 }
 
-// Resolve converts validated data mount rows into host paths using
-// the admin-defined mount sources. Returns an error if a source
-// references a name that no longer exists in the admin config
-// (can happen if the admin removes a source after apps were
-// configured to use it).
+// Resolve converts validated data mount rows into MountEntries with
+// host paths as Source. The returned entries are ready to be passed
+// directly to the Docker API as bind-mount sources — no MountConfig
+// translation needed. Returns an error if a source references a name
+// that no longer exists in the admin config (can happen if the admin
+// removes a source after apps were configured to use it).
 func Resolve(mounts []db.DataMountRow, sources []config.DataMountSource) ([]backend.MountEntry, error) {
     sourceMap := make(map[string]string, len(sources))
     for _, s := range sources {
@@ -529,17 +536,25 @@ entries:
 binds, mounts := d.mountCfg.WorkerMounts(spec.BundlePath, spec.LibraryPath,
     spec.LibDir, spec.TransferDir, spec.TokenDir, spec.WorkerMount)
 
-// Append per-app data mounts.
+// Append per-app data mounts. Source paths are host paths (not
+// server-container paths), so they bypass MountConfig translation
+// and go directly into Docker bind strings.
 for _, dm := range spec.DataMounts {
-    b, m := d.mountCfg.TranslateMount(dm)
-    binds = append(binds, b...)
-    mounts = append(mounts, m...)
+    flag := ":ro"
+    if !dm.ReadOnly {
+        flag = ""
+    }
+    binds = append(binds, dm.Source+":"+dm.Target+flag)
 }
 ```
 
-This reuses `MountConfig.TranslateMount()` (already used by
-`Build()` at line 786) which handles the bind/volume/native mode
-translation.
+Data mount sources are host paths by definition (the admin configures
+them as the path on the Docker host, not a path inside the blockyard
+server container). Unlike bundle/library/transfer mounts — which the
+server works with directly and need mode-dependent translation via
+`MountConfig` — data mount paths are opaque to the server. It never
+reads from them; it just passes them through to the Docker API as
+bind-mount sources. No `TranslateMount` needed.
 
 **Runtime** — in the `ContainerCreate` call (line 450), add the
 `Runtime` field to `HostConfig`:
@@ -1126,12 +1141,17 @@ phase 3-1 — runs up, down, up and verifies schema stability.
 
 ## Design decisions
 
-1. **Mount sources are config-only, not DB-stored.** Admin-defined
-   sources (`[[storage.data_mounts]]`) live in TOML, not the database.
-   The paths reference host filesystem locations — they're
-   deployment-specific, not application-specific. Storing them in
-   config matches this: the admin defines what's available, the app
-   references by name.
+1. **Mount source paths are host paths, not server-container paths.**
+   The `path` field in `[[storage.data_mounts]]` is the path on the
+   Docker host — the same coordinate system as `docker run -v`. The
+   server never accesses these paths itself; it passes them directly
+   to the Docker API as bind-mount sources for worker containers.
+   This means data mounts bypass `MountConfig.TranslateMount()`
+   entirely — unlike bundle/library mounts (which the server works
+   with directly and need mode-dependent path translation), data
+   mounts are opaque host-to-worker bind mounts. Sources live in
+   TOML, not the database, because they're deployment-specific
+   (host filesystem layout), not application-specific.
 
 2. **Validation in a separate package.** Mount validation lives in
    `internal/mount/`, not inline in the API handler. The process
