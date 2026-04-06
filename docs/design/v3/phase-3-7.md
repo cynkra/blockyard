@@ -25,7 +25,7 @@ developed in parallel with phase 3-6 (data mounts) and phase 3-9
   not add migrations, but follows the same testing conventions.
 - **Backend interface** (`internal/backend/backend.go`) — the nine-method
   `Backend` interface, `WorkerSpec`, `BuildSpec`, `BuildResult`,
-  `LogStream`, `ManagedResource`, and `ContainerStatsResult` types are
+  `LogStream`, `ManagedResource`, and `WorkerResourceUsageResult` types are
   stable and unchanged.
 - **`backends.md` design doc** — process backend design rationale,
   isolation properties, deployment modes, and comparison with Docker.
@@ -62,6 +62,29 @@ can be integrated later.
    allocation, and log capture. Integration tests (tagged
    `process_test`) for spawn/health/stop lifecycle. Skipped when bwrap
    is unavailable.
+10. **Backend interface decoupling** — renames and new methods to remove
+    Docker-specific assumptions from the interface and shared code:
+    - Rename `ContainerStats` → `WorkerResourceUsage` and
+      `ContainerStatsResult` → `WorkerResourceUsageResult` on the
+      `Backend` interface (and all callers: `api/runtime.go`,
+      `ui/sidebar.go`, `backend/mock/mock.go`, test stubs).
+    - Add `CleanupOrphanResources(ctx) error` to the `Backend`
+      interface. Docker cleans iptables rules; process backend is a
+      no-op. Removes the hard `docker` import from `ops/ops.go`.
+    - Add `Preflight(ctx) (*preflight.Report, error)` to the `Backend`
+      interface. Each backend checks its own prerequisites (Docker:
+      socket/image/mounts; process: bwrap/R/userns/ports). `main.go`
+      calls `be.Preflight()` instead of branching by backend type.
+    - Move `ParseMemoryLimit` from `internal/backend/docker` to
+      `internal/units` — it's used by `api/apps.go` for input
+      validation and has nothing to do with Docker.
+    - Move `default_memory_limit` and `default_cpu_limit` from
+      `[docker]` to `[server]` — these are worker resource defaults,
+      not Docker concepts.
+    - Move `store_retention` from `[docker]` to `[storage]` — it
+      controls R library cache eviction, which is backend-neutral.
+    - Rename `skip_docker_preflight` → `skip_preflight` on
+      `ServerConfig`.
 
 ## Step-by-step
 
@@ -88,14 +111,32 @@ type Config struct {
 }
 ```
 
-Add `Backend` field to `ServerConfig`:
+Add `Backend` field to `ServerConfig` and move backend-neutral
+worker defaults out of `DockerConfig`:
 
 ```go
 type ServerConfig struct {
     // ...existing fields...
-    Backend string `toml:"backend"` // "docker" (default) or "process"
+    Backend            string  `toml:"backend"`              // "docker" (default) or "process"
+    SkipPreflight      bool    `toml:"skip_preflight"`       // skip backend-specific preflight checks at startup
+    DefaultMemoryLimit string  `toml:"default_memory_limit"` // fallback memory limit for workers (e.g. "2g"); moved from [docker]
+    DefaultCPULimit    float64 `toml:"default_cpu_limit"`    // fallback CPU limit (fractional vCPUs); moved from [docker]
 }
 ```
+
+Move `store_retention` from `DockerConfig` to `StorageConfig`:
+
+```go
+type StorageConfig struct {
+    // ...existing fields...
+    StoreRetention Duration `toml:"store_retention"` // moved from [docker]; 0 = disabled
+}
+```
+
+Remove the moved fields from `DockerConfig` and the old
+`SkipDockerPreflight` from `ServerConfig`. Keep backward-compat TOML
+parsing for one release: if the old `[docker]` fields are present, copy
+them to the new location and log a deprecation warning.
 
 Defaults in `applyDefaults()`:
 
@@ -179,6 +220,7 @@ package process
 
 import (
     "fmt"
+    "net"
     "sync"
 )
 
@@ -198,16 +240,36 @@ func newPortAllocator(start, end int) *portAllocator {
 }
 
 // Alloc returns the next free port, or an error if all ports are in use.
+// After marking a port as allocated in the bitset, it verifies the port
+// is actually bindable (TCP listen + immediate close). This prevents
+// TOCTOU failures where another process on the host has already bound
+// the port. If the probe fails, the port is skipped and the scan
+// continues to the next free slot.
 func (p *portAllocator) Alloc() (int, error) {
     p.mu.Lock()
     defer p.mu.Unlock()
     for i, taken := range p.used {
         if !taken {
+            port := p.start + i
+            if !probePort(port) {
+                continue // port in use by another process; skip
+            }
             p.used[i] = true
-            return p.start + i, nil
+            return port, nil
         }
     }
     return 0, fmt.Errorf("process backend: all %d ports in use", len(p.used))
+}
+
+// probePort attempts a TCP listen on 127.0.0.1:port to verify the port
+// is available. Returns true if the listen succeeds (port is free).
+func probePort(port int) bool {
+    ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+    if err != nil {
+        return false
+    }
+    ln.Close()
+    return true
 }
 
 // Release returns a port to the pool. No-op if the port is out of range.
@@ -898,7 +960,7 @@ func (b *ProcessBackend) RemoveResource(_ context.Context, r backend.ManagedReso
     return nil
 }
 
-func (b *ProcessBackend) ContainerStats(_ context.Context, id string) (*backend.ContainerStatsResult, error) {
+func (b *ProcessBackend) WorkerResourceUsage(_ context.Context, id string) (*backend.WorkerResourceUsageResult, error) {
     b.mu.Lock()
     w, ok := b.workers[id]
     b.mu.Unlock()
@@ -928,7 +990,7 @@ func (b *ProcessBackend) ContainerStats(_ context.Context, id string) (*backend.
     w.lastCPU = &cpuSample{ticks: ticks, when: now}
     b.mu.Unlock()
 
-    return &backend.ContainerStatsResult{
+    return &backend.WorkerResourceUsageResult{
         CPUPercent:       cpuPercent,
         MemoryUsageBytes: rssBytes,
         MemoryLimitBytes: 0, // no per-worker cgroup limit
@@ -1071,12 +1133,58 @@ The `docker.Image` validation in `validate()` moves into the `case
 "docker"` branch (step 1) so it does not reject process-backend configs
 that leave `docker.image` empty.
 
+**Preflight via Backend interface.** Replace the current
+`SkipDockerPreflight` → `RunDockerChecks` flow with a backend method:
+
+```go
+if !cfg.Server.SkipPreflight {
+    preflightReport, err := be.Preflight(ctx)
+    // ...log, check HasErrors()
+}
+```
+
+Each backend implements `Preflight(ctx) (*preflight.Report, error)`:
+- Docker: the existing `RunDockerChecks` logic (socket, image pull,
+  mount detection, builder check).
+- Process: the new `RunProcessChecks` logic (bwrap, R, userns, port
+  range).
+
+This removes the backend-type branching from `main.go` and ensures
+future backends (k8s) only need to implement the interface method.
+
+**Store retention sweeper.** The current code gates on
+`cfg.Docker.StoreRetention`. After the config move:
+
+```go
+if cfg.Storage.StoreRetention.Duration > 0 {
+    pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Storage.StoreRetention.Duration)
+}
+```
+
+**Startup cleanup.** Replace the direct `docker.CleanupOrphanMetadataRules()`
+call in `ops.StartupCleanup` with:
+
+```go
+if err := srv.Backend.CleanupOrphanResources(ctx); err != nil {
+    slog.Warn("startup: orphan resource cleanup failed", "error", err)
+}
+```
+
+This removes the `internal/backend/docker` import from `ops/ops.go`.
+
+**System checker.** Rename `DockerPing` → `BackendPing` in
+`preflight.RuntimeDeps`.
+
 ### Step 7: Preflight check
 
 Add a process-backend preflight check to
 `internal/preflight/process_checks.go`. Follows the same pattern as
 `config_checks.go`: individual `check*` functions return a `Result`,
 and the top-level `Run*Checks` function collects them.
+
+`ProcessBackend.Preflight()` delegates to `RunProcessChecks` —
+the check functions stay in the `preflight` package (not `process`)
+to avoid a circular import.
 
 ```go
 package preflight
@@ -1190,35 +1298,29 @@ func checkPortRange(cfg *config.ProcessConfig) Result {
 }
 ```
 
-Wire it into `main.go` alongside the existing Docker preflight:
-
-```go
-if cfg.Server.Backend == "process" {
-    processReport := preflight.RunProcessChecks(cfg.Process)
-    processReport.Log()
-    if processReport.HasErrors() {
-        slog.Error("preflight process checks failed")
-        os.Exit(1)
-    }
-}
-```
+Wiring into `main.go` is handled by the `be.Preflight(ctx)` call
+described in step 6 — no backend-specific branching needed.
 
 ### Step 8: Orchestrator and rolling update compatibility
 
 The rolling update orchestrator (phase 3-5) uses the Docker API to
 clone the server's own container. When the server runs with backend =
-"process", the orchestrator is not available — there is no container to
-clone.
+"process", the Docker orchestrator is not available — there is no
+container to clone.
 
-The admin endpoints (`/api/v1/admin/update`, `/api/v1/admin/rollback`,
-`/api/v1/admin/status`) already return `501 Not Implemented` when the
-server is not running as a Docker container (native mode). The same
-applies when `backend = "process"` — the orchestrator is not
-instantiated and admin endpoints return 501.
-
-No code change needed — the existing guard (`if be, ok :=
+For phase 3-7, admin endpoints (`/api/v1/admin/update`,
+`/api/v1/admin/rollback`, `/api/v1/admin/status`) return `501 Not
+Implemented`. The existing guard (`if be, ok :=
 srv.Backend.(*docker.DockerBackend)` type assertion in `main.go`)
-naturally excludes `ProcessBackend`.
+naturally excludes `ProcessBackend`, leaving `orch = nil`.
+
+**Phase 3-8** adds a process-backend orchestrator variant. The
+mechanism differs from Docker: instead of cloning a container, the
+old server starts a new blockyard process. Both servers share state
+via Redis. The old server drains (stops accepting new sessions) and
+stays alive until all its sessions end — workers are child processes
+and die with the parent, so the server must outlive them. Once
+drained, the old server exits cleanly with zero workers remaining.
 
 ### Step 9: Tests
 
@@ -1521,7 +1623,7 @@ func TestSpawnAndStop(t *testing.T) {
     }
 }
 
-func TestContainerStatsUnknownWorker(t *testing.T) {
+func TestWorkerResourceUsageUnknownWorker(t *testing.T) {
     cfg := &config.ProcessConfig{
         BwrapPath:      "bwrap",
         RPath:          "/usr/bin/R",
@@ -1534,7 +1636,7 @@ func TestContainerStatsUnknownWorker(t *testing.T) {
     }
 
     // Unknown worker → nil stats, nil error.
-    stats, err := be.ContainerStats(context.Background(), "nonexistent")
+    stats, err := be.WorkerResourceUsage(context.Background(), "nonexistent")
     if err != nil {
         t.Errorf("expected nil error, got %v", err)
     }
@@ -1543,7 +1645,7 @@ func TestContainerStatsUnknownWorker(t *testing.T) {
     }
 }
 
-func TestContainerStatsLiveWorker(t *testing.T) {
+func TestWorkerResourceUsageLiveWorker(t *testing.T) {
     // Requires a running worker — spawn one, check stats, stop it.
     if _, err := exec.LookPath("bwrap"); err != nil {
         t.Skip("bwrap not available")
@@ -1571,7 +1673,7 @@ func TestContainerStatsLiveWorker(t *testing.T) {
     }
     defer be.Stop(ctx, spec.WorkerID)
 
-    stats, err := be.ContainerStats(ctx, spec.WorkerID)
+    stats, err := be.WorkerResourceUsage(ctx, spec.WorkerID)
     if err != nil {
         t.Fatalf("expected no error, got %v", err)
     }
@@ -1591,13 +1693,22 @@ func TestContainerStatsLiveWorker(t *testing.T) {
 
 | File | Action | Summary |
 |------|--------|---------|
-| `internal/config/config.go` | **update** | Add `ProcessConfig` struct, `Backend` field on `ServerConfig`, process defaults, validation |
-| `internal/backend/process/process.go` | **create** | `ProcessBackend` struct implementing all nine `Backend` methods; `readProcTreeStats`, `collectDescendants`, `readOneProcStats` helpers |
+| `internal/backend/backend.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`, `ContainerStatsResult` → `WorkerResourceUsageResult`; add `CleanupOrphanResources()` and `Preflight()` methods |
+| `internal/config/config.go` | **update** | Add `ProcessConfig`, `Backend`/`SkipPreflight` on `ServerConfig`; move `DefaultMemoryLimit`/`DefaultCPULimit` from `DockerConfig` → `ServerConfig`, `StoreRetention` from `DockerConfig` → `StorageConfig`; backward-compat parsing for old TOML locations |
+| `internal/backend/docker/docker.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; implement `CleanupOrphanResources()` (move `CleanupOrphanMetadataRules` logic) and `Preflight()` (move `RunDockerChecks` logic); read `DefaultMemoryLimit`/`DefaultCPULimit` from `ServerConfig` |
+| `internal/units/memory.go` | **create** | `ParseMemoryLimit()` moved from `internal/backend/docker` |
+| `internal/backend/process/process.go` | **create** | `ProcessBackend` struct implementing all `Backend` methods; `readProcTreeStats`, `collectDescendants`, `readOneProcStats` helpers |
 | `internal/backend/process/bwrap.go` | **create** | `bwrapArgs()`, `bwrapBuildArgs()`, `applySeccomp()`, `spliceBeforeSeparator()` |
 | `internal/backend/process/ports.go` | **create** | `portAllocator` with `Alloc()`, `Release()`, `InUse()` |
 | `internal/backend/process/logs.go` | **create** | `logBuffer` with `ingest()` and `stream()` for LogStream delivery |
-| `cmd/blockyard/main.go` | **update** | Backend selection switch; add `process` import; skip Docker preflight for process backend |
 | `internal/preflight/process_checks.go` | **create** | `RunProcessChecks()` — check bwrap, R, user namespaces, port range |
+| `cmd/blockyard/main.go` | **update** | Backend selection switch; `be.Preflight()` replaces Docker-specific preflight branching; `be.CleanupOrphanResources()` replaces direct Docker import in startup; store retention reads from `cfg.Storage`; rename `DockerPing` → `BackendPing` |
+| `internal/ops/ops.go` | **update** | Remove `docker` import; replace `docker.CleanupOrphanMetadataRules()` with `srv.Backend.CleanupOrphanResources()` |
+| `internal/api/apps.go` | **update** | Import `internal/units` instead of `internal/backend/docker` for `ParseMemoryLimit` |
+| `internal/api/runtime.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage` |
+| `internal/ui/sidebar.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage` |
+| `internal/backend/mock/mock.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; add no-op `CleanupOrphanResources()` and `Preflight()` |
+| `internal/preflight/checker.go` | **update** | Rename `DockerPing` → `BackendPing` in `RuntimeDeps` |
 | `internal/backend/process/bwrap_test.go` | **create** | bwrap argument construction tests |
 | `internal/backend/process/ports_test.go` | **create** | Port allocator tests (sequential and concurrent) |
 | `internal/backend/process/logs_test.go` | **create** | Log buffer and LogStream tests |
@@ -1624,7 +1735,7 @@ func TestContainerStatsLiveWorker(t *testing.T) {
    debugging without unbounded memory growth. The Docker backend has
    the same bounded behavior (Docker's log driver rotates).
 
-4. **`ContainerStats` walks the process tree via `/proc` — no cgroups
+4. **`WorkerResourceUsage` walks the process tree via `/proc` — no cgroups
    needed.** `cmd.Process.Pid` is the bwrap process, not R. Reading
    only bwrap's stats would show trivial usage (bwrap is a ~100KB C
    program). `readProcTreeStats` walks `/proc/{pid}/task/{tid}/children`
@@ -1634,7 +1745,7 @@ func TestContainerStatsLiveWorker(t *testing.T) {
    `MemoryLimitBytes` is 0 (no per-worker limit), but usage is real.
    CPU is reported as a percentage matching the Docker backend's
    semantics — each worker caches its previous `(ticks, timestamp)`
-   sample and `ContainerStats` computes `deltaCPU / deltaTime * 100`.
+   sample and `WorkerResourceUsage` computes `deltaCPU / deltaTime * 100`.
    The first call returns 0% (no previous sample). Returns nil on
    process exit (race between lookup and `/proc` read).
 
@@ -1760,3 +1871,15 @@ func TestContainerStatsLiveWorker(t *testing.T) {
     accessible on the host's external interface, bypassing the proxy
     and authentication layer. `127.0.0.1` restricts access to the
     loopback — only the blockyard proxy can reach it.
+
+21. **Backend interface decoupling as a first-class deliverable.** The
+    process backend is a stepping stone toward a Kubernetes backend.
+    Rather than adding if/else branches for each backend in `main.go`
+    and `ops.go`, we push backend-specific logic behind the `Backend`
+    interface: `Preflight()` for startup checks,
+    `CleanupOrphanResources()` for stale resource cleanup. Shared
+    config (`default_memory_limit`, `store_retention`) moves out of
+    `[docker]` so future backends don't need to read Docker config.
+    `ParseMemoryLimit` moves to `internal/units` so API validation
+    doesn't import a backend package. The goal: after this phase, no
+    code outside `internal/backend/docker/` imports that package.
