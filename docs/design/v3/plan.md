@@ -666,7 +666,8 @@ These all follow the same pattern: per-app field in the DB, field in
 1. **Admin-defined mount sources** — parse `[[storage.data_mounts]]`
    from TOML. Validate names are unique, paths are absolute.
 
-2. **App-level mount specification** — the `data_mounts` JSON column:
+2. **App-level mount specification** — `app_data_mounts` table with
+   `(app_id, target)` PK and FK to `apps(id)`:
 
    ```go
    type DataMount struct {
@@ -680,16 +681,34 @@ These all follow the same pattern: per-app field in the DB, field in
    subpath, target doesn't collide with reserved paths, no duplicates.
 
 4. **Mount backend integration** — `WorkerSpec.DataMounts` field. Docker
-   backend: bind mounts via `MountConfig`. Process backend: bwrap
-   `--bind` / `--ro-bind`.
+   backend: direct bind-mount strings (host paths bypass `MountConfig`
+   translation). Process backend: bwrap `--bind` / `--ro-bind`.
 
 5. **Multiple execution environment images** — `image` field on app
-   config (schema in migration 007). `PATCH /api/v1/apps/{id}` accepts
-   `image`. Docker backend reads `WorkerSpec.Image`, falls back to
-   server-wide default. `by update --image <ref>` CLI support.
+   config (migration 002). `PATCH /api/v1/apps/{id}` accepts `image`.
+   Docker backend reads `WorkerSpec.Image`, falls back to server-wide
+   default. `by update --image <ref>` CLI support.
 
 6. **Per-app OCI runtime selection** — `runtime` field on app config
-   (migration 007). Docker backend sets `HostConfig.Runtime` when set.
+   (migration 002). Docker backend sets `HostConfig.Runtime` when set.
+   Runtime changes require admin (the runtime controls the container
+   isolation boundary — runc vs kata vs sysbox — so it is a
+   security-sensitive setting).
+
+   **Runtime fallback chain** — the effective runtime for a worker is
+   resolved by `AppRuntime()` in order:
+
+   1. Per-app `runtime` column (admin-set override via PATCH or
+      `by scale --runtime`).
+   2. `docker.runtime_defaults` — a TOML map from access type to
+      runtime, e.g. `public = "kata-runtime"`. This lets operators
+      enforce stricter isolation for public-facing apps without
+      touching each app individually.
+   3. `docker.runtime` — server-wide default (empty = Docker daemon
+      default).
+
+   `runtime_defaults` keys are validated against the set of access
+   types (`acl`, `logged_in`, `public`).
 
 7. **Dynamic resource limit updates** — new Backend interface method:
 
