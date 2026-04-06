@@ -42,6 +42,7 @@ type mockDockerClient struct {
 	containerListFn     func(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error)
 	containerRemoveFn   func(ctx context.Context, containerID string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
 	containerStopFn     func(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error)
+	containerUpdateFn   func(ctx context.Context, containerID string, options client.ContainerUpdateOptions) (client.ContainerUpdateResult, error)
 	imageInspectFn      func(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error)
 	imagePullFn         func(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
 	networkConnectFn    func(ctx context.Context, networkID string, options client.NetworkConnectOptions) (client.NetworkConnectResult, error)
@@ -90,6 +91,9 @@ func (m *mockDockerClient) ContainerStats(context.Context, string, client.Contai
 }
 
 func (m *mockDockerClient) ContainerUpdate(ctx context.Context, containerID string, options client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+	if m.containerUpdateFn != nil {
+		return m.containerUpdateFn(ctx, containerID, options)
+	}
 	return client.ContainerUpdateResult{}, nil
 }
 
@@ -1465,5 +1469,163 @@ func TestRemoveResource_UnknownKind(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown kind")
+	}
+}
+
+// --- UpdateResources tests ---
+
+func TestUpdateResources_WorkerNotFound(t *testing.T) {
+	d := newTestBackend(&mockDockerClient{})
+	err := d.UpdateResources(context.Background(), "nonexistent", 512*1024*1024, 0)
+	if err == nil {
+		t.Fatal("expected error for unknown worker")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error should mention 'not found', got: %v", err)
+	}
+}
+
+func TestUpdateResources_MemoryOnly(t *testing.T) {
+	var gotID string
+	var gotResources *container.Resources
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, id string, opts client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			gotID = id
+			gotResources = opts.Resources
+			return client.ContainerUpdateResult{}, nil
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 512*1024*1024, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotID != "ctr-abc" {
+		t.Errorf("expected container ID ctr-abc, got %s", gotID)
+	}
+	if gotResources.Memory != 512*1024*1024 {
+		t.Errorf("expected memory 512MiB, got %d", gotResources.Memory)
+	}
+	if gotResources.NanoCPUs != 0 {
+		t.Errorf("expected NanoCPUs=0, got %d", gotResources.NanoCPUs)
+	}
+}
+
+func TestUpdateResources_CPUOnly(t *testing.T) {
+	var gotResources *container.Resources
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, _ string, opts client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			gotResources = opts.Resources
+			return client.ContainerUpdateResult{}, nil
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 0, 2_000_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotResources.Memory != 0 {
+		t.Errorf("expected memory=0, got %d", gotResources.Memory)
+	}
+	if gotResources.NanoCPUs != 2_000_000_000 {
+		t.Errorf("expected NanoCPUs=2e9, got %d", gotResources.NanoCPUs)
+	}
+}
+
+func TestUpdateResources_BothLimits(t *testing.T) {
+	var gotResources *container.Resources
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, _ string, opts client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			gotResources = opts.Resources
+			return client.ContainerUpdateResult{}, nil
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 1024*1024*1024, 1_500_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotResources.Memory != 1024*1024*1024 {
+		t.Errorf("expected memory 1GiB, got %d", gotResources.Memory)
+	}
+	if gotResources.NanoCPUs != 1_500_000_000 {
+		t.Errorf("expected NanoCPUs=1.5e9, got %d", gotResources.NanoCPUs)
+	}
+}
+
+func TestUpdateResources_DockerAPIError(t *testing.T) {
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, _ string, _ client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			return client.ContainerUpdateResult{}, errors.New("permission denied")
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 512*1024*1024, 0)
+	if err == nil {
+		t.Fatal("expected error from Docker API")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("expected permission denied, got: %v", err)
+	}
+}
+
+// --- ParseMemoryLimit edge cases ---
+
+func TestParseMemoryLimitEdgeCases(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int64
+		ok    bool
+	}{
+		// Empty string → parse error (no numeric part).
+		{"", 0, false},
+		// Whitespace only.
+		{"   ", 0, false},
+		// Case insensitive (upper).
+		{"512M", 512 * 1024 * 1024, true},
+		{"1G", 1024 * 1024 * 1024, true},
+		{"100KB", 100 * 1024, true},
+		{"256MB", 256 * 1024 * 1024, true},
+		// Kilobyte short form.
+		{"100k", 100 * 1024, true},
+		// No unit suffix → treated as bytes.
+		{"1024", 1024, true},
+		{"0", 0, true},
+		// Negative values.
+		{"-512m", -512 * 1024 * 1024, true},
+		{"-1", -1, true},
+		// Decimal values fail (ParseInt rejects them).
+		{"1.5g", 0, false},
+		{"0.5m", 0, false},
+		// Invalid suffixes → treated as bytes, then ParseInt fails.
+		{"512x", 0, false},
+		{"512p", 0, false},
+		// Spaces around the numeric part.
+		{" 512m ", 512 * 1024 * 1024, true},
+		{" 1024 ", 1024, true},
+		// Large value.
+		{"100g", 100 * 1024 * 1024 * 1024, true},
+		// Zero with unit.
+		{"0m", 0, true},
+		{"0g", 0, true},
+	}
+
+	for _, tt := range tests {
+		got, ok := ParseMemoryLimit(tt.input)
+		if ok != tt.ok {
+			t.Errorf("ParseMemoryLimit(%q) ok = %v, want %v", tt.input, ok, tt.ok)
+			continue
+		}
+		if ok && got != tt.want {
+			t.Errorf("ParseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
+		}
 	}
 }
