@@ -255,10 +255,9 @@
                            oninput="toggleSaveBtn(this)">
                     <button class="btn btn-error btn-sm hidden"
                             hx-patch="/api/v1/apps/{{.App.ID}}"
-                            hx-include="[name='name']"
+                            hx-include="#rename-app"
                             hx-confirm="Rename {{.App.Name}} to this new name? The old name will redirect for 7 days."
-                            hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }"
-                            onclick="this.classList.add('hidden')">Rename</button>
+                            hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }">Rename</button>
                 </div>
             </div>
             <button class="btn btn-error btn-sm mt-2"

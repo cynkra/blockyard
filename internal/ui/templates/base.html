@@ -375,7 +375,15 @@ document.body.addEventListener('htmx:confirm', function(e) {
     var isDestructive = e.detail.elt && (e.detail.elt.classList.contains('btn-error') ||
         (e.detail.verb && e.detail.verb === 'delete'));
     btn.className = isDestructive ? 'btn btn-error btn-sm' : 'btn btn-primary btn-sm';
-    btn.onclick = function() { dlg.close(); e.detail.issueRequest(); };
+    btn.onclick = function() {
+        dlg.close();
+        /* Strip hx-confirm, re-click the element to trigger htmx without a second prompt */
+        var elt = e.detail.elt;
+        var q = elt.getAttribute('hx-confirm');
+        elt.removeAttribute('hx-confirm');
+        elt.click();
+        setTimeout(function() { if (q) elt.setAttribute('hx-confirm', q); }, 50);
+    };
     dlg.showModal();
 });
 </script>
