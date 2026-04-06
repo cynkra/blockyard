@@ -359,21 +359,12 @@
   [x-cloak] { display: none !important; }
   .dd { @apply relative; }
   .dd-trigger {
-    @apply flex items-center justify-between gap-2 w-full text-left text-sm bg-base-100 cursor-pointer;
-    height: 2rem;
-    padding-inline: 0.75rem;
-    border: 1px solid oklch(var(--bc) / 0.2);
-    border-radius: var(--radius-field, 0.25rem);
+    @apply select select-sm text-sm w-full cursor-pointer;
+    /* Nudge DaisyUI chevron closer to the right edge for visual balance */
+    background-position: calc(100% - 14px) calc(1px + 50%), calc(100% - 10px) calc(1px + 50%);
+    padding-inline-end: calc(0.25rem * 6);
   }
-  .dd-trigger:hover { border-color: oklch(var(--bc) / 0.4); }
-  .dd-trigger:focus-visible { @apply outline-2 outline-offset-2 outline-base-content/20; }
   .dd-label { @apply truncate; }
-  .dd-chevron {
-    @apply w-3.5 h-3.5 shrink-0 opacity-50 transition-transform duration-150;
-    stroke: currentColor; fill: none; stroke-width: 2;
-    stroke-linecap: round; stroke-linejoin: round;
-  }
-  .rotate-180 { transform: rotate(180deg); }
   .dd-input { @apply input input-sm text-sm w-full; }
   .dd-menu { @apply absolute top-full left-0 right-0 mt-0.5 bg-base-100 border border-base-300 rounded-md shadow-lg z-[300] max-h-48 overflow-y-auto; }
   .dd-item { @apply px-2.5 py-1.5 cursor-pointer text-sm; transition: background 0.1s; }

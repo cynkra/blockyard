@@ -363,7 +363,32 @@ function updateTimeAgo() {
 }
 setInterval(updateTimeAgo, 30000);
 document.body.addEventListener('htmx:afterSwap', updateTimeAgo);
+
+/* Global hx-confirm interceptor — DaisyUI modal instead of native confirm */
+document.body.addEventListener('htmx:confirm', function(e) {
+    if (!e.detail.question) return;
+    e.preventDefault();
+    var dlg = document.getElementById('hx-confirm-dialog');
+    document.getElementById('hx-confirm-message').textContent = e.detail.question;
+    var btn = document.getElementById('hx-confirm-btn');
+    /* Destructive actions get a red button */
+    var isDestructive = e.detail.elt && (e.detail.elt.classList.contains('btn-error') ||
+        (e.detail.verb && e.detail.verb === 'delete'));
+    btn.className = isDestructive ? 'btn btn-error btn-sm' : 'btn btn-primary btn-sm';
+    btn.onclick = function() { dlg.close(); e.detail.issueRequest(); };
+    dlg.showModal();
+});
 </script>
+<dialog id="hx-confirm-dialog" class="modal">
+    <div class="modal-box max-w-sm">
+        <p class="text-sm" id="hx-confirm-message"></p>
+        <div class="modal-action">
+            <form method="dialog"><button class="btn btn-sm">Cancel</button></form>
+            <button class="btn btn-sm" id="hx-confirm-btn">Confirm</button>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
 </body>
 </html>
 {{end}}

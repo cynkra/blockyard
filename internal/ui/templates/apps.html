@@ -111,6 +111,17 @@
 </div>
 </div><!-- drawer -->
 
+<dialog id="tag-delete-dialog" class="modal">
+    <div class="modal-box max-w-sm">
+        <p class="text-sm">Delete tag "<strong id="tag-delete-name"></strong>"? This removes it from all apps.</p>
+        <div class="modal-action">
+            <form method="dialog"><button class="btn btn-sm">Cancel</button></form>
+            <button class="btn btn-error btn-sm" onclick="confirmTagDelete()">Delete</button>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
 <script>
 function closeSidebar() {
     if (typeof stopLogs === 'function') stopLogs();
@@ -202,12 +213,27 @@ function createGlobalTag() {
         else { r.json().then(function(d) { showToast(d.error || 'Failed', 'error'); }); }
     });
 }
+var _pendingTagDelete = null;
 function deleteGlobalTag(id, name) {
-    if (!confirm('Delete tag "' + name + '"?')) return;
-    fetch('/api/v1/tags/' + id, {method: 'DELETE'}).then(function(r) {
-        if (r.ok) { showToast('Tag deleted', 'success'); location.reload(); }
-        else { showToast('Failed to delete tag', 'error'); }
+    _pendingTagDelete = {id: id, name: name};
+    document.getElementById('tag-delete-name').textContent = name;
+    document.getElementById('tag-delete-dialog').showModal();
+}
+function confirmTagDelete() {
+    if (!_pendingTagDelete) return;
+    var name = _pendingTagDelete.name;
+    document.getElementById('tag-delete-dialog').close();
+    fetch('/api/v1/tags/' + _pendingTagDelete.id, {method: 'DELETE'}).then(function(r) {
+        if (r.ok) {
+            showToast('Tag deleted', 'success');
+            var url = new URL(window.location);
+            var tags = url.searchParams.getAll('tag');
+            url.searchParams.delete('tag');
+            tags.forEach(function(t) { if (t !== name) url.searchParams.append('tag', t); });
+            window.location = url.toString();
+        } else { showToast('Failed to delete tag', 'error'); }
     });
+    _pendingTagDelete = null;
 }
 
 /* Live-update: push settings changes to the card in the background.
@@ -280,11 +306,17 @@ function syncTagsToCard() {
         var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
         if (!card) return;
 
-        /* Read current tags from settings tab */
+        /* Read current tags (name + ID) from settings tab */
         var chips = sidebar.querySelectorAll('.tag-chips .tag-chip');
         var tagsEl = card.querySelector('.app-tags');
-        var tagNames = [];
-        chips.forEach(function(c) { tagNames.push(c.childNodes[0].textContent.trim()); });
+        var tagData = [];
+        chips.forEach(function(c) {
+            var name = c.childNodes[0].textContent.trim();
+            var btn = c.querySelector('[hx-delete]');
+            var id = btn ? btn.getAttribute('hx-delete').split('/tags/').pop() : '';
+            tagData.push({name: name, id: id});
+        });
+        var tagNames = tagData.map(function(t) { return t.name; });
 
         if (tagNames.length > 0) {
             if (!tagsEl) {
@@ -329,22 +361,31 @@ function syncTagsToCard() {
                 countEl.textContent = '(' + count + ')';
             });
             /* Add new tags if not present */
-            tagNames.forEach(function(name) {
+            var isAdmin = !!document.querySelector('.tag-admin-inline');
+            tagData.forEach(function(tag) {
                 var exists = false;
                 tagSidebar.querySelectorAll('.tag-browser-chip').forEach(function(c) {
-                    if (chipName(c) === name) exists = true;
+                    if (chipName(c) === tag.name) exists = true;
                 });
                 if (!exists) {
                     var div = document.createElement('div');
                     div.className = 'tag-browser-chip';
                     var a = document.createElement('a');
-                    a.className = 'badge badge-sm badge-soft badge-primary gap-1';
-                    a.href = '?tag=' + encodeURIComponent(name);
-                    a.textContent = name + ' ';
+                    a.className = 'badge badge-sm badge-soft badge-primary gap-1.5';
+                    a.href = '?tag=' + encodeURIComponent(tag.name);
+                    a.textContent = tag.name + ' ';
                     var count = document.createElement('span');
                     count.className = 'tag-count';
                     count.textContent = '(1)';
                     a.appendChild(count);
+                    if (isAdmin && tag.id) {
+                        var btn = document.createElement('button');
+                        btn.className = 'tag-remove';
+                        btn.title = 'Delete tag';
+                        btn.innerHTML = '&#10005;';
+                        btn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); deleteGlobalTag(tag.id, tag.name); };
+                        a.appendChild(btn);
+                    }
                     div.appendChild(a);
                     tagSidebar.appendChild(div);
                 }

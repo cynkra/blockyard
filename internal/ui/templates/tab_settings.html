@@ -178,7 +178,6 @@
                         <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
                                 role="combobox" aria-haspopup="listbox" :aria-expanded="open">
                             <span x-text="label" class="dd-label"></span>
-                            <svg class="dd-chevron" :class="open && 'rotate-180'" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
                         </button>
                         <input type="hidden" x-ref="input" :value="value">
                         <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
