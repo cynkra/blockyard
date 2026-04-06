@@ -173,14 +173,20 @@ var funcMap = template.FuncMap{
 	},
 	"statusDotClass": func(status string) string {
 		switch status {
-		case "running", "active", "ready", "configured":
+		case "running", "active":
 			return "status-success"
+		case "idle":
+			return "status-idle"
+		case "ready", "configured":
+			return "status-neutral"
 		case "building":
 			return "status-info"
 		case "stopping", "draining":
 			return "status-warning"
 		case "error", "failed":
 			return "status-error"
+		case "disabled", "stopped":
+			return "status-outline"
 		default:
 			return "status-neutral"
 		}
@@ -835,7 +841,7 @@ func buildCatalogEntries(apps []db.CatalogRow, srv *server.Server) []catalogEntr
 
 		status := "disabled"
 		if app.Enabled {
-			status = "ready"
+			status = "idle"
 			if srv.Workers.CountForApp(app.ID) > 0 {
 				status = "running"
 			}
@@ -867,7 +873,7 @@ func buildLandingEntries(apps []db.AppRow, srv *server.Server) []catalogEntry {
 
 		status := "disabled"
 		if app.Enabled {
-			status = "ready"
+			status = "idle"
 			if srv.Workers.CountForApp(app.ID) > 0 {
 				status = "running"
 			}

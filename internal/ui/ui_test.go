@@ -2338,8 +2338,8 @@ func TestComputeAppStatusReady(t *testing.T) {
 	app, _ := srv.DB.CreateApp("status-stop", "u")
 
 	// Enabled, no workers → ready (idle, waiting for traffic).
-	if got := computeAppStatus(srv, app); got != "ready" {
-		t.Errorf("computeAppStatus(no workers) = %q, want 'ready'", got)
+	if got := computeAppStatus(srv, app); got != "idle" {
+		t.Errorf("computeAppStatus(no workers) = %q, want 'idle'", got)
 	}
 }
 

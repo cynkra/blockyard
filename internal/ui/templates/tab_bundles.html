@@ -8,7 +8,7 @@
         <li>
             <hr class="{{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}bg-primary{{end}}" />
             <div class="timeline-middle">
-                <span class="status {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}status-success status-pulse{{else}}{{statusDotClass .Status}}{{end}}"></span>
+                <span class="status {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}status-success{{else}}{{statusDotClass .Status}}{{end}}"></span>
             </div>
             <div class="timeline-end timeline-box {{if and $.ActiveBundle (eq .ID $.ActiveBundle.ID)}}border-primary/30 bg-primary/5{{end}}">
                 <div class="flex items-center gap-2 flex-wrap">

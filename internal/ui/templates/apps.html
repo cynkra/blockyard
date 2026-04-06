@@ -52,7 +52,9 @@
         </button>
         {{end}}
         <div class="app-card-header">
-            <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}" style="flex-shrink:0"></span>
+            <div class="tooltip tooltip-right" data-tip="{{.Status}}">
+                <span class="status {{statusDotClass .Status}}" style="flex-shrink:0"></span>
+            </div>
             <span class="app-name">{{.Name}}</span>
         </div>
         {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
@@ -123,6 +125,59 @@
 </dialog>
 
 <script>
+function onAppRenamed(oldName, newName) {
+    /* Update card in-place */
+    var card = document.querySelector('.app-card[data-app-name="' + oldName + '"]');
+    if (card) {
+        card.dataset.appName = newName;
+        card.href = '/app/' + newName + '/';
+        card.querySelector('.app-name').textContent = newName;
+        var gear = card.querySelector('.app-card-gear');
+        if (gear) gear.setAttribute('hx-get', '/ui/apps/' + newName + '/sidebar');
+        htmx.process(gear);
+    }
+    /* Reload sidebar with new URLs */
+    htmx.ajax('GET', '/ui/apps/' + newName + '/sidebar', '#sidebar');
+    showToast('Renamed to ' + newName, 'success');
+}
+
+/* Sync status dot on enable/disable — updates card + sidebar header */
+function syncAppStatus(status) {
+    var sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    var header = sidebar.querySelector('h2');
+    if (!header) return;
+    var appName = header.textContent.trim();
+    var dotClass = {running: 'status-success', active: 'status-success',
+                    idle: 'status-idle',
+                    disabled: 'status-outline', stopped: 'status-outline',
+                    stopping: 'status-warning', building: 'status-info',
+                    error: 'status-error', failed: 'status-error'}[status] || 'status-neutral';
+    /* Card dot + tooltip */
+    var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
+    if (card) {
+        var dot = card.querySelector('.status');
+        if (dot) {
+            dot.className = 'status ' + dotClass;
+            var tip = dot.closest('.tooltip');
+            if (tip) tip.dataset.tip = status;
+        }
+    }
+    /* Sidebar header dot */
+    var sDot = sidebar.querySelector('.sidebar-header .status');
+    if (sDot) {
+        sDot.className = 'status ' + dotClass;
+    }
+    /* Settings accordion badge */
+    var badge = sidebar.querySelector('.app-controls')?.closest('.settings-section')?.querySelector('.status-badge');
+    if (badge) {
+        badge.className = 'status-badge status-' + status;
+        badge.textContent = status;
+    }
+}
+document.body.addEventListener('appDisabled', function() { syncAppStatus('disabled'); });
+document.body.addEventListener('appEnabled', function() { syncAppStatus('idle'); });
+
 function closeSidebar() {
     if (typeof stopLogs === 'function') stopLogs();
     document.getElementById('sidebar-toggle').checked = false;
@@ -235,6 +290,58 @@ function confirmTagDelete() {
     });
     _pendingTagDelete = null;
 }
+
+/* Poll app status and sync dots (card, sidebar header, tooltip).
+   Fetches sidebar HTML, parses status without swapping content. */
+var _statusPoll = null;
+function pollAppStatus() {
+    clearInterval(_statusPoll);
+    var sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    var header = sidebar.querySelector('h2');
+    if (!header) return;
+    var appName = header.textContent.trim();
+    var prevClass = '';
+    var polls = 0;
+    function check() {
+        fetch('/ui/apps/' + appName + '/sidebar', {credentials: 'same-origin'})
+            .then(function(r) { return r.text(); })
+            .then(function(html) {
+                var doc = new DOMParser().parseFromString(html, 'text/html');
+                var dot = doc.querySelector('.sidebar-header .status');
+                var tip = doc.querySelector('.sidebar-header .tooltip');
+                if (!dot) return;
+                var cls = dot.className;
+                var status = tip ? tip.dataset.tip : '';
+                if (cls !== prevClass) {
+                    prevClass = cls;
+                    /* Sidebar header dot */
+                    var sDot = sidebar.querySelector('.sidebar-header .status');
+                    if (sDot) sDot.className = cls;
+                    /* Card dot + tooltip */
+                    var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
+                    if (card) {
+                        var cDot = card.querySelector('.status');
+                        if (cDot) cDot.className = cls;
+                        var cTip = card.querySelector('.tooltip');
+                        if (cTip && status) cTip.dataset.tip = status;
+                    }
+                    /* Settings badge */
+                    var badge = sidebar.querySelector('.status-badge');
+                    if (badge && status) {
+                        badge.className = 'status-badge status-' + status + ' ml-2';
+                        badge.textContent = status;
+                    }
+                }
+            });
+        if (++polls >= 15) clearInterval(_statusPoll);
+    }
+    check();
+    _statusPoll = setInterval(check, 2000);
+}
+document.body.addEventListener('appSettingsChanged', pollAppStatus);
+document.body.addEventListener('appEnabled', pollAppStatus);
+document.body.addEventListener('appDisabled', pollAppStatus);
 
 /* Live-update: push settings changes to the card in the background.
    Sidebar is NOT touched — user stays on the exact tab they're on. */

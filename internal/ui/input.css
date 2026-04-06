@@ -119,7 +119,7 @@
 
   /* ── Status badges ── */
   .status-badge { @apply badge text-xs font-medium; }
-  .status-ready, .status-configured, .status-active, .status-running {
+  .status-idle, .status-ready, .status-configured, .status-active, .status-running {
     @apply badge-soft badge-success;
   }
   .status-building, .status-stopping, .status-draining {
@@ -162,11 +162,10 @@
      Template maps app status → DaisyUI color via statusDotClass helper.
      We only add sizing and pulse animation here. */
   .status { @apply status-lg; }
-  .status-pulse { animation: status-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite; }
-  @keyframes status-ping {
-    0% { box-shadow: 0 0 0 0 currentColor; }
-    70% { box-shadow: 0 0 0 6px transparent; }
-    100% { box-shadow: 0 0 0 0 transparent; }
+  .status-idle { background-color: oklch(0.65 0 0) !important; }
+  .status-outline {
+    background: transparent !important;
+    box-shadow: inset 0 0 0 2px oklch(0.65 0 0);
   }
 
   /* Gear button */

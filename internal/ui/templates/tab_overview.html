@@ -3,7 +3,7 @@
         <div class="stat">
             <div class="stat-title">Status</div>
             <div class="stat-value text-lg flex items-center gap-2">
-                <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}"></span>
+                <span class="status {{statusDotClass .Status}}"></span>
                 {{.Status}}
             </div>
             <div class="stat-desc">Last deployed <span class="time-ago" data-timestamp="{{.LastDeployed}}">{{.LastDeployed | timeAgo}}</span></div>
