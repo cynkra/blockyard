@@ -1577,55 +1577,6 @@ func TestUpdateResources_DockerAPIError(t *testing.T) {
 	}
 }
 
-// --- ParseMemoryLimit edge cases ---
-
-func TestParseMemoryLimitEdgeCases(t *testing.T) {
-	tests := []struct {
-		input string
-		want  int64
-		ok    bool
-	}{
-		// Empty string → parse error (no numeric part).
-		{"", 0, false},
-		// Whitespace only.
-		{"   ", 0, false},
-		// Case insensitive (upper).
-		{"512M", 512 * 1024 * 1024, true},
-		{"1G", 1024 * 1024 * 1024, true},
-		{"100KB", 100 * 1024, true},
-		{"256MB", 256 * 1024 * 1024, true},
-		// Kilobyte short form.
-		{"100k", 100 * 1024, true},
-		// No unit suffix → treated as bytes.
-		{"1024", 1024, true},
-		{"0", 0, true},
-		// Negative values.
-		{"-512m", -512 * 1024 * 1024, true},
-		{"-1", -1, true},
-		// Decimal values fail (ParseInt rejects them).
-		{"1.5g", 0, false},
-		{"0.5m", 0, false},
-		// Invalid suffixes → treated as bytes, then ParseInt fails.
-		{"512x", 0, false},
-		{"512p", 0, false},
-		// Spaces around the numeric part.
-		{" 512m ", 512 * 1024 * 1024, true},
-		{" 1024 ", 1024, true},
-		// Large value.
-		{"100g", 100 * 1024 * 1024 * 1024, true},
-		// Zero with unit.
-		{"0m", 0, true},
-		{"0g", 0, true},
-	}
-
-	for _, tt := range tests {
-		got, ok := ParseMemoryLimit(tt.input)
-		if ok != tt.ok {
-			t.Errorf("ParseMemoryLimit(%q) ok = %v, want %v", tt.input, ok, tt.ok)
-			continue
-		}
-		if ok && got != tt.want {
-			t.Errorf("ParseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
-		}
-	}
-}
+// ParseMemoryLimit edge cases are tested in docker_integration_test.go
+// (TestParseMemoryLimitEdgeCases) to avoid duplication with docker_test
+// build tag.
