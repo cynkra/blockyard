@@ -231,6 +231,8 @@ type AppRow struct {
 	RefreshSchedule      string   `db:"refresh_schedule" json:"refresh_schedule"`
 	LastRefreshAt        *string  `db:"last_refresh_at" json:"last_refresh_at,omitempty"`
 	Enabled              bool     `db:"enabled" json:"enabled"`
+	Image                string   `db:"image" json:"image"`
+	Runtime              string   `db:"runtime" json:"runtime"`
 }
 
 type BundleRow struct {
@@ -580,6 +582,8 @@ type AppUpdate struct {
 	Description          *string
 	PreWarmedSeats       *int
 	RefreshSchedule      *string
+	Image                *string
+	Runtime              *string
 }
 
 // UpdateApp applies partial updates to an app's configuration.
@@ -620,6 +624,12 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	if u.RefreshSchedule != nil {
 		app.RefreshSchedule = *u.RefreshSchedule
 	}
+	if u.Image != nil {
+		app.Image = *u.Image
+	}
+	if u.Runtime != nil {
+		app.Runtime = *u.Runtime
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(db.rebind(
@@ -633,6 +643,8 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 			description = ?,
 			pre_warmed_seats = ?,
 			refresh_schedule = ?,
+			image = ?,
+			runtime = ?,
 			updated_at = ?
 		WHERE id = ?`),
 		app.MaxWorkersPerApp, app.MaxSessionsPerWorker,
@@ -641,6 +653,7 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 		app.Title, app.Description,
 		app.PreWarmedSeats,
 		app.RefreshSchedule,
+		app.Image, app.Runtime,
 		now, id,
 	)
 	if err != nil {
@@ -648,6 +661,53 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	}
 
 	return db.GetApp(id)
+}
+
+// DataMountRow represents a row from the app_data_mounts table.
+type DataMountRow struct {
+	AppID    string `db:"app_id" json:"app_id"`
+	Source   string `db:"source" json:"source"`
+	Target   string `db:"target" json:"target"`
+	ReadOnly bool   `db:"readonly" json:"readonly"`
+}
+
+// ListAppDataMounts returns all data mounts for an app.
+func (db *DB) ListAppDataMounts(appID string) ([]DataMountRow, error) {
+	var mounts []DataMountRow
+	err := db.DB.Select(&mounts,
+		db.rebind(`SELECT * FROM app_data_mounts WHERE app_id = ?`),
+		appID)
+	if err != nil {
+		return nil, fmt.Errorf("list data mounts: %w", err)
+	}
+	return mounts, nil
+}
+
+// SetAppDataMounts replaces all data mounts for an app.
+func (db *DB) SetAppDataMounts(appID string, mounts []DataMountRow) error {
+	tx, err := db.DB.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+
+	_, err = tx.Exec(db.rebind(
+		`DELETE FROM app_data_mounts WHERE app_id = ?`), appID)
+	if err != nil {
+		return fmt.Errorf("clear data mounts: %w", err)
+	}
+
+	for _, m := range mounts {
+		_, err = tx.Exec(db.rebind(
+			`INSERT INTO app_data_mounts (app_id, source, target, readonly)
+			 VALUES (?, ?, ?, ?)`),
+			appID, m.Source, m.Target, m.ReadOnly)
+		if err != nil {
+			return fmt.Errorf("insert data mount: %w", err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 // ListPreWarmedApps returns all non-deleted apps with pre_warmed_seats > 0.

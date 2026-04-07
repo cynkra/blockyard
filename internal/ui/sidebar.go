@@ -43,6 +43,8 @@ type settingsTabData struct {
 	Tags          []db.TagRow
 	AvailableTags []db.TagRow
 	ActiveBundle  *db.BundleRow
+	IsAdmin       bool
+	DataMounts    []db.DataMountRow
 }
 
 type runtimeTabData struct {
@@ -316,12 +318,18 @@ func (ui *UI) settingsTab(srv *server.Server) http.HandlerFunc {
 			}
 		}
 
+		caller := auth.CallerFromContext(r.Context())
+		isAdmin := caller != nil && caller.Role.CanManageRoles()
+		dataMounts, _ := srv.DB.ListAppDataMounts(app.ID)
+
 		data := settingsTabData{
 			App:           app,
 			Status:        computeAppStatus(srv, app),
 			Tags:          tags,
 			AvailableTags: available,
 			ActiveBundle:  getActiveBundle(srv, app),
+			IsAdmin:       isAdmin,
+			DataMounts:    dataMounts,
 		}
 
 		w.Header().Set("Content-Type", "text/html")

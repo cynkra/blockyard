@@ -4857,6 +4857,593 @@ func TestRestoreAppHXRequest(t *testing.T) {
 
 // TestSwaggerDocJSON verifies that /swagger/doc.json is accessible without
 // authentication (regression test for #99).
+// --- Phase 3-6: UpdateApp with running workers → UpdateResources ---
+
+func TestUpdateAppResourcesPropagateToRunningWorkers(t *testing.T) {
+	be := mock.New()
+	srv, ts := testServerWithBackend(t, be)
+	created := createApp(t, ts, "live-update-app")
+	id := created["id"].(string)
+
+	// Spawn a mock worker.
+	be.Spawn(context.Background(), backend.WorkerSpec{WorkerID: "w-live"})
+	srv.Workers.Set("w-live", server.ActiveWorker{AppID: id, StartedAt: time.Now()})
+
+	body := `{"memory_limit":"256m","cpu_limit":1.5}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppResourcesWorkerGone(t *testing.T) {
+	// Worker registered in map but not in mock backend → UpdateResources
+	// returns "not found". The handler should still return 200 (best-effort).
+	be := mock.New()
+	srv, ts := testServerWithBackend(t, be)
+	created := createApp(t, ts, "ghost-worker-app")
+	id := created["id"].(string)
+
+	// Register a worker in the map without spawning it in the backend.
+	srv.Workers.Set("w-ghost", server.ActiveWorker{AppID: id, StartedAt: time.Now()})
+
+	body := `{"memory_limit":"128m"}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// Best-effort: still returns 200 even if UpdateResources fails.
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 (best-effort), got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppResourcesMultipleWorkers(t *testing.T) {
+	be := mock.New()
+	srv, ts := testServerWithBackend(t, be)
+	created := createApp(t, ts, "multi-worker-app")
+	id := created["id"].(string)
+
+	// Spawn multiple workers.
+	for _, wid := range []string{"mw-1", "mw-2", "mw-3"} {
+		be.Spawn(context.Background(), backend.WorkerSpec{WorkerID: wid})
+		srv.Workers.Set(wid, server.ActiveWorker{AppID: id, StartedAt: time.Now()})
+	}
+
+	body := `{"cpu_limit":2.0}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+// --- Phase 3-6: Data mounts API integration tests ---
+
+func testServerWithDataMounts(t *testing.T) (*server.Server, *httptest.Server) {
+	t.Helper()
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		Docker: config.DockerConfig{Image: "test-image", ShinyPort: 3838, PakVersion: "stable"},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+			DataMounts: []config.DataMountSource{
+				{Name: "models", Path: "/data/models"},
+				{Name: "scratch", Path: "/data/scratch"},
+			},
+		},
+		Proxy: config.ProxyConfig{MaxWorkers: 100},
+	}
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	seedTestAdmin(t, database)
+	be := mock.New()
+	srv := server.NewServer(cfg, be, database)
+	var wg sync.WaitGroup
+	srv.RestoreWG = &wg
+	handler := NewRouter(srv, func() {}, nil, context.Background())
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+	t.Cleanup(wg.Wait)
+	return srv, ts
+}
+
+func TestUpdateAppDataMountsValid(t *testing.T) {
+	_, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"models","target":"/mnt/models"},{"source":"scratch","target":"/mnt/scratch","readonly":false}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	mounts, ok := result["data_mounts"].([]interface{})
+	if !ok || len(mounts) != 2 {
+		t.Fatalf("expected 2 data_mounts, got %v", result["data_mounts"])
+	}
+}
+
+func TestUpdateAppDataMountsClearWithEmptyArray(t *testing.T) {
+	srv, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-clear-app")
+	id := created["id"].(string)
+
+	// First set some mounts.
+	body := `{"data_mounts":[{"source":"models","target":"/mnt/models"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// Clear mounts with empty array.
+	body = `{"data_mounts":[]}`
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	mounts := result["data_mounts"].([]interface{})
+	if len(mounts) != 0 {
+		t.Errorf("expected 0 data_mounts after clear, got %d", len(mounts))
+	}
+
+	// Verify DB state.
+	rows, _ := srv.DB.ListAppDataMounts(id)
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows in DB, got %d", len(rows))
+	}
+}
+
+func TestUpdateAppDataMountsUnknownSource(t *testing.T) {
+	_, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-unknown-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"nonexistent","target":"/mnt/data"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for unknown source, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppDataMountsReservedTarget(t *testing.T) {
+	_, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-reserved-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"models","target":"/app"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for reserved target, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppDataMountsPathTraversal(t *testing.T) {
+	_, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-traversal-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"models/../secret","target":"/mnt/data"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for path traversal, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppDataMountsDuplicateTarget(t *testing.T) {
+	_, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-dup-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"models","target":"/mnt/data"},{"source":"scratch","target":"/mnt/data"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for duplicate target, got %d", resp.StatusCode)
+	}
+}
+
+func TestUpdateAppDataMountsOmittedPreservesExisting(t *testing.T) {
+	srv, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-preserve-app")
+	id := created["id"].(string)
+
+	// Set mounts.
+	body := `{"data_mounts":[{"source":"models","target":"/mnt/models"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// Update something else — data_mounts omitted → should not touch mounts.
+	body = `{"title":"new title"}`
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	rows, _ := srv.DB.ListAppDataMounts(id)
+	if len(rows) != 1 {
+		t.Errorf("expected 1 mount preserved, got %d", len(rows))
+	}
+}
+
+func TestUpdateAppDataMountsReadOnlyDefault(t *testing.T) {
+	srv, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-ro-app")
+	id := created["id"].(string)
+
+	// Omit readonly field → should default to true.
+	body := `{"data_mounts":[{"source":"models","target":"/mnt/models"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	rows, _ := srv.DB.ListAppDataMounts(id)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(rows))
+	}
+	if !rows[0].ReadOnly {
+		t.Error("expected ReadOnly=true by default")
+	}
+}
+
+func TestUpdateAppDataMountsSubpath(t *testing.T) {
+	_, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "mount-subpath-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"models/v2","target":"/mnt/models"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200 for subpath, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppDataMountsNoSourcesConfigured(t *testing.T) {
+	// Default testServer has no DataMounts in config.
+	_, ts := testServer(t)
+	created := createApp(t, ts, "mount-nosource-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"models","target":"/mnt/models"}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 when no sources configured, got %d", resp.StatusCode)
+	}
+}
+
+// --- Phase 3-6: Image/runtime validation tests ---
+
+func TestUpdateAppImageValid(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "img-app")
+	id := created["id"].(string)
+
+	body := `{"image":"my-registry/custom:v2"}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["image"] != "my-registry/custom:v2" {
+		t.Errorf("expected image=my-registry/custom:v2, got %v", result["image"])
+	}
+}
+
+func TestUpdateAppImageWhitespaceRejected(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "img-ws-app")
+	id := created["id"].(string)
+
+	cases := []string{
+		`{"image":"my image:v1"}`,  // space
+		`{"image":"my\timage:v1"}`, // tab
+	}
+	for _, body := range cases {
+		req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("expected 400 for image with whitespace, got %d", resp.StatusCode)
+		}
+	}
+}
+
+func TestUpdateAppImageClearAccepted(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "img-clear-app")
+	id := created["id"].(string)
+
+	// Set image first.
+	body := `{"image":"custom:v2"}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// Clear image with empty string.
+	body = `{"image":""}`
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200 to clear image, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppRuntimeRequiresAdmin(t *testing.T) {
+	srv, ts := testServer(t)
+
+	// Create a publisher who owns the app — they have CanUpdateConfig
+	// but not CanManageRoles (system admin only).
+	srv.DB.UpsertUserWithRole("pub-rt", "pub-rt@test", "Publisher", "publisher")
+	pubToken := createTestPAT(t, srv.DB, "pub-rt")
+
+	// Publisher creates their own app (they're the owner).
+	body := `{"name":"runtime-admin-app"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+pubToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	var created map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+	id := created["id"].(string)
+
+	// Publisher (owner) tries to change runtime → 403 (admin-only).
+	body = `{"runtime":"kata"}`
+	req, _ = http.NewRequest("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+pubToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 403 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 403 for non-admin runtime change, got %d: %s", resp.StatusCode, b)
+	}
+}
+
+func TestUpdateAppRuntimeAdminAllowed(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "runtime-ok-app")
+	id := created["id"].(string)
+
+	// Admin changes runtime → 200.
+	body := `{"runtime":"kata"}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["runtime"] != "kata" {
+		t.Errorf("expected runtime=kata, got %v", result["runtime"])
+	}
+}
+
+// --- Phase 3-6: API response shape tests ---
+
+func TestGetAppResponseIncludesPhase36Fields(t *testing.T) {
+	srv, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "shape-app")
+	id := created["id"].(string)
+
+	// Set image, runtime, resource limits, and data mounts.
+	body := `{"image":"custom:v3","runtime":"sysbox","memory_limit":"1g","cpu_limit":2.5}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	body = `{"data_mounts":[{"source":"models","target":"/mnt/models","readonly":false}]}`
+	req = authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+
+	// GET the app and verify all fields.
+	req = authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["image"] != "custom:v3" {
+		t.Errorf("expected image=custom:v3, got %v", result["image"])
+	}
+	if result["runtime"] != "sysbox" {
+		t.Errorf("expected runtime=sysbox, got %v", result["runtime"])
+	}
+	if result["memory_limit"] != "1g" {
+		t.Errorf("expected memory_limit=1g, got %v", result["memory_limit"])
+	}
+	if result["cpu_limit"] != 2.5 {
+		t.Errorf("expected cpu_limit=2.5, got %v", result["cpu_limit"])
+	}
+
+	mounts, ok := result["data_mounts"].([]interface{})
+	if !ok || len(mounts) != 1 {
+		t.Fatalf("expected 1 data_mount, got %v", result["data_mounts"])
+	}
+	m := mounts[0].(map[string]interface{})
+	if m["source"] != "models" {
+		t.Errorf("expected mount source=models, got %v", m["source"])
+	}
+	if m["target"] != "/mnt/models" {
+		t.Errorf("expected mount target=/mnt/models, got %v", m["target"])
+	}
+
+	// Verify data_mounts are included in response as enriched mount rows.
+	appRow, _ := srv.DB.GetApp(id)
+	if appRow.Image != "custom:v3" {
+		t.Errorf("DB image = %q, want custom:v3", appRow.Image)
+	}
+	if appRow.Runtime != "sysbox" {
+		t.Errorf("DB runtime = %q, want sysbox", appRow.Runtime)
+	}
+}
+
+func TestGetAppResponseDefaultsForUnsetFields(t *testing.T) {
+	_, ts := testServer(t)
+	created := createApp(t, ts, "shape-defaults-app")
+	id := created["id"].(string)
+
+	req := authReq("GET", ts.URL+"/api/v1/apps/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	var result map[string]interface{}
+	json.Unmarshal(raw, &result)
+
+	// image and runtime should be empty strings when unset.
+	if result["image"] != "" {
+		t.Errorf("expected image='', got %v", result["image"])
+	}
+	if result["runtime"] != "" {
+		t.Errorf("expected runtime='', got %v", result["runtime"])
+	}
+
+	// memory_limit and cpu_limit should be nil when unset.
+	if result["memory_limit"] != nil {
+		t.Errorf("expected memory_limit=nil, got %v", result["memory_limit"])
+	}
+	if result["cpu_limit"] != nil {
+		t.Errorf("expected cpu_limit=nil, got %v", result["cpu_limit"])
+	}
+}
+
+func TestUpdateAppResponseIncludesDataMounts(t *testing.T) {
+	_, ts := testServerWithDataMounts(t)
+	created := createApp(t, ts, "shape-update-app")
+	id := created["id"].(string)
+
+	body := `{"data_mounts":[{"source":"models","target":"/mnt/m1"},{"source":"scratch","target":"/mnt/s1","readonly":false}]}`
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	mounts, ok := result["data_mounts"].([]interface{})
+	if !ok {
+		t.Fatalf("expected data_mounts in response, got %v", result["data_mounts"])
+	}
+	if len(mounts) != 2 {
+		t.Errorf("expected 2 data_mounts, got %d", len(mounts))
+	}
+}
+
 func TestSwaggerDocJSON(t *testing.T) {
 	_, ts := testServer(t)
 

@@ -42,6 +42,7 @@ type mockDockerClient struct {
 	containerListFn     func(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error)
 	containerRemoveFn   func(ctx context.Context, containerID string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
 	containerStopFn     func(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error)
+	containerUpdateFn   func(ctx context.Context, containerID string, options client.ContainerUpdateOptions) (client.ContainerUpdateResult, error)
 	imageInspectFn      func(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error)
 	imagePullFn         func(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
 	networkConnectFn    func(ctx context.Context, networkID string, options client.NetworkConnectOptions) (client.NetworkConnectResult, error)
@@ -87,6 +88,13 @@ func (m *mockDockerClient) ContainerStart(context.Context, string, client.Contai
 
 func (m *mockDockerClient) ContainerStats(context.Context, string, client.ContainerStatsOptions) (client.ContainerStatsResult, error) {
 	panic("not implemented")
+}
+
+func (m *mockDockerClient) ContainerUpdate(ctx context.Context, containerID string, options client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+	if m.containerUpdateFn != nil {
+		return m.containerUpdateFn(ctx, containerID, options)
+	}
+	return client.ContainerUpdateResult{}, nil
 }
 
 func (m *mockDockerClient) ContainerStop(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error) {
@@ -1463,3 +1471,112 @@ func TestRemoveResource_UnknownKind(t *testing.T) {
 		t.Fatal("expected error for unknown kind")
 	}
 }
+
+// --- UpdateResources tests ---
+
+func TestUpdateResources_WorkerNotFound(t *testing.T) {
+	d := newTestBackend(&mockDockerClient{})
+	err := d.UpdateResources(context.Background(), "nonexistent", 512*1024*1024, 0)
+	if err == nil {
+		t.Fatal("expected error for unknown worker")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error should mention 'not found', got: %v", err)
+	}
+}
+
+func TestUpdateResources_MemoryOnly(t *testing.T) {
+	var gotID string
+	var gotResources *container.Resources
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, id string, opts client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			gotID = id
+			gotResources = opts.Resources
+			return client.ContainerUpdateResult{}, nil
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 512*1024*1024, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotID != "ctr-abc" {
+		t.Errorf("expected container ID ctr-abc, got %s", gotID)
+	}
+	if gotResources.Memory != 512*1024*1024 {
+		t.Errorf("expected memory 512MiB, got %d", gotResources.Memory)
+	}
+	if gotResources.NanoCPUs != 0 {
+		t.Errorf("expected NanoCPUs=0, got %d", gotResources.NanoCPUs)
+	}
+}
+
+func TestUpdateResources_CPUOnly(t *testing.T) {
+	var gotResources *container.Resources
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, _ string, opts client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			gotResources = opts.Resources
+			return client.ContainerUpdateResult{}, nil
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 0, 2_000_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotResources.Memory != 0 {
+		t.Errorf("expected memory=0, got %d", gotResources.Memory)
+	}
+	if gotResources.NanoCPUs != 2_000_000_000 {
+		t.Errorf("expected NanoCPUs=2e9, got %d", gotResources.NanoCPUs)
+	}
+}
+
+func TestUpdateResources_BothLimits(t *testing.T) {
+	var gotResources *container.Resources
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, _ string, opts client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			gotResources = opts.Resources
+			return client.ContainerUpdateResult{}, nil
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 1024*1024*1024, 1_500_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotResources.Memory != 1024*1024*1024 {
+		t.Errorf("expected memory 1GiB, got %d", gotResources.Memory)
+	}
+	if gotResources.NanoCPUs != 1_500_000_000 {
+		t.Errorf("expected NanoCPUs=1.5e9, got %d", gotResources.NanoCPUs)
+	}
+}
+
+func TestUpdateResources_DockerAPIError(t *testing.T) {
+	cli := &mockDockerClient{
+		containerUpdateFn: func(_ context.Context, _ string, _ client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+			return client.ContainerUpdateResult{}, errors.New("permission denied")
+		},
+	}
+	d := newTestBackend(cli)
+	d.workers["w1"] = &workerState{containerID: "ctr-abc"}
+
+	err := d.UpdateResources(context.Background(), "w1", 512*1024*1024, 0)
+	if err == nil {
+		t.Fatal("expected error from Docker API")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("expected permission denied, got: %v", err)
+	}
+}
+
+// ParseMemoryLimit edge cases are tested in docker_integration_test.go
+// (TestParseMemoryLimitEdgeCases) to avoid duplication with docker_test
+// build tag.

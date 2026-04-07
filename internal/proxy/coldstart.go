@@ -15,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
@@ -248,7 +249,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	spec := backend.WorkerSpec{
 		AppID:       app.ID,
 		WorkerID:    wid,
-		Image:       srv.Config.Docker.Image,
+		Image:       server.AppImage(app, srv.Config.Docker.Image),
 		Cmd: []string{"R", "-e",
 			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
 				srv.Config.Storage.BundleWorkerPath)},
@@ -263,6 +264,20 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		CPULimit:    ptrOr(app.CPULimit, 0.0),
 		Labels:      labels,
 		Env:         extraEnv,
+		Runtime:     server.AppRuntime(app, srv.Config.Docker),
+	}
+
+	// Resolve per-app data mounts.
+	appMounts, err := srv.DB.ListAppDataMounts(app.ID)
+	if err != nil {
+		slog.Error("failed to list data mounts", "app", app.Name, "error", err) //nolint:gosec // G706: slog structured logging handles this
+	} else if len(appMounts) > 0 {
+		resolved, err := mount.Resolve(appMounts, srv.Config.Storage.DataMounts)
+		if err != nil {
+			slog.Error("failed to resolve data mounts", "app", app.Name, "error", err) //nolint:gosec // G706: slog structured logging handles this
+		} else {
+			spec.DataMounts = resolved
+		}
 	}
 
 	if err := srv.Backend.Spawn(spawnCtx, spec); err != nil {

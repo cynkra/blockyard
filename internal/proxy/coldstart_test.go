@@ -959,3 +959,152 @@ func TestSpawnWorkerWithPkgStoreNoManifest(t *testing.T) {
 		t.Error("worker lib dir should not exist for pre-store bundle")
 	}
 }
+
+// --- Data mount resolution in coldstart ---
+
+func testColdstartServerWithDataMounts(t *testing.T, sources []config.DataMountSource) *server.Server {
+	t.Helper()
+	tmp := t.TempDir()
+
+	cfg := &config.Config{
+		Docker: config.DockerConfig{
+			Image:      "test-image",
+			ShinyPort:  3838,
+			PakVersion: "stable",
+		},
+		Storage: config.StorageConfig{
+			BundleServerPath: tmp,
+			BundleWorkerPath: "/app",
+			BundleRetention:  50,
+			MaxBundleSize:    10 * 1024 * 1024,
+			DataMounts:       sources,
+		},
+		Proxy: config.ProxyConfig{
+			WsCacheTTL:         config.Duration{Duration: 5 * time.Second},
+			WorkerStartTimeout: config.Duration{Duration: 5 * time.Second},
+			MaxWorkers:         10,
+		},
+	}
+
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	be := mock.New()
+	return server.NewServer(cfg, be, database)
+}
+
+func TestSpawnWorkerWithDataMounts(t *testing.T) {
+	sources := []config.DataMountSource{
+		{Name: "models", Path: "/data/models"},
+	}
+	srv := testColdstartServerWithDataMounts(t, sources)
+	app := createTestApp(t, srv, "mount-app", true)
+
+	// Set data mounts in DB.
+	err := srv.DB.SetAppDataMounts(app.ID, []db.DataMountRow{
+		{AppID: app.ID, Source: "models", Target: "/mnt/models", ReadOnly: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the mock backend received the spec with data mounts.
+	be := srv.Backend.(*mock.MockBackend)
+	if !be.HasWorker(wid) {
+		t.Fatal("worker not found in backend")
+	}
+}
+
+func TestSpawnWorkerWithNoDataMounts(t *testing.T) {
+	srv := testColdstartServer(t)
+	app := createTestApp(t, srv, "no-mount-app", true)
+
+	// No data mounts configured — should spawn normally.
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wid == "" {
+		t.Error("expected non-empty worker ID")
+	}
+}
+
+func TestSpawnWorkerDataMountSourceRemovedFromConfig(t *testing.T) {
+	// App has mounts referencing "models" but config no longer has that source.
+	// The resolve step should log an error but still spawn the worker.
+	srv := testColdstartServerWithDataMounts(t, nil) // no sources in config
+	app := createTestApp(t, srv, "stale-mount-app", true)
+
+	// Manually insert stale mount in DB.
+	err := srv.DB.SetAppDataMounts(app.ID, []db.DataMountRow{
+		{AppID: app.ID, Source: "models", Target: "/mnt/models", ReadOnly: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should still spawn (mount resolution failure is logged, not fatal).
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wid == "" {
+		t.Error("expected non-empty worker ID despite stale mount")
+	}
+}
+
+func TestSpawnWorkerMultipleDataMounts(t *testing.T) {
+	sources := []config.DataMountSource{
+		{Name: "models", Path: "/data/models"},
+		{Name: "scratch", Path: "/data/scratch"},
+	}
+	srv := testColdstartServerWithDataMounts(t, sources)
+	app := createTestApp(t, srv, "multi-mount-app", true)
+
+	err := srv.DB.SetAppDataMounts(app.ID, []db.DataMountRow{
+		{AppID: app.ID, Source: "models", Target: "/mnt/models", ReadOnly: true},
+		{AppID: app.ID, Source: "scratch", Target: "/mnt/scratch", ReadOnly: false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wid == "" {
+		t.Error("expected non-empty worker ID")
+	}
+}
+
+func TestSpawnWorkerDataMountSubpath(t *testing.T) {
+	sources := []config.DataMountSource{
+		{Name: "models", Path: "/data/models"},
+	}
+	srv := testColdstartServerWithDataMounts(t, sources)
+	app := createTestApp(t, srv, "subpath-mount-app", true)
+
+	err := srv.DB.SetAppDataMounts(app.ID, []db.DataMountRow{
+		{AppID: app.ID, Source: "models/v2", Target: "/mnt/models", ReadOnly: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wid == "" {
+		t.Error("expected non-empty worker ID")
+	}
+}

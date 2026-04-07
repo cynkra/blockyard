@@ -33,6 +33,9 @@ func (b *ppBackend) RemoveResource(context.Context, backend.ManagedResource) err
 func (b *ppBackend) ContainerStats(context.Context, string) (*backend.ContainerStatsResult, error) {
 	return &backend.ContainerStatsResult{}, nil
 }
+func (b *ppBackend) UpdateResources(_ context.Context, _ string, _ int64, _ int64) error {
+	return nil
+}
 
 // --- preProcess tests ---
 

@@ -60,23 +60,26 @@ type catalogResponse struct { //nolint:unused
 }
 
 type appResponseV2JSON struct { //nolint:unused
-	ID                   string   `json:"id"`
-	Name                 string   `json:"name"`
-	Owner                string   `json:"owner"`
-	AccessType           string   `json:"access_type"`
-	ActiveBundle         *string  `json:"active_bundle"`
-	MaxWorkersPerApp     *int     `json:"max_workers_per_app"`
-	MaxSessionsPerWorker int      `json:"max_sessions_per_worker"`
-	MemoryLimit          *string  `json:"memory_limit"`
-	CPULimit             *float64 `json:"cpu_limit"`
-	Title                *string  `json:"title"`
-	Description          *string  `json:"description"`
-	PreWarmedSeats       int      `json:"pre_warmed_seats"`
-	Enabled              bool     `json:"enabled"`
-	RefreshSchedule      string   `json:"refresh_schedule"`
-	CreatedAt            string   `json:"created_at"`
-	UpdatedAt            string   `json:"updated_at"`
-	Status               string   `json:"status"`
-	Tags                 []string `json:"tags"`
-	Relation             string   `json:"relation,omitempty"`
+	ID                   string            `json:"id"`
+	Name                 string            `json:"name"`
+	Owner                string            `json:"owner"`
+	AccessType           string            `json:"access_type"`
+	ActiveBundle         *string           `json:"active_bundle"`
+	MaxWorkersPerApp     *int              `json:"max_workers_per_app"`
+	MaxSessionsPerWorker int               `json:"max_sessions_per_worker"`
+	MemoryLimit          *string           `json:"memory_limit"`
+	CPULimit             *float64          `json:"cpu_limit"`
+	Title                *string           `json:"title"`
+	Description          *string           `json:"description"`
+	PreWarmedSeats       int               `json:"pre_warmed_seats"`
+	Enabled              bool              `json:"enabled"`
+	RefreshSchedule      string            `json:"refresh_schedule"`
+	Image                string            `json:"image"`
+	Runtime              string            `json:"runtime"`
+	DataMounts           []db.DataMountRow `json:"data_mounts"`
+	CreatedAt            string            `json:"created_at"`
+	UpdatedAt            string            `json:"updated_at"`
+	Status               string            `json:"status"`
+	Tags                 []string          `json:"tags"`
+	Relation             string            `json:"relation,omitempty"`
 }
