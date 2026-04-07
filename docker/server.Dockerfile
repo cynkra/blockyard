@@ -1,4 +1,4 @@
-FROM hugomods/hugo:exts-0.147.4 AS docs
+FROM hugomods/hugo:exts-0.154.5 AS docs
 WORKDIR /docs
 COPY docs/ .
 RUN hugo --minify --baseURL /docs/ --enableGitInfo=false
