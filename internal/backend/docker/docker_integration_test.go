@@ -682,9 +682,9 @@ func TestBuildLogWriter(t *testing.T) {
 	count := len(logLines)
 	mu.Unlock()
 
-	// Even if the rv binary exits immediately, the container lifecycle
-	// itself may not produce output. The dummy rv script is silent,
-	// so we just verify the callback mechanism doesn't panic and was wired up.
+	// The dummy "true" command exits 0 silently, so the container
+	// lifecycle may not produce output. Just verify the callback
+	// mechanism doesn't panic and was wired up.
 	t.Logf("LogWriter received %d lines", count)
 }
 

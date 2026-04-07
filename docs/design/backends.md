@@ -227,16 +227,25 @@ mounts, seccomp, and capability dropping into one CLI invocation:
 ```
 bwrap \
   --unshare-pid --unshare-user --unshare-uts \
-  --ro-bind /app/bundle /app \
-  --ro-bind /rv-library /rv-library \
+  --ro-bind / / \
+  --ro-bind /data/bundles/app1/v1 /app \
+  --ro-bind /data/.pkg-store/worker-abc /blockyard-lib-store \
   --tmpfs /tmp \
   --proc /proc \
   --dev /dev \
+  --chdir /tmp \
   --die-with-parent \
   --new-session \
   --cap-drop ALL \
-  -- R -e "shiny::runApp('/app', port=PORT)"
+  -- R -e "shiny::runApp('/app', port=as.integer(Sys.getenv('SHINY_PORT')))"
 ```
+
+The `--ro-bind / /` strategy mounts the entire host root read-only
+and then shadows specific paths with writable scratch and app
+content — see `phase-3-7.md` for the rationale. The R library mounts
+at `/blockyard-lib-store` (store-assembled, phase 2-6) or
+`/blockyard-lib` (legacy per-bundle), matching the Docker backend's
+convention so the same `R_LIBS` env var resolves on either backend.
 
 The `--unshare-user` flag is critical: it creates a user namespace first,
 which allows the remaining namespaces (PID, mount) to be created without
@@ -579,7 +588,8 @@ The PVC is mounted into worker Pods as:
 | R library | `{pvc_mount}/{app_id}/{bundle_id}_lib/` | Read-only |
 | Worker lib view | `{pvc_mount}/.worker-libs/{worker-id}/` | Read-only |
 
-Build Jobs mount the library path read-write for `rv restore` output.
+Build Jobs mount the library path read-write for `pak::lockfile_install`
+output. (Phase 2-5 replaced `rv restore` with pak.)
 
 The `MountConfig` abstraction from the Docker backend is not needed — k8s
 PodSpecs declare volume mounts directly. The path translation problem
@@ -630,7 +640,7 @@ A new `[kubernetes]` config section, mutually exclusive with `[docker]`:
 namespace = "blockyard"          # namespace for worker Pods and Jobs
 image = "ghcr.io/cynkra/blockyard-r:latest"
 shiny_port = 3838
-rv_version = "v0.19.0"
+pak_version = "stable"           # pak release channel; see [docker].pak_version
 pvc_name = "blockyard-bundles"   # ReadWriteMany PVC
 pvc_mount_path = "/data/bundles" # mount point in all Pods
 kubeconfig = ""                  # empty = in-cluster; path = out-of-cluster

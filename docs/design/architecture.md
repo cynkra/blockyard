@@ -16,8 +16,9 @@ by that ID — callers only see the string.
 
 The build method maps to the native run-to-completion primitive on each
 backend: a container with auto-remove on Docker/Podman, a Job on Kubernetes.
-In v0 it runs `rv restore`; later it could run container image builds. Build
-containers carry the same labels as workers and are covered by the same orphan
+Today it runs `pak::lockfile_install` (phase 2-5 replaced the original
+`rv restore`); later it could run container image builds. Build containers
+carry the same labels as workers and are covered by the same orphan
 cleanup.
 
 | Backend             | Client                            | Handle    | Priority | Purpose                |

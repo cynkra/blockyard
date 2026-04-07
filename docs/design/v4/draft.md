@@ -75,7 +75,11 @@ server deployments are needed.
 
 ### Build Image Consolidation
 
-v3 addresses multi-image builds for Docker by mounting the `rv` binary from
-the server container into build containers (bind mount to
-`/usr/local/bin/rv`). For Kubernetes, the equivalent is an init container
-or shared volume — this is the v4 concern.
+v3 addresses multi-image builds for Docker by mounting the
+`by-builder` Go binary from the server's cache into build containers
+(bind mount to `/tools/by-builder`). pak itself runs as an R package
+inside the build image, so no external binary mount is needed for pak.
+For Kubernetes, the equivalent of the `by-builder` mount is an init
+container that copies the binary onto a shared `emptyDir` volume, or
+bundling `by-builder` into the build image directly — this is the v4
+concern.

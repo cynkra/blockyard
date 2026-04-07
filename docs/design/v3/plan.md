@@ -729,6 +729,8 @@ These all follow the same pattern: per-app field in the DB, field in
 
 Implement the `Backend` interface using bubblewrap. This phase covers
 the core implementation; packaging and deployment are phase 3-8.
+Also decouples the codebase from Docker-specific assumptions to
+prepare for future backends (k8s).
 
 **Deliverables:**
 
@@ -749,7 +751,9 @@ the core implementation; packaging and deployment are phase 3-8.
    func (b *ProcessBackend) Build(ctx, spec) (BuildResult, error)
    func (b *ProcessBackend) ListManaged(ctx) ([]ManagedResource, error)
    func (b *ProcessBackend) RemoveResource(ctx, r) error
-   func (b *ProcessBackend) ContainerStats(ctx, id) (*ContainerStatsResult, error)
+   func (b *ProcessBackend) WorkerResourceUsage(ctx, id) (*WorkerResourceUsageResult, error)
+   func (b *ProcessBackend) CleanupOrphanResources(ctx) error
+   func (b *ProcessBackend) Preflight(ctx) (*preflight.Report, error)
    ```
 
 2. **bwrap command construction** — PID namespace (`--unshare-pid`),
@@ -767,7 +771,15 @@ the core implementation; packaging and deployment are phase 3-8.
 5. **Backend selection** — `cmd/blockyard/main.go` instantiates
    `ProcessBackend` when `[server] backend = "process"`.
 
-6. **Tests** — unit tests for bwrap argument construction. Integration
+6. **Backend interface decoupling** — rename `ContainerStats` →
+   `WorkerResourceUsage`; add `CleanupOrphanResources()` and
+   `Preflight()` to `Backend` interface; move `ParseMemoryLimit` to
+   `internal/units`; move `default_memory_limit`, `default_cpu_limit`
+   to `[server]` config; move `store_retention` to `[storage]` config;
+   rename `skip_docker_preflight` → `skip_preflight`. Goal: no code
+   outside `internal/backend/docker/` imports that package.
+
+7. **Tests** — unit tests for bwrap argument construction. Integration
    tests (tagged `process_test`): spawn worker, verify health check,
    verify filesystem isolation, verify cleanup. Skipped when bwrap is
    unavailable.
@@ -795,6 +807,15 @@ Deployment artifacts and documentation for the process backend.
 
 4. **Multi-platform release binaries** — extend the release workflow:
    `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`.
+
+5. **Process backend rolling updates** — orchestrator variant for
+   process-backend deployments. Starts a new blockyard process instead
+   of cloning a Docker container. Old server stays alive (serving
+   existing sessions) until fully drained, then exits — workers die
+   with the parent but there are none left. Both servers share state
+   via Redis. Requires bind address coordination: old server releases
+   its listener so the new server can take over, with a reverse proxy
+   routing based on health checks.
 
 ### Phase 3-9: Pre-Fork Mechanism
 
