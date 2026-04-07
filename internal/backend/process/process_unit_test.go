@@ -3,9 +3,12 @@ package process
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
@@ -144,6 +147,127 @@ func TestLookupMissingWorker(t *testing.T) {
 	}
 	if stats != nil {
 		t.Errorf("expected nil stats, got %+v", stats)
+	}
+}
+
+// TestExitedWorkerLogsAreRetained verifies that an exited worker
+// entry persists in the map until explicit Stop/RemoveResource so
+// callers can still retrieve buffered stderr/stdout for diagnosis.
+// Matches Docker's "stopped containers remain listable until rm"
+// semantic.
+func TestExitedWorkerLogsAreRetained(t *testing.T) {
+	b := newFakeBackend(t)
+
+	// Inject an exited worker entry directly. Done channel is
+	// closed and the log buffer has some content.
+	logs := newLogBuffer(10)
+	r, w := io.Pipe()
+	go logs.ingest(r)
+	fmt.Fprintln(w, "hello")
+	fmt.Fprintln(w, "goodbye")
+	w.Close()
+
+	// Wait for ingest to mark the buffer closed.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		logs.mu.Lock()
+		closed := logs.closed
+		logs.mu.Unlock()
+		if closed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	done := make(chan struct{})
+	close(done)
+	b.workers["exited-worker"] = &workerProc{
+		port: 20000,
+		uid:  70000,
+		spec: backend.WorkerSpec{WorkerID: "exited-worker"},
+		logs: logs,
+		done: done,
+	}
+
+	ctx := context.Background()
+
+	// Logs() must succeed and return the buffered content.
+	stream, err := b.Logs(ctx, "exited-worker")
+	if err != nil {
+		t.Fatalf("Logs after exit: %v", err)
+	}
+	var lines []string
+	for line := range stream.Lines {
+		lines = append(lines, line)
+	}
+	if len(lines) != 2 || lines[0] != "hello" || lines[1] != "goodbye" {
+		t.Errorf("unexpected log lines: %v", lines)
+	}
+
+	// HealthCheck must report unhealthy (done channel is closed).
+	if b.HealthCheck(ctx, "exited-worker") {
+		t.Error("HealthCheck should return false for an exited worker")
+	}
+
+	// Addr should still return the last-known address (matches the
+	// Docker semantic where you can inspect a stopped container).
+	addr, err := b.Addr(ctx, "exited-worker")
+	if err != nil {
+		t.Errorf("Addr: %v", err)
+	}
+	if addr == "" {
+		t.Error("Addr returned empty string")
+	}
+
+	// ListManaged includes the exited worker.
+	resources, err := b.ListManaged(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen bool
+	for _, r := range resources {
+		if r.ID == "exited-worker" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Error("ListManaged should include exited worker")
+	}
+
+	// Stop on an exited worker is a no-op + delete.
+	if err := b.Stop(ctx, "exited-worker"); err != nil {
+		t.Errorf("Stop on exited worker: %v", err)
+	}
+
+	// After Stop, the entry is gone.
+	if _, err := b.Logs(ctx, "exited-worker"); err == nil {
+		t.Error("Logs should fail after Stop deletes the entry")
+	}
+}
+
+// TestSpawnRefusesDuplicateLiveWorker verifies that calling Spawn
+// with a worker ID that's already running returns an error rather
+// than clobbering the live entry.
+func TestSpawnRefusesDuplicateLiveWorker(t *testing.T) {
+	b := newFakeBackend(t)
+
+	// Inject a "live" entry (done channel still open).
+	b.workers["live-worker"] = &workerProc{
+		port: 20000,
+		uid:  70000,
+		spec: backend.WorkerSpec{WorkerID: "live-worker"},
+		done: make(chan struct{}),
+	}
+
+	// Spawn would normally fail at the bwrap LookPath step (the
+	// fake backend uses /nonexistent/bwrap), but the duplicate
+	// check runs first so we should see the duplicate error.
+	err := b.Spawn(context.Background(), backend.WorkerSpec{WorkerID: "live-worker"})
+	if err == nil {
+		t.Fatal("expected error spawning duplicate live worker")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

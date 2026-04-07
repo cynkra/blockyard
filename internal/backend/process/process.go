@@ -103,6 +103,24 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 			"cpu_limit", spec.CPULimit)
 	}
 
+	// If an entry for this worker ID already exists, refuse to spawn
+	// over a live one. An entry that has already exited (its done
+	// channel is closed and slots have been released) is cleared so
+	// the new spawn can take its place — this matches the Docker
+	// semantic where you can recreate a container with the same name
+	// after the previous one exited and was removed.
+	b.mu.Lock()
+	if existing, ok := b.workers[spec.WorkerID]; ok {
+		select {
+		case <-existing.done:
+			delete(b.workers, spec.WorkerID)
+		default:
+			b.mu.Unlock()
+			return fmt.Errorf("process backend: worker %q is already running", spec.WorkerID)
+		}
+	}
+	b.mu.Unlock()
+
 	port, err := b.ports.Alloc()
 	if err != nil {
 		return err
@@ -210,9 +228,13 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 
 		_ = cmd.Wait()
 		close(done)
-		b.mu.Lock()
-		delete(b.workers, spec.WorkerID)
-		b.mu.Unlock()
+		// Release the port and UID slots so they can be reused —
+		// the worker is no longer holding them. Do NOT delete the
+		// map entry: keep it around so Logs() can replay buffered
+		// stderr/stdout for diagnosis. The entry persists until an
+		// explicit Stop() / RemoveResource() prunes it (matches the
+		// Docker semantic where stopped containers remain listable
+		// until `docker rm`).
 		b.ports.Release(port)
 		b.uids.Release(uid)
 		slog.Info("process backend: worker exited",
@@ -263,19 +285,34 @@ func (b *ProcessBackend) Stop(_ context.Context, id string) error {
 		return fmt.Errorf("process backend: worker %q not found", id)
 	}
 
+	// If the worker has already exited (e.g., crashed before the
+	// caller noticed and called Stop), the wait goroutine has already
+	// closed `done` and released slots. We just need to drop the map
+	// entry. Skip the SIGTERM-SIGKILL dance for a process that's gone.
+	select {
+	case <-w.done:
+		b.mu.Lock()
+		delete(b.workers, id)
+		b.mu.Unlock()
+		return nil
+	default:
+	}
+
 	// SIGTERM, then wait up to 10s, then SIGKILL.
 	_ = w.process.Signal(syscall.SIGTERM)
 
 	select {
 	case <-w.done:
-		return nil
 	case <-time.After(10 * time.Second):
+		slog.Warn("process backend: worker did not exit after SIGTERM, sending SIGKILL",
+			"worker_id", id)
+		_ = w.process.Kill()
+		<-w.done
 	}
 
-	slog.Warn("process backend: worker did not exit after SIGTERM, sending SIGKILL",
-		"worker_id", id)
-	_ = w.process.Kill()
-	<-w.done
+	b.mu.Lock()
+	delete(b.workers, id)
+	b.mu.Unlock()
 	return nil
 }
 
@@ -463,8 +500,19 @@ func (b *ProcessBackend) RemoveResource(_ context.Context, r backend.ManagedReso
 	if !ok {
 		return nil // already gone
 	}
-	_ = w.process.Kill()
-	<-w.done
+	// Kill the process if it's still alive (no SIGTERM grace —
+	// RemoveResource is the orphan-cleanup path; force-kill is the
+	// expected behavior). Then wait for the wait goroutine to
+	// release slots, and prune the map entry.
+	select {
+	case <-w.done:
+	default:
+		_ = w.process.Kill()
+		<-w.done
+	}
+	b.mu.Lock()
+	delete(b.workers, r.ID)
+	b.mu.Unlock()
 	return nil
 }
 
