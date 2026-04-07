@@ -3,7 +3,7 @@ WORKDIR /docs
 COPY docs/ .
 RUN hugo --minify --baseURL /docs/ --enableGitInfo=false
 
-FROM node:22-alpine AS css-builder
+FROM node:25-alpine AS css-builder
 WORKDIR /src/internal/ui
 COPY internal/ui/package.json internal/ui/package-lock.json ./
 RUN npm ci
