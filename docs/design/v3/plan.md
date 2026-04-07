@@ -805,17 +805,28 @@ Deployment artifacts and documentation for the process backend.
    guidance (process backend has no per-worker cgroups — relies on outer
    container or system limits).
 
-4. **Multi-platform release binaries** — extend the release workflow:
-   `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`.
+4. **Multi-arch process-backend image** — the new process-backend
+   Docker image (deliverable #2) is published for `linux/amd64` and
+   `linux/arm64`, matching the existing Docker-backend image. The
+   process backend is Linux-only (bwrap is unavailable on macOS), so
+   no darwin server binaries are added — operators who want to run
+   blockyard on a Mac use the Docker backend image via Docker Desktop.
 
 5. **Process backend rolling updates** — orchestrator variant for
-   process-backend deployments. Starts a new blockyard process instead
-   of cloning a Docker container. Old server stays alive (serving
-   existing sessions) until fully drained, then exits — workers die
-   with the parent but there are none left. Both servers share state
-   via Redis. Requires bind address coordination: old server releases
-   its listener so the new server can take over, with a reverse proxy
-   routing based on health checks.
+   process-backend deployments. The old server fork+execs a new
+   blockyard process from the same binary with `BLOCKYARD_PASSIVE=1`
+   and an alternate bind address (two-port parallel servers, not
+   single-port handoff — this is what gives zero-interruption cutover).
+   Both servers share state via Redis. An operator-run reverse proxy
+   fronts both bind ports and routes by health, same shape as the
+   Docker rolling update. After the new server passes `/readyz` and
+   is activated, the old server drains: it stops accepting new
+   sessions while existing ones complete naturally, then exits.
+   Workers spawned by the old server die with it (Pdeathsig) but by
+   that point no sessions are left on them; the new server's
+   autoscaler rebuilds the pool from new traffic. Requires no
+   external supervisor — `by admin update` is the single entry point
+   for both Docker and process backends.
 
 ### Phase 3-9: Pre-Fork Mechanism
 
