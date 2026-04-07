@@ -327,25 +327,13 @@ jobs:
           go-version-file: go.mod
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - name: Check bwrap smoke test (diagnostic)
-        run: |
-          set -x
-          id
-          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "(sysctl not present)"
-          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "(apparmor sysctl not present)"
-          ls -la /usr/bin/bwrap
-          bwrap --version
-          echo "--- unshare -U ---"
-          unshare -U /bin/true && echo OK || echo FAIL
-          echo "--- bwrap unprivileged ---"
-          bwrap --unshare-user --uid 60000 --gid 65534 --ro-bind / / --proc /proc --dev /dev -- /bin/true && echo OK || echo FAIL
-          echo "--- bwrap sudo ---"
-          sudo bwrap --unshare-user --uid 60000 --gid 65534 --ro-bind / / --proc /proc --dev /dev -- /bin/true && echo OK || echo FAIL
       # Ubuntu 24.04 ships an AppArmor profile that blocks unprivileged
-      # user namespaces for most binaries (bwrap included). If the smoke
-      # test above shows unprivileged bwrap works, we run the tests as
-      # the normal runner user; otherwise fall back to sudo.
-      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
+      # bwrap from writing uid_maps, so `bwrap --uid N --gid G` fails
+      # as the runner user with "setting up uid map: Permission denied".
+      # Running the tests under sudo sidesteps this: root writes the
+      # uid_map directly, which matches the design's "containerized
+      # mode" where blockyard runs as PID 1 root.
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-process

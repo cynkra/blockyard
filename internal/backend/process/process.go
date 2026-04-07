@@ -175,14 +175,48 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 		return fmt.Errorf("process backend: stderr pipe: %w", err)
 	}
 
-	// Pin this goroutine to its OS thread across the fork. Pdeathsig
-	// fires when the *thread* that forked the child exits — without
-	// LockOSThread the Go runtime may retire the thread and trigger
-	// a spurious SIGKILL to bwrap.
-	runtime.LockOSThread()
-	err = cmd.Start()
-	runtime.UnlockOSThread()
-	if err != nil {
+	// Fork + wait must run on the same pinned OS thread. Pdeathsig
+	// fires when the thread that *forked* the child exits, not when
+	// the goroutine hosting that thread is rescheduled. If we locked
+	// the thread only around Start() and then unlocked, the Go runtime
+	// could retire the thread while the child is still running and
+	// SIGKILL bwrap. Instead, dedicate a single goroutine to the
+	// child's lifetime: it LockOSThreads, Starts, Waits, and only
+	// exits once the child is reaped — at which point there is no
+	// child left to kill when the thread is destroyed.
+	//
+	// The wait is gated on a `proceed` channel so the main path can
+	// register the worker before cleanup runs. Otherwise an immediate
+	// exit would run `delete(b.workers, ...)` before the entry exists,
+	// and we'd end up with a stale map entry whose port and uid have
+	// already been released.
+	done := make(chan struct{})
+	started := make(chan error, 1)
+	proceed := make(chan struct{})
+	go func() {
+		runtime.LockOSThread()
+		// Intentionally do NOT UnlockOSThread. See comment above.
+
+		if err := cmd.Start(); err != nil {
+			started <- err
+			return
+		}
+		started <- nil
+
+		<-proceed
+
+		_ = cmd.Wait()
+		close(done)
+		b.mu.Lock()
+		delete(b.workers, spec.WorkerID)
+		b.mu.Unlock()
+		b.ports.Release(port)
+		b.uids.Release(uid)
+		slog.Info("process backend: worker exited",
+			"worker_id", spec.WorkerID, "port", port, "uid", uid)
+	}()
+
+	if err := <-started; err != nil {
 		releaseSlots()
 		return fmt.Errorf("process backend: start bwrap: %w", err)
 	}
@@ -194,12 +228,6 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	go logs.ingest(stdout)
 	go logs.ingest(stderr)
 
-	// Register the worker BEFORE launching the wait goroutine. If the
-	// process exits immediately, the wait goroutine deletes the entry it
-	// finds. The reverse order would race: an immediate exit would run
-	// the cleanup before the entry exists, then the spawn would leave an
-	// orphan entry whose port/uid have already been released.
-	done := make(chan struct{})
 	b.mu.Lock()
 	b.workers[spec.WorkerID] = &workerProc{
 		cmd:     cmd,
@@ -212,17 +240,9 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	}
 	b.mu.Unlock()
 
-	go func() {
-		_ = cmd.Wait()
-		close(done)
-		b.mu.Lock()
-		delete(b.workers, spec.WorkerID)
-		b.mu.Unlock()
-		b.ports.Release(port)
-		b.uids.Release(uid)
-		slog.Info("process backend: worker exited",
-			"worker_id", spec.WorkerID, "port", port, "uid", uid)
-	}()
+	// Signal the wait goroutine that registration is done and it is
+	// safe to reap+clean up on exit.
+	close(proceed)
 
 	slog.Info("process backend: spawned worker",
 		"worker_id", spec.WorkerID,
