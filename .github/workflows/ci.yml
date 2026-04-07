@@ -327,13 +327,34 @@ jobs:
           go-version-file: go.mod
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      # Ubuntu 24.04 ships an AppArmor profile that blocks unprivileged
-      # bwrap from writing uid_maps, so `bwrap --uid N --gid G` fails
-      # as the runner user with "setting up uid map: Permission denied".
-      # Running the tests under sudo sidesteps this: root writes the
-      # uid_map directly, which matches the design's "containerized
-      # mode" where blockyard runs as PID 1 root.
-      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
+      # Temporary diagnostic: run bwrap with the same args the
+      # process backend constructs, so we can see bwrap's stderr
+      # directly rather than through the Go log buffer.
+      - name: bwrap worker smoke test (diagnostic)
+        run: |
+          set -x
+          BUNDLE=$(mktemp -d)
+          sudo bwrap \
+            --unshare-pid --unshare-user --unshare-uts \
+            --uid 69200 --gid 65534 \
+            --die-with-parent --new-session \
+            --ro-bind / / \
+            --tmpfs /tmp \
+            --proc /proc \
+            --dev /dev \
+            --chdir /tmp \
+            --ro-bind "$BUNDLE" /app \
+            --cap-drop ALL \
+            -- /bin/sleep 2 &
+          BWPID=$!
+          sleep 0.3
+          if kill -0 $BWPID 2>/dev/null; then
+            echo "bwrap is still running after 0.3s — good"
+          else
+            echo "bwrap already dead — diagnostic reproduces the bug"
+          fi
+          wait $BWPID; echo "bwrap exited with $?"
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-process
