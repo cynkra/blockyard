@@ -8,10 +8,11 @@ backend targets deployments where startup latency matters (scale-to-zero,
 internal-only) or where the Docker socket privilege is unacceptable.
 
 This phase covers the core implementation: config, backend struct,
-all nine `Backend` methods, port and UID allocation, bwrap argument
-construction, log capture, worker egress preflight, and tests.
-Packaging and deployment artifacts (seccomp profile, Dockerfile,
-release binaries) are deferred to phase 3-8.
+all twelve `Backend` methods (ten existing plus two added by this
+phase: `Preflight` and `CleanupOrphanResources`), port and UID
+allocation, bwrap argument construction, log capture, worker egress
+preflight, and tests. Packaging and deployment artifacts (seccomp
+profile, Dockerfile, release binaries) are deferred to phase 3-8.
 
 Independent of the operations track (phases 3-2 through 3-5). Can be
 developed in parallel with phase 3-6 (data mounts) and phase 3-9
@@ -23,11 +24,14 @@ developed in parallel with phase 3-6 (data mounts) and phase 3-9
 
 - **Phase 3-1** — migration tooling and conventions. Phase 3-7 does
   not add migrations, but follows the same testing conventions.
-- **Backend interface** (`internal/backend/backend.go`) — the nine-method
-  `Backend` interface, `WorkerSpec`, `BuildSpec`, `BuildResult`,
-  `LogStream`, and `ManagedResource` types are stable. Phase 3-7 adds
-  two new methods (`CleanupOrphanResources`, `Preflight`) and renames
-  `ContainerStats` → `WorkerResourceUsage` (see deliverable #13).
+- **Backend interface** (`internal/backend/backend.go`) — the ten-method
+  `Backend` interface (`Spawn`, `Stop`, `HealthCheck`, `Logs`, `Addr`,
+  `Build`, `ListManaged`, `RemoveResource`, `ContainerStats`,
+  `UpdateResources`), along with `WorkerSpec`, `BuildSpec`, `BuildResult`,
+  `LogStream`, `ManagedResource`, and `ErrNotSupported`, are stable.
+  Phase 3-7 adds two new methods (`CleanupOrphanResources`, `Preflight`)
+  and renames `ContainerStats` → `WorkerResourceUsage` (see deliverable
+  #13), bringing the total to twelve.
 - **`backends.md` design doc** — process backend design rationale,
   isolation properties, deployment modes, and comparison with Docker.
   Phase 3-7 implements the design described there.
@@ -48,7 +52,12 @@ can be integrated later.
    field gains `"process"` as a valid value. Startup instantiates
    `ProcessBackend` or `DockerBackend` accordingly.
 3. **Process backend struct** (`internal/backend/process/process.go`) —
-   `ProcessBackend` implementing all nine `Backend` interface methods.
+   `ProcessBackend` implementing all twelve `Backend` interface methods.
+   `UpdateResources` returns `backend.ErrNotSupported` since the process
+   backend does not enforce per-worker resource limits (decision #6);
+   `api/apps.go` skips the warning log when it sees `ErrNotSupported`
+   from this call so app-update requests don't spam one noisy line per
+   worker (see step 6).
 4. **Port allocator** (`internal/backend/process/ports.go`) — allocates
    and releases localhost ports from a configured range.
 5. **bwrap command construction** (`internal/backend/process/bwrap.go`)
@@ -200,10 +209,58 @@ type StorageConfig struct {
 }
 ```
 
-Remove the moved fields from `DockerConfig` and the old
-`SkipDockerPreflight` from `ServerConfig`. Keep backward-compat TOML
-parsing for one release: if the old `[docker]` fields are present, copy
-them to the new location and log a deprecation warning.
+Keep backward-compat TOML parsing for one release. The cleanest way to
+do this with `BurntSushi/toml` is to leave the old fields on the
+source structs under a deprecated-rename and copy them across in a
+migration shim that runs after `toml.Unmarshal` and before
+`applyDefaults`:
+
+```go
+type DockerConfig struct {
+    // ...remaining fields...
+    // Deprecated fields kept for one release so existing TOML still
+    // parses. migrateDeprecatedFields copies these into their new
+    // homes and warns. Remove in the next major bump.
+    DeprecatedDefaultMemoryLimit string   `toml:"default_memory_limit"`
+    DeprecatedDefaultCPULimit    float64  `toml:"default_cpu_limit"`
+    DeprecatedStoreRetention     Duration `toml:"store_retention"`
+}
+
+type ServerConfig struct {
+    // ...fields including the new Backend/SkipPreflight/DefaultMemoryLimit/DefaultCPULimit...
+    DeprecatedSkipDockerPreflight bool `toml:"skip_docker_preflight"`
+}
+```
+
+```go
+// migrateDeprecatedFields copies old [docker]/[server] field values
+// into their new locations when the new field is unset and the old
+// field is present. Emits a deprecation warning for each move. Called
+// once from Load(), between toml.Unmarshal and applyDefaults.
+func migrateDeprecatedFields(cfg *Config) {
+    if cfg.Server.DefaultMemoryLimit == "" && cfg.Docker.DeprecatedDefaultMemoryLimit != "" {
+        cfg.Server.DefaultMemoryLimit = cfg.Docker.DeprecatedDefaultMemoryLimit
+        slog.Warn("config: docker.default_memory_limit is deprecated; use server.default_memory_limit")
+    }
+    if cfg.Server.DefaultCPULimit == 0 && cfg.Docker.DeprecatedDefaultCPULimit != 0 {
+        cfg.Server.DefaultCPULimit = cfg.Docker.DeprecatedDefaultCPULimit
+        slog.Warn("config: docker.default_cpu_limit is deprecated; use server.default_cpu_limit")
+    }
+    if cfg.Storage.StoreRetention.Duration == 0 && cfg.Docker.DeprecatedStoreRetention.Duration != 0 {
+        cfg.Storage.StoreRetention = cfg.Docker.DeprecatedStoreRetention
+        slog.Warn("config: docker.store_retention is deprecated; use storage.store_retention")
+    }
+    if !cfg.Server.SkipPreflight && cfg.Server.DeprecatedSkipDockerPreflight {
+        cfg.Server.SkipPreflight = true
+        slog.Warn("config: server.skip_docker_preflight is deprecated; use server.skip_preflight")
+    }
+}
+```
+
+When both old and new fields are set, new wins and the old is dropped
+silently — the operator is transitioning and already has the new value
+they want. The deprecated fields are removed entirely in the next
+release.
 
 Defaults in `applyDefaults()`:
 
@@ -833,13 +890,12 @@ func (lb *logBuffer) stream() backend.LogStream {
         defer close(ch)
         defer unsub()
 
-        // Start cursor at the oldest available line.
+        // Start cursor at the oldest available line. If the ring has
+        // wrapped, that's seq - size; otherwise 0.
         lb.mu.Lock()
-        cursor := lb.seq // start at current position (replay all available)
+        var cursor uint64
         if lb.seq > uint64(lb.size) {
             cursor = lb.seq - uint64(lb.size)
-        } else {
-            cursor = 0
         }
         lb.mu.Unlock()
 
@@ -897,8 +953,10 @@ The backend uses `os/exec` to launch bwrap and `os.Process.Signal` /
 package process
 
 import (
+    "bufio"
     "context"
     "fmt"
+    "io"
     "log/slog"
     "net"
     "os"
@@ -975,6 +1033,19 @@ func (b *ProcessBackend) Preflight(_ context.Context) (*preflight.Report, error)
 }
 
 func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
+    // Warn when per-app resource limits are set: the process backend
+    // does not enforce them (decision #6). checkResourceLimits only
+    // catches the [server] defaults, so without this warning an app
+    // with `memory_limit = "512m"` in the database would silently get
+    // unlimited workers with no trace in the logs.
+    if spec.MemoryLimit != "" || spec.CPULimit > 0 {
+        slog.Warn("process backend: per-worker resource limits are ignored",
+            "worker_id", spec.WorkerID,
+            "app_id", spec.AppID,
+            "memory_limit", spec.MemoryLimit,
+            "cpu_limit", spec.CPULimit)
+    }
+
     port, err := b.ports.Alloc()
     if err != nil {
         return err
@@ -1206,15 +1277,56 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
     }
     cmd.Env = append(cmd.Env, spec.Env...)
 
-    output, err := cmd.CombinedOutput()
-    logs := string(output)
+    // Stream stdout/stderr line-by-line: pak builds run for minutes and
+    // the build UI renders spec.LogWriter output live. Collecting with
+    // CombinedOutput and replaying after exit would leave the UI stuck
+    // on "building..." until completion and then dump everything at once.
+    // The Docker backend streams via ContainerLogs Follow + scanner for
+    // the same reason (docker.go Build step 5).
+    stdout, err := cmd.StdoutPipe()
+    if err != nil {
+        return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
+    }
+    stderr, err := cmd.StderrPipe()
+    if err != nil {
+        return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
+    }
+    if err := cmd.Start(); err != nil {
+        return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
+    }
 
-    // Stream log lines to the callback if provided.
-    if spec.LogWriter != nil {
-        for _, line := range splitLines(logs) {
-            spec.LogWriter(line)
+    // Two goroutines, one per stream — sequential reads would suppress
+    // stderr until stdout closes. A mutex serializes writes into the
+    // shared logs buffer and the LogWriter callback so lines are not
+    // interleaved mid-character. Interleave at *line* granularity is
+    // fine; R/Shiny mix diagnostics across both streams and the Docker
+    // backend merges them the same way.
+    var (
+        logsBuf strings.Builder
+        logMu   sync.Mutex
+        wg      sync.WaitGroup
+    )
+    ingest := func(r io.Reader) {
+        defer wg.Done()
+        sc := bufio.NewScanner(r)
+        for sc.Scan() {
+            line := sc.Text()
+            logMu.Lock()
+            logsBuf.WriteString(line)
+            logsBuf.WriteByte('\n')
+            if spec.LogWriter != nil {
+                spec.LogWriter(line)
+            }
+            logMu.Unlock()
         }
     }
+    wg.Add(2)
+    go ingest(stdout)
+    go ingest(stderr)
+    wg.Wait()
+
+    err = cmd.Wait()
+    logs := logsBuf.String()
 
     if err != nil {
         exitCode := 1
@@ -1295,6 +1407,16 @@ func (b *ProcessBackend) WorkerResourceUsage(_ context.Context, id string) (*bac
         MemoryUsageBytes: rssBytes,
         MemoryLimitBytes: 0, // no per-worker cgroup limit
     }, nil
+}
+
+// UpdateResources is not supported by the process backend: we do not
+// enforce per-worker cgroup limits (decision #6), so there is nothing
+// to update. Returning ErrNotSupported lets callers distinguish "cannot
+// do this" from "ran into a real error"; api/apps.go checks for
+// ErrNotSupported and skips its warning log so app-update requests do
+// not spam one noisy warning per worker.
+func (b *ProcessBackend) UpdateResources(_ context.Context, _ string, _ int64, _ int64) error {
+    return backend.ErrNotSupported
 }
 
 // readProcTreeStats aggregates RSS and CPU ticks across a process and
@@ -1415,7 +1537,7 @@ case "process":
         os.Exit(1)
     }
 default: // "docker"
-    be, err = docker.New(context.Background(), &cfg.Docker, cfg.Storage.BundleServerPath)
+    be, err = docker.New(context.Background(), cfg, cfg.Storage.BundleServerPath)
     if err != nil {
         slog.Error("failed to create docker backend", "error", err)
         os.Exit(1)
@@ -1428,6 +1550,17 @@ Add the import:
 ```go
 import "github.com/cynkra/blockyard/internal/backend/process"
 ```
+
+**`docker.New()` signature change.** The current signature takes
+`*config.DockerConfig`; after moving `default_memory_limit` and
+`default_cpu_limit` from `DockerConfig` to `ServerConfig` the backend
+needs to read both sections, so `New()` takes the full `*config.Config`
+(parallel to `process.New`). Inside the backend, the existing
+`d.config.DefaultMemoryLimit` / `d.config.DefaultCPULimit` reads at
+`docker.go:450-458` become `d.fullCfg.Server.DefaultMemoryLimit` /
+`d.fullCfg.Server.DefaultCPULimit`. The `DockerBackend` struct gains a
+`fullCfg *config.Config` field alongside the existing `config
+*config.DockerConfig` shortcut; `New()` sets both from its argument.
 
 The `docker.Image` validation in `validate()` moves into the `case
 "docker"` branch (step 1) so it does not reject process-backend configs
@@ -1959,9 +2092,11 @@ if len(os.Args) > 1 && os.Args[1] == "probe" {
 ```
 
 `runProbe` is a small function (~30 lines) that parses `--tcp host:port`
-and `--timeout duration`, attempts a TCP connect with the timeout, and
-returns nil on success or an error on failure. No imports beyond
-`net`, `flag`, and `time`.
+and `--timeout duration` using a fresh `flag.NewFlagSet("probe",
+flag.ContinueOnError)` — **not** the global `flag` package — so its
+flag definitions don't clash with main's `-config`/`-version`. It
+attempts a TCP connect with the timeout and returns nil on success
+or an error on failure. No imports beyond `net`, `flag`, and `time`.
 
 The probe runs inside the bwrap sandbox with the same UID/GID/namespaces
 a worker would have. From the firewall's perspective, the connect is
@@ -2318,8 +2453,14 @@ func TestLogBufferRingOverflow(t *testing.T) {
 
 #### Integration tests — worker lifecycle
 
-`internal/backend/process/process_integration_test.go`, guarded by
-`//go:build process_test`:
+Two files, both guarded by `//go:build process_test`:
+
+- `internal/backend/process/process_integration_test.go` —
+  `package process_test` (external). Exercises the exported API only
+  (`process.New`, `Spawn`, `WorkerResourceUsage`, etc.).
+- `internal/backend/process/preflight_internal_test.go` —
+  `package process` (internal). Holds `TestCheckBwrapHostUIDMapping`
+  and any future tests that need to call unexported check functions.
 
 ```go
 //go:build process_test
@@ -2452,15 +2593,23 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
     }
 
     ctx := context.Background()
+    // Use an explicit sleep command so we have a long-lived process to
+    // measure. The fallback Cmd in bwrapArgs runs `R -e shiny::runApp(...)`
+    // which would die immediately on an empty bundle — tests that spawn
+    // from t.TempDir() must supply their own Cmd.
     spec := backend.WorkerSpec{
         WorkerID:    "stats-worker",
         BundlePath:  t.TempDir(),
         WorkerMount: "/app",
+        Cmd:         []string{"/bin/sleep", "60"},
     }
     if err := be.Spawn(ctx, spec); err != nil {
         t.Fatal(err)
     }
     defer be.Stop(ctx, spec.WorkerID)
+
+    // Give the sandboxed process a moment to start and allocate RSS.
+    time.Sleep(200 * time.Millisecond)
 
     stats, err := be.WorkerResourceUsage(ctx, spec.WorkerID)
     if err != nil {
@@ -2470,13 +2619,21 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
         t.Fatal("expected non-nil stats for live worker")
     }
     if stats.MemoryUsageBytes == 0 {
-        t.Error("expected non-zero RSS for a live R process")
+        t.Error("expected non-zero RSS for a live process")
     }
     if stats.MemoryLimitBytes != 0 {
         t.Errorf("expected 0 memory limit (no cgroup), got %d", stats.MemoryLimitBytes)
     }
 }
 
+// TestCheckBwrapHostUIDMapping runs under the internal `process` build
+// tag (not `process_test`) because it needs to call the unexported
+// `checkBwrapHostUIDMapping` directly. An alternative would be to invoke
+// `RunPreflight` and scan the report for the "bwrap_host_uid_mapping"
+// result by name, but direct invocation produces clearer failure
+// messages. This test file therefore lives in `package process`, not
+// `package process_test`; the integration tests above that only touch
+// exported API can stay in the external test package.
 func TestCheckBwrapHostUIDMapping(t *testing.T) {
     if _, err := exec.LookPath("bwrap"); err != nil {
         t.Skip("bwrap not available")
@@ -2522,7 +2679,7 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 | `internal/config/config.go` | **update** | Add `ProcessConfig`, `Backend`/`SkipPreflight` on `ServerConfig`; move `DefaultMemoryLimit`/`DefaultCPULimit` from `DockerConfig` → `ServerConfig`, `StoreRetention` from `DockerConfig` → `StorageConfig`; backward-compat parsing for old TOML locations |
 | `internal/backend/docker/docker.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; implement `CleanupOrphanResources()` (move `CleanupOrphanMetadataRules` logic) and `Preflight()` (delegates to the moved-in `docker/preflight.go`); read `DefaultMemoryLimit`/`DefaultCPULimit` from `ServerConfig` |
 | `internal/units/memory.go` | **create** | `ParseMemoryLimit()` moved from `internal/backend/docker` |
-| `internal/backend/process/process.go` | **create** | `ProcessBackend` struct implementing all `Backend` methods; `readProcTreeStats`, `collectDescendants`, `readOneProcStats` helpers |
+| `internal/backend/process/process.go` | **create** | `ProcessBackend` struct implementing all twelve `Backend` methods (including `UpdateResources`, which returns `ErrNotSupported` — decision #6); `readProcTreeStats`, `collectDescendants`, `readOneProcStats` helpers |
 | `internal/backend/process/bwrap.go` | **create** | `bwrapArgs()`, `bwrapBuildArgs()`, `applySeccomp()`, `spliceBeforeSeparator()` |
 | `internal/backend/process/ports.go` | **create** | `portAllocator` with `Alloc()`, `Release()`, `InUse()` |
 | `internal/backend/process/uids.go` | **create** | `uidAllocator` for per-worker host UIDs (parallel to `portAllocator`) |
@@ -2530,22 +2687,27 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 | `internal/backend/process/preflight.go` | **create** | `RunPreflight()` and `check*` functions — bwrap, R, user namespaces, port range, resource-limit warning, worker egress probe. Lives in the `process` package (not `internal/preflight`) to break the import cycle that adding `Backend.Preflight()` would otherwise create. Imports `internal/preflight` for `Report`/`Result` types only. |
 | `internal/backend/docker/preflight.go` | **create** | Moved from `internal/preflight/docker_checks.go`. Same functions, same logic, new home — keeps backend-specific check code in the backend package and lets `internal/preflight` shrink to a leaf package. |
 | `internal/preflight/docker_checks.go` | **delete** | Moved to `internal/backend/docker/preflight.go`. |
+| `internal/preflight/docker_checks_test.go` | **move** | Moved to `internal/backend/docker/preflight_test.go` alongside the code under test. |
+| `internal/preflight/docker_checks_nodep_test.go` | **move** | Moved to `internal/backend/docker/preflight_nodep_test.go` alongside the code under test. |
+| `internal/preflight/redis_network_check_test.go` | **move** | Moved to `internal/backend/docker/redis_network_check_test.go` — the helper under test (`checkRedisOnServiceNetwork`) moves with the rest of the docker check code. |
+| `internal/preflight/redis_network_check_docker_test.go` | **move** | Moved to `internal/backend/docker/redis_network_check_docker_test.go` alongside the code under test. |
 | `internal/preflight/preflight.go` | **update** | Export `Report.add` → `Report.Add` so check functions in the backend packages can append results. The previous private name worked when all check functions lived in the same package; with the refactor they're external callers. |
 | `internal/preflight/addrs.go` | **create** | `tcpAddrFromRedisURL`, `tcpAddrFromHTTPURL`, `tcpAddrFromDBConfig` helpers used by the egress probe. Lives in `internal/preflight` so both backends can reuse it. |
 | `internal/preflight/config_checks.go` | **update** | `checkNoDefaultMemoryLimit` and `checkNoDefaultCPULimit` read from `cfg.Server.DefaultMemoryLimit`/`DefaultCPULimit` (the new home) instead of `cfg.Docker.*`. Warning messages updated to reference `server.default_memory_limit` / `server.default_cpu_limit`. |
 | `cmd/blockyard/main.go` | **update** | Backend selection switch; `probe` subcommand dispatch (early in main); `be.Preflight()` replaces Docker-specific preflight branching; `be.CleanupOrphanResources()` replaces direct Docker import in startup; store retention reads from `cfg.Storage`; rename `DockerPing` → `BackendPing` |
 | `internal/ops/ops.go` | **update** | Remove `docker` import; replace `docker.CleanupOrphanMetadataRules()` with `srv.Backend.CleanupOrphanResources()` |
-| `internal/api/apps.go` | **update** | Import `internal/units` instead of `internal/backend/docker` for `ParseMemoryLimit` |
+| `internal/api/apps.go` | **update** | Import `internal/units` instead of `internal/backend/docker` for `ParseMemoryLimit`; skip the `failed to update worker resources` warning when `UpdateResources` returns `backend.ErrNotSupported` (so the process backend does not log one noisy line per worker on every app update) |
 | `internal/api/runtime.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage` |
 | `internal/ui/sidebar.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage` |
 | `internal/ui/templates/tab_runtime.html` | **update** | Wrap `MemoryLimitBytes` rendering in a conditional so zero (process backend, or unconfigured Docker) renders just the usage |
-| `internal/backend/mock/mock.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; add no-op `CleanupOrphanResources()` and `Preflight()` |
+| `internal/backend/mock/mock.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; add no-op `CleanupOrphanResources()` and `Preflight()` (existing `UpdateResources` is unchanged — the mock backend continues to honor limits for tests that depend on that behavior) |
 | `internal/preflight/checker.go` | **update** | Rename `DockerPing` → `BackendPing` in `RuntimeDeps` |
 | `internal/backend/process/bwrap_test.go` | **create** | bwrap argument construction tests |
 | `internal/backend/process/ports_test.go` | **create** | Port allocator tests (sequential and concurrent) |
 | `internal/backend/process/uids_test.go` | **create** | UID allocator tests (sequential and concurrent) |
 | `internal/backend/process/logs_test.go` | **create** | Log buffer and LogStream tests |
-| `internal/backend/process/process_integration_test.go` | **create** | Integration tests (spawn, health, stop, stats); `//go:build process_test` |
+| `internal/backend/process/process_integration_test.go` | **create** | Integration tests (spawn, health, stop, stats); `//go:build process_test`; `package process_test` (external — exported API only) |
+| `internal/backend/process/preflight_internal_test.go` | **create** | Internal tests for unexported preflight helpers (`checkBwrapHostUIDMapping`); `//go:build process_test`; `package process` |
 
 ## Design decisions
 
@@ -2646,7 +2808,17 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 6. **No per-worker resource limits.** Same rationale. cgroup delegation
    is difficult inside containers and adds a systemd dependency on
    native hosts. The outer container's cgroup limits serve as a shared
-   ceiling in containerized mode.
+   ceiling in containerized mode. Two consequences flow from this:
+   - `UpdateResources` returns `backend.ErrNotSupported` — there is
+     nothing to live-update. `api/apps.go` checks for `ErrNotSupported`
+     and skips its warning log so app-update requests don't spam one
+     warning per worker.
+   - `Spawn` emits a one-time `slog.Warn` when `spec.MemoryLimit` or
+     `spec.CPULimit` is non-zero. `checkResourceLimits` catches the
+     `[server]` defaults at startup, but apps can set their own limits
+     via the API after startup, and those land in `WorkerSpec` fields.
+     Silently ignoring them would be a footgun; the warning gives
+     operators a breadcrumb that the limit did not take effect.
 
 7. **SIGTERM → SIGKILL escalation with 10s grace.** Matches Docker's
    default `docker stop` behavior. `Stop()` sends SIGTERM to the bwrap
@@ -2667,11 +2839,17 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
    around `cmd.Start()` prevents the Go runtime from retiring the
    forking thread, which would trigger a spurious `PDEATHSIG`.
 
-9. **Build uses `CombinedOutput`, not pipes.** Build tasks run to
-   completion (not long-lived), so capturing all output into a string
-   is simpler and matches the `BuildResult.Logs` return type. The
-   Docker backend does the same — build logs are collected after the
-   container exits.
+9. **Build streams stdout/stderr line-by-line, not `CombinedOutput`.**
+   `spec.LogWriter` is called by the build UI to render progress live
+   (pak installs run for minutes); the Docker backend streams via
+   `ContainerLogs Follow` + scanner and calls `LogWriter` per line as
+   it arrives (see `docker.go` Build step 5). Collecting with
+   `CombinedOutput` and replaying lines after the process exits would
+   leave the UI stuck on "building..." until completion and then dump
+   everything at once — a regression from the Docker backend's UX.
+   The process backend uses `StdoutPipe`/`StderrPipe` + two scanner
+   goroutines (one per stream to avoid stderr suppression), serialized
+   by a mutex so lines are not interleaved mid-character.
 
 10. **`ListManaged` reuses `ResourceContainer` kind.** The process
     backend has no networks to manage — only processes. Reusing
