@@ -20,6 +20,11 @@ enableGitInfo = true
       unsafe = true
     [markup.goldmark.parser.attribute]
       block = true
+  [markup.highlight]
+    # Emit Chroma classes instead of inline styles so we can theme code
+    # blocks via CSS scoped under html[data-theme="..."]. See _chroma.scss.
+    noClasses = false
+    style = "catppuccin-mocha"
 
 [menu]
   [[menu.after]]

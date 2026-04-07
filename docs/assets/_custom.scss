@@ -1,3 +1,5 @@
+@import "chroma";
+
 // Blockyard docs color palette
 // Aligns Hugo Book theme with the DaisyUI light/night themes
 // used by the blockyard server UI (internal/ui/input.css).
@@ -67,53 +69,474 @@ html[data-theme="light"] {
   @include theme-light;
 }
 
-// Card grid for homepage
-.blockyard-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 1rem;
-  margin: 1rem 0;
-}
+// Right-side TOC: wider, wrapped, with active-section highlighting.
+// Theme default is 16rem, which crams long names like "by deploy" or
+// nested REST API paths. Bump to 19rem and let long entries wrap.
+.book-toc {
+  flex: 0 0 19rem;
+  font-size: var(--font-size-smaller);
 
-.blockyard-card {
-  padding: 1rem 1.25rem;
-  border: 1px solid var(--gray-200);
-  border-radius: var(--border-radius);
-
-  h3 {
-    margin-top: 0;
-    margin-bottom: 0.5rem;
+  .book-toc-content {
+    width: 19rem;
   }
 
-  p {
-    margin: 0;
+  nav > ul {
+    padding-inline-start: 0;
+  }
+
+  ul {
+    list-style: none;
+    padding-inline-start: 0.75rem;
+
+    ul {
+      padding-inline-start: 0.75rem;
+      margin-top: 0.25rem;
+      margin-bottom: 0.25rem;
+    }
+  }
+
+  li {
+    margin: 0.15rem 0;
+  }
+
+  a {
+    display: block;
+    padding: 0.2rem 0.5rem;
+    border-left: 2px solid transparent;
+    margin-left: -0.5rem;
     color: var(--gray-500);
-    font-size: var(--font-size-smaller);
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+    transition: color 0.15s, border-color 0.15s;
+
+    &:hover {
+      color: var(--color-link);
+    }
+
+    &.active {
+      color: var(--color-link);
+      border-left-color: var(--color-link);
+      font-weight: 500;
+    }
   }
 }
 
-.blockyard-link-card {
-  display: block;
-  padding: 1rem 1.25rem;
+// Theme toggle — iOS-style sliding pill, anchored to the bottom of
+// the menu sidebar via the menu-after injection point.
+.bk-theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: $padding-16 0 0;
+  margin-top: $padding-16;
+  border-top: 1px solid var(--gray-200);
+}
+
+.bk-theme-row__label {
+  font-size: var(--font-size-smaller);
+  color: var(--gray-500);
+}
+
+.bk-theme-toggle {
+  position: relative;
+  width: 2.75rem;
+  height: 1.5rem;
+  padding: 0;
+  background: var(--gray-200);
   border: 1px solid var(--gray-200);
-  border-radius: var(--border-radius);
-  text-decoration: none;
-  color: inherit;
-  transition: border-color 0.2s;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  flex-shrink: 0;
 
   &:hover {
     border-color: var(--color-link);
   }
 
+  // Sun/moon icons sit on either side of the track, dim, behind the thumb.
+  &__icon {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--gray-500);
+    pointer-events: none;
+  }
+
+  &__sun  { left: 0.3rem; }
+  &__moon { right: 0.3rem; }
+
+  // The thumb slides from left (light) to right (dark).
+  &__thumb {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: calc(1.5rem - 4px);
+    height: calc(1.5rem - 4px);
+    border-radius: 50%;
+    background: #ffffff;  // always light, like an iOS switch
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.2),
+      0 2px 6px rgba(0, 0, 0, 0.15);
+    transition: transform 0.2s ease;
+    pointer-events: none;
+  }
+}
+
+html[data-theme="dark"] .bk-theme-toggle {
+  // Slightly brighter track in dark mode so the thumb has somewhere to live.
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+html[data-theme="dark"] .bk-theme-toggle__thumb {
+  transform: translateX(1.25rem);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Home page (custom layout)
+// ─────────────────────────────────────────────────────────────────────
+
+.bk-home {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 2rem 0 4rem;
+
+  // The home layout sets BookToC=false, so .book-page already gets the
+  // full width. Reset its inner padding so the hero stretches edge-to-edge.
+  margin-top: -$padding-16;
+}
+
+// ── Hero ──────────────────────────────────────────────────────────────
+.bk-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 3rem;
+  align-items: center;
+  padding: 3rem 0 4rem;
+
+  @media (max-width: 60rem) {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    padding: 2rem 0 3rem;
+  }
+}
+
+.bk-hero__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+  color: var(--color-link);
+}
+
+.bk-hero__logo {
+  flex-shrink: 0;
+}
+
+.bk-hero__wordmark {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--body-font-color);
+}
+
+.bk-hero__headline {
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin: 0 0 1rem;
+  color: var(--body-font-color);
+}
+
+.bk-hero__subtitle {
+  font-size: 1.125rem;
+  line-height: 1.5;
+  margin: 0 0 2rem;
+  color: var(--gray-500);
+  max-width: 32rem;
+}
+
+.bk-hero__cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+// ── Buttons ──────────────────────────────────────────────────────────
+// Selectors include `a.` to beat the theme's a[href] color rule.
+a.bk-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.25rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  border-radius: var(--border-radius);
+  text-decoration: none;
+  transition: transform 0.1s, box-shadow 0.15s, background-color 0.15s,
+    border-color 0.15s, color 0.15s;
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: translateY(0);
+  }
+}
+
+a.bk-btn--primary {
+  background: var(--color-link);
+  color: #ffffff;
+  border: 1px solid var(--color-link);
+
+  &:hover {
+    box-shadow: 0 6px 16px -6px var(--color-link);
+    color: #ffffff;
+  }
+}
+
+a.bk-btn--ghost {
+  background: transparent;
+  color: var(--body-font-color);
+  border: 1px solid var(--gray-200);
+
+  &:hover {
+    border-color: var(--color-link);
+    color: var(--color-link);
+  }
+}
+
+// ── Terminal mockup ──────────────────────────────────────────────────
+.bk-hero__demo {
+  width: 100%;
+}
+
+.bk-terminal {
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--gray-200);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 12px 32px -12px rgba(0, 0, 0, 0.25);
+  background: var(--bk-terminal-bg);
+}
+
+html[data-theme="light"] {
+  --bk-terminal-bg: #1e1e2e;            // dark even in light mode (terminal)
+  --bk-terminal-bar-bg: #2a2a3a;
+  --bk-terminal-fg: #cdd6f4;
+  --bk-terminal-muted: #7f849c;
+  --bk-terminal-prompt: #a6e3a1;
+  --bk-terminal-cmd: #89b4fa;
+  --bk-terminal-ok: #a6e3a1;
+  --bk-terminal-url: #94e2d5;
+}
+html[data-theme="dark"] {
+  --bk-terminal-bg: #181825;
+  --bk-terminal-bar-bg: #1e1e2e;
+  --bk-terminal-fg: #cdd6f4;
+  --bk-terminal-muted: #7f849c;
+  --bk-terminal-prompt: #a6e3a1;
+  --bk-terminal-cmd: #89b4fa;
+  --bk-terminal-ok: #a6e3a1;
+  --bk-terminal-url: #94e2d5;
+}
+
+.bk-terminal__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.9rem;
+  background: var(--bk-terminal-bar-bg);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.bk-terminal__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+
+  &--red    { background: #ff5f57; }
+  &--yellow { background: #febc2e; }
+  &--green  { background: #28c840; }
+}
+
+.bk-terminal__title {
+  margin-left: 0.5rem;
+  font-family: var(--mono-font), monospace;
+  font-size: 0.75rem;
+  color: var(--bk-terminal-muted);
+}
+
+.bk-terminal__body {
+  margin: 0;
+  padding: 1.1rem 1.25rem 1.4rem;
+  font-family: var(--mono-font), monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--bk-terminal-fg);
+  background: transparent;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.bk-tl {
+  display: block;
+}
+.bk-tl--out {
+  color: var(--bk-terminal-fg);
+  opacity: 0.85;
+}
+.bk-tl__prompt {
+  color: var(--bk-terminal-prompt);
+  font-weight: 600;
+}
+.bk-tl__cmd {
+  color: var(--bk-terminal-cmd);
+  font-weight: 600;
+}
+.bk-tl__ok {
+  color: var(--bk-terminal-ok);
+  font-weight: 600;
+}
+.bk-tl__url {
+  color: var(--bk-terminal-url);
+  text-decoration: underline;
+  text-decoration-color: rgba(148, 226, 213, 0.3);
+}
+
+// ── Sections ─────────────────────────────────────────────────────────
+.bk-section {
+  padding: 3rem 0 1rem;
+
+  & + .bk-section {
+    padding-top: 2rem;
+  }
+}
+
+.bk-section__title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 1.5rem;
+  color: var(--body-font-color);
+}
+
+// ── Feature grid ─────────────────────────────────────────────────────
+.bk-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+
+.bk-feature {
+  padding: 1.4rem 1.4rem 1.5rem;
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  border-radius: 12px;
+  transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+
+  &:hover {
+    transform: translateY(-2px);
+    border-color: var(--color-link);
+    box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.15);
+  }
+
   h3 {
-    margin-top: 0;
-    margin-bottom: 0.25rem;
+    margin: 0.75rem 0 0.4rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--body-font-color);
+  }
+
+  p {
+    margin: 0;
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--gray-500);
+  }
+
+  code {
+    font-size: 0.85em;
+    padding: 0.05em 0.35em;
+    background: var(--gray-200);
+    border-radius: 4px;
+    color: var(--body-font-color);
+  }
+}
+
+.bk-feature__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 8px;
+  background: var(--gray-200);
+  color: var(--color-link);
+}
+
+// ── Documentation hub ────────────────────────────────────────────────
+.bk-hub-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+
+a.bk-hub {
+  display: block;
+  padding: 1.4rem 1.4rem 1.5rem;
+  border: 1px solid var(--gray-200);
+  border-radius: 12px;
+  text-decoration: none;
+  color: var(--body-font-color);
+  background: transparent;
+  transition: transform 0.15s, border-color 0.15s, background 0.15s;
+  position: relative;
+
+  &::after {
+    content: "→";
+    position: absolute;
+    top: 1.4rem;
+    right: 1.4rem;
+    color: var(--gray-500);
+    transition: transform 0.15s, color 0.15s;
+  }
+
+  &:hover {
+    transform: translateY(-2px);
+    border-color: var(--color-link);
+
+    &::after {
+      transform: translateX(3px);
+      color: var(--color-link);
+    }
+  }
+
+  h3 {
+    margin: 0.75rem 0 0.4rem;
+    font-size: 1.05rem;
+    font-weight: 600;
     color: var(--color-link);
   }
 
   p {
     margin: 0;
+    font-size: 0.92rem;
+    line-height: 1.5;
     color: var(--gray-500);
-    font-size: var(--font-size-smaller);
   }
+}
+
+.bk-hub__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 8px;
+  background: var(--gray-200);
+  color: var(--color-link);
 }
