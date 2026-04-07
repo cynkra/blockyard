@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/cynkra/blockyard/internal/apiclient"
@@ -37,9 +38,13 @@ func scaleCmd() *cobra.Command {
 				v, _ := cmd.Flags().GetInt("pre-warm")
 				body["pre_warmed_seats"] = v
 			}
+			if cmd.Flags().Changed("runtime") {
+				v, _ := cmd.Flags().GetString("runtime")
+				body["runtime"] = v
+			}
 
 			if len(body) == 0 {
-				exitErrorf(jsonOutput, "no flags specified; use --memory, --cpu, --max-workers, --max-sessions, or --pre-warm")
+				exitErrorf(jsonOutput, "no flags specified; use --memory, --cpu, --max-workers, --max-sessions, --pre-warm, or --runtime")
 			}
 
 			resp, err := c.PatchJSON("/api/v1/apps/"+args[0], body)
@@ -69,6 +74,7 @@ func scaleCmd() *cobra.Command {
 	cmd.Flags().Int("max-workers", 0, "Max workers per app")
 	cmd.Flags().Int("max-sessions", 0, "Max sessions per worker")
 	cmd.Flags().Int("pre-warm", 0, "Pre-warmed standby workers")
+	cmd.Flags().String("runtime", "", `OCI runtime (e.g., "kata-runtime")`)
 	return cmd
 }
 
@@ -90,9 +96,17 @@ func updateCmd() *cobra.Command {
 				v, _ := cmd.Flags().GetString("description")
 				body["description"] = v
 			}
+			if cmd.Flags().Changed("image") {
+				v, _ := cmd.Flags().GetString("image")
+				body["image"] = v
+			}
+			if cmd.Flags().Changed("data-mounts") {
+				v, _ := cmd.Flags().GetString("data-mounts")
+				body["data_mounts"] = json.RawMessage(v)
+			}
 
 			if len(body) == 0 {
-				exitErrorf(jsonOutput, "no flags specified; use --title or --description")
+				exitErrorf(jsonOutput, "no flags specified; use --title, --description, --image, or --data-mounts")
 			}
 
 			resp, err := c.PatchJSON("/api/v1/apps/"+args[0], body)
@@ -119,5 +133,8 @@ func updateCmd() *cobra.Command {
 	}
 	cmd.Flags().String("title", "", "Display title")
 	cmd.Flags().String("description", "", "Description")
+	cmd.Flags().String("image", "", "Docker image for this app (empty = server default)")
+	cmd.Flags().String("data-mounts", "",
+		`data mounts JSON (e.g., '[{"source":"models","target":"/models"}]')`)
 	return cmd
 }

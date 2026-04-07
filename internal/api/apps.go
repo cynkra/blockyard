@@ -21,6 +21,7 @@ import (
 	docker "github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
@@ -290,23 +291,37 @@ func GetApp(srv *server.Server) http.HandlerFunc {
 		}
 
 		resp := appResponseV2WithRelation(app, srv, relation.String())
+		dataMounts, _ := srv.DB.ListAppDataMounts(app.ID)
+		if dataMounts == nil {
+			dataMounts = []db.DataMountRow{}
+		}
+		resp["data_mounts"] = dataMounts
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
 }
 
+type dataMountInput struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	ReadOnly *bool  `json:"readonly"` // defaults to true when omitted
+}
+
 type updateAppRequest struct {
-	Name                 *string  `json:"name"`
-	MaxWorkersPerApp     *int     `json:"max_workers_per_app"`
-	MaxSessionsPerWorker *int     `json:"max_sessions_per_worker"`
-	MemoryLimit          *string  `json:"memory_limit"`
-	CPULimit             *float64 `json:"cpu_limit"`
-	AccessType           *string  `json:"access_type"`
-	Title                *string  `json:"title"`
-	Description          *string  `json:"description"`
-	PreWarmedSeats       *int     `json:"pre_warmed_seats"`
-	RefreshSchedule      *string  `json:"refresh_schedule"`
+	Name                 *string          `json:"name"`
+	MaxWorkersPerApp     *int             `json:"max_workers_per_app"`
+	MaxSessionsPerWorker *int             `json:"max_sessions_per_worker"`
+	MemoryLimit          *string          `json:"memory_limit"`
+	CPULimit             *float64         `json:"cpu_limit"`
+	AccessType           *string          `json:"access_type"`
+	Title                *string          `json:"title"`
+	Description          *string          `json:"description"`
+	PreWarmedSeats       *int             `json:"pre_warmed_seats"`
+	RefreshSchedule      *string          `json:"refresh_schedule"`
+	Image                *string          `json:"image"`
+	Runtime              *string          `json:"runtime"`
+	DataMounts           []dataMountInput `json:"data_mounts,omitempty"`
 }
 
 // UpdateApp updates an application's configuration.
@@ -415,6 +430,42 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			}
 		}
 
+		if body.Image != nil && *body.Image != "" {
+			img := *body.Image
+			if strings.ContainsAny(img, " \t\n") {
+				badRequest(w, "image must not contain whitespace")
+				return
+			}
+		}
+
+		// Runtime changes require admin — runtime controls the container
+		// isolation boundary (e.g., runc vs kata vs sysbox).
+		if body.Runtime != nil && (caller == nil || !caller.Role.CanManageRoles()) {
+			forbidden(w, "runtime requires admin")
+			return
+		}
+
+		// Convert dataMountInput → DataMountRow, defaulting ReadOnly to true.
+		var mountRows []db.DataMountRow
+		if body.DataMounts != nil {
+			mountRows = make([]db.DataMountRow, len(body.DataMounts))
+			for i, m := range body.DataMounts {
+				ro := true
+				if m.ReadOnly != nil {
+					ro = *m.ReadOnly
+				}
+				mountRows[i] = db.DataMountRow{
+					Source:   m.Source,
+					Target:   m.Target,
+					ReadOnly: ro,
+				}
+			}
+			if err := mount.Validate(mountRows, srv.Config.Storage.DataMounts); err != nil {
+				badRequest(w, fmt.Sprintf("data_mounts: %v", err))
+				return
+			}
+		}
+
 		// Handle rename separately — it has its own transaction.
 		if body.Name != nil && *body.Name != app.Name {
 			if !relation.CanManageACL() { // owner or admin only
@@ -451,11 +502,43 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			Description:          body.Description,
 			PreWarmedSeats:       body.PreWarmedSeats,
 			RefreshSchedule:      body.RefreshSchedule,
+			Image:                body.Image,
+			Runtime:              body.Runtime,
 		}
-		app, err := srv.DB.UpdateApp(app.ID, update)
+		updated, err := srv.DB.UpdateApp(app.ID, update)
 		if err != nil {
 			serverError(w, "update app: "+err.Error())
 			return
+		}
+
+		if mountRows != nil {
+			for i := range mountRows {
+				mountRows[i].AppID = app.ID
+			}
+			if err := srv.DB.SetAppDataMounts(app.ID, mountRows); err != nil {
+				serverError(w, "set data mounts: "+err.Error())
+				return
+			}
+		}
+
+		// Live-update resource limits on running workers (best-effort).
+		if body.MemoryLimit != nil || body.CPULimit != nil {
+			mem := int64(0)
+			if updated.MemoryLimit != nil {
+				if parsed, ok := docker.ParseMemoryLimit(*updated.MemoryLimit); ok {
+					mem = parsed
+				}
+			}
+			cpuNano := int64(0)
+			if updated.CPULimit != nil {
+				cpuNano = int64(*updated.CPULimit * 1e9)
+			}
+			for _, wid := range srv.Workers.ForApp(app.ID) {
+				if err := srv.Backend.UpdateResources(r.Context(), wid, mem, cpuNano); err != nil {
+					slog.Warn("failed to update worker resources",
+						"worker", wid, "error", err)
+				}
+			}
 		}
 
 		if srv.AuditLog != nil {
@@ -466,8 +549,15 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			w.Header().Set("HX-Trigger", "appUpdated")
 		}
 
+		resp := appResponseV2(updated, srv)
+		dataMounts, _ := srv.DB.ListAppDataMounts(app.ID)
+		if dataMounts == nil {
+			dataMounts = []db.DataMountRow{}
+		}
+		resp["data_mounts"] = dataMounts
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(appResponseV2(app, srv))
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -790,7 +880,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 		spec := backend.WorkerSpec{
 			AppID:       app.ID,
 			WorkerID:    workerID,
-			Image:       srv.Config.Docker.Image,
+			Image:       server.AppImage(app, srv.Config.Docker.Image),
 			Cmd: []string{"R", "-e",
 				fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
 					srv.Config.Storage.BundleWorkerPath)},
@@ -802,6 +892,15 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			CPULimit:    floatOrZero(app.CPULimit),
 			Labels:      labels,
 			Env:         server.WorkerEnv(srv),
+			Runtime:     server.AppRuntime(app, srv.Config.Docker),
+		}
+
+		// Resolve per-app data mounts.
+		appMounts, _ := srv.DB.ListAppDataMounts(app.ID)
+		if len(appMounts) > 0 {
+			if resolved, err := mount.Resolve(appMounts, srv.Config.Storage.DataMounts); err == nil {
+				spec.DataMounts = resolved
+			}
 		}
 
 		slog.Info("starting app via API",
@@ -1082,6 +1181,13 @@ func parseUpdateAppForm(r *http.Request) updateAppRequest {
 			body.CPULimit = &f
 		}
 	}
+	if v := r.FormValue("image"); r.Form.Has("image") {
+		body.Image = &v
+	}
+	if v := r.FormValue("runtime"); r.Form.Has("runtime") {
+		body.Runtime = &v
+	}
+	// data_mounts not supported via form encoding — use JSON API.
 	return body
 }
 

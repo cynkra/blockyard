@@ -41,6 +41,7 @@ type dockerClient interface {
 	ContainerStart(ctx context.Context, containerID string, options client.ContainerStartOptions) (client.ContainerStartResult, error)
 	ContainerStats(ctx context.Context, containerID string, options client.ContainerStatsOptions) (client.ContainerStatsResult, error)
 	ContainerStop(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error)
+	ContainerUpdate(ctx context.Context, containerID string, options client.ContainerUpdateOptions) (client.ContainerUpdateResult, error)
 	ContainerWait(ctx context.Context, containerID string, options client.ContainerWaitOptions) client.ContainerWaitResult
 	ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error)
 	ImagePull(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
@@ -415,6 +416,17 @@ func (d *DockerBackend) createWorkerContainer(
 
 	binds, mounts := d.mountCfg.WorkerMounts(spec.BundlePath, spec.LibraryPath, spec.LibDir, spec.TransferDir, spec.TokenDir, spec.WorkerMount)
 
+	// Append per-app data mounts. Source paths are host paths (not
+	// server-container paths), so they bypass MountConfig translation
+	// and go directly into Docker bind strings.
+	for _, dm := range spec.DataMounts {
+		flag := ":ro"
+		if !dm.ReadOnly {
+			flag = ""
+		}
+		binds = append(binds, dm.Source+":"+dm.Target+flag)
+	}
+
 	// R_LIBS: use /blockyard-lib-store when store-assembled library is
 	// available, else legacy /blockyard-lib. Must not use /lib as that
 	// shadows the system shared library directory on Linux.
@@ -463,6 +475,7 @@ func (d *DockerBackend) createWorkerContainer(
 			SecurityOpt:    []string{"no-new-privileges"},
 			ReadonlyRootfs: true,
 			Resources:      resources,
+			Runtime:        spec.Runtime,
 		},
 		Name: containerName,
 	})
@@ -471,6 +484,28 @@ func (d *DockerBackend) createWorkerContainer(
 	}
 
 	return resp.ID, nil
+}
+
+// UpdateResources live-updates resource limits on a running container.
+func (d *DockerBackend) UpdateResources(ctx context.Context, id string, mem int64, nanoCPUs int64) error {
+	d.mu.Lock()
+	ws, ok := d.workers[id]
+	d.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("worker %s not found", id)
+	}
+
+	resources := container.Resources{}
+	if mem > 0 {
+		resources.Memory = mem
+	}
+	if nanoCPUs > 0 {
+		resources.NanoCPUs = nanoCPUs
+	}
+
+	_, err := d.client.ContainerUpdate(ctx, ws.containerID,
+		client.ContainerUpdateOptions{Resources: &resources})
+	return err
 }
 
 // --- Log stream demuxing ---

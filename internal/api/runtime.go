@@ -618,6 +618,8 @@ func appResponseV2(app *db.AppRow, srv *server.Server) map[string]any {
 		"pre_warmed_seats":       app.PreWarmedSeats,
 		"enabled":                app.Enabled,
 		"refresh_schedule":       app.RefreshSchedule,
+		"image":                  app.Image,
+		"runtime":                app.Runtime,
 		"created_at":             app.CreatedAt,
 		"updated_at":             app.UpdatedAt,
 		"status":                 status,

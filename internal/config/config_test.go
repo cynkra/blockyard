@@ -1602,3 +1602,76 @@ func TestLogLevelParsing(t *testing.T) {
 		}
 	}
 }
+
+func TestValidate_DataMountDuplicateNames(t *testing.T) {
+	err := validateDataMounts([]DataMountSource{
+		{Name: "models", Path: "/data/models"},
+		{Name: "models", Path: "/data/models2"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("expected duplicate error, got: %v", err)
+	}
+}
+
+func TestValidate_DataMountRelativePath(t *testing.T) {
+	err := validateDataMounts([]DataMountSource{
+		{Name: "models", Path: "relative"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Errorf("expected absolute path error, got: %v", err)
+	}
+}
+
+func TestValidate_DataMountEmptyName(t *testing.T) {
+	err := validateDataMounts([]DataMountSource{
+		{Name: "", Path: "/data/models"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "name must not be empty") {
+		t.Errorf("expected empty name error, got: %v", err)
+	}
+}
+
+func TestValidate_DataMountInvalidChars(t *testing.T) {
+	err := validateDataMounts([]DataMountSource{
+		{Name: "models/v2", Path: "/data/models"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid characters") {
+		t.Errorf("expected invalid characters error, got: %v", err)
+	}
+}
+
+func TestValidate_DataMountValid(t *testing.T) {
+	err := validateDataMounts([]DataMountSource{
+		{Name: "models", Path: "/data/models"},
+		{Name: "scratch-2", Path: "/data/scratch"},
+	})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_RuntimeDefaultsValid(t *testing.T) {
+	err := validateRuntimeDefaults(map[string]string{
+		"public": "kata-runtime",
+		"acl":    "runc",
+	})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_RuntimeDefaultsInvalidKey(t *testing.T) {
+	err := validateRuntimeDefaults(map[string]string{
+		"unknown": "runc",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown access type") {
+		t.Errorf("expected unknown access type error, got: %v", err)
+	}
+}
+
+func TestValidate_RuntimeDefaultsEmpty(t *testing.T) {
+	err := validateRuntimeDefaults(nil)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

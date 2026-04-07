@@ -1,6 +1,9 @@
 package backend
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Backend is the pluggable container runtime abstraction.
 // Docker/Podman for v0, Kubernetes for v2.
@@ -33,7 +36,16 @@ type Backend interface {
 	// ContainerStats returns a point-in-time resource usage snapshot
 	// for a container. Returns nil stats if the container is not found.
 	ContainerStats(ctx context.Context, containerID string) (*ContainerStatsResult, error)
+
+	// UpdateResources live-updates memory and CPU limits for a running
+	// worker. Returns ErrNotSupported if the backend does not support
+	// live resource updates.
+	UpdateResources(ctx context.Context, id string, mem int64, nanoCPUs int64) error
 }
+
+// ErrNotSupported is returned by backend methods that are not
+// available for the current backend type.
+var ErrNotSupported = errors.New("operation not supported by this backend")
 
 // ContainerStatsResult holds point-in-time resource usage for a container.
 type ContainerStatsResult struct {
@@ -58,6 +70,8 @@ type WorkerSpec struct {
 	CPULimit    float64           // fractional vCPUs, 0 if unset
 	Labels      map[string]string
 	Env         map[string]string // additional env vars (e.g. VAULT_ADDR)
+	DataMounts  []MountEntry      // data mounts from app config; resolved host paths
+	Runtime     string            // OCI runtime override; empty = default
 }
 
 type BuildSpec struct {

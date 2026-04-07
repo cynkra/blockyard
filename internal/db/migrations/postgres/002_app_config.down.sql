@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS app_data_mounts;
+ALTER TABLE apps DROP COLUMN image;
+ALTER TABLE apps DROP COLUMN runtime;

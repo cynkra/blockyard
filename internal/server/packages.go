@@ -61,6 +61,14 @@ func (srv *Server) InstallPackage(
 	}
 	workerLibDir := srv.PkgStore.WorkerLibDir(workerID)
 
+	// Look up app for per-app image override.
+	appImg := srv.Config.Docker.Image
+	if srv.DB != nil {
+		if app, lookupErr := srv.DB.GetApp(appID); lookupErr == nil && app != nil {
+			appImg = AppImage(app, srv.Config.Docker.Image)
+		}
+	}
+
 	// 2. Load the bundle's manifest for repository configuration.
 	bundlePaths := srv.BundlePaths(appID, worker.BundleID)
 	manifestPath := filepath.Join(bundlePaths.Base, "manifest.json")
@@ -79,7 +87,7 @@ func (srv *Server) InstallPackage(
 	// 4. Ensure pak and by-builder are cached.
 	bsp := srv.Config.Storage.BundleServerPath
 	pakPath, err := pakcache.EnsureInstalled(
-		ctx, srv.Backend, srv.Config.Docker.Image,
+		ctx, srv.Backend, appImg,
 		srv.Config.Docker.PakVersion,
 		filepath.Join(bsp, ".pak-cache"))
 	if err != nil {
@@ -102,7 +110,7 @@ func (srv *Server) InstallPackage(
 		WorkerLibDir: workerLibDir,
 		StoreRoot:    srv.PkgStore.Root(),
 		Platform:     srv.PkgStore.Platform(),
-		Image:        srv.Config.Docker.Image,
+		Image:        appImg,
 		Repositories: m.Repositories,
 	})
 	if err != nil {

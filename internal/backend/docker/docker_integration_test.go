@@ -833,6 +833,30 @@ func TestParseMemoryLimitEdgeCases(t *testing.T) {
 		{"512mb", 512 * 1024 * 1024, true},
 		{"2gb", 2 * 1024 * 1024 * 1024, true},
 		{"128kb", 128 * 1024, true},
+		// Case insensitivity.
+		{"512M", 512 * 1024 * 1024, true},
+		{"1G", 1024 * 1024 * 1024, true},
+		{"100KB", 100 * 1024, true},
+		{"256MB", 256 * 1024 * 1024, true},
+		// Whitespace handling.
+		{"   ", 0, false},
+		{" 512m ", 512 * 1024 * 1024, true},
+		{" 1024 ", 1024, true},
+		// Zero values.
+		{"0", 0, true},
+		{"0m", 0, true},
+		{"0g", 0, true},
+		// Negative values.
+		{"-512m", -512 * 1024 * 1024, true},
+		{"-1", -1, true},
+		// Decimal values fail (ParseInt rejects them).
+		{"1.5g", 0, false},
+		{"0.5m", 0, false},
+		// Invalid suffixes → treated as bytes, ParseInt fails.
+		{"512x", 0, false},
+		{"512p", 0, false},
+		// Large value.
+		{"100g", 100 * 1024 * 1024 * 1024, true},
 	}
 
 	for _, tt := range tests {

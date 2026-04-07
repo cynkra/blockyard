@@ -37,7 +37,7 @@ func (srv *Server) RunRefresh(
 
 	// 1. Ensure pak and by-builder are cached.
 	pakPath, err := pakcache.EnsureInstalled(
-		ctx, srv.Backend, srv.Config.Docker.Image,
+		ctx, srv.Backend, AppImage(app, srv.Config.Docker.Image),
 		srv.Config.Docker.PakVersion,
 		filepath.Join(bsp, ".pak-cache"))
 	if err != nil {
@@ -66,7 +66,7 @@ func (srv *Server) RunRefresh(
 	spec := backend.BuildSpec{
 		AppID:    app.ID,
 		BundleID: "refresh-" + buildUUID[:8],
-		Image:    srv.Config.Docker.Image,
+		Image:    AppImage(app, srv.Config.Docker.Image),
 		Cmd:      bundle.BuildCommand(),
 		Mounts: bundle.BuildMounts(
 			pakPath, bundlePaths.Unpacked,
@@ -183,7 +183,7 @@ func (srv *Server) drainAndReplace(
 		}
 	}
 
-	spec := srv.defaultWorkerSpec(app.ID, newWorkerID, newLibDir, *app.ActiveBundle)
+	spec := srv.defaultWorkerSpec(app, newWorkerID, newLibDir, *app.ActiveBundle)
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {
 		sender.Write("Failed to start new worker.")
 		restoreOld()
