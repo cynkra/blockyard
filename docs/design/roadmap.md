@@ -814,8 +814,9 @@ deployments.
 - **Backend package extraction.** Extract separate Go packages for each backend
   implementation if build-tag sprawl warrants it.
 
-- **Build image consolidation.** Kubernetes variant of the v3 rv-binary mount
-  approach: init containers or shared volumes for build dependencies.
+- **Build image consolidation.** Kubernetes variant of the v3 `by-builder`
+  binary mount approach: init containers or shared volumes to expose the
+  Go builder binary to build Pods.
 
 ### Out of Scope
 
