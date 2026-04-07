@@ -16,6 +16,58 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/api/v1/system/checks": {
+            "get": {
+                "description": "Returns the latest cached system check report. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "system"
+                ],
+                "summary": "Get system check report",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_cynkra_blockyard_internal_preflight.Report"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/system/checks/run": {
+            "post": {
+                "description": "Triggers a new dynamic check run and returns the combined report. Admin only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "system"
+                ],
+                "summary": "Run system checks",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_cynkra_blockyard_internal_preflight.Report"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.errorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/apps": {
             "get": {
                 "security": [
@@ -1506,6 +1558,71 @@ const docTemplate = `{
                         }
                     }
                 }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Update a tag's name. Requires admin or publisher role.",
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "tags"
+                ],
+                "summary": "Rename tag",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Tag ID",
+                        "name": "tagID",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "New tag name",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.renameTagRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.tagResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.errorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.errorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.errorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.errorResponse"
+                        }
+                    }
+                }
             }
         },
         "/tasks/{taskID}": {
@@ -2041,6 +2158,23 @@ const docTemplate = `{
                 }
             }
         },
+        "github_com_cynkra_blockyard_internal_db.DataMountRow": {
+            "type": "object",
+            "properties": {
+                "app_id": {
+                    "type": "string"
+                },
+                "readonly": {
+                    "type": "boolean"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "target": {
+                    "type": "string"
+                }
+            }
+        },
         "github_com_cynkra_blockyard_internal_db.DeploymentRow": {
             "type": "object",
             "properties": {
@@ -2139,6 +2273,79 @@ const docTemplate = `{
                 },
                 "sub": {
                     "type": "string"
+                }
+            }
+        },
+        "github_com_cynkra_blockyard_internal_preflight.Report": {
+            "type": "object",
+            "properties": {
+                "ran_at": {
+                    "type": "string"
+                },
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_cynkra_blockyard_internal_preflight.Result"
+                    }
+                },
+                "summary": {
+                    "$ref": "#/definitions/github_com_cynkra_blockyard_internal_preflight.Summary"
+                }
+            }
+        },
+        "github_com_cynkra_blockyard_internal_preflight.Result": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "description": "\"config\", \"docker\", \"runtime\"",
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "severity": {
+                    "$ref": "#/definitions/github_com_cynkra_blockyard_internal_preflight.Severity"
+                }
+            }
+        },
+        "github_com_cynkra_blockyard_internal_preflight.Severity": {
+            "type": "integer",
+            "enum": [
+                0,
+                1,
+                2,
+                3
+            ],
+            "x-enum-comments": {
+                "SeverityError": "blocks startup",
+                "SeverityInfo": "informational (operator awareness)",
+                "SeverityOK": "check passed",
+                "SeverityWarning": "security hazard or likely misconfiguration"
+            },
+            "x-enum-varnames": [
+                "SeverityOK",
+                "SeverityInfo",
+                "SeverityWarning",
+                "SeverityError"
+            ]
+        },
+        "github_com_cynkra_blockyard_internal_preflight.Summary": {
+            "type": "object",
+            "properties": {
+                "errors": {
+                    "type": "integer"
+                },
+                "info": {
+                    "type": "integer"
+                },
+                "ok": {
+                    "type": "integer"
+                },
+                "warnings": {
+                    "type": "integer"
                 }
             }
         },
@@ -2311,6 +2518,12 @@ const docTemplate = `{
                 "created_at": {
                     "type": "string"
                 },
+                "data_mounts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_cynkra_blockyard_internal_db.DataMountRow"
+                    }
+                },
                 "description": {
                     "type": "string"
                 },
@@ -2318,6 +2531,9 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "id": {
+                    "type": "string"
+                },
+                "image": {
                     "type": "string"
                 },
                 "max_sessions_per_worker": {
@@ -2342,6 +2558,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "relation": {
+                    "type": "string"
+                },
+                "runtime": {
                     "type": "string"
                 },
                 "status": {
@@ -2515,6 +2734,21 @@ const docTemplate = `{
                 }
             }
         },
+        "internal_api.dataMountInput": {
+            "type": "object",
+            "properties": {
+                "readonly": {
+                    "description": "defaults to true when omitted",
+                    "type": "boolean"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "target": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_api.deploymentsResponse": {
             "type": "object",
             "properties": {
@@ -2558,6 +2792,14 @@ const docTemplate = `{
                 },
                 "role": {
                     "description": "\"viewer\" | \"collaborator\"",
+                    "type": "string"
+                }
+            }
+        },
+        "internal_api.renameTagRequest": {
+            "type": "object",
+            "properties": {
+                "name": {
                     "type": "string"
                 }
             }
@@ -2707,7 +2949,16 @@ const docTemplate = `{
                 "cpu_limit": {
                     "type": "number"
                 },
+                "data_mounts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_api.dataMountInput"
+                    }
+                },
                 "description": {
+                    "type": "string"
+                },
+                "image": {
                     "type": "string"
                 },
                 "max_sessions_per_worker": {
@@ -2719,10 +2970,16 @@ const docTemplate = `{
                 "memory_limit": {
                     "type": "string"
                 },
+                "name": {
+                    "type": "string"
+                },
                 "pre_warmed_sessions": {
                     "type": "integer"
                 },
                 "refresh_schedule": {
+                    "type": "string"
+                },
+                "runtime": {
                     "type": "string"
                 },
                 "title": {

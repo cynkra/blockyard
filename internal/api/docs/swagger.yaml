@@ -17,6 +17,17 @@ definitions:
       uploaded_at:
         type: string
     type: object
+  github_com_cynkra_blockyard_internal_db.DataMountRow:
+    properties:
+      app_id:
+        type: string
+      readonly:
+        type: boolean
+      source:
+        type: string
+      target:
+        type: string
+    type: object
   github_com_cynkra_blockyard_internal_db.DeploymentRow:
     properties:
       app_id:
@@ -82,6 +93,57 @@ definitions:
         type: string
       sub:
         type: string
+    type: object
+  github_com_cynkra_blockyard_internal_preflight.Report:
+    properties:
+      ran_at:
+        type: string
+      results:
+        items:
+          $ref: '#/definitions/github_com_cynkra_blockyard_internal_preflight.Result'
+        type: array
+      summary:
+        $ref: '#/definitions/github_com_cynkra_blockyard_internal_preflight.Summary'
+    type: object
+  github_com_cynkra_blockyard_internal_preflight.Result:
+    properties:
+      category:
+        description: '"config", "docker", "runtime"'
+        type: string
+      message:
+        type: string
+      name:
+        type: string
+      severity:
+        $ref: '#/definitions/github_com_cynkra_blockyard_internal_preflight.Severity'
+    type: object
+  github_com_cynkra_blockyard_internal_preflight.Severity:
+    enum:
+    - 0
+    - 1
+    - 2
+    - 3
+    type: integer
+    x-enum-comments:
+      SeverityError: blocks startup
+      SeverityInfo: informational (operator awareness)
+      SeverityOK: check passed
+      SeverityWarning: security hazard or likely misconfiguration
+    x-enum-varnames:
+    - SeverityOK
+    - SeverityInfo
+    - SeverityWarning
+    - SeverityError
+  github_com_cynkra_blockyard_internal_preflight.Summary:
+    properties:
+      errors:
+        type: integer
+      info:
+        type: integer
+      ok:
+        type: integer
+      warnings:
+        type: integer
     type: object
   internal_api.AppResponse:
     properties:
@@ -194,11 +256,17 @@ definitions:
         type: number
       created_at:
         type: string
+      data_mounts:
+        items:
+          $ref: '#/definitions/github_com_cynkra_blockyard_internal_db.DataMountRow'
+        type: array
       description:
         type: string
       enabled:
         type: boolean
       id:
+        type: string
+      image:
         type: string
       max_sessions_per_worker:
         type: integer
@@ -215,6 +283,8 @@ definitions:
       refresh_schedule:
         type: string
       relation:
+        type: string
+      runtime:
         type: string
       status:
         type: string
@@ -327,6 +397,16 @@ definitions:
       sub:
         type: string
     type: object
+  internal_api.dataMountInput:
+    properties:
+      readonly:
+        description: defaults to true when omitted
+        type: boolean
+      source:
+        type: string
+      target:
+        type: string
+    type: object
   internal_api.deploymentsResponse:
     properties:
       deployments:
@@ -356,6 +436,11 @@ definitions:
         type: string
       role:
         description: '"viewer" | "collaborator"'
+        type: string
+    type: object
+  internal_api.renameTagRequest:
+    properties:
+      name:
         type: string
     type: object
   internal_api.rollbackRequest:
@@ -452,7 +537,13 @@ definitions:
         type: string
       cpu_limit:
         type: number
+      data_mounts:
+        items:
+          $ref: '#/definitions/internal_api.dataMountInput'
+        type: array
       description:
+        type: string
+      image:
         type: string
       max_sessions_per_worker:
         type: integer
@@ -460,9 +551,13 @@ definitions:
         type: integer
       memory_limit:
         type: string
+      name:
+        type: string
       pre_warmed_sessions:
         type: integer
       refresh_schedule:
+        type: string
+      runtime:
         type: string
       title:
         type: string
@@ -495,6 +590,41 @@ info:
   title: Blockyard API
   version: "1.0"
 paths:
+  /api/v1/system/checks:
+    get:
+      description: Returns the latest cached system check report. Admin only.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_cynkra_blockyard_internal_preflight.Report'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_api.errorResponse'
+      summary: Get system check report
+      tags:
+      - system
+  /api/v1/system/checks/run:
+    post:
+      description: Triggers a new dynamic check run and returns the combined report.
+        Admin only.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_cynkra_blockyard_internal_preflight.Report'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_api.errorResponse'
+      summary: Run system checks
+      tags:
+      - system
   /apps:
     get:
       description: List apps with RBAC filtering, search, tag filter, and pagination.
@@ -1466,6 +1596,48 @@ paths:
       security:
       - BearerAuth: []
       summary: Delete tag
+      tags:
+      - tags
+    patch:
+      consumes:
+      - application/json
+      description: Update a tag's name. Requires admin or publisher role.
+      parameters:
+      - description: Tag ID
+        in: path
+        name: tagID
+        required: true
+        type: string
+      - description: New tag name
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_api.renameTagRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_api.tagResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_api.errorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_api.errorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_api.errorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_api.errorResponse'
+      security:
+      - BearerAuth: []
+      summary: Rename tag
       tags:
       - tags
   /tasks/{taskID}:
