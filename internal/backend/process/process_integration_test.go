@@ -4,8 +4,12 @@ package process_test
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,32 +18,148 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 )
 
-// requireBwrap skips the test if bwrap is not installed or cannot
-// create user namespaces in the current environment (some kernels and
-// some hosted CI runners disable unprivileged userns). Distinguishing
-// "absent" from "broken" lets us run tests on developer machines that
-// have a working bwrap and skip cleanly on the CI image.
-func requireBwrap(t *testing.T) {
+// bwrapMode classifies the bwrap deployment mode the current test
+// process is running under. The three modes correspond directly to
+// the deployment modes documented in backends.md / phase-3-7.md:
+//
+//   - bwrapHostMapped — bwrap can write a uid_map that gives the
+//     sandboxed child a host-effective UID different from the
+//     caller's UID. This is what happens when blockyard runs as
+//     root (containerized mode) or when bwrap is setuid root
+//     (Fedora/RHEL default). Both spawn lifecycle tests and the
+//     uid-mapping preflight check should succeed.
+//
+//   - bwrapNoHostMap — bwrap can spawn but cannot write a uid_map
+//     to a foreign UID. The unprivileged kernel.userns_clone path
+//     where workers all end up running as the caller's host UID,
+//     defeating the iptables --uid-owner egress isolation. The
+//     preflight check is supposed to *catch* this — tests assert
+//     it does — and lifecycle tests skip because every spawn
+//     would fail with "setting up uid map: Permission denied".
+//
+//   - bwrapUnavailable — bwrap is missing, or bwrap can't even
+//     create a user namespace (no unprivileged userns at all).
+//     All process_test integration tests skip.
+type bwrapMode int
+
+const (
+	bwrapUnavailable bwrapMode = iota
+	bwrapNoHostMap
+	bwrapHostMapped
+)
+
+// detectBwrapMode probes the current bwrap configuration. It always
+// returns one of the three modes; cached so the probe runs once per
+// test process.
+var detectedBwrapMode struct {
+	once sync.Once
+	mode bwrapMode
+}
+
+func detectBwrapMode(t *testing.T) bwrapMode {
 	t.Helper()
+	detectedBwrapMode.once.Do(func() {
+		detectedBwrapMode.mode = probeBwrapMode()
+	})
+	return detectedBwrapMode.mode
+}
+
+func probeBwrapMode() bwrapMode {
 	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bwrap not available")
+		return bwrapUnavailable
 	}
-	// Smoke test: try a minimal sandbox. If it fails because the kernel
-	// disallows unprivileged user namespaces, skip rather than fail.
-	out, err := exec.Command("bwrap",
+	// Step 1: can bwrap even create a user namespace? Without --uid,
+	// bwrap maps the caller's UID to itself in the new namespace,
+	// which works on every kernel that allows unprivileged userns.
+	if err := exec.Command("bwrap",
 		"--ro-bind", "/", "/",
 		"--proc", "/proc",
 		"--dev", "/dev",
 		"--unshare-pid", "--unshare-user", "--unshare-uts",
 		"--die-with-parent", "--new-session",
-		"--", "/bin/true").CombinedOutput()
-	if err != nil {
-		t.Skipf("bwrap not functional in this environment: %v: %s", err, strings.TrimSpace(string(out)))
+		"--", "/bin/true").Run(); err != nil {
+		return bwrapUnavailable
+	}
+	// Step 2: can bwrap write a uid_map to a UID distinct from the
+	// caller's? Pick a probe UID guaranteed to differ.
+	probeUID := os.Getuid() + 12345
+	if probeUID == os.Getuid() { // overflow guard, never happens in practice
+		probeUID++
+	}
+	cmd := exec.Command("bwrap",
+		"--ro-bind", "/", "/",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--unshare-pid", "--unshare-user", "--unshare-uts",
+		"--uid", strconv.Itoa(probeUID),
+		"--gid", "65534",
+		"--die-with-parent", "--new-session",
+		"--", "/bin/sleep", "0.5")
+	if err := cmd.Start(); err != nil {
+		return bwrapNoHostMap
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	// Read /proc/<pid>/status from the parent's view to confirm the
+	// host-effective UID matches what we asked for.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
+		if err != nil {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "Uid:") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return bwrapNoHostMap
+			}
+			realUID, perr := strconv.Atoi(fields[1])
+			if perr != nil {
+				return bwrapNoHostMap
+			}
+			if realUID == probeUID {
+				return bwrapHostMapped
+			}
+			return bwrapNoHostMap
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return bwrapNoHostMap
+}
+
+// requireBwrap skips the test if bwrap is missing or can't even
+// create a user namespace. Use this for tests that just need bwrap
+// to spawn — they don't depend on the host UID mapping mode.
+func requireBwrap(t *testing.T) {
+	t.Helper()
+	if detectBwrapMode(t) == bwrapUnavailable {
+		t.Skip("bwrap not available or unprivileged userns disabled")
+	}
+}
+
+// requireHostUIDMapping skips the test unless bwrap can produce a
+// host-effective UID different from the caller's. Lifecycle tests
+// that spawn workers via the configured WorkerUID range need this;
+// in mode (c) every spawn would fail with "setting up uid map:
+// Permission denied".
+func requireHostUIDMapping(t *testing.T) {
+	t.Helper()
+	switch detectBwrapMode(t) {
+	case bwrapUnavailable:
+		t.Skip("bwrap not available")
+	case bwrapNoHostMap:
+		t.Skip("bwrap cannot write a host-effective uid_map (run as root, install bwrap setuid, or set up subuid ranges)")
 	}
 }
 
 func TestSpawnAndStop(t *testing.T) {
-	requireBwrap(t)
+	requireHostUIDMapping(t)
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{Backend: "process"},
@@ -123,7 +243,7 @@ func TestWorkerResourceUsageUnknownWorker(t *testing.T) {
 }
 
 func TestWorkerResourceUsageLiveWorker(t *testing.T) {
-	requireBwrap(t)
+	requireHostUIDMapping(t)
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{Backend: "process"},

@@ -315,11 +315,37 @@ jobs:
           path: coverage-ui.out
           retention-days: 1
 
+  # The process backend supports three deployment modes (see
+  # backends.md / phase-3-7.md decision #5). All three are tested
+  # in parallel because the security-relevant preflight check
+  # (checkBwrapHostUIDMapping) and the iptables --uid-owner contract
+  # behave differently per mode and we want regressions in any
+  # single mode to surface immediately.
+  #
+  #   - root        — sudo go test, blockyard-as-root containerized
+  #                   mode. bwrap inherits CAP_SYS_ADMIN and writes
+  #                   any uid_map.
+  #   - setuid      — `chmod u+s /usr/bin/bwrap` then run unprivileged.
+  #                   Matches the Fedora/RHEL production default and
+  #                   the recommended path for native non-root
+  #                   blockyard on Debian 12+/Ubuntu 24.04+.
+  #   - unprivileged — disable Ubuntu 24.04's AppArmor restriction
+  #                    on unprivileged user namespaces and run as
+  #                    the runner user with no setuid. Workers can
+  #                    spawn but uid_map writes to foreign UIDs are
+  #                    rejected by the kernel — exactly the silent
+  #                    failure mode the preflight check is supposed
+  #                    to detect. The integration tests assert that
+  #                    checkBwrapHostUIDMapping returns Error here.
   process:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'process')
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [root, setuid, unprivileged]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -327,15 +353,45 @@ jobs:
           go-version-file: go.mod
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      # Run under sudo so bwrap --uid/--gid can write uid_maps — the
-      # Ubuntu 24.04 AppArmor profile blocks that as an unprivileged
-      # user. Matches the design's "containerized mode" where
-      # blockyard runs as PID 1 root and inherits full capabilities.
-      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
+      - name: Configure mode (${{ matrix.mode }})
+        run: |
+          case "${{ matrix.mode }}" in
+            root)
+              : # nothing extra; tests run under sudo below
+              ;;
+            setuid)
+              sudo chmod u+s /usr/bin/bwrap
+              ;;
+            unprivileged)
+              # Ubuntu 24.04 ships an AppArmor profile that blocks
+              # unprivileged uid_map writes. Disable the kernel-level
+              # toggle so the test process can exercise the
+              # unprivileged-userns failure path the preflight check
+              # is supposed to catch.
+              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+              ;;
+          esac
+      - name: Run process backend tests (${{ matrix.mode }})
+        run: |
+          case "${{ matrix.mode }}" in
+            root)
+              sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) \
+                go test -tags process_test \
+                -coverprofile=coverage-process-${{ matrix.mode }}.out \
+                -coverpkg=./internal/... \
+                ./internal/backend/process/...
+              ;;
+            *)
+              go test -tags process_test \
+                -coverprofile=coverage-process-${{ matrix.mode }}.out \
+                -coverpkg=./internal/... \
+                ./internal/backend/process/...
+              ;;
+          esac
       - uses: actions/upload-artifact@v7
         with:
-          name: coverage-process
-          path: coverage-process.out
+          name: coverage-process-${{ matrix.mode }}
+          path: coverage-process-${{ matrix.mode }}.out
           retention-days: 1
 
   coverage:
