@@ -8,10 +8,10 @@ backend targets deployments where startup latency matters (scale-to-zero,
 internal-only) or where the Docker socket privilege is unacceptable.
 
 This phase covers the core implementation: config, backend struct,
-all nine `Backend` methods, port allocation, bwrap argument
-construction, log capture, and tests. Packaging and deployment
-artifacts (seccomp profile, Dockerfile, release binaries) are deferred
-to phase 3-8.
+all nine `Backend` methods, port and UID allocation, bwrap argument
+construction, log capture, worker egress preflight, and tests.
+Packaging and deployment artifacts (seccomp profile, Dockerfile,
+release binaries) are deferred to phase 3-8.
 
 Independent of the operations track (phases 3-2 through 3-5). Can be
 developed in parallel with phase 3-6 (data mounts) and phase 3-9
@@ -25,8 +25,9 @@ developed in parallel with phase 3-6 (data mounts) and phase 3-9
   not add migrations, but follows the same testing conventions.
 - **Backend interface** (`internal/backend/backend.go`) — the nine-method
   `Backend` interface, `WorkerSpec`, `BuildSpec`, `BuildResult`,
-  `LogStream`, `ManagedResource`, and `WorkerResourceUsageResult` types are
-  stable and unchanged.
+  `LogStream`, and `ManagedResource` types are stable. Phase 3-7 adds
+  two new methods (`CleanupOrphanResources`, `Preflight`) and renames
+  `ContainerStats` → `WorkerResourceUsage` (see deliverable #13).
 - **`backends.md` design doc** — process backend design rationale,
   isolation properties, deployment modes, and comparison with Docker.
   Phase 3-7 implements the design described there.
@@ -41,7 +42,8 @@ can be integrated later.
 
 1. **`[process]` config section** (`internal/config/config.go`) —
    `ProcessConfig` struct with `bwrap_path`, `r_path`,
-   `seccomp_profile`, `port_range_start`, `port_range_end`.
+   `seccomp_profile`, `port_range_start`, `port_range_end`,
+   `worker_uid_range_start`, `worker_uid_range_end`, `worker_gid`.
 2. **Backend selection** (`cmd/blockyard/main.go`) — `[server] backend`
    field gains `"process"` as a valid value. Startup instantiates
    `ProcessBackend` or `DockerBackend` accordingly.
@@ -50,24 +52,60 @@ can be integrated later.
 4. **Port allocator** (`internal/backend/process/ports.go`) — allocates
    and releases localhost ports from a configured range.
 5. **bwrap command construction** (`internal/backend/process/bwrap.go`)
-   — builds the bwrap argument list from a `WorkerSpec`.
+   — builds the bwrap argument list from a `WorkerSpec`, including
+   `--uid <N> --gid <G>` flags for the UID/GID egress isolation hooks
+   (see #9 below).
 6. **Log capture** (`internal/backend/process/logs.go`) — captures
    stdout/stderr from child processes and serves them via `LogStream`.
 7. **Build support** — bwrap-sandboxed builds with write access to the
    build output directory. Same `BuildSpec` → R script → pak flow as
    the Docker backend.
-8. **Preflight check** — verify `bwrap` is installed and user namespaces
-   are enabled (`/proc/sys/kernel/unprivileged_userns_clone`).
-9. **Tests** — unit tests for bwrap argument construction, port
-   allocation, and log capture. Integration tests (tagged
-   `process_test`) for spawn/health/stop lifecycle. Skipped when bwrap
-   is unavailable.
-10. **Backend interface decoupling** — renames and new methods to remove
+8. **Preflight check** — verify `bwrap` is installed, user namespaces
+   are enabled (`/proc/sys/kernel/unprivileged_userns_clone`), the
+   port and UID ranges are sized correctly, resource-limit fields
+   are not silently ignored, and worker egress is firewalled. The
+   egress check spawns the blockyard binary in `probe` mode under a
+   bwrap sandbox configured exactly like a real worker (same
+   UID/GID/namespaces) and tries TCP-connecting to the cloud metadata
+   endpoint plus configured Redis/OpenBao/database addresses. Any
+   reachable target produces a warning (or error, for metadata).
+9. **Worker UID/GID isolation** — each worker is allocated a unique
+   host UID from `worker_uid_range_start..end` and shares a single
+   `worker_gid` with all other workers. This is the foundation for
+   the egress firewall (decision #5): operators install
+   `iptables -m owner --gid-owner $worker_gid -j REJECT` to block
+   worker outbound traffic without affecting blockyard itself.
+   Implemented via a `uidAllocator` (parallel to the port allocator)
+   and `--uid <N> --gid <G>` flags in `bwrapArgs`.
+10. **`blockyard probe` subcommand** — small TCP-connectivity probe
+    used by `checkWorkerEgress`. Dispatched early in `main.go` based
+    on `os.Args[1]`. ~30 lines, no external tools required, runs
+    inside the same bwrap sandbox a worker uses.
+11. **Tests** — unit tests for bwrap argument construction, port
+    allocation, UID allocation, and log capture. Integration tests
+    (tagged `process_test`) for spawn/health/stop lifecycle. Skipped
+    when bwrap is unavailable.
+12. **Runtime tab template — handle zero memory limit**
+    (`internal/ui/templates/tab_runtime.html`). The current template
+    renders `{{.MemoryUsageBytes | humanBytes}} / {{.MemoryLimitBytes | humanBytes}}`
+    unconditionally. Process-backend workers have `MemoryLimitBytes = 0`
+    (no per-worker cgroup limit — see decision #4), which would render
+    as `"45 MB / 0 B"`. Wrap the limit in a conditional so it renders
+    just `"45 MB"` when the limit is zero. This is backend-agnostic:
+    Docker workers without a configured memory limit currently render
+    the same way and benefit from the fix.
+13. **Backend interface decoupling** — renames and new methods to remove
     Docker-specific assumptions from the interface and shared code:
     - Rename `ContainerStats` → `WorkerResourceUsage` and
       `ContainerStatsResult` → `WorkerResourceUsageResult` on the
       `Backend` interface (and all callers: `api/runtime.go`,
       `ui/sidebar.go`, `backend/mock/mock.go`, test stubs).
+      Implementation order: do this rename as one atomic commit
+      (interface + Docker backend + mock + all callers) *before*
+      writing `ProcessBackend`. The new backend's compile-time
+      interface check (`var _ backend.Backend = (*ProcessBackend)(nil)`)
+      depends on the renamed method existing on the interface; doing
+      it the other way around leaves the tree broken between commits.
     - Add `CleanupOrphanResources(ctx) error` to the `Backend`
       interface. Docker cleans iptables rules; process backend is a
       no-op. Removes the hard `docker` import from `ops/ops.go`.
@@ -75,12 +113,32 @@ can be integrated later.
       interface. Each backend checks its own prerequisites (Docker:
       socket/image/mounts; process: bwrap/R/userns/ports). `main.go`
       calls `be.Preflight()` instead of branching by backend type.
+      **Move backend-specific check functions out of `internal/preflight`
+      into the backend packages** to break the import cycle this would
+      otherwise create. Currently `internal/preflight/docker_checks.go`
+      imports `internal/backend/docker`; once `internal/backend`
+      imports `internal/preflight` for the `Report` return type, that
+      becomes `backend → preflight → backend/docker → backend`. The
+      fix is to move the docker check functions into
+      `internal/backend/docker/preflight.go` and the new process
+      check functions into `internal/backend/process/preflight.go`.
+      `internal/preflight` shrinks to a leaf package containing only
+      `Report`, `Result`, severity constants, log formatting, and
+      shared helpers (e.g. `addrs.go` for URL/DSN parsing). Both
+      backend packages import it; it imports neither. No cycle.
     - Move `ParseMemoryLimit` from `internal/backend/docker` to
       `internal/units` — it's used by `api/apps.go` for input
       validation and has nothing to do with Docker.
     - Move `default_memory_limit` and `default_cpu_limit` from
       `[docker]` to `[server]` — these are worker resource defaults,
-      not Docker concepts.
+      not Docker concepts. The Docker backend enforces them via cgroup
+      limits; a future k8s backend would translate them to Pod
+      resource requests/limits. The process backend (decision #6)
+      does not enforce per-worker limits — `process.RunPreflight`
+      emits a warning when either field is set to a non-default
+      value, so operators are not silently misled. The move is about
+      config shape for backend-neutral fields, not a claim that every
+      backend enforces them.
     - Move `store_retention` from `[docker]` to `[storage]` — it
       controls R library cache eviction, which is backend-neutral.
     - Rename `skip_docker_preflight` → `skip_preflight` on
@@ -94,11 +152,14 @@ Add `ProcessConfig` to `internal/config/config.go`:
 
 ```go
 type ProcessConfig struct {
-    BwrapPath      string `toml:"bwrap_path"`       // path to bubblewrap binary
-    RPath          string `toml:"r_path"`            // path to R binary
-    SeccompProfile string `toml:"seccomp_profile"`   // path to custom seccomp JSON; empty = built-in
-    PortRangeStart int    `toml:"port_range_start"`  // first port for workers (inclusive)
-    PortRangeEnd   int    `toml:"port_range_end"`    // last port for workers (inclusive)
+    BwrapPath         string `toml:"bwrap_path"`           // path to bubblewrap binary
+    RPath             string `toml:"r_path"`                // path to R binary
+    SeccompProfile    string `toml:"seccomp_profile"`       // path to custom seccomp JSON; empty = built-in
+    PortRangeStart    int    `toml:"port_range_start"`      // first port for workers (inclusive)
+    PortRangeEnd      int    `toml:"port_range_end"`        // last port for workers (inclusive)
+    WorkerUIDStart    int    `toml:"worker_uid_range_start"` // first host UID for workers (inclusive)
+    WorkerUIDEnd      int    `toml:"worker_uid_range_end"`   // last host UID for workers (inclusive)
+    WorkerGID         int    `toml:"worker_gid"`            // shared host GID for all workers (used by egress firewall rules)
 }
 ```
 
@@ -163,6 +224,15 @@ func processDefaults(c *ProcessConfig) {
     if c.PortRangeEnd == 0 {
         c.PortRangeEnd = 10999
     }
+    if c.WorkerUIDStart == 0 {
+        c.WorkerUIDStart = 60000
+    }
+    if c.WorkerUIDEnd == 0 {
+        c.WorkerUIDEnd = 60999
+    }
+    if c.WorkerGID == 0 {
+        c.WorkerGID = 65534 // nogroup
+    }
 }
 ```
 
@@ -181,6 +251,16 @@ case "process":
     if cfg.Process.PortRangeEnd < cfg.Process.PortRangeStart {
         return fmt.Errorf("config: process.port_range_end must be >= port_range_start")
     }
+    if cfg.Process.WorkerUIDEnd < cfg.Process.WorkerUIDStart {
+        return fmt.Errorf("config: process.worker_uid_range_end must be >= worker_uid_range_start")
+    }
+    // Worker UID range size should accommodate peak worker count + headroom
+    // for rolling updates (phase 3-8 runs old + new workers concurrently).
+    uidCount := cfg.Process.WorkerUIDEnd - cfg.Process.WorkerUIDStart + 1
+    portCount := cfg.Process.PortRangeEnd - cfg.Process.PortRangeStart + 1
+    if uidCount < portCount {
+        return fmt.Errorf("config: process.worker_uid_range must be at least as large as port_range (got %d UIDs vs %d ports)", uidCount, portCount)
+    }
 default:
     return fmt.Errorf("config: server.backend must be \"docker\" or \"process\", got %q", cfg.Server.Backend)
 }
@@ -198,7 +278,45 @@ r_path = "/usr/bin/R"
 seccomp_profile = ""
 port_range_start = 10000
 port_range_end = 10999
+worker_uid_range_start = 60000
+worker_uid_range_end = 60999
+worker_gid = 65534
 ```
+
+**Sizing the port range.** Each running worker consumes one port from
+the range. The default range (10000-10999) provides 1000 ports — enough
+for most deployments. Operators who plan to enable rolling updates
+(phase 3-8) should size the range for ~2x peak worker count, since
+both the old and new server allocate from the same range during the
+overlap window. Running close to range capacity will block rolling
+updates with a "no free ports" error.
+
+**Worker UID range and GID.** Each running worker is assigned a unique
+host UID from `worker_uid_range_start..worker_uid_range_end`, and all
+workers share `worker_gid` as their host GID. This is the foundation
+for egress isolation: blockyard runs as its own UID and can reach
+Redis/database/OpenBao freely; workers run as different UIDs in a
+shared GID, and operators install an iptables rule blocking outbound
+traffic from that GID:
+
+```sh
+# Allow blockyard's own egress
+iptables -A OUTPUT -m owner --uid-owner blockyard -j ACCEPT
+# Block worker egress (covers all workers via shared GID)
+iptables -A OUTPUT -m owner --gid-owner 65534 -j REJECT
+```
+
+The `process.RunPreflight` check `checkWorkerEgress` verifies this is
+in place by spawning a probe under the worker UID/GID and attempting
+TCP connections to sensitive endpoints (cloud metadata, Redis,
+OpenBao, database). See step 7 and decision #5 for the threat model
+and limitations.
+
+The UID range must be at least as large as the port range, since each
+worker consumes one port and one UID. Defaults: 60000-60999 (1000
+UIDs) and GID 65534 (`nogroup`). Operators may prefer a dedicated
+group like `blockyard-workers`; in that case set `worker_gid` to that
+group's numeric ID.
 
 Auto-construct from env vars (same pattern as other optional sections):
 
@@ -296,6 +414,65 @@ func (p *portAllocator) InUse() int {
 }
 ```
 
+### Step 2b: UID allocator
+
+New file `internal/backend/process/uids.go`. Same shape as the port
+allocator but without the bind probe — UIDs aren't a host resource we
+need to verify; they're just identifiers for filesystem permissions
+and iptables `--uid-owner` rules. The allocator is per-process state,
+not coordinated across blockyard instances. Phase 3-8 (rolling
+updates) must size the UID range for ~2x peak workers, same as the
+port range.
+
+```go
+package process
+
+import (
+    "fmt"
+    "sync"
+)
+
+// uidAllocator manages a fixed range of host UIDs for workers.
+// Each running worker is assigned a unique UID; on exit the UID is
+// returned to the pool. The allocator is in-memory only.
+type uidAllocator struct {
+    mu    sync.Mutex
+    start int
+    used  []bool // index = uid - start
+}
+
+func newUIDAllocator(start, end int) *uidAllocator {
+    size := end - start + 1
+    return &uidAllocator{
+        start: start,
+        used:  make([]bool, size),
+    }
+}
+
+// Alloc returns the next free UID, or an error if all UIDs are in use.
+func (u *uidAllocator) Alloc() (int, error) {
+    u.mu.Lock()
+    defer u.mu.Unlock()
+    for i, taken := range u.used {
+        if !taken {
+            u.used[i] = true
+            return u.start + i, nil
+        }
+    }
+    return 0, fmt.Errorf("process backend: all %d worker UIDs in use", len(u.used))
+}
+
+// Release returns a UID to the pool. No-op if out of range.
+func (u *uidAllocator) Release(uid int) {
+    u.mu.Lock()
+    defer u.mu.Unlock()
+    idx := uid - u.start
+    if idx >= 0 && idx < len(u.used) {
+        u.used[idx] = false
+    }
+}
+```
+
 ### Step 3: bwrap command construction
 
 New file `internal/backend/process/bwrap.go`. Builds the bwrap
@@ -330,12 +507,23 @@ import (
 )
 
 // bwrapArgs constructs the bwrap command-line arguments for a worker.
-func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port int) []string {
+// uid is the host UID this worker runs as (allocated from the worker
+// UID pool); gid is the shared host GID for all workers (used by the
+// egress firewall rule). Together they let operators install
+// `iptables -m owner --gid-owner $worker_gid -j REJECT` to block
+// worker egress without affecting blockyard itself.
+func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gid int) []string {
     args := []string{
         // Namespace isolation
         "--unshare-pid",
         "--unshare-user",
         "--unshare-uts",
+
+        // Host identity — workers run as a per-worker UID and a shared
+        // GID. The UID gives per-worker filesystem isolation; the GID
+        // is the target of the operator's egress firewall rule.
+        "--uid", strconv.Itoa(uid),
+        "--gid", strconv.Itoa(gid),
 
         // Process lifecycle
         "--die-with-parent",
@@ -402,12 +590,18 @@ func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port int) []s
 
 // bwrapBuildArgs constructs the bwrap arguments for a build task.
 // Same root strategy as workers but with additional writable mounts
-// for build output.
-func bwrapBuildArgs(cfg *config.ProcessConfig, spec backend.BuildSpec) []string {
+// for build output. uid/gid follow the same convention as bwrapArgs;
+// builds use the next free worker UID and the same shared GID, so
+// build egress is also covered by the operator's firewall rule.
+func bwrapBuildArgs(cfg *config.ProcessConfig, spec backend.BuildSpec, uid, gid int) []string {
     args := []string{
         "--unshare-pid",
         "--unshare-user",
         "--unshare-uts",
+
+        "--uid", strconv.Itoa(uid),
+        "--gid", strconv.Itoa(gid),
+
         "--die-with-parent",
         "--new-session",
 
@@ -663,6 +857,7 @@ import (
 
     "github.com/cynkra/blockyard/internal/backend"
     "github.com/cynkra/blockyard/internal/config"
+    "github.com/cynkra/blockyard/internal/preflight"
 )
 
 // Compile-time interface check.
@@ -679,6 +874,7 @@ type workerProc struct {
     cmd      *exec.Cmd
     process  *os.Process
     port     int
+    uid      int           // host UID this worker runs as (returned to pool on exit)
     spec     backend.WorkerSpec
     logs     *logBuffer
     done     chan struct{} // closed when process exits
@@ -687,25 +883,40 @@ type workerProc struct {
 
 // ProcessBackend implements backend.Backend using bubblewrap.
 type ProcessBackend struct {
-    cfg   *config.ProcessConfig
-    ports *portAllocator
+    cfg     *config.ProcessConfig // shortcut for fullCfg.Process; used in hot paths
+    fullCfg *config.Config        // held for Preflight() — needs Redis/OpenBao/DB addrs for egress probe and Server.DefaultMemoryLimit/CPULimit for the resource-limit warning
+    ports   *portAllocator
+    uids    *uidAllocator
 
     mu      sync.Mutex
     workers map[string]*workerProc // keyed by worker ID
 }
 
 // New creates a ProcessBackend. Verifies that bwrap exists at the
-// configured path.
-func New(cfg *config.ProcessConfig) (*ProcessBackend, error) {
+// configured path. The full config is stored so Preflight() can read
+// the addresses of Redis/OpenBao/database for the egress probe and
+// the server-level resource-limit fields for the warning check.
+func New(fullCfg *config.Config) (*ProcessBackend, error) {
+    cfg := fullCfg.Process
     if _, err := exec.LookPath(cfg.BwrapPath); err != nil {
         return nil, fmt.Errorf("process backend: bwrap not found at %q: %w",
             cfg.BwrapPath, err)
     }
     return &ProcessBackend{
         cfg:     cfg,
+        fullCfg: fullCfg,
         ports:   newPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd),
+        uids:    newUIDAllocator(cfg.WorkerUIDStart, cfg.WorkerUIDEnd),
         workers: make(map[string]*workerProc),
     }, nil
+}
+
+// Preflight implements backend.Backend. The check functions live in
+// the same package (this file's siblings) — see preflight.go for the
+// implementations. Returning the report through the interface lets
+// main.go run the preflight without knowing which backend is active.
+func (b *ProcessBackend) Preflight(_ context.Context) (*preflight.Report, error) {
+    return RunPreflight(b.cfg, b.fullCfg), nil
 }
 
 func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
@@ -713,8 +924,13 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
     if err != nil {
         return err
     }
+    uid, err := b.uids.Alloc()
+    if err != nil {
+        b.ports.Release(port)
+        return err
+    }
 
-    args := bwrapArgs(b.cfg, spec, port)
+    args := bwrapArgs(b.cfg, spec, port, uid, b.cfg.WorkerGID)
 
     // exec.Command, not exec.CommandContext — the ctx passed to Spawn is
     // typically a request context that cancels when the handler returns.
@@ -728,10 +944,16 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
     // a server crash would leave orphaned bwrap+R processes.
     cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 
+    // Helper to release both port and UID on error.
+    releaseSlots := func() {
+        b.ports.Release(port)
+        b.uids.Release(uid)
+    }
+
     // Seccomp — splice --seccomp <fd> args before the "--" separator.
     // No-op when SeccompProfile is empty (phase 3-8 ships the profile).
     if secArgs, err := applySeccomp(cmd, b.cfg.SeccompProfile); err != nil {
-        b.ports.Release(port)
+        releaseSlots()
         return fmt.Errorf("process backend: seccomp: %w", err)
     } else if len(secArgs) > 0 {
         spliceBeforeSeparator(cmd, secArgs)
@@ -755,12 +977,12 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
 
     stdout, err := cmd.StdoutPipe()
     if err != nil {
-        b.ports.Release(port)
+        releaseSlots()
         return fmt.Errorf("process backend: stdout pipe: %w", err)
     }
     stderr, err := cmd.StderrPipe()
     if err != nil {
-        b.ports.Release(port)
+        releaseSlots()
         return fmt.Errorf("process backend: stderr pipe: %w", err)
     }
 
@@ -772,7 +994,7 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
     err = cmd.Start()
     runtime.UnlockOSThread()
     if err != nil {
-        b.ports.Release(port)
+        releaseSlots()
         return fmt.Errorf("process backend: start bwrap: %w", err)
     }
 
@@ -791,8 +1013,9 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
         delete(b.workers, spec.WorkerID)
         b.mu.Unlock()
         b.ports.Release(port)
+        b.uids.Release(uid)
         slog.Info("process backend: worker exited",
-            "worker_id", spec.WorkerID, "port", port)
+            "worker_id", spec.WorkerID, "port", port, "uid", uid)
     }()
 
     b.mu.Lock()
@@ -800,6 +1023,7 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
         cmd:     cmd,
         process: cmd.Process,
         port:    port,
+        uid:     uid,
         spec:    spec,
         logs:    logs,
         done:    done,
@@ -809,6 +1033,7 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
     slog.Info("process backend: spawned worker",
         "worker_id", spec.WorkerID,
         "port", port,
+        "uid", uid,
         "pid", cmd.Process.Pid)
     return nil
 }
@@ -884,7 +1109,15 @@ func (b *ProcessBackend) Addr(_ context.Context, id string) (string, error) {
 }
 
 func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (backend.BuildResult, error) {
-    args := bwrapBuildArgs(b.cfg, spec)
+    // Builds run under the same UID pool as workers — they're sandboxed
+    // R processes that share the worker firewall rules.
+    uid, err := b.uids.Alloc()
+    if err != nil {
+        return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
+    }
+    defer b.uids.Release(uid)
+
+    args := bwrapBuildArgs(b.cfg, spec, uid, b.cfg.WorkerGID)
     // Context is appropriate here — builds are bounded, run-to-completion
     // tasks. If the caller cancels, the build should stop.
     cmd := exec.CommandContext(ctx, b.cfg.BwrapPath, args...) //nolint:gosec // G204: args from validated config
@@ -1109,7 +1342,7 @@ Update `cmd/blockyard/main.go` to select the backend based on config:
 var be backend.Backend
 switch cfg.Server.Backend {
 case "process":
-    be, err = process.New(cfg.Process)
+    be, err = process.New(cfg)
     if err != nil {
         slog.Error("failed to create process backend", "error", err)
         os.Exit(1)
@@ -1144,10 +1377,12 @@ if !cfg.Server.SkipPreflight {
 ```
 
 Each backend implements `Preflight(ctx) (*preflight.Report, error)`:
-- Docker: the existing `RunDockerChecks` logic (socket, image pull,
-  mount detection, builder check).
-- Process: the new `RunProcessChecks` logic (bwrap, R, userns, port
-  range).
+- Docker: the existing check logic (socket, image pull, mount
+  detection, builder check), moved from `internal/preflight` into
+  `internal/backend/docker/preflight.go`.
+- Process: the new check logic (bwrap, R, userns, port range,
+  resource-limit warning, worker egress probe), in
+  `internal/backend/process/preflight.go`.
 
 This removes the backend-type branching from `main.go` and ensures
 future backends (k8s) only need to implement the interface method.
@@ -1178,128 +1413,332 @@ This removes the `internal/backend/docker` import from `ops/ops.go`.
 ### Step 7: Preflight check
 
 Add a process-backend preflight check to
-`internal/preflight/process_checks.go`. Follows the same pattern as
-`config_checks.go`: individual `check*` functions return a `Result`,
-and the top-level `Run*Checks` function collects them.
+`internal/backend/process/preflight.go`. Follows the same pattern as
+`config_checks.go` in `internal/preflight`: individual `check*`
+functions return a `preflight.Result`, and the top-level
+`RunPreflight` function collects them into a `preflight.Report`.
 
-`ProcessBackend.Preflight()` delegates to `RunProcessChecks` —
-the check functions stay in the `preflight` package (not `process`)
-to avoid a circular import.
+The check functions live in the `process` package (not the
+`preflight` package) to keep the cycle broken: `internal/preflight`
+becomes a leaf package containing only `Report`, `Result`, severity
+constants, log formatting, and shared helpers. Both `backend/docker`
+and `backend/process` import it for the types. The same pattern
+applies to docker — `internal/preflight/docker_checks.go` moves to
+`internal/backend/docker/preflight.go` (see decoupling deliverable).
+
+`ProcessBackend.Preflight()` simply calls the package-local
+`RunPreflight` function and returns its report.
 
 ```go
-package preflight
+package process
 
 import (
     "fmt"
     "os"
     "os/exec"
+    "strconv"
     "strings"
     "time"
 
     "github.com/cynkra/blockyard/internal/config"
+    "github.com/cynkra/blockyard/internal/preflight"
 )
 
-// RunProcessChecks verifies the process backend prerequisites.
-func RunProcessChecks(cfg *config.ProcessConfig) *Report {
-    r := &Report{RanAt: time.Now().UTC()}
-    r.add(checkBwrap(cfg))
-    r.add(checkRBinary(cfg))
-    r.add(checkUserNamespaces())
-    r.add(checkPortRange(cfg))
+// RunPreflight verifies the process backend prerequisites. Called by
+// (*ProcessBackend).Preflight() with the full config so the egress
+// probe can read Redis/OpenBao/database addresses and the resource-
+// limit check can read server-level defaults.
+func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config) *preflight.Report {
+    r := &preflight.Report{RanAt: time.Now().UTC()}
+    r.Add(checkBwrap(cfg))
+    r.Add(checkRBinary(cfg))
+    r.Add(checkUserNamespaces())
+    r.Add(checkPortRange(cfg))
+    r.Add(checkResourceLimits(&fullCfg.Server))
+    r.Add(checkWorkerEgress(cfg, fullCfg))
     return r
 }
 
-func checkBwrap(cfg *config.ProcessConfig) Result {
+func checkBwrap(cfg *config.ProcessConfig) preflight.Result {
     if _, err := exec.LookPath(cfg.BwrapPath); err != nil {
-        return Result{
+        return preflight.Result{
             Name:     "bwrap_available",
-            Severity: SeverityError,
+            Severity: preflight.SeverityError,
             Message:  fmt.Sprintf("bwrap not found at %q", cfg.BwrapPath),
             Category: "process",
         }
     }
     out, err := exec.Command(cfg.BwrapPath, "--version").CombinedOutput()
     if err != nil {
-        return Result{
+        return preflight.Result{
             Name:     "bwrap_available",
-            Severity: SeverityError,
+            Severity: preflight.SeverityError,
             Message:  fmt.Sprintf("bwrap --version failed: %v", err),
             Category: "process",
         }
     }
-    return Result{
+    return preflight.Result{
         Name:     "bwrap_available",
-        Severity: SeverityOK,
+        Severity: preflight.SeverityOK,
         Message:  fmt.Sprintf("bwrap version: %s", strings.TrimSpace(string(out))),
         Category: "process",
     }
 }
 
-func checkRBinary(cfg *config.ProcessConfig) Result {
+func checkRBinary(cfg *config.ProcessConfig) preflight.Result {
     if _, err := exec.LookPath(cfg.RPath); err != nil {
-        return Result{
+        return preflight.Result{
             Name:     "r_binary",
-            Severity: SeverityError,
+            Severity: preflight.SeverityError,
             Message:  fmt.Sprintf("R not found at %q", cfg.RPath),
             Category: "process",
         }
     }
-    return Result{
+    return preflight.Result{
         Name:     "r_binary",
-        Severity: SeverityOK,
+        Severity: preflight.SeverityOK,
         Message:  "R binary found",
         Category: "process",
     }
 }
 
-func checkUserNamespaces() Result {
+func checkUserNamespaces() preflight.Result {
     data, err := os.ReadFile("/proc/sys/kernel/unprivileged_userns_clone")
     if err != nil {
         // File doesn't exist — kernel allows unprivileged userns by default.
-        return Result{
+        return preflight.Result{
             Name:     "user_namespaces",
-            Severity: SeverityOK,
+            Severity: preflight.SeverityOK,
             Message:  "unprivileged user namespaces available (sysctl absent, default allow)",
             Category: "process",
         }
     }
     if strings.TrimSpace(string(data)) == "0" {
-        return Result{
+        return preflight.Result{
             Name:     "user_namespaces",
-            Severity: SeverityError,
+            Severity: preflight.SeverityError,
             Message:  "unprivileged user namespaces disabled (kernel.unprivileged_userns_clone = 0); required for bwrap --unshare-user",
             Category: "process",
         }
     }
-    return Result{
+    return preflight.Result{
         Name:     "user_namespaces",
-        Severity: SeverityOK,
+        Severity: preflight.SeverityOK,
         Message:  "unprivileged user namespaces enabled",
         Category: "process",
     }
 }
 
-func checkPortRange(cfg *config.ProcessConfig) Result {
+// checkResourceLimits warns when default_memory_limit or default_cpu_limit
+// are set but the process backend cannot enforce them (decision #6).
+// The fields live in [server] (not [docker]) so the same TOML works
+// for Docker and a future k8s backend, but the process backend silently
+// ignoring them would be a footgun. The warning makes the gap explicit.
+func checkResourceLimits(srvCfg *config.ServerConfig) preflight.Result {
+    var unset []string
+    if srvCfg.DefaultMemoryLimit != "" {
+        unset = append(unset, fmt.Sprintf("default_memory_limit=%q", srvCfg.DefaultMemoryLimit))
+    }
+    if srvCfg.DefaultCPULimit != 0 {
+        unset = append(unset, fmt.Sprintf("default_cpu_limit=%v", srvCfg.DefaultCPULimit))
+    }
+    if len(unset) == 0 {
+        return preflight.Result{
+            Name:     "resource_limits",
+            Severity: preflight.SeverityOK,
+            Message:  "no per-worker resource limits configured",
+            Category: "process",
+        }
+    }
+    return preflight.Result{
+        Name:     "resource_limits",
+        Severity: preflight.SeverityWarning,
+        Message: fmt.Sprintf(
+            "process backend does not enforce per-worker resource limits; ignoring %s. "+
+                "Use the Docker backend if you need cgroup-enforced limits.",
+            strings.Join(unset, ", "),
+        ),
+        Category: "process",
+    }
+}
+
+func checkPortRange(cfg *config.ProcessConfig) preflight.Result {
     portCount := cfg.PortRangeEnd - cfg.PortRangeStart + 1
     if portCount < 10 {
-        return Result{
+        return preflight.Result{
             Name:     "port_range",
-            Severity: SeverityWarning,
+            Severity: preflight.SeverityWarning,
             Message:  fmt.Sprintf("port range only has %d ports; consider widening [process] port_range_start/port_range_end", portCount),
             Category: "process",
         }
     }
-    return Result{
+    return preflight.Result{
         Name:     "port_range",
-        Severity: SeverityOK,
+        Severity: preflight.SeverityOK,
         Message:  fmt.Sprintf("port range: %d ports available", portCount),
         Category: "process",
     }
 }
+
+// checkWorkerEgress verifies that workers cannot reach sensitive
+// network endpoints. It spawns the blockyard binary in `probe` mode
+// inside a bwrap sandbox configured exactly like a real worker — same
+// UID, same GID, same namespace flags — and asks it to TCP-connect
+// to a list of targets. Any successful connection from inside the
+// sandbox means a real worker would also succeed, indicating the
+// operator's egress firewall is missing or misconfigured.
+//
+// Targets:
+//   - 169.254.169.254:80 (cloud metadata) — always probed; ERROR if
+//     reachable since there is no legitimate reason for a worker to
+//     read instance credentials.
+//   - Redis address (if configured) — WARNING if reachable.
+//   - OpenBao address (if configured) — WARNING if reachable.
+//   - Database TCP address (if not SQLite) — WARNING if reachable.
+//
+// The probe binary is the same blockyard binary, invoked with
+// `blockyard probe --tcp host:port` (see step 7b). It exits 0 on
+// successful TCP connect, 1 on failure. No external tools required.
+func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) preflight.Result {
+    // Build the target list from config.
+    type target struct {
+        name     string
+        addr     string
+        critical bool // true → ERROR if reachable; false → WARNING
+    }
+    targets := []target{
+        {name: "cloud_metadata", addr: "169.254.169.254:80", critical: true},
+    }
+    if fullCfg.Redis != nil && fullCfg.Redis.URL != "" {
+        if hp := tcpAddrFromRedisURL(fullCfg.Redis.URL); hp != "" {
+            targets = append(targets, target{name: "redis", addr: hp})
+        }
+    }
+    if fullCfg.Openbao != nil && fullCfg.Openbao.Address != "" {
+        if hp := tcpAddrFromHTTPURL(fullCfg.Openbao.Address); hp != "" {
+            targets = append(targets, target{name: "openbao", addr: hp})
+        }
+    }
+    if hp := tcpAddrFromDBConfig(fullCfg.Database); hp != "" {
+        targets = append(targets, target{name: "database", addr: hp})
+    }
+
+    // Use the start of the worker UID range as the probe UID. Preflight
+    // runs at startup before any worker spawns, so the allocator state
+    // is irrelevant — there's nothing to collide with.
+    probeUID := cfg.WorkerUIDStart
+    probeGID := cfg.WorkerGID
+
+    var reachable, blocked []string
+    var critical bool
+    for _, t := range targets {
+        if probeReachable(cfg, probeUID, probeGID, t.addr) {
+            reachable = append(reachable, fmt.Sprintf("%s (%s)", t.name, t.addr))
+            if t.critical {
+                critical = true
+            }
+        } else {
+            blocked = append(blocked, t.name)
+        }
+    }
+
+    if len(reachable) == 0 {
+        return preflight.Result{
+            Name:     "worker_egress",
+            Severity: preflight.SeverityOK,
+            Message:  fmt.Sprintf("worker egress blocked for: %s", strings.Join(blocked, ", ")),
+            Category: "process",
+        }
+    }
+    severity := preflight.SeverityWarning
+    if critical {
+        severity = preflight.SeverityError
+    }
+    return preflight.Result{
+        Name:     "worker_egress",
+        Severity: severity,
+        Message: fmt.Sprintf(
+            "workers can reach sensitive endpoints: %s. "+
+                "Configure egress filtering with: "+
+                "`iptables -A OUTPUT -m owner --gid-owner %d -j REJECT` "+
+                "(or use a dedicated worker GID). See backends.md for details.",
+            strings.Join(reachable, ", "), cfg.WorkerGID,
+        ),
+        Category: "process",
+    }
+}
+
+// probeReachable spawns the blockyard binary in probe mode under the
+// same bwrap config a worker would use, and reports whether the
+// target TCP address is reachable. Returns false on probe error
+// (treated as "not reachable" — fail-safe for the warning, not for
+// security).
+func probeReachable(cfg *config.ProcessConfig, uid, gid int, target string) bool {
+    self, err := os.Executable()
+    if err != nil {
+        return false
+    }
+    args := []string{
+        "--unshare-pid", "--unshare-user", "--unshare-uts",
+        "--uid", strconv.Itoa(uid),
+        "--gid", strconv.Itoa(gid),
+        "--die-with-parent", "--new-session",
+        "--ro-bind", "/", "/",
+        "--tmpfs", "/tmp",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--chdir", "/tmp",
+        "--cap-drop", "ALL",
+        "--",
+        self, "probe", "--tcp", target, "--timeout", "2s",
+    }
+    cmd := exec.Command(cfg.BwrapPath, args...) //nolint:gosec // G204
+    err = cmd.Run()
+    return err == nil // exit 0 = connect succeeded
+}
 ```
+
+Helpers `tcpAddrFromRedisURL`, `tcpAddrFromHTTPURL`, and
+`tcpAddrFromDBConfig` parse standard URL/DSN forms and return
+`host:port` strings (or `""` if the config is local-only, e.g. SQLite
+file paths). They live in `internal/preflight/addrs.go` so both the
+docker and process backend preflight code can reuse them.
 
 Wiring into `main.go` is handled by the `be.Preflight(ctx)` call
 described in step 6 — no backend-specific branching needed.
+`(*ProcessBackend).Preflight()` calls `process.RunPreflight(b.cfg, b.fullCfg)`
+and returns the resulting report. Because `process.RunPreflight` lives
+in the backend package (not the preflight package), it can freely
+import `internal/preflight` for the `Report`/`Result` types without
+creating a cycle.
+
+### Step 7b: `blockyard probe` subcommand
+
+The `checkWorkerEgress` preflight needs a binary it can spawn inside
+a bwrap sandbox to test TCP reachability. Rather than depending on
+external tools (`nc`, `curl`, etc.) that may not be installed in the
+sandbox's read-only root, blockyard ships its own probe mode.
+
+In `cmd/blockyard/main.go`, dispatch on the first argument before
+`flag.Parse()`:
+
+```go
+if len(os.Args) > 1 && os.Args[1] == "probe" {
+    if err := runProbe(os.Args[2:]); err != nil {
+        os.Exit(1)
+    }
+    os.Exit(0)
+}
+```
+
+`runProbe` is a small function (~30 lines) that parses `--tcp host:port`
+and `--timeout duration`, attempts a TCP connect with the timeout, and
+returns nil on success or an error on failure. No imports beyond
+`net`, `flag`, and `time`.
+
+The probe runs inside the bwrap sandbox with the same UID/GID/namespaces
+a worker would have. From the firewall's perspective, the connect is
+indistinguishable from a worker connect — which is exactly the point.
 
 ### Step 8: Orchestrator and rolling update compatibility
 
@@ -1315,12 +1754,58 @@ srv.Backend.(*docker.DockerBackend)` type assertion in `main.go`)
 naturally excludes `ProcessBackend`, leaving `orch = nil`.
 
 **Phase 3-8** adds a process-backend orchestrator variant. The
-mechanism differs from Docker: instead of cloning a container, the
-old server starts a new blockyard process. Both servers share state
-via Redis. The old server drains (stops accepting new sessions) and
-stays alive until all its sessions end — workers are child processes
-and die with the parent, so the server must outlive them. Once
-drained, the old server exits cleanly with zero workers remaining.
+mechanism is parallel-server cutover, not container cloning: the old
+blockyard stays running while a new blockyard starts alongside it on a
+different port, an external reverse proxy fronts both, and existing
+sessions stay on the old server until they end naturally. The old
+server exits when its session count hits zero; its workers die with
+it (Pdeathsig), but they have no live sessions left at that point.
+
+Workers are *not* handed off between servers. Each server owns its own
+workers for its full lifetime. This is a deliberate design choice: see
+the worker survival discussion below. The implication is that the new
+server starts with an empty worker pool and the autoscaler rebuilds it
+from new traffic — a cold-pool degradation versus the Docker rolling
+update (which inherits warm workers via Redis worker state).
+
+**Prerequisites for phase 3-8 process rolling updates:**
+
+- **Redis** — same as Docker rolling updates. Sessions must be in
+  Redis so the new server can serve sessions whose cookies were issued
+  by the old server.
+- **External reverse proxy with service discovery.** Two blockyards on
+  the same host bind different ports; an external proxy (Caddy,
+  Traefik, nginx with consul-template, etc.) discovers both and routes
+  to either. Same operational shape as the Docker rolling update,
+  minus the Docker label discovery.
+- **Port range sized for overlap.** Both servers allocate worker ports
+  from the same `[process] port_range`. During the overlap window the
+  range must accommodate the union of both servers' workers. Operators
+  who run close to range capacity will need to widen the range before
+  enabling rolling updates. See the `[process]` config section.
+
+**Worker survival was considered and rejected.** An alternative design
+("option C" in the phase 3-7 review) would drop `Pdeathsig` so workers
+survive their parent server, persist worker state to Redis, write
+worker logs to files, and add a TTL-based reaper. The new server would
+adopt the old server's workers via Redis instead of spawning fresh
+ones.
+
+The benefit of that design is narrow: it only matters for users whose
+WebSocket is dropped *during* the cutover and reconnects within
+seconds. In the parallel-server model the old server keeps running,
+those users never see a disconnect, and there is nothing to "preserve"
+across a reconnect that does not happen. The two scenarios where
+worker survival would help — old server crash mid-drain, or operator
+forcing fast cutover with active sessions — are niche failure modes
+for the process backend's stated use case (scale-to-zero, internal-
+only). The phase 3-7 invasiveness (drop Pdeathsig, persist state, log
+files, reaper) is not justified by the realized benefit.
+
+The cost of *not* doing worker survival is the cold-pool degradation
+mentioned above. This is acceptable for the use case: scale-to-zero
+deployments expect cold starts, and internal-only deployments have
+infrequent rolling updates.
 
 ### Step 9: Tests
 
@@ -1341,12 +1826,16 @@ func TestBwrapArgs(t *testing.T) {
         ShinyPort:   3838,
     }
 
-    args := bwrapArgs(cfg, spec, 10000)
+    args := bwrapArgs(cfg, spec, 10000, 60000, 65534)
 
     // Verify namespace flags are present.
     assertContains(t, args, "--unshare-pid")
     assertContains(t, args, "--unshare-user")
     assertContains(t, args, "--die-with-parent")
+
+    // Verify UID/GID flags are present and correct.
+    assertFlagValue(t, args, "--uid", "60000")
+    assertFlagValue(t, args, "--gid", "65534")
 
     // Verify read-only root bind.
     assertBindMount(t, args, "--ro-bind", "/", "/")
@@ -1376,7 +1865,7 @@ func TestBwrapArgsWithLibDir(t *testing.T) {
         WorkerMount: "/app",
     }
 
-    args := bwrapArgs(cfg, spec, 10001)
+    args := bwrapArgs(cfg, spec, 10001, 60001, 65534)
     assertBindMount(t, args, "--ro-bind", spec.LibDir, "/rv-library")
 }
 
@@ -1392,7 +1881,7 @@ func TestBwrapArgsCustomCmd(t *testing.T) {
         Cmd:         []string{"/usr/bin/R", "-e", "httpuv::runServer('0.0.0.0', 8080)"},
     }
 
-    args := bwrapArgs(cfg, spec, 10002)
+    args := bwrapArgs(cfg, spec, 10002, 60002, 65534)
     sepIdx := indexOf(args, "--")
     cmd := args[sepIdx+1:]
     if len(cmd) != 3 || cmd[0] != "/usr/bin/R" {
@@ -1413,9 +1902,11 @@ func TestBwrapBuildArgs(t *testing.T) {
         },
     }
 
-    args := bwrapBuildArgs(cfg, spec)
+    args := bwrapBuildArgs(cfg, spec, 60000, 65534)
     assertBindMount(t, args, "--ro-bind", "/data/bundles/app1/v1", "/app")
     assertBindMount(t, args, "--bind", "/data/lib-out", "/rv-library")
+    assertFlagValue(t, args, "--uid", "60000")
+    assertFlagValue(t, args, "--gid", "65534")
 }
 ```
 
@@ -1568,11 +2059,16 @@ func TestSpawnAndStop(t *testing.T) {
         t.Skip("bwrap not available")
     }
 
-    cfg := &config.ProcessConfig{
-        BwrapPath:      "bwrap",
-        RPath:          "/usr/bin/R",
-        PortRangeStart: 19000,
-        PortRangeEnd:   19099,
+    cfg := &config.Config{
+        Process: &config.ProcessConfig{
+            BwrapPath:      "bwrap",
+            RPath:          "/usr/bin/R",
+            PortRangeStart: 19000,
+            PortRangeEnd:   19099,
+            WorkerUIDStart: 69000,
+            WorkerUIDEnd:   69099,
+            WorkerGID:      65534,
+        },
     }
     be, err := process.New(cfg)
     if err != nil {
@@ -1624,11 +2120,16 @@ func TestSpawnAndStop(t *testing.T) {
 }
 
 func TestWorkerResourceUsageUnknownWorker(t *testing.T) {
-    cfg := &config.ProcessConfig{
-        BwrapPath:      "bwrap",
-        RPath:          "/usr/bin/R",
-        PortRangeStart: 19100,
-        PortRangeEnd:   19199,
+    cfg := &config.Config{
+        Process: &config.ProcessConfig{
+            BwrapPath:      "bwrap",
+            RPath:          "/usr/bin/R",
+            PortRangeStart: 19100,
+            PortRangeEnd:   19199,
+            WorkerUIDStart: 69100,
+            WorkerUIDEnd:   69199,
+            WorkerGID:      65534,
+        },
     }
     be, err := process.New(cfg)
     if err != nil {
@@ -1651,11 +2152,16 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
         t.Skip("bwrap not available")
     }
 
-    cfg := &config.ProcessConfig{
-        BwrapPath:      "bwrap",
-        RPath:          "/usr/bin/R",
-        PortRangeStart: 19100,
-        PortRangeEnd:   19199,
+    cfg := &config.Config{
+        Process: &config.ProcessConfig{
+            BwrapPath:      "bwrap",
+            RPath:          "/usr/bin/R",
+            PortRangeStart: 19100,
+            PortRangeEnd:   19199,
+            WorkerUIDStart: 69100,
+            WorkerUIDEnd:   69199,
+            WorkerGID:      65534,
+        },
     }
     be, err := process.New(cfg)
     if err != nil {
@@ -1695,22 +2201,29 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 |------|--------|---------|
 | `internal/backend/backend.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`, `ContainerStatsResult` → `WorkerResourceUsageResult`; add `CleanupOrphanResources()` and `Preflight()` methods |
 | `internal/config/config.go` | **update** | Add `ProcessConfig`, `Backend`/`SkipPreflight` on `ServerConfig`; move `DefaultMemoryLimit`/`DefaultCPULimit` from `DockerConfig` → `ServerConfig`, `StoreRetention` from `DockerConfig` → `StorageConfig`; backward-compat parsing for old TOML locations |
-| `internal/backend/docker/docker.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; implement `CleanupOrphanResources()` (move `CleanupOrphanMetadataRules` logic) and `Preflight()` (move `RunDockerChecks` logic); read `DefaultMemoryLimit`/`DefaultCPULimit` from `ServerConfig` |
+| `internal/backend/docker/docker.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; implement `CleanupOrphanResources()` (move `CleanupOrphanMetadataRules` logic) and `Preflight()` (delegates to the moved-in `docker/preflight.go`); read `DefaultMemoryLimit`/`DefaultCPULimit` from `ServerConfig` |
 | `internal/units/memory.go` | **create** | `ParseMemoryLimit()` moved from `internal/backend/docker` |
 | `internal/backend/process/process.go` | **create** | `ProcessBackend` struct implementing all `Backend` methods; `readProcTreeStats`, `collectDescendants`, `readOneProcStats` helpers |
 | `internal/backend/process/bwrap.go` | **create** | `bwrapArgs()`, `bwrapBuildArgs()`, `applySeccomp()`, `spliceBeforeSeparator()` |
 | `internal/backend/process/ports.go` | **create** | `portAllocator` with `Alloc()`, `Release()`, `InUse()` |
+| `internal/backend/process/uids.go` | **create** | `uidAllocator` for per-worker host UIDs (parallel to `portAllocator`) |
 | `internal/backend/process/logs.go` | **create** | `logBuffer` with `ingest()` and `stream()` for LogStream delivery |
-| `internal/preflight/process_checks.go` | **create** | `RunProcessChecks()` — check bwrap, R, user namespaces, port range |
-| `cmd/blockyard/main.go` | **update** | Backend selection switch; `be.Preflight()` replaces Docker-specific preflight branching; `be.CleanupOrphanResources()` replaces direct Docker import in startup; store retention reads from `cfg.Storage`; rename `DockerPing` → `BackendPing` |
+| `internal/backend/process/preflight.go` | **create** | `RunPreflight()` and `check*` functions — bwrap, R, user namespaces, port range, resource-limit warning, worker egress probe. Lives in the `process` package (not `internal/preflight`) to break the import cycle that adding `Backend.Preflight()` would otherwise create. Imports `internal/preflight` for `Report`/`Result` types only. |
+| `internal/backend/docker/preflight.go` | **create** | Moved from `internal/preflight/docker_checks.go`. Same functions, same logic, new home — keeps backend-specific check code in the backend package and lets `internal/preflight` shrink to a leaf package. |
+| `internal/preflight/docker_checks.go` | **delete** | Moved to `internal/backend/docker/preflight.go`. |
+| `internal/preflight/preflight.go` | **update** | Export `Report.add` → `Report.Add` so check functions in the backend packages can append results. The previous private name worked when all check functions lived in the same package; with the refactor they're external callers. |
+| `internal/preflight/addrs.go` | **create** | `tcpAddrFromRedisURL`, `tcpAddrFromHTTPURL`, `tcpAddrFromDBConfig` helpers used by the egress probe. Lives in `internal/preflight` so both backends can reuse it. |
+| `cmd/blockyard/main.go` | **update** | Backend selection switch; `probe` subcommand dispatch (early in main); `be.Preflight()` replaces Docker-specific preflight branching; `be.CleanupOrphanResources()` replaces direct Docker import in startup; store retention reads from `cfg.Storage`; rename `DockerPing` → `BackendPing` |
 | `internal/ops/ops.go` | **update** | Remove `docker` import; replace `docker.CleanupOrphanMetadataRules()` with `srv.Backend.CleanupOrphanResources()` |
 | `internal/api/apps.go` | **update** | Import `internal/units` instead of `internal/backend/docker` for `ParseMemoryLimit` |
 | `internal/api/runtime.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage` |
 | `internal/ui/sidebar.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage` |
+| `internal/ui/templates/tab_runtime.html` | **update** | Wrap `MemoryLimitBytes` rendering in a conditional so zero (process backend, or unconfigured Docker) renders just the usage |
 | `internal/backend/mock/mock.go` | **update** | Rename `ContainerStats` → `WorkerResourceUsage`; add no-op `CleanupOrphanResources()` and `Preflight()` |
 | `internal/preflight/checker.go` | **update** | Rename `DockerPing` → `BackendPing` in `RuntimeDeps` |
 | `internal/backend/process/bwrap_test.go` | **create** | bwrap argument construction tests |
 | `internal/backend/process/ports_test.go` | **create** | Port allocator tests (sequential and concurrent) |
+| `internal/backend/process/uids_test.go` | **create** | UID allocator tests (sequential and concurrent) |
 | `internal/backend/process/logs_test.go` | **create** | Log buffer and LogStream tests |
 | `internal/backend/process/process_integration_test.go` | **create** | Integration tests (spawn, health, stop, stats); `//go:build process_test` |
 
@@ -1749,11 +2262,39 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
    The first call returns 0% (no previous sample). Returns nil on
    process exit (race between lookup and `/proc` read).
 
-5. **No network isolation.** Documented as a deliberate scope decision
-   in `backends.md`. Workers share the host network stack. Network
-   namespaces with veth pairs would add significant complexity for a
-   backend whose purpose is simplicity. Deployments needing network
-   isolation should use the Docker backend.
+5. **No in-process network isolation; egress filtering via UID/GID
+   firewall rules, verified at preflight.** Workers share the host
+   network stack — no `--unshare-net`, no veth pairs. Building per-
+   worker network namespaces would require either rebuilding Docker's
+   veth machinery (substantial complexity, contradicts the "no daemon"
+   pitch) or modifying upstream R packages to accept passed-in socket
+   FDs. Both were rejected.
+
+   Instead, the process backend gives operators the *hooks* to enforce
+   egress isolation outside the process: each worker runs as a unique
+   host UID from a configured pool (`worker_uid_range_start..end`),
+   and all workers share a single host GID (`worker_gid`). The
+   operator installs an iptables rule:
+
+   ```sh
+   iptables -A OUTPUT -m owner --uid-owner blockyard -j ACCEPT
+   iptables -A OUTPUT -m owner --gid-owner $worker_gid -j REJECT
+   ```
+
+   This lets blockyard reach Redis/database/OpenBao freely while
+   blocking all worker egress to those same services. The
+   `checkWorkerEgress` preflight check actively verifies the rule is
+   in place by spawning a probe under the worker UID/GID and trying
+   to TCP-connect to sensitive endpoints. Operators see explicit
+   warnings (or errors, for the cloud metadata endpoint) when the
+   firewall is missing.
+
+   **Limitations.** This model gives worker-vs-host-services
+   isolation but not cross-worker isolation: two workers in the same
+   GID can probe each other's loopback Shiny ports. Multi-tenant
+   deployments where compromised-worker → compromised-worker attack
+   matters should use the Docker backend (per-worker bridge networks).
+   Documented in `backends.md`.
 
 6. **No per-worker resource limits.** Same rationale. cgroup delegation
    is difficult inside containers and adds a systemd dependency on
@@ -1874,12 +2415,28 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 
 21. **Backend interface decoupling as a first-class deliverable.** The
     process backend is a stepping stone toward a Kubernetes backend.
-    Rather than adding if/else branches for each backend in `main.go`
-    and `ops.go`, we push backend-specific logic behind the `Backend`
+    Rather than adding if/else branches for each backend in shared
+    code paths, we push backend-specific logic behind the `Backend`
     interface: `Preflight()` for startup checks,
     `CleanupOrphanResources()` for stale resource cleanup. Shared
     config (`default_memory_limit`, `store_retention`) moves out of
     `[docker]` so future backends don't need to read Docker config.
     `ParseMemoryLimit` moves to `internal/units` so API validation
-    doesn't import a backend package. The goal: after this phase, no
-    code outside `internal/backend/docker/` imports that package.
+    doesn't import a backend package.
+
+    The goal: after this phase, no code outside `internal/backend/docker/`
+    and the composition root (`cmd/blockyard/main.go`) imports that
+    package. The composition root is structurally exempt — its job is
+    to know about every backend it can construct, including the
+    type-asserted orchestrator wiring. Decoupling targets shared code
+    paths (`ops`, `api`, `server`, `ui`, `mock`), not the wiring layer.
+
+    Forcing orchestrator construction behind a `Backend.Orchestrator()`
+    method was considered and rejected. The Docker, process, and
+    future k8s orchestrators have radically different mechanisms
+    (container clone + watchdog vs. parallel-process drain vs. k8s
+    Deployment rollout); a common interface would either be a
+    lowest-common-denominator stub that adds no value or grow to
+    accommodate every backend's quirks. Keeping orchestrator wiring in
+    the composition root costs three lines per new backend and avoids
+    coupling the Backend interface to update concerns.
