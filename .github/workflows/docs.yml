@@ -30,7 +30,7 @@ jobs:
         with:
           hugo-version: "0.147.4"
           extended: true
-      - run: hugo --minify
+      - run: hugo --minify --baseURL https://cynkra.github.io/blockyard/
       - uses: actions/upload-pages-artifact@v4
         with:
           path: docs/public
