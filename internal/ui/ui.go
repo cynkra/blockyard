@@ -207,7 +207,7 @@ func New() *UI {
 	for _, name := range []string{"landing.html", "apps.html", "deployments.html", "api_keys.html", "profile.html", "system.html"} {
 		t := template.Must(
 			template.New("").Funcs(funcMap).ParseFS(
-				content, "templates/base.html", "templates/"+name,
+				content, "templates/base.html", "templates/icons.html", "templates/"+name,
 			),
 		)
 		pages[name] = t
@@ -215,13 +215,13 @@ func New() *UI {
 	// Re-parse profile.html with the shared token_list fragment.
 	pages["profile.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
-			content, "templates/base.html", "templates/profile.html", "templates/token_list.html",
+			content, "templates/base.html", "templates/icons.html", "templates/profile.html", "templates/token_list.html",
 		),
 	)
 	// Re-parse system.html with the shared system_checks fragment.
 	pages["system.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
-			content, "templates/base.html", "templates/system.html", "templates/system_checks.html",
+			content, "templates/base.html", "templates/icons.html", "templates/system.html", "templates/system_checks.html",
 		),
 	)
 
