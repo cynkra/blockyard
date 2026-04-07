@@ -62,7 +62,7 @@ func TestSpawnAndStop(t *testing.T) {
 	spec := backend.WorkerSpec{
 		WorkerID:    "test-worker-1",
 		BundlePath:  t.TempDir(),
-		WorkerMount: "/app",
+		WorkerMount: "/tmp/app",
 		ShinyPort:   3838,
 		Cmd:         []string{"/bin/sleep", "60"},
 	}
@@ -146,7 +146,7 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 	spec := backend.WorkerSpec{
 		WorkerID:    "stats-worker",
 		BundlePath:  t.TempDir(),
-		WorkerMount: "/app",
+		WorkerMount: "/tmp/app",
 		Cmd:         []string{"/bin/sleep", "60"},
 	}
 	if err := be.Spawn(ctx, spec); err != nil {
@@ -157,27 +157,11 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 	// Give the sandboxed process a moment to start and allocate RSS.
 	time.Sleep(200 * time.Millisecond)
 
-	// If the worker is gone already the test is going to fail; grab
-	// the buffered bwrap logs before that so we can see *why*.
-	dumpLogsOnFail := func() {
-		stream, lerr := be.Logs(ctx, spec.WorkerID)
-		if lerr != nil {
-			t.Logf("Logs() after worker exit: %v", lerr)
-			return
-		}
-		defer stream.Close()
-		for line := range stream.Lines {
-			t.Logf("worker log: %s", line)
-		}
-	}
-
 	stats, err := be.WorkerResourceUsage(ctx, spec.WorkerID)
 	if err != nil {
-		dumpLogsOnFail()
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if stats == nil {
-		dumpLogsOnFail()
 		t.Fatal("expected non-nil stats for live worker")
 	}
 	if stats.MemoryUsageBytes == 0 {

@@ -327,86 +327,11 @@ jobs:
           go-version-file: go.mod
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      # Temporary diagnostic: run bwrap with the same args the
-      # process backend constructs, so we can see bwrap's stderr
-      # directly rather than through the Go log buffer.
-      - name: bwrap worker smoke test (diagnostic)
-        run: |
-          set +e
-          BUNDLE=$(mktemp -d)
-          echo "=== bwrap foreground with /bin/true (baseline) ==="
-          sudo bwrap \
-            --unshare-pid --unshare-user --unshare-uts \
-            --uid 69200 --gid 65534 \
-            --die-with-parent --new-session \
-            --ro-bind / / \
-            --tmpfs /tmp \
-            --proc /proc \
-            --dev /dev \
-            --chdir /tmp \
-            --ro-bind "$BUNDLE" /app \
-            --cap-drop ALL \
-            -- /bin/true
-          echo "exit: $?"
-          echo "=== bwrap foreground with /bin/sleep 0.5 ==="
-          sudo bwrap \
-            --unshare-pid --unshare-user --unshare-uts \
-            --uid 69200 --gid 65534 \
-            --die-with-parent --new-session \
-            --ro-bind / / \
-            --tmpfs /tmp \
-            --proc /proc \
-            --dev /dev \
-            --chdir /tmp \
-            --ro-bind "$BUNDLE" /app \
-            --cap-drop ALL \
-            -- /bin/sleep 0.5
-          echo "exit: $?"
-          echo "=== bwrap without --ro-bind bundle (simpler) ==="
-          sudo bwrap \
-            --unshare-pid --unshare-user --unshare-uts \
-            --uid 69200 --gid 65534 \
-            --die-with-parent --new-session \
-            --ro-bind / / \
-            --proc /proc \
-            --dev /dev \
-            --cap-drop ALL \
-            -- /bin/sleep 0.5
-          echo "exit: $?"
-          echo "=== bwrap without --unshare-pid ==="
-          sudo bwrap \
-            --unshare-user --unshare-uts \
-            --uid 69200 --gid 65534 \
-            --die-with-parent --new-session \
-            --ro-bind / / \
-            --proc /proc \
-            --dev /dev \
-            --cap-drop ALL \
-            -- /bin/sleep 0.5
-          echo "exit: $?"
-          echo "=== bwrap without --new-session ==="
-          sudo bwrap \
-            --unshare-pid --unshare-user --unshare-uts \
-            --uid 69200 --gid 65534 \
-            --die-with-parent \
-            --ro-bind / / \
-            --proc /proc \
-            --dev /dev \
-            --cap-drop ALL \
-            -- /bin/sleep 0.5
-          echo "exit: $?"
-          echo "=== bwrap without --die-with-parent ==="
-          sudo bwrap \
-            --unshare-pid --unshare-user --unshare-uts \
-            --uid 69200 --gid 65534 \
-            --new-session \
-            --ro-bind / / \
-            --proc /proc \
-            --dev /dev \
-            --cap-drop ALL \
-            -- /bin/sleep 0.5
-          echo "exit: $?"
-      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -v -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
+      # Run under sudo so bwrap --uid/--gid can write uid_maps — the
+      # Ubuntu 24.04 AppArmor profile blocks that as an unprivileged
+      # user. Matches the design's "containerized mode" where
+      # blockyard runs as PID 1 root and inherits full capabilities.
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-process
