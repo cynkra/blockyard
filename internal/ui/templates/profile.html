@@ -27,12 +27,20 @@
           hx-target="#pat-result"
           hx-swap="innerHTML">
         <input type="text" name="name" placeholder="Token name (e.g., CI deploy)" required>
-        <select name="expires_in" class="select select-sm text-sm">
-            <option value="30d">30 days</option>
-            <option value="90d" selected>90 days</option>
-            <option value="365d">1 year</option>
-            <option value="">No expiry</option>
-        </select>
+        <div x-data="dropdown({value: '90d'})" class="dd" @click.outside="open = false">
+            <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                    role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                <span x-text="label" class="dd-label"></span>
+            </button>
+            <input type="hidden" name="expires_in" x-ref="input" :value="value">
+            <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                 @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
+                <div role="option" class="dd-item" data-value="30d">30 days</div>
+                <div role="option" class="dd-item" data-value="90d">90 days</div>
+                <div role="option" class="dd-item" data-value="365d">1 year</div>
+                <div role="option" class="dd-item" data-value="">No expiry</div>
+            </div>
+        </div>
         <button type="submit" class="btn btn-primary btn-sm">Create token</button>
     </form>
     <div id="pat-result"></div>

@@ -10,7 +10,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='title']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
     <div class="field-group">
@@ -23,7 +23,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='description']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
 
@@ -47,56 +47,22 @@
               hx-post="/ui/apps/{{.App.Name}}/tags"
               hx-target="#tab-content"
               hx-swap="innerHTML">
-            <div class="autocomplete-wrap flex-1">
-                <input type="text" name="name" placeholder="Add or create tag..."
-                       class="input input-sm text-sm w-full"
-                       autocomplete="off"
-                       oninput="filterTagSuggestions(this)"
-                       onfocus="this.nextElementSibling.classList.remove('hidden')"
-                       onblur="setTimeout(function(){document.querySelector('.tag-suggest')?.classList.add('hidden')},200)">
-                <div class="autocomplete-list tag-suggest hidden">
+            <div x-data="combobox({create: true})" class="dd flex-1"
+                 @click.outside="open = false">
+                <input type="text" name="name" x-model="query" @input="onInput()" @keydown="onKeydown($event)"
+                       @focus="onFocus()" @blur="setTimeout(function(){ open=false; activeIdx=-1 }, 150)"
+                       placeholder="Add or create tag..." autocomplete="off"
+                       class="dd-input" role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                     @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
                     {{range .AvailableTags}}
-                    <div class="autocomplete-item tag-option" data-name="{{.Name}}"
-                         onmousedown="selectTagOption(this)">{{.Name}}</div>
+                    <div role="option" class="dd-item" data-value="{{.Name}}">{{.Name}}</div>
                     {{end}}
-                    <div class="autocomplete-item tag-create hidden" onmousedown="selectTagOption(this)"></div>
+                    <div role="option" class="dd-item dd-create" data-value="" hidden></div>
                 </div>
             </div>
             <button type="submit" class="btn btn-sm shrink-0">Add</button>
         </form>
-        <script>
-        function filterTagSuggestions(input) {
-            var val = input.value.toLowerCase().trim();
-            var list = input.nextElementSibling;
-            var options = list.querySelectorAll('.tag-option');
-            var createEl = list.querySelector('.tag-create');
-            var anyMatch = false;
-            var exactMatch = false;
-            options.forEach(function(opt) {
-                var name = opt.dataset.name.toLowerCase();
-                if (val === '' || name.indexOf(val) !== -1) {
-                    opt.classList.remove('hidden');
-                    anyMatch = true;
-                    if (name === val) exactMatch = true;
-                } else {
-                    opt.classList.add('hidden');
-                }
-            });
-            if (val && !exactMatch) {
-                createEl.textContent = 'Create "' + input.value.trim() + '"';
-                createEl.dataset.name = input.value.trim();
-                createEl.classList.remove('hidden');
-            } else {
-                createEl.classList.add('hidden');
-            }
-            list.classList.remove('hidden');
-        }
-        function selectTagOption(el) {
-            var input = el.closest('.autocomplete-wrap').querySelector('input');
-            input.value = el.dataset.name;
-            el.closest('.autocomplete-list').classList.add('hidden');
-        }
-        </script>
     </div>
 
     <h3>Resource Configuration</h3>
@@ -113,7 +79,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='memory_limit']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
         <span class="field-error" id="memory-limit-error"></span>
     </div>
@@ -128,7 +94,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='cpu_limit']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
     <div class="field-group">
@@ -142,7 +108,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='max_workers_per_app']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
     <div class="field-group">
@@ -156,7 +122,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='max_sessions_per_worker']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
     <div class="field-group">
@@ -170,7 +136,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='pre_warmed_seats']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
 
@@ -188,7 +154,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='refresh_schedule']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
     {{end}}
@@ -207,7 +173,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='image']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
     {{if .IsAdmin}}
@@ -224,7 +190,7 @@
                     hx-patch="/api/v1/apps/{{.App.ID}}"
                     hx-include="[name='runtime']"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;}"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg></button>
+                    hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>
     </div>
     {{end}}
@@ -270,7 +236,7 @@
 
     <div class="danger-zone">
         <p class="danger-zone-title">
-            <svg viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
+            <svg class="w-4 h-4 shrink-0 inline-block mr-1"><use href="#i-alert-triangle"/></svg>
             Danger Zone
         </p>
         <div class="field-group">
@@ -283,10 +249,9 @@
                        oninput="toggleSaveBtn(this)">
                 <button class="btn btn-error btn-sm hidden"
                         hx-patch="/api/v1/apps/{{.App.ID}}"
-                        hx-include="[name='name']"
+                        hx-include="#rename-app"
                         hx-confirm="Rename {{.App.Name}} to this new name? The old name will redirect for 7 days."
-                        hx-on::after-request="if(event.detail.successful) { closeSidebar(); location.reload(); }"
-                        onclick="this.classList.add('hidden')">Rename</button>
+                        hx-on::after-request="if(event.detail.successful) { onAppRenamed('{{.App.Name}}', document.getElementById('rename-app').value); }">Rename</button>
             </div>
         </div>
         <button class="btn btn-error btn-sm"

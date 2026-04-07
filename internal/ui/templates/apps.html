@@ -12,7 +12,7 @@
         {{if or (eq .UserRole "publisher") (eq .UserRole "admin")}}
         <button class="btn btn-primary btn-sm"
                 hx-get="/ui/apps/new" hx-target="#new-app-container" hx-swap="innerHTML">
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg>
+            <svg width="16" height="16"><use href="#i-plus"/></svg>
             New App
         </button>
         {{end}}
@@ -48,11 +48,13 @@
                 hx-swap="innerHTML"
                 aria-label="Manage {{.Name}}"
                 onclick="event.stopPropagation(); event.preventDefault()">
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+<svg width="16" height="16"><use href="#i-settings"/></svg>
         </button>
         {{end}}
         <div class="app-card-header">
-            <span class="status {{statusDotClass .Status}} {{if eq .Status "running"}}status-pulse{{end}}" style="flex-shrink:0"></span>
+            <div class="tooltip tooltip-right" data-tip="{{.Status}}">
+                <span class="status {{statusDotClass .Status}}" style="flex-shrink:0"></span>
+            </div>
             <span class="app-name">{{.Name}}</span>
         </div>
         {{if .Title}}<span class="app-title">{{deref .Title}}</span>{{end}}
@@ -111,7 +113,71 @@
 </div>
 </div><!-- drawer -->
 
+<dialog id="tag-delete-dialog" class="modal">
+    <div class="modal-box max-w-sm">
+        <p class="text-sm">Delete tag "<strong id="tag-delete-name"></strong>"? This removes it from all apps.</p>
+        <div class="modal-action">
+            <form method="dialog"><button class="btn btn-sm">Cancel</button></form>
+            <button class="btn btn-error btn-sm" onclick="confirmTagDelete()">Delete</button>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
 <script>
+function onAppRenamed(oldName, newName) {
+    /* Update card in-place */
+    var card = document.querySelector('.app-card[data-app-name="' + oldName + '"]');
+    if (card) {
+        card.dataset.appName = newName;
+        card.href = '/app/' + newName + '/';
+        card.querySelector('.app-name').textContent = newName;
+        var gear = card.querySelector('.app-card-gear');
+        if (gear) gear.setAttribute('hx-get', '/ui/apps/' + newName + '/sidebar');
+        htmx.process(gear);
+    }
+    /* Reload sidebar with new URLs */
+    htmx.ajax('GET', '/ui/apps/' + newName + '/sidebar', '#sidebar');
+    showToast('Renamed to ' + newName, 'success');
+}
+
+/* Sync status dot on enable/disable — updates card + sidebar header */
+function syncAppStatus(status) {
+    var sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    var header = sidebar.querySelector('h2');
+    if (!header) return;
+    var appName = header.textContent.trim();
+    var dotClass = {running: 'status-success', active: 'status-success',
+                    idle: 'status-idle',
+                    disabled: 'status-outline', stopped: 'status-outline',
+                    stopping: 'status-warning', building: 'status-info',
+                    error: 'status-error', failed: 'status-error'}[status] || 'status-neutral';
+    /* Card dot + tooltip */
+    var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
+    if (card) {
+        var dot = card.querySelector('.status');
+        if (dot) {
+            dot.className = 'status ' + dotClass;
+            var tip = dot.closest('.tooltip');
+            if (tip) tip.dataset.tip = status;
+        }
+    }
+    /* Sidebar header dot */
+    var sDot = sidebar.querySelector('.sidebar-header .status');
+    if (sDot) {
+        sDot.className = 'status ' + dotClass;
+    }
+    /* Settings accordion badge */
+    var badge = sidebar.querySelector('.app-controls')?.closest('.settings-section')?.querySelector('.status-badge');
+    if (badge) {
+        badge.className = 'status-badge status-' + status;
+        badge.textContent = status;
+    }
+}
+document.body.addEventListener('appDisabled', function() { syncAppStatus('disabled'); });
+document.body.addEventListener('appEnabled', function() { syncAppStatus('idle'); });
+
 function closeSidebar() {
     if (typeof stopLogs === 'function') stopLogs();
     document.getElementById('sidebar-toggle').checked = false;
@@ -202,13 +268,80 @@ function createGlobalTag() {
         else { r.json().then(function(d) { showToast(d.error || 'Failed', 'error'); }); }
     });
 }
+var _pendingTagDelete = null;
 function deleteGlobalTag(id, name) {
-    if (!confirm('Delete tag "' + name + '"?')) return;
-    fetch('/api/v1/tags/' + id, {method: 'DELETE'}).then(function(r) {
-        if (r.ok) { showToast('Tag deleted', 'success'); location.reload(); }
-        else { showToast('Failed to delete tag', 'error'); }
-    });
+    _pendingTagDelete = {id: id, name: name};
+    document.getElementById('tag-delete-name').textContent = name;
+    document.getElementById('tag-delete-dialog').showModal();
 }
+function confirmTagDelete() {
+    if (!_pendingTagDelete) return;
+    var name = _pendingTagDelete.name;
+    document.getElementById('tag-delete-dialog').close();
+    fetch('/api/v1/tags/' + _pendingTagDelete.id, {method: 'DELETE'}).then(function(r) {
+        if (r.ok) {
+            showToast('Tag deleted', 'success');
+            var url = new URL(window.location);
+            var tags = url.searchParams.getAll('tag');
+            url.searchParams.delete('tag');
+            tags.forEach(function(t) { if (t !== name) url.searchParams.append('tag', t); });
+            window.location = url.toString();
+        } else { showToast('Failed to delete tag', 'error'); }
+    });
+    _pendingTagDelete = null;
+}
+
+/* Poll app status and sync dots (card, sidebar header, tooltip).
+   Fetches sidebar HTML, parses status without swapping content. */
+var _statusPoll = null;
+function pollAppStatus() {
+    clearInterval(_statusPoll);
+    var sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    var header = sidebar.querySelector('h2');
+    if (!header) return;
+    var appName = header.textContent.trim();
+    var prevClass = '';
+    var polls = 0;
+    function check() {
+        fetch('/ui/apps/' + appName + '/sidebar', {credentials: 'same-origin'})
+            .then(function(r) { return r.text(); })
+            .then(function(html) {
+                var doc = new DOMParser().parseFromString(html, 'text/html');
+                var dot = doc.querySelector('.sidebar-header .status');
+                var tip = doc.querySelector('.sidebar-header .tooltip');
+                if (!dot) return;
+                var cls = dot.className;
+                var status = tip ? tip.dataset.tip : '';
+                if (cls !== prevClass) {
+                    prevClass = cls;
+                    /* Sidebar header dot */
+                    var sDot = sidebar.querySelector('.sidebar-header .status');
+                    if (sDot) sDot.className = cls;
+                    /* Card dot + tooltip */
+                    var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
+                    if (card) {
+                        var cDot = card.querySelector('.status');
+                        if (cDot) cDot.className = cls;
+                        var cTip = card.querySelector('.tooltip');
+                        if (cTip && status) cTip.dataset.tip = status;
+                    }
+                    /* Settings badge */
+                    var badge = sidebar.querySelector('.status-badge');
+                    if (badge && status) {
+                        badge.className = 'status-badge status-' + status + ' ml-2';
+                        badge.textContent = status;
+                    }
+                }
+            });
+        if (++polls >= 15) clearInterval(_statusPoll);
+    }
+    check();
+    _statusPoll = setInterval(check, 2000);
+}
+document.body.addEventListener('appSettingsChanged', pollAppStatus);
+document.body.addEventListener('appEnabled', pollAppStatus);
+document.body.addEventListener('appDisabled', pollAppStatus);
 
 /* Live-update: push settings changes to the card in the background.
    Sidebar is NOT touched — user stays on the exact tab they're on. */
@@ -280,11 +413,17 @@ function syncTagsToCard() {
         var card = document.querySelector('.app-card[data-app-name="' + appName + '"]');
         if (!card) return;
 
-        /* Read current tags from settings tab */
+        /* Read current tags (name + ID) from settings tab */
         var chips = sidebar.querySelectorAll('.tag-chips .tag-chip');
         var tagsEl = card.querySelector('.app-tags');
-        var tagNames = [];
-        chips.forEach(function(c) { tagNames.push(c.childNodes[0].textContent.trim()); });
+        var tagData = [];
+        chips.forEach(function(c) {
+            var name = c.childNodes[0].textContent.trim();
+            var btn = c.querySelector('[hx-delete]');
+            var id = btn ? btn.getAttribute('hx-delete').split('/tags/').pop() : '';
+            tagData.push({name: name, id: id});
+        });
+        var tagNames = tagData.map(function(t) { return t.name; });
 
         if (tagNames.length > 0) {
             if (!tagsEl) {
@@ -329,22 +468,31 @@ function syncTagsToCard() {
                 countEl.textContent = '(' + count + ')';
             });
             /* Add new tags if not present */
-            tagNames.forEach(function(name) {
+            var isAdmin = !!document.querySelector('.tag-admin-inline');
+            tagData.forEach(function(tag) {
                 var exists = false;
                 tagSidebar.querySelectorAll('.tag-browser-chip').forEach(function(c) {
-                    if (chipName(c) === name) exists = true;
+                    if (chipName(c) === tag.name) exists = true;
                 });
                 if (!exists) {
                     var div = document.createElement('div');
                     div.className = 'tag-browser-chip';
                     var a = document.createElement('a');
-                    a.className = 'badge badge-sm badge-soft badge-primary gap-1';
-                    a.href = '?tag=' + encodeURIComponent(name);
-                    a.textContent = name + ' ';
+                    a.className = 'badge badge-sm badge-soft badge-primary gap-1.5';
+                    a.href = '?tag=' + encodeURIComponent(tag.name);
+                    a.textContent = tag.name + ' ';
                     var count = document.createElement('span');
                     count.className = 'tag-count';
                     count.textContent = '(1)';
                     a.appendChild(count);
+                    if (isAdmin && tag.id) {
+                        var btn = document.createElement('button');
+                        btn.className = 'tag-remove';
+                        btn.title = 'Delete tag';
+                        btn.innerHTML = '&#10005;';
+                        btn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); deleteGlobalTag(tag.id, tag.name); };
+                        a.appendChild(btn);
+                    }
                     div.appendChild(a);
                     tagSidebar.appendChild(div);
                 }

@@ -173,14 +173,20 @@ var funcMap = template.FuncMap{
 	},
 	"statusDotClass": func(status string) string {
 		switch status {
-		case "running", "active", "ready", "configured":
+		case "running", "active":
 			return "status-success"
+		case "idle":
+			return "status-idle"
+		case "ready", "configured":
+			return "status-neutral"
 		case "building":
 			return "status-info"
 		case "stopping", "draining":
 			return "status-warning"
 		case "error", "failed":
 			return "status-error"
+		case "disabled", "stopped":
+			return "status-outline"
 		default:
 			return "status-neutral"
 		}
@@ -201,7 +207,7 @@ func New() *UI {
 	for _, name := range []string{"landing.html", "apps.html", "deployments.html", "api_keys.html", "profile.html", "system.html"} {
 		t := template.Must(
 			template.New("").Funcs(funcMap).ParseFS(
-				content, "templates/base.html", "templates/"+name,
+				content, "templates/base.html", "templates/icons.html", "templates/"+name,
 			),
 		)
 		pages[name] = t
@@ -209,13 +215,13 @@ func New() *UI {
 	// Re-parse profile.html with the shared token_list fragment.
 	pages["profile.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
-			content, "templates/base.html", "templates/profile.html", "templates/token_list.html",
+			content, "templates/base.html", "templates/icons.html", "templates/profile.html", "templates/token_list.html",
 		),
 	)
 	// Re-parse system.html with the shared system_checks fragment.
 	pages["system.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
-			content, "templates/base.html", "templates/system.html", "templates/system_checks.html",
+			content, "templates/base.html", "templates/icons.html", "templates/system.html", "templates/system_checks.html",
 		),
 	)
 
@@ -835,7 +841,7 @@ func buildCatalogEntries(apps []db.CatalogRow, srv *server.Server) []catalogEntr
 
 		status := "disabled"
 		if app.Enabled {
-			status = "ready"
+			status = "idle"
 			if srv.Workers.CountForApp(app.ID) > 0 {
 				status = "running"
 			}
@@ -867,7 +873,7 @@ func buildLandingEntries(apps []db.AppRow, srv *server.Server) []catalogEntry {
 
 		status := "disabled"
 		if app.Enabled {
-			status = "ready"
+			status = "idle"
 			if srv.Workers.CountForApp(app.ID) > 0 {
 				status = "running"
 			}

@@ -185,8 +185,8 @@ func (ui *UI) resolveAppForFragment(
 
 // computeAppStatus derives display status from worker state.
 //
-// Returns "disabled" when the app is off, "ready" when it is enabled
-// but idle (cold-start, no workers), "running" when workers are active,
+// Returns "disabled" when the app is off, "idle" when it is enabled
+// but has no workers (cold-start), "running" when workers are active,
 // and "stopping" when all workers are draining.
 func computeAppStatus(srv *server.Server, app *db.AppRow) string {
 	if !app.Enabled {
@@ -194,7 +194,7 @@ func computeAppStatus(srv *server.Server, app *db.AppRow) string {
 	}
 	workerIDs := srv.Workers.ForApp(app.ID)
 	if len(workerIDs) == 0 {
-		return "ready"
+		return "idle"
 	}
 	allDraining := true
 	for _, wid := range workerIDs {
@@ -675,7 +675,7 @@ func (ui *UI) searchUsersFragment(srv *server.Server) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html")
 		for _, u := range users {
 			fmt.Fprintf(w,
-				`<div class="autocomplete-item" data-value="%s"><span class="autocomplete-name">%s</span><span class="autocomplete-email">%s</span></div>`,
+				`<div role="option" class="dd-item" data-value="%s"><span class="dd-item-name">%s</span><span class="dd-item-detail">%s</span></div>`,
 				template.HTMLEscapeString(u.Sub),
 				template.HTMLEscapeString(u.Name),
 				template.HTMLEscapeString(u.Email),

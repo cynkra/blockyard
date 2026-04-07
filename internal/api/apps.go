@@ -1146,6 +1146,9 @@ func floatOrZero(f *float64) float64 {
 // parseUpdateAppForm parses form-encoded data into an updateAppRequest.
 func parseUpdateAppForm(r *http.Request) updateAppRequest {
 	var body updateAppRequest
+	if v := r.FormValue("name"); v != "" {
+		body.Name = &v
+	}
 	if v := r.FormValue("title"); v != "" {
 		body.Title = &v
 	}

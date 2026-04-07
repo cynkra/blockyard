@@ -2188,9 +2188,9 @@ func TestCollaboratorsTabWithACLGrants(t *testing.T) {
 	if !strings.Contains(body, "Alice Smith") {
 		t.Error("expected display name 'Alice Smith' in grant list")
 	}
-	// Access type selector should have ACL selected.
-	if !strings.Contains(body, `value="acl" selected`) {
-		t.Error("expected 'acl' option to be selected")
+	// Access type dropdown should be initialized with ACL.
+	if !strings.Contains(body, `dropdown({value: 'acl'})`) {
+		t.Error("expected dropdown initialized with 'acl' value")
 	}
 }
 
@@ -2213,8 +2213,8 @@ func TestCollaboratorsTabPublicAccessHidesACLSection(t *testing.T) {
 	if strings.Contains(body, "acl-section") {
 		t.Error("acl-section should be hidden for public access type")
 	}
-	if !strings.Contains(body, `value="public" selected`) {
-		t.Error("expected 'public' option to be selected")
+	if !strings.Contains(body, `dropdown({value: 'public'})`) {
+		t.Error("expected dropdown initialized with 'public' value")
 	}
 }
 
@@ -2338,8 +2338,8 @@ func TestComputeAppStatusReady(t *testing.T) {
 	app, _ := srv.DB.CreateApp("status-stop", "u")
 
 	// Enabled, no workers → ready (idle, waiting for traffic).
-	if got := computeAppStatus(srv, app); got != "ready" {
-		t.Errorf("computeAppStatus(no workers) = %q, want 'ready'", got)
+	if got := computeAppStatus(srv, app); got != "idle" {
+		t.Errorf("computeAppStatus(no workers) = %q, want 'idle'", got)
 	}
 }
 
