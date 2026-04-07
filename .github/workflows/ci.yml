@@ -19,6 +19,7 @@ on:
           - idp
           - openbao
           - pak
+          - process
           - ui
           - redis
 
@@ -314,11 +315,30 @@ jobs:
           path: coverage-ui.out
           retention-days: 1
 
+  process:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [unit]
+    if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'process')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: go test -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-process
+          path: coverage-process.out
+          retention-days: 1
+
   coverage:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: github.event_name != 'merge_group' && github.event_name != 'push' && inputs.job == ''
-    needs: [unit, cli, docker, idp, openbao, pak, redis, ui]
+    needs: [unit, cli, docker, idp, openbao, pak, process, redis, ui]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6

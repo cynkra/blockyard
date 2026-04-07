@@ -3,10 +3,14 @@ package backend
 import (
 	"context"
 	"errors"
+
+	"github.com/cynkra/blockyard/internal/preflight"
 )
 
-// Backend is the pluggable container runtime abstraction.
-// Docker/Podman for v0, Kubernetes for v2.
+// Backend is the pluggable worker runtime abstraction. The Docker
+// implementation runs each worker in its own container; the process
+// implementation spawns sandboxed child processes via bubblewrap. A
+// future Kubernetes implementation would manage Pods.
 type Backend interface {
 	// Spawn starts a long-lived worker. The caller provides the worker ID
 	// in spec.WorkerID; the backend uses it as its internal key.
@@ -33,22 +37,37 @@ type Backend interface {
 	// RemoveResource removes an orphaned resource.
 	RemoveResource(ctx context.Context, r ManagedResource) error
 
-	// ContainerStats returns a point-in-time resource usage snapshot
-	// for a container. Returns nil stats if the container is not found.
-	ContainerStats(ctx context.Context, containerID string) (*ContainerStatsResult, error)
+	// WorkerResourceUsage returns a point-in-time resource usage
+	// snapshot for a worker. Returns nil stats if the worker is not
+	// found. Backends may implement this differently — Docker reads
+	// container cgroup counters, the process backend walks /proc.
+	WorkerResourceUsage(ctx context.Context, workerID string) (*WorkerResourceUsageResult, error)
 
 	// UpdateResources live-updates memory and CPU limits for a running
 	// worker. Returns ErrNotSupported if the backend does not support
 	// live resource updates.
 	UpdateResources(ctx context.Context, id string, mem int64, nanoCPUs int64) error
+
+	// CleanupOrphanResources removes backend-specific stale state left
+	// over from previous runs (Docker: orphaned iptables rules).
+	// Process backend is a no-op. Called once at startup.
+	CleanupOrphanResources(ctx context.Context) error
+
+	// Preflight runs backend-specific startup checks and returns the
+	// resulting report. Each backend checks its own prerequisites.
+	// main.go calls this through the interface so it does not have to
+	// branch on the backend type.
+	Preflight(ctx context.Context) (*preflight.Report, error)
 }
 
 // ErrNotSupported is returned by backend methods that are not
 // available for the current backend type.
 var ErrNotSupported = errors.New("operation not supported by this backend")
 
-// ContainerStatsResult holds point-in-time resource usage for a container.
-type ContainerStatsResult struct {
+// WorkerResourceUsageResult holds point-in-time resource usage for a
+// worker. MemoryLimitBytes is 0 when the backend does not enforce a
+// per-worker limit (e.g. process backend, or Docker without a limit).
+type WorkerResourceUsageResult struct {
 	CPUPercent       float64
 	MemoryUsageBytes uint64
 	MemoryLimitBytes uint64

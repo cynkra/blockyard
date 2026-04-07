@@ -35,18 +35,18 @@ func TestCheckDatabase(t *testing.T) {
 	})
 }
 
-func TestCheckDocker(t *testing.T) {
+func TestCheckBackend(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
-		deps := RuntimeDeps{DockerPing: func(ctx context.Context) error { return nil }}
-		res := checkDocker(context.Background(), deps)
+		deps := RuntimeDeps{BackendPing: func(ctx context.Context) error { return nil }}
+		res := checkBackend(context.Background(), deps)
 		if res.Severity != SeverityOK {
 			t.Errorf("expected OK, got %v", res.Severity)
 		}
 	})
 
 	t.Run("error", func(t *testing.T) {
-		deps := RuntimeDeps{DockerPing: func(ctx context.Context) error { return errors.New("socket gone") }}
-		res := checkDocker(context.Background(), deps)
+		deps := RuntimeDeps{BackendPing: func(ctx context.Context) error { return errors.New("socket gone") }}
+		res := checkBackend(context.Background(), deps)
 		if res.Severity != SeverityError {
 			t.Errorf("expected Error, got %v", res.Severity)
 		}
@@ -175,7 +175,7 @@ func TestCheckUpdateAvailable(t *testing.T) {
 func TestRunDynamicChecks(t *testing.T) {
 	deps := RuntimeDeps{
 		DBPing:        func(ctx context.Context) error { return nil },
-		DockerPing:    func(ctx context.Context) error { return nil },
+		BackendPing:    func(ctx context.Context) error { return nil },
 		RedisPing:     func(ctx context.Context) error { return nil },
 		IDPCheck:      func(ctx context.Context) error { return nil },
 		VaultCheck:    func(ctx context.Context) error { return nil },

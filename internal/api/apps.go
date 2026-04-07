@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,7 +19,6 @@ import (
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/backend"
-	docker "github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/mount"
@@ -26,6 +26,7 @@ import (
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/telemetry"
+	"github.com/cynkra/blockyard/internal/units"
 )
 
 // AppResponse wraps an AppRow with a derived runtime status.
@@ -369,7 +370,7 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 		if body.MemoryLimit != nil && *body.MemoryLimit != "" {
-			if _, ok := docker.ParseMemoryLimit(*body.MemoryLimit); !ok {
+			if _, ok := units.ParseMemoryLimit(*body.MemoryLimit); !ok {
 				badRequest(w, `invalid memory_limit format: use e.g. "256m", "1g", "512mb"`)
 				return
 			}
@@ -525,7 +526,7 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 		if body.MemoryLimit != nil || body.CPULimit != nil {
 			mem := int64(0)
 			if updated.MemoryLimit != nil {
-				if parsed, ok := docker.ParseMemoryLimit(*updated.MemoryLimit); ok {
+				if parsed, ok := units.ParseMemoryLimit(*updated.MemoryLimit); ok {
 					mem = parsed
 				}
 			}
@@ -534,7 +535,8 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 				cpuNano = int64(*updated.CPULimit * 1e9)
 			}
 			for _, wid := range srv.Workers.ForApp(app.ID) {
-				if err := srv.Backend.UpdateResources(r.Context(), wid, mem, cpuNano); err != nil {
+				err := srv.Backend.UpdateResources(r.Context(), wid, mem, cpuNano)
+				if err != nil && !errors.Is(err, backend.ErrNotSupported) {
 					slog.Warn("failed to update worker resources",
 						"worker", wid, "error", err)
 				}

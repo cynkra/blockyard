@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/preflight"
 )
 
 // stubBackend implements backend.Backend with a configurable Build hook.
@@ -31,11 +32,15 @@ func (b *stubBackend) Logs(context.Context, string) (backend.LogStream, error)  
 func (b *stubBackend) Addr(context.Context, string) (string, error)                { return "", nil }
 func (b *stubBackend) ListManaged(context.Context) ([]backend.ManagedResource, error) { return nil, nil }
 func (b *stubBackend) RemoveResource(context.Context, backend.ManagedResource) error { return nil }
-func (b *stubBackend) ContainerStats(context.Context, string) (*backend.ContainerStatsResult, error) {
-	return &backend.ContainerStatsResult{}, nil
+func (b *stubBackend) WorkerResourceUsage(context.Context, string) (*backend.WorkerResourceUsageResult, error) {
+	return &backend.WorkerResourceUsageResult{}, nil
 }
 func (b *stubBackend) UpdateResources(_ context.Context, _ string, _ int64, _ int64) error {
 	return nil
+}
+func (b *stubBackend) CleanupOrphanResources(context.Context) error { return nil }
+func (b *stubBackend) Preflight(context.Context) (*preflight.Report, error) {
+	return &preflight.Report{}, nil
 }
 
 // --- EnsureInstalled tests ---

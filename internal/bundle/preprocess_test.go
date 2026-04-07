@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/preflight"
 )
 
 // ppBackend implements backend.Backend with a configurable Build hook.
@@ -30,11 +31,15 @@ func (b *ppBackend) Logs(context.Context, string) (backend.LogStream, error)    
 func (b *ppBackend) Addr(context.Context, string) (string, error)                     { return "", nil }
 func (b *ppBackend) ListManaged(context.Context) ([]backend.ManagedResource, error)   { return nil, nil }
 func (b *ppBackend) RemoveResource(context.Context, backend.ManagedResource) error { return nil }
-func (b *ppBackend) ContainerStats(context.Context, string) (*backend.ContainerStatsResult, error) {
-	return &backend.ContainerStatsResult{}, nil
+func (b *ppBackend) WorkerResourceUsage(context.Context, string) (*backend.WorkerResourceUsageResult, error) {
+	return &backend.WorkerResourceUsageResult{}, nil
 }
 func (b *ppBackend) UpdateResources(_ context.Context, _ string, _ int64, _ int64) error {
 	return nil
+}
+func (b *ppBackend) CleanupOrphanResources(context.Context) error { return nil }
+func (b *ppBackend) Preflight(context.Context) (*preflight.Report, error) {
+	return &preflight.Report{}, nil
 }
 
 // --- preProcess tests ---

@@ -167,9 +167,11 @@ func (m *mockDockerClient) NetworkRemove(ctx context.Context, networkID string, 
 // --- helpers ---
 
 func newTestBackend(cli dockerClient, opts ...func(*DockerBackend)) *DockerBackend {
+	full := &config.Config{}
 	d := &DockerBackend{
 		client:  cli,
-		config:  &config.DockerConfig{},
+		config:  &full.Docker,
+		fullCfg: full,
 		runCmd:  defaultCmdRunner,
 		workers: make(map[string]*workerState),
 	}
@@ -180,33 +182,6 @@ func newTestBackend(cli dockerClient, opts ...func(*DockerBackend)) *DockerBacke
 }
 
 // --- existing unit tests ---
-
-func TestParseMemoryLimit(t *testing.T) {
-	tests := []struct {
-		input string
-		want  int64
-		ok    bool
-	}{
-		{"512m", 512 * 1024 * 1024, true},
-		{"1g", 1024 * 1024 * 1024, true},
-		{"256mb", 256 * 1024 * 1024, true},
-		{"100kb", 100 * 1024, true},
-		{"1024", 1024, true},
-		{"  2g  ", 2 * 1024 * 1024 * 1024, true},
-		{"invalid", 0, false},
-	}
-
-	for _, tt := range tests {
-		got, ok := ParseMemoryLimit(tt.input)
-		if ok != tt.ok {
-			t.Errorf("ParseMemoryLimit(%q) ok = %v, want %v", tt.input, ok, tt.ok)
-			continue
-		}
-		if ok && got != tt.want {
-			t.Errorf("ParseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
-		}
-	}
-}
 
 func TestExtractContainerIDFromCgroup(t *testing.T) {
 	tests := []struct {
@@ -1577,6 +1552,4 @@ func TestUpdateResources_DockerAPIError(t *testing.T) {
 	}
 }
 
-// ParseMemoryLimit edge cases are tested in docker_integration_test.go
-// (TestParseMemoryLimitEdgeCases) to avoid duplication with docker_test
-// build tag.
+// ParseMemoryLimit moved to internal/units; tests live there now.

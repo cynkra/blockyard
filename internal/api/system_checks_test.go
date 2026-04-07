@@ -25,8 +25,8 @@ func setupCheckerServer(t *testing.T) *server.Server {
 
 	srv := server.NewServer(&config.Config{}, mock.New(), database)
 	srv.Checker = preflight.NewChecker(preflight.RuntimeDeps{
-		DBPing:     func(ctx context.Context) error { return nil },
-		DockerPing: func(ctx context.Context) error { return nil },
+		DBPing:      func(ctx context.Context) error { return nil },
+		BackendPing: func(ctx context.Context) error { return nil },
 	})
 	srv.Checker.Init(context.Background(), &preflight.Report{}, nil)
 	return srv

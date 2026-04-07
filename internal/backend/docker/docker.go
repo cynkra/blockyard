@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/units"
 )
 
 // Compile-time interface check.
@@ -81,11 +81,15 @@ const (
 
 // DockerBackend implements backend.Backend using the Docker Engine API.
 type DockerBackend struct {
-	client   dockerClient
-	serverID string // own container ID; empty = native mode
-	config   *config.DockerConfig
-	mountCfg MountConfig
-	runCmd   cmdRunner
+	client           dockerClient
+	serverID         string // own container ID; empty = native mode
+	config           *config.DockerConfig // shortcut for fullCfg.Docker
+	fullCfg          *config.Config       // full config; needed for Server.DefaultMemoryLimit/CPULimit and the redis URL the preflight builder reads
+	bundleServerPath string               // root for the by-builder cache and pkg-store
+	serverVersion    string               // server build version, plumbed into preflight
+	redisURL         string               // optional; used by checkRedisOnServiceNetwork
+	mountCfg         MountConfig
+	runCmd           cmdRunner
 
 	mu      sync.Mutex
 	workers map[string]*workerState // keyed by worker ID
@@ -97,7 +101,12 @@ type DockerBackend struct {
 // New creates a DockerBackend, verifying Docker connectivity, detecting
 // whether the server is running inside a container, and auto-detecting
 // how the data directory is mounted.
-func New(ctx context.Context, cfg *config.DockerConfig, bundleServerPath string) (*DockerBackend, error) {
+//
+// Takes the full *config.Config (parallel to process.New) so the
+// backend can read both `[docker]` and the worker-resource-limit
+// defaults that now live in `[server]`.
+func New(ctx context.Context, fullCfg *config.Config, bundleServerPath, serverVersion string) (*DockerBackend, error) {
+	cfg := &fullCfg.Docker
 	cli, err := client.New(
 		client.WithHost("unix://"+cfg.Socket),
 	)
@@ -121,13 +130,22 @@ func New(ctx context.Context, cfg *config.DockerConfig, bundleServerPath string)
 		return nil, err
 	}
 
+	var redisURL string
+	if fullCfg.Redis != nil {
+		redisURL = fullCfg.Redis.URL
+	}
+
 	return &DockerBackend{
-		client:   cli,
-		serverID: serverID,
-		config:   cfg,
-		mountCfg: mountCfg,
-		runCmd:   defaultCmdRunner,
-		workers:  make(map[string]*workerState),
+		client:           cli,
+		serverID:         serverID,
+		config:           cfg,
+		fullCfg:          fullCfg,
+		bundleServerPath: bundleServerPath,
+		serverVersion:    serverVersion,
+		redisURL:         redisURL,
+		mountCfg:         mountCfg,
+		runCmd:           defaultCmdRunner,
+		workers:          make(map[string]*workerState),
 	}, nil
 }
 
@@ -258,46 +276,6 @@ func (d *DockerBackend) ensureImage(ctx context.Context, img string) error {
 
 	slog.Info("image pulled", "image", img)
 	return nil
-}
-
-// --- Memory limit parsing ---
-
-// ParseMemoryLimit converts human-readable memory strings like "512m", "1g",
-// "256mb" to bytes. Returns (bytes, true) on success.
-func ParseMemoryLimit(s string) (int64, bool) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	var numStr string
-	var multiplier int64
-
-	switch {
-	case strings.HasSuffix(s, "gb"):
-		numStr = strings.TrimSuffix(s, "gb")
-		multiplier = 1024 * 1024 * 1024
-	case strings.HasSuffix(s, "g"):
-		numStr = strings.TrimSuffix(s, "g")
-		multiplier = 1024 * 1024 * 1024
-	case strings.HasSuffix(s, "mb"):
-		numStr = strings.TrimSuffix(s, "mb")
-		multiplier = 1024 * 1024
-	case strings.HasSuffix(s, "m"):
-		numStr = strings.TrimSuffix(s, "m")
-		multiplier = 1024 * 1024
-	case strings.HasSuffix(s, "kb"):
-		numStr = strings.TrimSuffix(s, "kb")
-		multiplier = 1024
-	case strings.HasSuffix(s, "k"):
-		numStr = strings.TrimSuffix(s, "k")
-		multiplier = 1024
-	default:
-		numStr = s
-		multiplier = 1 // assume bytes
-	}
-
-	n, err := strconv.ParseInt(strings.TrimSpace(numStr), 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return n * multiplier, true
 }
 
 // --- Network helpers ---
@@ -444,18 +422,18 @@ func (d *DockerBackend) createWorkerContainer(
 
 	var resources container.Resources
 	if spec.MemoryLimit != "" {
-		if mem, ok := ParseMemoryLimit(spec.MemoryLimit); ok {
+		if mem, ok := units.ParseMemoryLimit(spec.MemoryLimit); ok {
 			resources.Memory = mem
 		}
-	} else if d.config.DefaultMemoryLimit != "" {
-		if mem, ok := ParseMemoryLimit(d.config.DefaultMemoryLimit); ok {
+	} else if d.fullCfg.Server.DefaultMemoryLimit != "" {
+		if mem, ok := units.ParseMemoryLimit(d.fullCfg.Server.DefaultMemoryLimit); ok {
 			resources.Memory = mem
 		}
 	}
 	if spec.CPULimit > 0 {
 		resources.NanoCPUs = int64(spec.CPULimit * 1e9)
-	} else if d.config.DefaultCPULimit > 0 {
-		resources.NanoCPUs = int64(d.config.DefaultCPULimit * 1e9)
+	} else if d.fullCfg.Server.DefaultCPULimit > 0 {
+		resources.NanoCPUs = int64(d.fullCfg.Server.DefaultCPULimit * 1e9)
 	}
 	resources.PidsLimit = int64Ptr(512)
 
@@ -629,7 +607,7 @@ func (d *DockerBackend) verifyResourceLimits(
 	info := cResult.Container
 
 	if spec.MemoryLimit != "" {
-		expected, ok := ParseMemoryLimit(spec.MemoryLimit)
+		expected, ok := units.ParseMemoryLimit(spec.MemoryLimit)
 		if ok && info.HostConfig.Resources.Memory != expected {
 			slog.Warn("spawn: memory limit mismatch",
 				"worker_id", spec.WorkerID,
@@ -956,12 +934,20 @@ func (d *DockerBackend) ListManaged(ctx context.Context) ([]backend.ManagedResou
 	return resources, nil
 }
 
-func (d *DockerBackend) ContainerStats(ctx context.Context, containerID string) (*backend.ContainerStatsResult, error) {
+func (d *DockerBackend) WorkerResourceUsage(ctx context.Context, workerID string) (*backend.WorkerResourceUsageResult, error) {
+	d.mu.Lock()
+	ws, ok := d.workers[workerID]
+	d.mu.Unlock()
+	containerID := workerID
+	if ok {
+		containerID = ws.containerID
+	}
+
 	resp, err := d.client.ContainerStats(ctx, containerID, client.ContainerStatsOptions{
 		IncludePreviousSample: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("container stats: %w", err)
+		return nil, fmt.Errorf("worker resource usage: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -1003,7 +989,7 @@ func (d *DockerBackend) ContainerStats(ctx context.Context, containerID string) 
 		cpuPercent = (cpuDelta / sysDelta) * float64(statsJSON.CPUStats.OnlineCPUs) * 100.0
 	}
 
-	return &backend.ContainerStatsResult{
+	return &backend.WorkerResourceUsageResult{
 		CPUPercent:       cpuPercent,
 		MemoryUsageBytes: statsJSON.MemoryStats.Usage,
 		MemoryLimitBytes: statsJSON.MemoryStats.Limit,

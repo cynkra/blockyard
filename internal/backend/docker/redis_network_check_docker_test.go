@@ -1,6 +1,6 @@
 //go:build docker_test
 
-package preflight
+package docker
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/preflight"
 )
 
 // TestCheckRedisOnServiceNetwork_Detected creates a Docker network with
@@ -56,13 +57,17 @@ func TestCheckRedisOnServiceNetwork_Detected(t *testing.T) {
 	}
 
 	// The check should detect the container by name.
-	deps := DockerDeps{
-		Client:   cli,
-		Config:   &config.DockerConfig{ServiceNetwork: netName},
-		RedisURL: fmt.Sprintf("redis://%s:6379", containerName),
+	full := &config.Config{Docker: config.DockerConfig{ServiceNetwork: netName}}
+	d := &DockerBackend{
+		client:  cli,
+		config:  &full.Docker,
+		fullCfg: full,
+		runCmd:  defaultCmdRunner,
+		workers: make(map[string]*workerState),
 	}
-	res := checkRedisOnServiceNetwork(ctx, deps)
-	if res.Severity != SeverityError {
+	deps := PreflightDeps{RedisURL: fmt.Sprintf("redis://%s:6379", containerName)}
+	res := checkRedisOnServiceNetwork(ctx, d, deps)
+	if res.Severity != preflight.SeverityError {
 		t.Errorf("severity = %v, want SeverityError: %s", res.Severity, res.Message)
 	}
 }
@@ -85,13 +90,17 @@ func TestCheckRedisOnServiceNetwork_NotDetected(t *testing.T) {
 	}
 	defer cli.NetworkRemove(ctx, netResp.ID, client.NetworkRemoveOptions{}) //nolint:errcheck
 
-	deps := DockerDeps{
-		Client:   cli,
-		Config:   &config.DockerConfig{ServiceNetwork: netName},
-		RedisURL: "redis://some-other-host:6379",
+	full := &config.Config{Docker: config.DockerConfig{ServiceNetwork: netName}}
+	d := &DockerBackend{
+		client:  cli,
+		config:  &full.Docker,
+		fullCfg: full,
+		runCmd:  defaultCmdRunner,
+		workers: make(map[string]*workerState),
 	}
-	res := checkRedisOnServiceNetwork(ctx, deps)
-	if res.Severity != SeverityOK {
+	deps := PreflightDeps{RedisURL: "redis://some-other-host:6379"}
+	res := checkRedisOnServiceNetwork(ctx, d, deps)
+	if res.Severity != preflight.SeverityOK {
 		t.Errorf("severity = %v, want OK when Redis not on service network: %s", res.Severity, res.Message)
 	}
 }

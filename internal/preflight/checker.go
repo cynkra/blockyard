@@ -12,7 +12,7 @@ import (
 type RuntimeDeps struct {
 	StorePath     string                          // pkg-store volume root (for disk space check)
 	DBPing        func(ctx context.Context) error // database health
-	DockerPing    func(ctx context.Context) error // Docker socket health
+	BackendPing   func(ctx context.Context) error // backend health (Docker socket, process backend liveness, etc.)
 	RedisPing     func(ctx context.Context) error // Redis health (nil = no Redis)
 	IDPCheck      func(ctx context.Context) error // OIDC IdP health (nil = no OIDC)
 	VaultCheck    func(ctx context.Context) error // OpenBao health (nil = no vault)

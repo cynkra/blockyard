@@ -1675,3 +1675,202 @@ func TestValidate_RuntimeDefaultsEmpty(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestProcessBackendConfig(t *testing.T) {
+	const processTOML = `
+[server]
+backend = "process"
+
+[process]
+bwrap_path             = "/usr/bin/bwrap"
+r_path                 = "/usr/bin/R"
+port_range_start       = 11000
+port_range_end         = 11099
+worker_uid_range_start = 65000
+worker_uid_range_end   = 65099
+worker_gid             = 65534
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+	cfg := loadFromString(t, processTOML)
+	if cfg.Server.Backend != "process" {
+		t.Errorf("expected backend=process, got %q", cfg.Server.Backend)
+	}
+	if cfg.Process == nil {
+		t.Fatal("expected [process] config to be set")
+	}
+	if cfg.Process.PortRangeStart != 11000 {
+		t.Errorf("expected port range start 11000, got %d", cfg.Process.PortRangeStart)
+	}
+	if cfg.Process.WorkerGID != 65534 {
+		t.Errorf("expected worker GID 65534, got %d", cfg.Process.WorkerGID)
+	}
+}
+
+func TestProcessBackendDefaults(t *testing.T) {
+	const processTOML = `
+[server]
+backend = "process"
+
+[process]
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+	cfg := loadFromString(t, processTOML)
+	if cfg.Process.BwrapPath != "/usr/bin/bwrap" {
+		t.Errorf("default bwrap_path = %q", cfg.Process.BwrapPath)
+	}
+	if cfg.Process.PortRangeStart != 10000 || cfg.Process.PortRangeEnd != 10999 {
+		t.Errorf("default port range = %d..%d", cfg.Process.PortRangeStart, cfg.Process.PortRangeEnd)
+	}
+	if cfg.Process.WorkerUIDStart != 60000 || cfg.Process.WorkerUIDEnd != 60999 {
+		t.Errorf("default uid range = %d..%d", cfg.Process.WorkerUIDStart, cfg.Process.WorkerUIDEnd)
+	}
+	if cfg.Process.WorkerGID != 65534 {
+		t.Errorf("default worker_gid = %d", cfg.Process.WorkerGID)
+	}
+}
+
+func TestProcessBackendRequiresProcessSection(t *testing.T) {
+	const badTOML = `
+[server]
+backend = "process"
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	if err := os.WriteFile(path, []byte(badTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error when [process] section is missing")
+	}
+}
+
+func TestProcessBackendUIDRangeMustCoverPortRange(t *testing.T) {
+	const badTOML = `
+[server]
+backend = "process"
+
+[process]
+port_range_start       = 10000
+port_range_end         = 10099
+worker_uid_range_start = 60000
+worker_uid_range_end   = 60010
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	if err := os.WriteFile(path, []byte(badTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error when uid range smaller than port range")
+	}
+}
+
+func TestUnknownBackendRejected(t *testing.T) {
+	const badTOML = `
+[server]
+backend = "k8s"
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	if err := os.WriteFile(path, []byte(badTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown backend")
+	}
+}
+
+func TestDeprecatedFieldMigration(t *testing.T) {
+	const oldTOML = `
+[server]
+skip_docker_preflight = true
+
+[docker]
+image                = "img"
+default_memory_limit = "2g"
+default_cpu_limit    = 4.0
+store_retention      = "24h"
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+	cfg := loadFromString(t, oldTOML)
+	if cfg.Server.DefaultMemoryLimit != "2g" {
+		t.Errorf("default_memory_limit not migrated: got %q", cfg.Server.DefaultMemoryLimit)
+	}
+	if cfg.Server.DefaultCPULimit != 4.0 {
+		t.Errorf("default_cpu_limit not migrated: got %v", cfg.Server.DefaultCPULimit)
+	}
+	if cfg.Storage.StoreRetention.Duration != 24*time.Hour {
+		t.Errorf("store_retention not migrated: got %v", cfg.Storage.StoreRetention.Duration)
+	}
+	if !cfg.Server.SkipPreflight {
+		t.Errorf("skip_docker_preflight not migrated")
+	}
+}
+
+func TestNewFieldWinsOverDeprecated(t *testing.T) {
+	const bothTOML = `
+[server]
+default_memory_limit = "8g"
+
+[docker]
+image                = "img"
+default_memory_limit = "2g"
+
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+	cfg := loadFromString(t, bothTOML)
+	if cfg.Server.DefaultMemoryLimit != "8g" {
+		t.Errorf("expected new field to win, got %q", cfg.Server.DefaultMemoryLimit)
+	}
+}

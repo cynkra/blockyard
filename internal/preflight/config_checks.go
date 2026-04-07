@@ -17,18 +17,18 @@ func RunConfigChecks(cfg *config.Config) *Report {
 	// only emit the more specific wildcard+no-OIDC warning.
 	wildcardNoOIDC := checkWildcardBindNoOIDC(cfg)
 	if wildcardNoOIDC.Severity > SeverityOK {
-		r.add(wildcardNoOIDC)
+		r.Add(wildcardNoOIDC)
 	} else {
-		r.add(checkNoOIDC(cfg))
+		r.Add(checkNoOIDC(cfg))
 	}
 
-	r.add(checkExternalURLNotHTTPS(cfg))
-	r.add(checkOpenbaoHTTP(cfg))
-	r.add(checkManagementBindPublic(cfg))
-	r.add(checkNoDefaultMemoryLimit(cfg))
-	r.add(checkNoDefaultCPULimit(cfg))
-	r.add(checkNoAuditLog(cfg))
-	r.add(checkTrustedProxiesTooBroad(cfg))
+	r.Add(checkExternalURLNotHTTPS(cfg))
+	r.Add(checkOpenbaoHTTP(cfg))
+	r.Add(checkManagementBindPublic(cfg))
+	r.Add(checkNoDefaultMemoryLimit(cfg))
+	r.Add(checkNoDefaultCPULimit(cfg))
+	r.Add(checkNoAuditLog(cfg))
+	r.Add(checkTrustedProxiesTooBroad(cfg))
 
 	return r
 }
@@ -162,9 +162,9 @@ func checkManagementBindPublic(cfg *config.Config) Result {
 }
 
 // checkNoDefaultMemoryLimit warns when no default memory limit is set
-// for worker containers. A single runaway app can OOM the host.
+// for workers. A single runaway app can OOM the host.
 func checkNoDefaultMemoryLimit(cfg *config.Config) Result {
-	if cfg.Docker.DefaultMemoryLimit != "" {
+	if cfg.Server.DefaultMemoryLimit != "" {
 		return Result{
 			Name:     "no_default_memory_limit",
 			Severity: SeverityOK,
@@ -175,15 +175,15 @@ func checkNoDefaultMemoryLimit(cfg *config.Config) Result {
 	return Result{
 		Name:     "no_default_memory_limit",
 		Severity: SeverityWarning,
-		Message:  "docker.default_memory_limit is not set; worker containers have no memory limit",
+		Message:  "server.default_memory_limit is not set; workers have no memory limit",
 		Category: "config",
 	}
 }
 
 // checkNoDefaultCPULimit warns when no default CPU limit is set for
-// worker containers. A single app can starve all others.
+// workers. A single app can starve all others.
 func checkNoDefaultCPULimit(cfg *config.Config) Result {
-	if cfg.Docker.DefaultCPULimit != 0 {
+	if cfg.Server.DefaultCPULimit != 0 {
 		return Result{
 			Name:     "no_default_cpu_limit",
 			Severity: SeverityOK,
@@ -194,7 +194,7 @@ func checkNoDefaultCPULimit(cfg *config.Config) Result {
 	return Result{
 		Name:     "no_default_cpu_limit",
 		Severity: SeverityWarning,
-		Message:  "docker.default_cpu_limit is not set; worker containers have no CPU limit",
+		Message:  "server.default_cpu_limit is not set; workers have no CPU limit",
 		Category: "config",
 	}
 }

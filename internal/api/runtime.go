@@ -113,8 +113,8 @@ func buildRuntimeResponse(srv *server.Server, app *db.AppRow) runtimeResponse {
 			rw.IdleSince = &idle
 		}
 
-		// Container stats (best-effort).
-		stats, err := srv.Backend.ContainerStats(r_context(), wid)
+		// Worker resource usage (best-effort).
+		stats, err := srv.Backend.WorkerResourceUsage(r_context(), wid)
 		if err == nil && stats != nil {
 			rw.Stats = &runtimeWorkerStats{
 				CPUPercent:       stats.CPUPercent,

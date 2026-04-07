@@ -31,13 +31,15 @@ import (
 
 const testPakVersion = "stable"
 
-func dockerTestConfig(t *testing.T) *config.DockerConfig {
+func dockerTestConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return &config.DockerConfig{
-		Socket:     "/var/run/docker.sock",
-		Image:      testutil.TOMLDockerImage(t),
-		ShinyPort:  8080,
-		PakVersion: testPakVersion,
+	return &config.Config{
+		Docker: config.DockerConfig{
+			Socket:     "/var/run/docker.sock",
+			Image:      testutil.TOMLDockerImage(t),
+			ShinyPort:  8080,
+			PakVersion: testPakVersion,
+		},
 	}
 }
 
@@ -46,7 +48,7 @@ func setupDockerServer(t *testing.T) *server.Server {
 	ctx := context.Background()
 	basePath := t.TempDir()
 
-	be, err := dockerbe.New(ctx, dockerTestConfig(t), basePath)
+	be, err := dockerbe.New(ctx, dockerTestConfig(t), basePath, "test")
 	if err != nil {
 		t.Fatalf("New docker backend: %v", err)
 	}
@@ -61,7 +63,7 @@ func setupDockerServer(t *testing.T) *server.Server {
 	os.MkdirAll(storeRoot, 0o755)
 
 	cfg := &config.Config{
-		Docker: *dockerTestConfig(t),
+		Docker: dockerTestConfig(t).Docker,
 		Storage: config.StorageConfig{
 			BundleServerPath: basePath,
 			BundleWorkerPath: "/app",

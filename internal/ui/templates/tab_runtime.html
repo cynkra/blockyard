@@ -36,10 +36,14 @@
                     </div>
                 </td>
                 <td>
+                    {{if gt .MemoryLimitBytes 0}}
                     <div class="tooltip" data-tip="{{.MemoryUsageBytes | humanBytes}} / {{.MemoryLimitBytes | humanBytes}}">
                         <span class="text-xs">{{.MemoryUsageBytes | humanBytes}}</span>
                         <span class="text-xs text-base-content/40">/ {{.MemoryLimitBytes | humanBytes}}</span>
                     </div>
+                    {{else}}
+                    <span class="text-xs">{{.MemoryUsageBytes | humanBytes}}</span>
+                    {{end}}
                 </td>
                 <td>
                     {{len .Sessions}}

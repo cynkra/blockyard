@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,8 +20,9 @@ import (
 	_ "github.com/cynkra/blockyard/internal/api/docs"
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/docker"
-	"github.com/cynkra/blockyard/internal/buildercache"
+	"github.com/cynkra/blockyard/internal/backend/process"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/drain"
@@ -40,7 +42,39 @@ import (
 
 var version = "dev"
 
+// runProbe is the `blockyard probe --tcp host:port --timeout dur` mode
+// used by the process backend's worker-egress preflight check. Spawned
+// inside a bwrap sandbox configured exactly like a real worker; exits
+// 0 on TCP connect success, 1 on failure. Uses a fresh FlagSet so the
+// probe-specific flags don't clash with main's `-config`/`-version`.
+func runProbe(args []string) error {
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	addr := fs.String("tcp", "", "host:port to TCP-connect")
+	timeout := fs.Duration("timeout", 2*time.Second, "connect timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *addr == "" {
+		return fmt.Errorf("probe: --tcp host:port is required")
+	}
+	conn, err := net.DialTimeout("tcp", *addr, *timeout)
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	return nil
+}
+
 func main() {
+	// `blockyard probe ...` short-circuits before flag.Parse() so its
+	// own FlagSet handles the args. Used by process.checkWorkerEgress.
+	if len(os.Args) > 1 && os.Args[1] == "probe" {
+		if err := runProbe(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	configPath := flag.String("config", "blockyard.toml", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -80,10 +114,22 @@ func main() {
 	}
 
 	// Initialize backend
-	be, err := docker.New(context.Background(), &cfg.Docker, cfg.Storage.BundleServerPath)
-	if err != nil {
-		slog.Error("failed to create docker backend", "error", err)
-		os.Exit(1)
+	var be backend.Backend
+	switch cfg.Server.Backend {
+	case "process":
+		pb, perr := process.New(cfg)
+		if perr != nil {
+			slog.Error("failed to create process backend", "error", perr)
+			os.Exit(1)
+		}
+		be = pb
+	default: // "docker"
+		dockerBE, derr := docker.New(context.Background(), cfg, cfg.Storage.BundleServerPath, version)
+		if derr != nil {
+			slog.Error("failed to create docker backend", "error", derr)
+			os.Exit(1)
+		}
+		be = dockerBE
 	}
 
 	// Initialize database
@@ -107,35 +153,20 @@ func main() {
 		srv.PkgStore.SetPlatform(platform)
 	}
 
-	// ── Preflight: Docker-dependent checks ──
-	var dockerReport *preflight.Report
-	if !cfg.Server.SkipDockerPreflight {
-		builderBin, builderErr := buildercache.EnsureCached(
-			filepath.Join(cfg.Storage.BundleServerPath, ".by-builder-cache"), version)
-		if builderErr != nil {
-			slog.Warn("preflight: could not cache by-builder, skipping builder check",
-				"error", builderErr)
-			builderBin = ""
-		}
-
+	// ── Preflight: backend-specific checks ──
+	var backendReport *preflight.Report
+	if !cfg.Server.SkipPreflight {
 		preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		var redisURL string
-		if cfg.Redis != nil {
-			redisURL = cfg.Redis.URL
-		}
-		dockerReport = preflight.RunDockerChecks(preflightCtx, preflight.DockerDeps{
-			Client:     be.Client(),
-			ServerID:   be.ServerID(),
-			MountCfg:   be.MountCfg(),
-			Config:     &cfg.Docker,
-			StorePath:  storePath,
-			BuilderBin: builderBin,
-			RedisURL:   redisURL,
-		})
+		var pErr error
+		backendReport, pErr = be.Preflight(preflightCtx)
 		preflightCancel()
-		dockerReport.Log()
-		if dockerReport.HasErrors() {
-			slog.Error("preflight Docker checks failed")
+		if pErr != nil {
+			slog.Error("preflight checks errored", "error", pErr)
+			os.Exit(1)
+		}
+		backendReport.Log()
+		if backendReport.HasErrors() {
+			slog.Error("preflight backend checks failed")
 			os.Exit(1)
 		}
 	}
@@ -381,8 +412,8 @@ func main() {
 		}()
 
 		// Store eviction sweeper.
-		if cfg.Docker.StoreRetention.Duration > 0 {
-			pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Docker.StoreRetention.Duration)
+		if cfg.Storage.StoreRetention.Duration > 0 {
+			pkgstore.SpawnEvictionSweeper(bgCtx, srv.PkgStore, cfg.Storage.StoreRetention.Duration)
 		}
 
 		// Refresh scheduler.
@@ -416,7 +447,7 @@ func main() {
 		StorePath:     storePath,
 		ServerVersion: version,
 		DBPing:        database.Ping,
-		DockerPing: func(ctx context.Context) error {
+		BackendPing: func(ctx context.Context) error {
 			_, err := be.ListManaged(ctx)
 			return err
 		},
@@ -439,7 +470,7 @@ func main() {
 		checkerDeps.VaultTokenOK = srv.VaultTokenHealthy
 	}
 	srv.Checker = preflight.NewChecker(checkerDeps)
-	srv.Checker.Init(context.Background(), configReport, dockerReport)
+	srv.Checker.Init(context.Background(), configReport, backendReport)
 
 	// Late-binding drain closures — drainer is nil here, assigned below.
 	var drainer *drain.Drainer

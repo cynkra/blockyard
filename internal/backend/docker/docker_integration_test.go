@@ -35,20 +35,22 @@ func rawClient(t *testing.T, d *DockerBackend) *client.Client {
 	return c
 }
 
-func testConfig(t *testing.T) *config.DockerConfig {
+func testConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return &config.DockerConfig{
-		Socket:     "/var/run/docker.sock",
-		Image:      testutil.AlpineImage(t),
-		ShinyPort:  8080,
-		PakVersion: "stable",
+	return &config.Config{
+		Docker: config.DockerConfig{
+			Socket:     "/var/run/docker.sock",
+			Image:      testutil.AlpineImage(t),
+			ShinyPort:  8080,
+			PakVersion: "stable",
+		},
 	}
 }
 
 
 func TestSpawnAndStop(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -93,7 +95,7 @@ func TestSpawnAndStop(t *testing.T) {
 
 func TestHealthCheckNoListener(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -125,7 +127,7 @@ func TestHealthCheckNoListener(t *testing.T) {
 
 func TestOrphanCleanup(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -189,7 +191,7 @@ func TestOrphanCleanup(t *testing.T) {
 
 func TestNetworkIsolation(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -268,7 +270,7 @@ func TestNetworkIsolation(t *testing.T) {
 
 func TestMetadataEndpointBlocked(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -345,7 +347,7 @@ func testSpawn(t *testing.T, b *DockerBackend, cmd []string) (string, backend.Wo
 
 func TestLogs(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -380,7 +382,7 @@ func TestLogs(t *testing.T) {
 
 func TestLogsUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -393,7 +395,7 @@ func TestLogsUnknownWorker(t *testing.T) {
 
 func TestStopUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -405,7 +407,7 @@ func TestStopUnknownWorker(t *testing.T) {
 
 func TestHealthCheckUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -424,7 +426,7 @@ func testBundleDir(t *testing.T) (bundleDir, libDir string) {
 
 func TestBuildFailsWithBadImage(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -455,7 +457,7 @@ func TestBuildFailsWithBadImage(t *testing.T) {
 
 func TestBuildWithProductionImage(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -488,7 +490,7 @@ func TestBuildWithProductionImage(t *testing.T) {
 
 func TestAddrUnknownWorker(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -504,7 +506,7 @@ func TestAddrUnknownWorker(t *testing.T) {
 
 func TestSpawnWithMemoryLimit(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -545,7 +547,7 @@ func TestSpawnWithMemoryLimit(t *testing.T) {
 
 func TestSpawnWithCPULimit(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -586,7 +588,7 @@ func TestSpawnWithCPULimit(t *testing.T) {
 
 func TestSpawnWithEnvVars(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -645,7 +647,7 @@ func TestSpawnWithEnvVars(t *testing.T) {
 
 func TestBuildLogWriter(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -690,7 +692,7 @@ func TestBuildLogWriter(t *testing.T) {
 
 func TestBuildExitCodeOnFailure(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -725,7 +727,7 @@ func TestBuildExitCodeOnFailure(t *testing.T) {
 
 func TestSpawnAndHealthCheckWithListener(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -760,7 +762,7 @@ func TestSpawnAndHealthCheckWithListener(t *testing.T) {
 
 func TestListManagedIncludesNetworks(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -793,7 +795,7 @@ func TestListManagedIncludesNetworks(t *testing.T) {
 
 func TestContainerStats(t *testing.T) {
 	ctx := context.Background()
-	b, err := New(ctx, testConfig(t), t.TempDir())
+	b, err := New(ctx, testConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -804,12 +806,13 @@ func TestContainerStats(t *testing.T) {
 	ws := b.workers[workerID]
 	b.mu.Unlock()
 
-	stats, err := b.ContainerStats(ctx, ws.containerID)
+	_ = ws // workerState referenced for parity with the original test
+	stats, err := b.WorkerResourceUsage(ctx, workerID)
 	if err != nil {
-		t.Fatalf("ContainerStats: %v", err)
+		t.Fatalf("WorkerResourceUsage: %v", err)
 	}
 	if stats == nil {
-		t.Fatal("ContainerStats returned nil")
+		t.Fatal("WorkerResourceUsage returned nil")
 	}
 	if stats.MemoryLimitBytes == 0 {
 		t.Error("expected non-zero memory limit")
@@ -817,56 +820,3 @@ func TestContainerStats(t *testing.T) {
 	t.Logf("CPU=%.2f%%, Mem=%d/%d", stats.CPUPercent, stats.MemoryUsageBytes, stats.MemoryLimitBytes)
 }
 
-func TestParseMemoryLimitEdgeCases(t *testing.T) {
-	tests := []struct {
-		input  string
-		want   int64
-		wantOk bool
-	}{
-		{"512m", 512 * 1024 * 1024, true},
-		{"1g", 1024 * 1024 * 1024, true},
-		{"256k", 256 * 1024, true},
-		{"1024", 1024, true},
-		{"", 0, false},
-		{"abc", 0, false},
-		{"m", 0, false},
-		{"512mb", 512 * 1024 * 1024, true},
-		{"2gb", 2 * 1024 * 1024 * 1024, true},
-		{"128kb", 128 * 1024, true},
-		// Case insensitivity.
-		{"512M", 512 * 1024 * 1024, true},
-		{"1G", 1024 * 1024 * 1024, true},
-		{"100KB", 100 * 1024, true},
-		{"256MB", 256 * 1024 * 1024, true},
-		// Whitespace handling.
-		{"   ", 0, false},
-		{" 512m ", 512 * 1024 * 1024, true},
-		{" 1024 ", 1024, true},
-		// Zero values.
-		{"0", 0, true},
-		{"0m", 0, true},
-		{"0g", 0, true},
-		// Negative values.
-		{"-512m", -512 * 1024 * 1024, true},
-		{"-1", -1, true},
-		// Decimal values fail (ParseInt rejects them).
-		{"1.5g", 0, false},
-		{"0.5m", 0, false},
-		// Invalid suffixes → treated as bytes, ParseInt fails.
-		{"512x", 0, false},
-		{"512p", 0, false},
-		// Large value.
-		{"100g", 100 * 1024 * 1024 * 1024, true},
-	}
-
-	for _, tt := range tests {
-		got, ok := ParseMemoryLimit(tt.input)
-		if ok != tt.wantOk {
-			t.Errorf("ParseMemoryLimit(%q): ok=%v, want %v", tt.input, ok, tt.wantOk)
-			continue
-		}
-		if ok && got != tt.want {
-			t.Errorf("ParseMemoryLimit(%q) = %d, want %d", tt.input, got, tt.want)
-		}
-	}
-}
