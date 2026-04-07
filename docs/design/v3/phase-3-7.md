@@ -72,11 +72,17 @@ can be integrated later.
 9. **Worker UID/GID isolation** — each worker is allocated a unique
    host UID from `worker_uid_range_start..end` and shares a single
    `worker_gid` with all other workers. This is the foundation for
-   the egress firewall (decision #5): operators install
-   `iptables -m owner --gid-owner $worker_gid -j REJECT` to block
-   worker outbound traffic without affecting blockyard itself.
+   the egress firewall (decision #5): operators install destination-
+   scoped `iptables -m owner --gid-owner $worker_gid -d <internal-ip>
+   -j REJECT` rules to block worker access to specific internal
+   services (Redis, OpenBao, database, cloud metadata) without
+   affecting blockyard itself and without blocking the open internet
+   (workers can still reach external APIs, download data, etc.).
    Implemented via a `uidAllocator` (parallel to the port allocator)
-   and `--uid <N> --gid <G>` flags in `bwrapArgs`.
+   and `--uid <N> --gid <G>` flags in `bwrapArgs`. For the host UID
+   mapping to actually take effect, blockyard must run as root or
+   bwrap must be setuid — verified by `checkBwrapHostUIDMapping`
+   (see deliverable #8).
 10. **`blockyard probe` subcommand** — small TCP-connectivity probe
     used by `checkWorkerEgress`. Dispatched early in `main.go` based
     on `os.Args[1]`. ~30 lines, no external tools required, runs
@@ -296,21 +302,55 @@ host UID from `worker_uid_range_start..worker_uid_range_end`, and all
 workers share `worker_gid` as their host GID. This is the foundation
 for egress isolation: blockyard runs as its own UID and can reach
 Redis/database/OpenBao freely; workers run as different UIDs in a
-shared GID, and operators install an iptables rule blocking outbound
-traffic from that GID:
+shared GID, and operators install iptables rules that block worker
+access to **specific internal services** (not blanket egress —
+workers legitimately need to reach the open internet to download
+data, call APIs, fetch models, etc.):
 
 ```sh
-# Allow blockyard's own egress
+# Allow blockyard's own egress (to Redis, DB, OpenBao, etc.)
 iptables -A OUTPUT -m owner --uid-owner blockyard -j ACCEPT
-# Block worker egress (covers all workers via shared GID)
-iptables -A OUTPUT -m owner --gid-owner 65534 -j REJECT
+# Block worker access to specific internal destinations, not the
+# open internet. The worker GID is the match; the destination
+# address narrows the rule.
+iptables -A OUTPUT -m owner --gid-owner 65534 -d 169.254.169.254 -j REJECT
+iptables -A OUTPUT -m owner --gid-owner 65534 -d <redis-ip>     -j REJECT
+iptables -A OUTPUT -m owner --gid-owner 65534 -d <openbao-ip>   -j REJECT
+iptables -A OUTPUT -m owner --gid-owner 65534 -d <database-ip>  -j REJECT
+# Traffic to the open internet falls through and is allowed.
 ```
 
-The `process.RunPreflight` check `checkWorkerEgress` verifies this is
-in place by spawning a probe under the worker UID/GID and attempting
-TCP connections to sensitive endpoints (cloud metadata, Redis,
-OpenBao, database). See step 7 and decision #5 for the threat model
-and limitations.
+The `process.RunPreflight` check `checkWorkerEgress` verifies these
+rules are in place by spawning a probe under the worker UID/GID and
+attempting TCP connections to the same internal endpoints (cloud
+metadata, Redis, OpenBao, database). It does *not* probe the open
+internet — workers are expected to reach it. See step 7 and
+decision #5 for the threat model and limitations.
+
+**Deployment modes and the UID mapping requirement.** The iptables
+`--uid-owner`/`--gid-owner` match works on the process's *host*
+UID/GID as the kernel sees it, not on the namespace-local UID inside
+the sandbox. For bwrap's `--uid N --gid G` flags to actually produce
+a host-visible UID/GID of N/G (so the iptables rules match), one of
+the following must hold:
+
+- **Blockyard runs as root** (typical containerized deployment, where
+  blockyard is PID 1 root inside a container). bwrap inherits root
+  and can set up any uid_map. This is the recommended mode and works
+  with a distro-default bwrap.
+- **bwrap is setuid root** on the host (`chmod u+s /usr/bin/bwrap`).
+  This is the default on Fedora/RHEL but *not* on Debian 12+ or
+  Ubuntu 24.04+, which ship bwrap relying on unprivileged user
+  namespaces. On those distros a native non-root blockyard deployment
+  needs an operator-installed setuid bwrap.
+
+Running native non-root with an unprivileged bwrap produces a silent
+failure mode: workers start fine but all run under blockyard's own
+host UID/GID, so the per-worker isolation collapses and the iptables
+rules match nothing. `process.RunPreflight` catches this explicitly
+via `checkBwrapHostUIDMapping` (step 7) — it spawns bwrap with a
+distinct sandbox UID and verifies the child's *host-side*
+`/proc/<pid>/status` reports the requested UID, not the caller's UID.
 
 The UID range must be at least as large as the port range, since each
 worker consumes one port and one UID. Defaults: 60000-60999 (1000
@@ -509,9 +549,15 @@ import (
 // bwrapArgs constructs the bwrap command-line arguments for a worker.
 // uid is the host UID this worker runs as (allocated from the worker
 // UID pool); gid is the shared host GID for all workers (used by the
-// egress firewall rule). Together they let operators install
-// `iptables -m owner --gid-owner $worker_gid -j REJECT` to block
-// worker egress without affecting blockyard itself.
+// operator's destination-scoped egress firewall rules). Together they
+// let operators install rules like
+// `iptables -m owner --gid-owner $worker_gid -d <internal-ip> -j REJECT`
+// to block worker access to specific internal services without
+// affecting blockyard or blocking the open internet.
+//
+// For the host UID/GID to actually take effect (so iptables owner
+// match works), blockyard must run as root or bwrap must be setuid.
+// Verified at startup by checkBwrapHostUIDMapping.
 func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gid int) []string {
     args := []string{
         // Namespace isolation
@@ -550,23 +596,32 @@ func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gi
         "--ro-bind", spec.BundlePath, spec.WorkerMount,
     }
 
-    // R library (read-only) — legacy path or store-based path
+    // R library (read-only) — mount target must match the Docker
+    // backend's convention so the same R_LIBS env var resolves
+    // correctly on either backend. Store-assembled library (phase 2-6)
+    // mounts at /blockyard-lib-store; legacy per-bundle library
+    // (phase 2-5) mounts at /blockyard-lib. Must not use /lib, which
+    // shadows the system shared library directory.
     if spec.LibDir != "" {
-        args = append(args, "--ro-bind", spec.LibDir, "/rv-library")
+        args = append(args, "--ro-bind", spec.LibDir, "/blockyard-lib-store")
     } else if spec.LibraryPath != "" {
-        args = append(args, "--ro-bind", spec.LibraryPath, "/rv-library")
+        args = append(args, "--ro-bind", spec.LibraryPath, "/blockyard-lib")
     }
 
-    // Worker token directory (read-only, optional) — must come before
-    // the transfer mount so that the child mount shadows the parent.
+    // Worker token directory (read-only, optional) — mount target
+    // /var/run/blockyard matches the Docker backend's convention.
+    // Workers read /var/run/blockyard/token to authenticate to the
+    // packages endpoint.
     if spec.TokenDir != "" {
         args = append(args, "--ro-bind", spec.TokenDir, "/var/run/blockyard")
     }
 
-    // Transfer directory (read-write, optional) — mounted after the
-    // parent /var/run/blockyard so it shadows the transfer subdirectory.
+    // Transfer directory (read-write, optional) — mount target /transfer
+    // matches the Docker backend's convention. Workers read the handoff
+    // file via the BLOCKYARD_TRANSFER_PATH env var (set to
+    // "/transfer/board.json" in server/transfer.go).
     if spec.TransferDir != "" {
-        args = append(args, "--bind", spec.TransferDir, "/var/run/blockyard/transfer")
+        args = append(args, "--bind", spec.TransferDir, "/transfer")
     }
 
     // Capability dropping — bwrap drops all by default with --unshare-user,
@@ -961,16 +1016,28 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
 
     // Minimal environment — do NOT inherit the server's env, which
     // contains database URLs, Redis credentials, OpenBao tokens, etc.
+    //
+    // R_LIBS must point at the mount target for the R library (see
+    // bwrapArgs) and SHINY_PORT must be the allocated host port —
+    // call sites pass a Cmd that reads `Sys.getenv('SHINY_PORT')`
+    // to decide what port Shiny binds to. Both must match the Docker
+    // backend's conventions so the same spec.Cmd works on either
+    // backend without modification.
+    rLibs := "/blockyard-lib"
+    if spec.LibDir != "" {
+        rLibs = "/blockyard-lib-store"
+    }
     cmd.Env = []string{
         "PATH=/usr/bin:/usr/local/bin:/bin",
         "HOME=/tmp",
         "TMPDIR=/tmp",
         "LANG=C.UTF-8",
+        "R_LIBS=" + rLibs,
     }
     for k, v := range spec.Env {
         cmd.Env = append(cmd.Env, k+"="+v)
     }
-    cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", port))
+    cmd.Env = append(cmd.Env, fmt.Sprintf("SHINY_PORT=%d", port))
 
     // Log capture
     logs := newLogBuffer(10000)
@@ -1448,6 +1515,14 @@ import (
 // (*ProcessBackend).Preflight() with the full config so the egress
 // probe can read Redis/OpenBao/database addresses and the resource-
 // limit check can read server-level defaults.
+//
+// Check ordering matters: bwrap/R/userns are prerequisites for
+// checkBwrapHostUIDMapping (it spawns bwrap), and that check is a
+// prerequisite for checkWorkerEgress (which also spawns bwrap and
+// whose results are meaningful only if the host UID mapping is
+// effective). If a prerequisite fails we still run the later checks
+// — they'll fail too, and emitting all failures at once is more
+// useful than bailing at the first.
 func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config) *preflight.Report {
     r := &preflight.Report{RanAt: time.Now().UTC()}
     r.Add(checkBwrap(cfg))
@@ -1455,6 +1530,7 @@ func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config) *preflight.
     r.Add(checkUserNamespaces())
     r.Add(checkPortRange(cfg))
     r.Add(checkResourceLimits(&fullCfg.Server))
+    r.Add(checkBwrapHostUIDMapping(cfg))
     r.Add(checkWorkerEgress(cfg, fullCfg))
     return r
 }
@@ -1527,6 +1603,155 @@ func checkUserNamespaces() preflight.Result {
         Message:  "unprivileged user namespaces enabled",
         Category: "process",
     }
+}
+
+// checkBwrapHostUIDMapping verifies that bwrap's --uid/--gid flags
+// produce a host-visible UID/GID, not just a namespace-local one.
+// This is load-bearing for decision #5: the operator's iptables
+// owner-match rules only fire if workers actually appear as the
+// configured worker UID/GID from the init namespace's perspective.
+//
+// The check works by spawning a bwrap child under a probe UID/GID
+// distinct from the caller's UID/GID, then reading the host-side
+// /proc/<child_pid>/status from the parent process. If the reported
+// Uid/Gid lines do not match what we asked for, bwrap is running in
+// unprivileged-userns mode and the mapping is local-only.
+//
+// Remediation: run blockyard as root (typical containerized mode) or
+// install bwrap setuid on the host (`chmod u+s /usr/bin/bwrap`, or
+// equivalent via setcap). On Debian 12+/Ubuntu 24.04+ bwrap is no
+// longer shipped setuid by default.
+func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
+    const name = "bwrap_host_uid_mapping"
+
+    // Probe UID/GID — must be distinct from any UID the caller might
+    // already have. The worker UID range start is a safe choice: it's
+    // outside the usual 0/1000 system range and matches the real
+    // worker mapping we care about.
+    probeUID := cfg.WorkerUIDStart
+    probeGID := cfg.WorkerGID
+    if probeUID == os.Getuid() {
+        // Caller already runs as WorkerUIDStart — pick any other value.
+        probeUID = cfg.WorkerUIDStart + 1
+    }
+
+    // Long-enough sleep that we have time to read /proc before exit.
+    args := []string{
+        "--ro-bind", "/", "/",
+        "--tmpfs", "/tmp",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--unshare-pid", "--unshare-user", "--unshare-uts",
+        "--uid", strconv.Itoa(probeUID),
+        "--gid", strconv.Itoa(probeGID),
+        "--die-with-parent", "--new-session",
+        "--cap-drop", "ALL",
+        "--", "/bin/sleep", "2",
+    }
+    cmd := exec.Command(cfg.BwrapPath, args...) //nolint:gosec // G204
+    if err := cmd.Start(); err != nil {
+        return preflight.Result{
+            Name:     name,
+            Severity: preflight.SeverityError,
+            Message:  fmt.Sprintf("failed to spawn bwrap probe: %v", err),
+            Category: "process",
+        }
+    }
+    defer func() {
+        _ = cmd.Process.Kill()
+        _ = cmd.Wait()
+    }()
+
+    // Poll the bwrap child's /proc/<pid>/status — the sandboxed sleep
+    // is a grandchild, but what matters for iptables is what the
+    // worker processes look like from the host. bwrap and its
+    // descendants all share the same host credentials set, so reading
+    // the bwrap pid is sufficient.
+    var uidLine, gidLine string
+    deadline := time.Now().Add(1 * time.Second)
+    for time.Now().Before(deadline) {
+        data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
+        if err == nil {
+            for _, line := range strings.Split(string(data), "\n") {
+                switch {
+                case strings.HasPrefix(line, "Uid:"):
+                    uidLine = line
+                case strings.HasPrefix(line, "Gid:"):
+                    gidLine = line
+                }
+            }
+            if uidLine != "" && gidLine != "" {
+                break
+            }
+        }
+        time.Sleep(50 * time.Millisecond)
+    }
+    if uidLine == "" || gidLine == "" {
+        return preflight.Result{
+            Name:     name,
+            Severity: preflight.SeverityError,
+            Message:  "bwrap probe exited before /proc could be read",
+            Category: "process",
+        }
+    }
+
+    // /proc/<pid>/status Uid/Gid lines have the form:
+    //   Uid:\t<real>\t<effective>\t<saved>\t<fs>
+    // We check the real UID — that's what iptables --uid-owner
+    // matches against (filp->f_cred->fsuid == the fsuid, same value
+    // on a vanilla fork/exec).
+    realHostUID, err := parseStatusUID(uidLine)
+    if err != nil {
+        return preflight.Result{
+            Name:     name,
+            Severity: preflight.SeverityError,
+            Message:  fmt.Sprintf("could not parse /proc/<pid>/status Uid line %q: %v", uidLine, err),
+            Category: "process",
+        }
+    }
+    realHostGID, err := parseStatusUID(gidLine)
+    if err != nil {
+        return preflight.Result{
+            Name:     name,
+            Severity: preflight.SeverityError,
+            Message:  fmt.Sprintf("could not parse /proc/<pid>/status Gid line %q: %v", gidLine, err),
+            Category: "process",
+        }
+    }
+
+    if realHostUID != probeUID || realHostGID != probeGID {
+        return preflight.Result{
+            Name:     name,
+            Severity: preflight.SeverityError,
+            Message: fmt.Sprintf(
+                "bwrap --uid/--gid do not affect the host view of the child: "+
+                    "requested uid=%d gid=%d, host /proc sees uid=%d gid=%d. "+
+                    "The operator's iptables --uid-owner/--gid-owner rules will not match "+
+                    "worker traffic in this configuration. Either run blockyard as root "+
+                    "(typical containerized deployment) or install bwrap setuid on the host "+
+                    "(`sudo chmod u+s %s`). See backends.md for details.",
+                probeUID, probeGID, realHostUID, realHostGID, cfg.BwrapPath,
+            ),
+            Category: "process",
+        }
+    }
+    return preflight.Result{
+        Name:     name,
+        Severity: preflight.SeverityOK,
+        Message:  fmt.Sprintf("bwrap --uid/--gid are host-effective (child host uid=%d gid=%d)", realHostUID, realHostGID),
+        Category: "process",
+    }
+}
+
+// parseStatusUID extracts the first numeric field from a
+// /proc/<pid>/status Uid: or Gid: line (the "real" id).
+//   Uid:\t1000\t1000\t1000\t1000
+func parseStatusUID(line string) (int, error) {
+    fields := strings.Fields(line)
+    if len(fields) < 2 {
+        return 0, fmt.Errorf("too few fields")
+    }
+    return strconv.Atoi(fields[1])
 }
 
 // checkResourceLimits warns when default_memory_limit or default_cpu_limit
@@ -1646,7 +1871,7 @@ func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) prefli
         return preflight.Result{
             Name:     "worker_egress",
             Severity: preflight.SeverityOK,
-            Message:  fmt.Sprintf("worker egress blocked for: %s", strings.Join(blocked, ", ")),
+            Message:  fmt.Sprintf("worker access to internal services is blocked: %s", strings.Join(blocked, ", ")),
             Category: "process",
         }
     }
@@ -1658,10 +1883,12 @@ func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) prefli
         Name:     "worker_egress",
         Severity: severity,
         Message: fmt.Sprintf(
-            "workers can reach sensitive endpoints: %s. "+
-                "Configure egress filtering with: "+
-                "`iptables -A OUTPUT -m owner --gid-owner %d -j REJECT` "+
-                "(or use a dedicated worker GID). See backends.md for details.",
+            "workers can reach internal services: %s. "+
+                "Install destination-scoped iptables rules, e.g. "+
+                "`iptables -A OUTPUT -m owner --gid-owner %d -d <service-ip> -j REJECT` "+
+                "for each internal endpoint. Do not use a blanket REJECT — "+
+                "workers legitimately need the open internet. "+
+                "See backends.md for details.",
             strings.Join(reachable, ", "), cfg.WorkerGID,
         ),
         Category: "process",
@@ -1807,7 +2034,60 @@ mentioned above. This is acceptable for the use case: scale-to-zero
 deployments expect cold starts, and internal-only deployments have
 infrequent rolling updates.
 
-### Step 9: Tests
+### Step 9: Phase 3-9 (pre-fork) forward compatibility
+
+Phase 3-9 adds a pre-fork worker pool with a control channel between
+blockyard and each pooled worker (send `RunApp`, receive health,
+etc.). The Docker backend uses per-worker bridge IPs on a fixed
+control port with token auth. For parity, the process backend needs
+an equivalent control transport.
+
+Phase 3-7 does not implement that transport — it belongs to phase 3-9
+— but it establishes three load-bearing contracts that phase 3-9
+hangs off. Implementers of phase 3-7 should preserve them:
+
+1. **Token dir mount at `/var/run/blockyard`** — set up in `bwrapArgs`
+   (step 3). Phase 3-9 reads the per-worker control token from this
+   directory to authenticate control connections. The mount path and
+   read-only flag are part of the contract.
+2. **bwrap does not `--unshare-net`** — workers share the host
+   loopback. Phase 3-9 addresses pooled workers via
+   `127.0.0.1:<control_port>` without any veth or namespace machinery.
+   This is already load-bearing for the `host='127.0.0.1'` Shiny
+   binding (decision #20) and the preflight egress probe (step 7);
+   phase 3-9 adds a third dependency.
+3. **Port allocator is per-worker state, not per-port semantics** —
+   phase 3-9 extends `portAllocator` (step 2) to hand out a unique
+   control port in addition to the shiny port. The concrete scheme
+   (paired allocation, a second allocator over a disjoint range, or
+   odd/even within a single range) is deferred to phase 3-9. Phase
+   3-7 should avoid baking "one port per worker" into surrounding
+   code: `Spawn` calls `ports.Alloc()` once and stores the result in
+   `workerProc.port`, which phase 3-9 extends with a second call and
+   a second field — no structural changes to the lifecycle flow.
+
+**Sketch (full design in phase-3-9.md).** The process-backend
+pre-fork control transport is TCP on localhost with token auth, same
+wire protocol as the Docker backend: first frame from the controller
+is `AUTH <token>\n`, token read from the mounted
+`/var/run/blockyard` directory. The abstract `Forking` interface has
+two implementations (Docker, process), both addressing children by
+`host:port` — the Docker impl uses the per-worker bridge IP, the
+process impl uses `127.0.0.1 + allocated control port`.
+`prefork.Manager` is fully backend-agnostic; only the constructor
+differs.
+
+**Why TCP, not a Unix socket.** A pathname socket on the host
+filesystem would be the obvious alternative and avoid touching
+loopback, but it runs straight into the per-worker UID question
+(decision #5): the bind-mounted socket file inherits the creator's
+UID, and the bwrap worker runs under a different UID than blockyard.
+We already dodge this on the Docker side; matching that for the
+process backend means staying on TCP. Abstract-namespace sockets
+sidestep the filesystem permission issue but are Linux-specific,
+harder to debug, and save nothing meaningful over loopback TCP.
+
+### Step 10: Tests
 
 #### Unit tests — bwrap argument construction
 
@@ -1866,7 +2146,7 @@ func TestBwrapArgsWithLibDir(t *testing.T) {
     }
 
     args := bwrapArgs(cfg, spec, 10001, 60001, 65534)
-    assertBindMount(t, args, "--ro-bind", spec.LibDir, "/rv-library")
+    assertBindMount(t, args, "--ro-bind", spec.LibDir, "/blockyard-lib-store")
 }
 
 func TestBwrapArgsCustomCmd(t *testing.T) {
@@ -1894,17 +2174,20 @@ func TestBwrapBuildArgs(t *testing.T) {
         BwrapPath: "/usr/bin/bwrap",
         RPath:     "/usr/bin/R",
     }
+    // Mount targets match the real build caller in
+    // server/packages.go: `/worker-lib` for the read-only reference
+    // library, `/store` for the writable package store destination.
     spec := backend.BuildSpec{
         Cmd: []string{"/usr/bin/R", "-e", "pak::pak_install()"},
         Mounts: []backend.MountEntry{
-            {Source: "/data/bundles/app1/v1", Target: "/app", ReadOnly: true},
-            {Source: "/data/lib-out", Target: "/rv-library", ReadOnly: false},
+            {Source: "/data/worker-lib", Target: "/worker-lib", ReadOnly: true},
+            {Source: "/data/.pkg-store", Target: "/store", ReadOnly: false},
         },
     }
 
     args := bwrapBuildArgs(cfg, spec, 60000, 65534)
-    assertBindMount(t, args, "--ro-bind", "/data/bundles/app1/v1", "/app")
-    assertBindMount(t, args, "--bind", "/data/lib-out", "/rv-library")
+    assertBindMount(t, args, "--ro-bind", "/data/worker-lib", "/worker-lib")
+    assertBindMount(t, args, "--bind", "/data/.pkg-store", "/store")
     assertFlagValue(t, args, "--uid", "60000")
     assertFlagValue(t, args, "--gid", "65534")
 }
@@ -2193,6 +2476,42 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
         t.Errorf("expected 0 memory limit (no cgroup), got %d", stats.MemoryLimitBytes)
     }
 }
+
+func TestCheckBwrapHostUIDMapping(t *testing.T) {
+    if _, err := exec.LookPath("bwrap"); err != nil {
+        t.Skip("bwrap not available")
+    }
+
+    cfg := &config.ProcessConfig{
+        BwrapPath:      "bwrap",
+        WorkerUIDStart: 60000,
+        WorkerUIDEnd:   60099,
+        WorkerGID:      65534,
+    }
+
+    result := checkBwrapHostUIDMapping(cfg)
+
+    // This test is strict about the outcome only when we know what
+    // mode bwrap is in. On a CI host where bwrap is not setuid and
+    // we are not root, an Error result is the correct answer and
+    // demonstrates the check is working. On a host with setuid bwrap
+    // or when running as root, OK is the correct answer. In either
+    // case the check must complete — not error out parsing /proc or
+    // hang on the child.
+    switch result.Severity {
+    case preflight.SeverityOK:
+        // Expected when running as root or with setuid bwrap.
+    case preflight.SeverityError:
+        // Expected with unprivileged bwrap as a non-root caller.
+        // Verify the message names both the requested and observed UIDs
+        // so operators can act on it.
+        if !strings.Contains(result.Message, "requested uid") {
+            t.Errorf("error message missing requested uid context: %q", result.Message)
+        }
+    default:
+        t.Errorf("unexpected severity %v: %q", result.Severity, result.Message)
+    }
+}
 ```
 
 ## Files changed
@@ -2213,6 +2532,7 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 | `internal/preflight/docker_checks.go` | **delete** | Moved to `internal/backend/docker/preflight.go`. |
 | `internal/preflight/preflight.go` | **update** | Export `Report.add` → `Report.Add` so check functions in the backend packages can append results. The previous private name worked when all check functions lived in the same package; with the refactor they're external callers. |
 | `internal/preflight/addrs.go` | **create** | `tcpAddrFromRedisURL`, `tcpAddrFromHTTPURL`, `tcpAddrFromDBConfig` helpers used by the egress probe. Lives in `internal/preflight` so both backends can reuse it. |
+| `internal/preflight/config_checks.go` | **update** | `checkNoDefaultMemoryLimit` and `checkNoDefaultCPULimit` read from `cfg.Server.DefaultMemoryLimit`/`DefaultCPULimit` (the new home) instead of `cfg.Docker.*`. Warning messages updated to reference `server.default_memory_limit` / `server.default_cpu_limit`. |
 | `cmd/blockyard/main.go` | **update** | Backend selection switch; `probe` subcommand dispatch (early in main); `be.Preflight()` replaces Docker-specific preflight branching; `be.CleanupOrphanResources()` replaces direct Docker import in startup; store retention reads from `cfg.Storage`; rename `DockerPing` → `BackendPing` |
 | `internal/ops/ops.go` | **update** | Remove `docker` import; replace `docker.CleanupOrphanMetadataRules()` with `srv.Backend.CleanupOrphanResources()` |
 | `internal/api/apps.go` | **update** | Import `internal/units` instead of `internal/backend/docker` for `ParseMemoryLimit` |
@@ -2262,32 +2582,59 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
    The first call returns 0% (no previous sample). Returns nil on
    process exit (race between lookup and `/proc` read).
 
-5. **No in-process network isolation; egress filtering via UID/GID
-   firewall rules, verified at preflight.** Workers share the host
-   network stack — no `--unshare-net`, no veth pairs. Building per-
-   worker network namespaces would require either rebuilding Docker's
-   veth machinery (substantial complexity, contradicts the "no daemon"
-   pitch) or modifying upstream R packages to accept passed-in socket
-   FDs. Both were rejected.
+5. **No in-process network isolation; destination-scoped egress
+   filtering via UID/GID firewall rules, verified at preflight.**
+   Workers share the host network stack — no `--unshare-net`, no veth
+   pairs. Building per-worker network namespaces would require either
+   rebuilding Docker's veth machinery (substantial complexity,
+   contradicts the "no daemon" pitch) or modifying upstream R packages
+   to accept passed-in socket FDs. Both were rejected.
 
    Instead, the process backend gives operators the *hooks* to enforce
    egress isolation outside the process: each worker runs as a unique
    host UID from a configured pool (`worker_uid_range_start..end`),
    and all workers share a single host GID (`worker_gid`). The
-   operator installs an iptables rule:
+   operator installs destination-scoped iptables rules:
 
    ```sh
    iptables -A OUTPUT -m owner --uid-owner blockyard -j ACCEPT
-   iptables -A OUTPUT -m owner --gid-owner $worker_gid -j REJECT
+   iptables -A OUTPUT -m owner --gid-owner $worker_gid -d 169.254.169.254 -j REJECT
+   iptables -A OUTPUT -m owner --gid-owner $worker_gid -d <redis-ip>     -j REJECT
+   iptables -A OUTPUT -m owner --gid-owner $worker_gid -d <openbao-ip>   -j REJECT
+   iptables -A OUTPUT -m owner --gid-owner $worker_gid -d <database-ip>  -j REJECT
    ```
 
-   This lets blockyard reach Redis/database/OpenBao freely while
-   blocking all worker egress to those same services. The
-   `checkWorkerEgress` preflight check actively verifies the rule is
-   in place by spawning a probe under the worker UID/GID and trying
-   to TCP-connect to sensitive endpoints. Operators see explicit
-   warnings (or errors, for the cloud metadata endpoint) when the
-   firewall is missing.
+   This lets blockyard reach Redis/database/OpenBao freely, blocks
+   workers from reaching those specific internal services, and leaves
+   the open internet reachable for workers that need it (downloading
+   data, calling external APIs, fetching models). A blanket
+   `--gid-owner $worker_gid -j REJECT` would be wrong — it cuts off
+   legitimate egress too.
+
+   The `checkWorkerEgress` preflight check actively verifies the rules
+   are in place by spawning a probe under the worker UID/GID and
+   trying to TCP-connect to the same internal endpoints
+   (`checkWorkerEgress` only probes internal targets, never the open
+   internet — workers are expected to reach it). Operators see
+   explicit warnings (or errors, for the cloud metadata endpoint) when
+   the rules are missing.
+
+   **Host UID mapping is load-bearing.** iptables `--uid-owner` and
+   `--gid-owner` match on the *host-side* UID/GID of the process that
+   created the socket, not on the namespace-local UID inside the
+   sandbox. For bwrap's `--uid N --gid G` flags to produce a
+   host-visible UID/GID of N/G, either blockyard must run as root
+   (typical containerized mode — bwrap inherits root and can set up
+   arbitrary uid_map) or bwrap must be setuid on the host (the default
+   on Fedora/RHEL, *not* the default on Debian 12+ / Ubuntu 24.04+
+   which rely on unprivileged user namespaces). A native non-root
+   blockyard deployment with a distro-default bwrap silently fails:
+   workers start fine but all run under blockyard's own host UID, so
+   the iptables owner-match rules never fire. The
+   `checkBwrapHostUIDMapping` preflight check catches this by spawning
+   a bwrap child with a distinct sandbox UID and reading the child's
+   host-side `/proc/<pid>/status` to verify the requested UID
+   actually took effect.
 
    **Limitations.** This model gives worker-vs-host-services
    isolation but not cross-worker isolation: two workers in the same
