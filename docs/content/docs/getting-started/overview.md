@@ -1,29 +1,38 @@
 ---
 title: What is Blockyard?
-description: An overview of Blockyard and what it does.
+description: An overview of Blockyard and the blockr threat model it is built for.
 weight: 1
 ---
 
-Blockyard is a hosting platform for [Shiny](https://shiny.posit.co/)
-applications. It runs each app in an isolated Docker container, handles
-dependency restoration, and reverse-proxies HTTP and WebSocket traffic to
-the right worker.
+Blockyard is a self-hosted platform for running
+[blockr](https://github.com/blockr-org/blockr) applications in production.
+blockr apps evaluate user-supplied R expressions inside every session,
+which is a security model no general-purpose
+[Shiny](https://shiny.posit.co/) host was designed for. Blockyard provides
+hardened container-per-session isolation, per-user credential management
+via [OpenBao](https://openbao.org/), server-side dependency resolution,
+and built-in board storage — the full blockr stack as a single binary.
 
 ## How it works
 
-1. **You deploy a bundle** — run `by deploy ./my-app` or upload a `.tar.gz`
-   archive via the REST API. Bundles optionally include dependency metadata
-   (`renv.lock`, `DESCRIPTION`, or `manifest.json`).
-2. **Blockyard restores dependencies** — it resolves a manifest, spins up a
-   build container, and uses [pak](https://pak.r-lib.org/) to install packages.
+1. **You deploy a bundle** — run `by deploy ./my-board` or upload a
+   `.tar.gz` archive via the REST API. Bundles can include dependency
+   metadata (`renv.lock`, `DESCRIPTION`, or `manifest.json`), or none at
+   all — the server discovers what's needed.
+2. **Blockyard resolves dependencies server-side** — it spins up a build
+   container and uses [pak](https://pak.r-lib.org/) to install packages.
+   Unpinned bundles can be refreshed in place later without a redeploy.
 3. **Users visit the app** — when a request hits `/app/<name>/`, Blockyard
-   spawns a worker container on demand and reverse-proxies HTTP and WebSocket
-   traffic to it.
+   spawns a worker container on demand and reverse-proxies HTTP and
+   WebSocket traffic to it. Each session gets its own container.
 
 Workers are isolated from each other via per-container bridge networks.
 Containers run with a read-only filesystem, all Linux capabilities dropped,
 `no-new-privileges` set, and cloud metadata endpoint access blocked
-(`169.254.169.254`). See [Deploying an App](/docs/guides/deploying/#container-security)
+(`169.254.169.254`). For high-security deployments, workers can run under
+the [Kata](https://katacontainers.io/) runtime, which gives each session
+its own lightweight VM. See
+[Deploying an App](/docs/guides/deploying/#container-security)
 for the full list of security settings.
 
 ## Authentication & Authorization

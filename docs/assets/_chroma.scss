@@ -1,0 +1,97 @@
+// Chroma syntax-highlighting palettes, scoped per theme.
+//
+// Generated with:
+//   hugo gen chromastyles --style=catppuccin-latte
+//   hugo gen chromastyles --style=catppuccin-mocha
+//
+// Selectors are wrapped in html[data-theme="..."] so the theme toggle
+// switches code-block colors alongside body colors. Both palettes are
+// shipped in every page so the toggle is instant (no second stylesheet
+// to fetch).
+
+html[data-theme="light"] {
+  // Catppuccin Latte
+  .chroma { color: #4c4f69; background-color: #eff1f5; }
+  .chroma .err { color: #d20f39; }
+  .chroma .lnlinks { outline: none; text-decoration: none; color: inherit; }
+  .chroma .lntd { vertical-align: top; padding: 0; margin: 0; border: 0; }
+  .chroma .lntable { border-spacing: 0; padding: 0; margin: 0; border: 0; }
+  .chroma .hl { background-color: #bcc0cc; }
+  .chroma .lnt { white-space: pre; user-select: none; margin-right: 0.4em; padding: 0 0.4em; color: #8c8fa1; }
+  .chroma .ln { white-space: pre; user-select: none; margin-right: 0.4em; padding: 0 0.4em; color: #8c8fa1; }
+  .chroma .line { display: flex; }
+  .chroma .k, .chroma .kp, .chroma .kr, .chroma .nt { color: #8839ef; }
+  .chroma .kc, .chroma .ne, .chroma .nn, .chroma .py, .chroma .m,
+  .chroma .mb, .chroma .mf, .chroma .mh, .chroma .mi, .chroma .il,
+  .chroma .mo { color: #fe640b; }
+  .chroma .kd, .chroma .kt, .chroma .err, .chroma .gr, .chroma .gt,
+  .chroma .sa { color: #d20f39; }
+  .chroma .kn, .chroma .ni, .chroma .sr { color: #179299; }
+  .chroma .na, .chroma .nd, .chroma .nf, .chroma .fm, .chroma .dl,
+  .chroma .se { color: #1e66f5; }
+  .chroma .nd { font-weight: bold; }
+  .chroma .nc, .chroma .no { color: #df8e1d; }
+  .chroma .nl, .chroma .nb, .chroma .bp, .chroma .o, .chroma .ow { color: #04a5e5; }
+  .chroma .o, .chroma .ow { font-weight: bold; }
+  .chroma .nv, .chroma .vc, .chroma .vg, .chroma .vi, .chroma .vm { color: #dc8a78; }
+  .chroma .s, .chroma .sb, .chroma .sc, .chroma .s2, .chroma .si,
+  .chroma .sx, .chroma .s1, .chroma .ss { color: #40a02b; }
+  .chroma .sd, .chroma .sh { color: #9ca0b0; }
+  .chroma .c, .chroma .ch, .chroma .cm, .chroma .c1, .chroma .cs,
+  .chroma .cp, .chroma .cpf { color: #9ca0b0; font-style: italic; }
+  .chroma .cpf { font-weight: bold; }
+  .chroma .gd { color: #d20f39; background-color: #ccd0da; }
+  .chroma .gi { color: #40a02b; background-color: #ccd0da; }
+  .chroma .ge { font-style: italic; }
+  .chroma .gh, .chroma .gu { color: #fe640b; font-weight: bold; }
+  .chroma .gs { font-weight: bold; }
+  .chroma .gl { text-decoration: underline; }
+}
+
+html[data-theme="dark"] {
+  // Catppuccin Mocha
+  .chroma { color: #cdd6f4; background-color: #1e1e2e; }
+  .chroma .err { color: #f38ba8; }
+  .chroma .lnlinks { outline: none; text-decoration: none; color: inherit; }
+  .chroma .lntd { vertical-align: top; padding: 0; margin: 0; border: 0; }
+  .chroma .lntable { border-spacing: 0; padding: 0; margin: 0; border: 0; }
+  .chroma .hl { background-color: #45475a; }
+  .chroma .lnt { white-space: pre; user-select: none; margin-right: 0.4em; padding: 0 0.4em; color: #7f849c; }
+  .chroma .ln { white-space: pre; user-select: none; margin-right: 0.4em; padding: 0 0.4em; color: #7f849c; }
+  .chroma .line { display: flex; }
+  .chroma .k, .chroma .kp, .chroma .kr, .chroma .nt { color: #cba6f7; }
+  .chroma .kc, .chroma .ne, .chroma .nn, .chroma .py, .chroma .m,
+  .chroma .mb, .chroma .mf, .chroma .mh, .chroma .mi, .chroma .il,
+  .chroma .mo { color: #fab387; }
+  .chroma .kd, .chroma .kt, .chroma .err, .chroma .gr, .chroma .gt,
+  .chroma .sa { color: #f38ba8; }
+  .chroma .kn, .chroma .ni, .chroma .sr { color: #94e2d5; }
+  .chroma .na, .chroma .nd, .chroma .nf, .chroma .fm, .chroma .dl,
+  .chroma .se { color: #89b4fa; }
+  .chroma .nd { font-weight: bold; }
+  .chroma .nc, .chroma .no { color: #f9e2af; }
+  .chroma .nl, .chroma .nb, .chroma .bp, .chroma .o, .chroma .ow { color: #89dceb; }
+  .chroma .o, .chroma .ow { font-weight: bold; }
+  .chroma .nv, .chroma .vc, .chroma .vg, .chroma .vi, .chroma .vm { color: #f5e0dc; }
+  .chroma .s, .chroma .sb, .chroma .sc, .chroma .s2, .chroma .si,
+  .chroma .sx, .chroma .s1, .chroma .ss { color: #a6e3a1; }
+  .chroma .sd, .chroma .sh { color: #6c7086; }
+  .chroma .c, .chroma .ch, .chroma .cm, .chroma .c1, .chroma .cs,
+  .chroma .cp, .chroma .cpf { color: #6c7086; font-style: italic; }
+  .chroma .cpf { font-weight: bold; }
+  .chroma .gd { color: #f38ba8; background-color: #313244; }
+  .chroma .gi { color: #a6e3a1; background-color: #313244; }
+  .chroma .ge { font-style: italic; }
+  .chroma .gh, .chroma .gu { color: #fab387; font-weight: bold; }
+  .chroma .gs { font-weight: bold; }
+  .chroma .gl { text-decoration: underline; }
+}
+
+// Soften the code block container — match border-radius and add subtle border
+.markdown {
+  .highlight pre, pre.chroma {
+    border-radius: var(--border-radius);
+    border: 1px solid var(--gray-200);
+    padding: 0.75em 1em;
+  }
+}

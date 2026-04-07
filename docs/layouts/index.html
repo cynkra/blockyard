@@ -1,0 +1,146 @@
+{{ define "main" }}
+<div class="bk-home">
+
+  <!-- ───────────────────────────── Hero ───────────────────────────── -->
+  <section class="bk-hero">
+    <div class="bk-hero__text">
+      <div class="bk-hero__brand">
+        <svg class="bk-hero__logo" width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+          <path d="m3.3 7 8.7 5 8.7-5"/>
+          <path d="M12 22V12"/>
+        </svg>
+        <span class="bk-hero__wordmark">Blockyard</span>
+      </div>
+      <h1 class="bk-hero__headline">Production blockr hosting,<br>one binary.</h1>
+      <p class="bk-hero__subtitle">
+        Hardened session isolation, per-user credentials via OpenBao,
+        unpinned deploys with live refresh, and built-in board storage.
+        The full <a href="https://github.com/blockr-org/blockr">blockr</a>
+        stack as one binary.
+      </p>
+      <div class="bk-hero__cta">
+        <a class="bk-btn bk-btn--primary" href="{{ "docs/getting-started/quickstart/" | relURL }}">
+          Quickstart
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
+          </svg>
+        </a>
+        <a class="bk-btn bk-btn--ghost" href="https://github.com/cynkra/blockyard" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.69-3.87-1.36-3.87-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.13v3.16c0 .31.21.66.8.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/>
+          </svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+
+    <div class="bk-hero__demo" aria-hidden="true">
+      <div class="bk-terminal">
+        <div class="bk-terminal__bar">
+          <span class="bk-terminal__dot bk-terminal__dot--red"></span>
+          <span class="bk-terminal__dot bk-terminal__dot--yellow"></span>
+          <span class="bk-terminal__dot bk-terminal__dot--green"></span>
+          <span class="bk-terminal__title">~/projects/my-board</span>
+        </div>
+        <pre class="bk-terminal__body"><span class="bk-tl"><span class="bk-tl__prompt">$</span> <span class="bk-tl__cmd">by deploy</span> ./my-board</span>
+<span class="bk-tl bk-tl--out">Bundling 12.3 KB <span class="bk-tl__ok">✓</span></span>
+<span class="bk-tl bk-tl--out">Server resolving 14 packages via pak <span class="bk-tl__ok">✓</span></span>
+<span class="bk-tl bk-tl--out">Build complete in 28s <span class="bk-tl__ok">✓</span></span>
+<span class="bk-tl bk-tl--out">  </span>
+<span class="bk-tl bk-tl--out">URL: <span class="bk-tl__url">http://localhost:8080/app/my-board/</span></span>
+</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────── Why Blockyard ──────────────────────── -->
+  <section class="bk-section">
+    <h2 class="bk-section__title">Why Blockyard?</h2>
+    <div class="bk-feature-grid">
+
+      <div class="bk-feature">
+        <div class="bk-feature__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+        </div>
+        <h3>Hostile-by-default isolation</h3>
+        <p>Every blockr session evaluates user-supplied R code. Per-container bridge networks, dropped capabilities, read-only root, seccomp profiles — and an optional Kata runtime for VM-grade isolation.</p>
+      </div>
+
+      <div class="bk-feature">
+        <div class="bk-feature__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </div>
+        <h3>Per-user credentials via OpenBao</h3>
+        <p>Short-lived, scoped tokens injected per request. The server itself can't read user secrets, so <code>Sys.getenv()</code> exfiltration that breaks env-var-based credentialing isn't possible by design.</p>
+      </div>
+
+      <div class="bk-feature">
+        <div class="bk-feature__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+        </div>
+        <h3>Unpinned deploys with live refresh</h3>
+        <p>Deploy without a lockfile — the server resolves R packages via <code>pak</code>. A refresh action re-resolves dependencies in place, with no redeploy and no code change. No other platform does this.</p>
+      </div>
+
+      <div class="bk-feature">
+        <div class="bk-feature__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
+        </div>
+        <h3>Live package installs</h3>
+        <p>Users install packages at runtime. Hot-loaded if compatible, transparent session migration to a fresh container if not. Either way, the user keeps working without an image rebuild or redeploy.</p>
+      </div>
+
+      <div class="bk-feature">
+        <div class="bk-feature__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <h3>OIDC + admin-controlled RBAC</h3>
+        <p>OIDC sign-in with system roles assigned by admins, not derived from IdP groups. Per-app ACLs with <code>public</code> / <code>logged_in</code> / restricted visibility.</p>
+      </div>
+
+      <div class="bk-feature">
+        <div class="bk-feature__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        </div>
+        <h3>Board storage built in</h3>
+        <p>First-class save, share and restore for blockr boards, with per-user ACLs. Not a bolted-on integration — wired into the auth and credential model from day one.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ─────────────────────── Documentation hub ─────────────────────── -->
+  <section class="bk-section">
+    <h2 class="bk-section__title">Documentation</h2>
+    <div class="bk-hub-grid">
+
+      <a class="bk-hub" href="{{ "docs/getting-started/overview/" | relURL }}">
+        <div class="bk-hub__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>
+        </div>
+        <h3>Getting Started</h3>
+        <p>Install the server, deploy your first app, learn the core concepts.</p>
+      </a>
+
+      <a class="bk-hub" href="{{ "docs/guides/deploying/" | relURL }}">
+        <div class="bk-hub__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        </div>
+        <h3>Guides</h3>
+        <p>Deployment patterns, configuration, authorization, observability.</p>
+      </a>
+
+      <a class="bk-hub" href="{{ "docs/reference/cli/" | relURL }}">
+        <div class="bk-hub__icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        </div>
+        <h3>Reference</h3>
+        <p>CLI commands, REST API endpoints, full configuration file schema.</p>
+      </a>
+
+    </div>
+  </section>
+
+</div>
+{{ end }}
