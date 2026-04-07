@@ -13,19 +13,27 @@ import (
 // Subscribers track a global sequence number so their cursor stays
 // valid across ring wraps. Each subscriber gets its own notification
 // channel so broadcasts wake all viewers, not just one.
+//
+// size and seq are both uint64 so the modulo math in ingest/stream
+// doesn't need conversions that the gosec G115 lint flags. maxLines is
+// accepted as int at the API boundary because that matches how Go code
+// typically expresses buffer capacity.
 type logBuffer struct {
 	mu     sync.Mutex
 	buf    []string // fixed-size ring buffer
-	size   int      // len(buf), set at init
+	size   uint64   // len(buf), set at init
 	seq    uint64   // total lines written (monotonic); buf index = seq % size
 	closed bool
 	subs   []chan struct{} // per-subscriber notification channels
 }
 
 func newLogBuffer(maxLines int) *logBuffer {
+	if maxLines < 0 {
+		maxLines = 0
+	}
 	return &logBuffer{
 		buf:  make([]string, maxLines),
-		size: maxLines,
+		size: uint64(maxLines), //nolint:gosec // G115: guarded non-negative above
 	}
 }
 
@@ -62,7 +70,7 @@ func (lb *logBuffer) ingest(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		lb.mu.Lock()
-		lb.buf[lb.seq%uint64(lb.size)] = scanner.Text()
+		lb.buf[lb.seq%lb.size] = scanner.Text()
 		lb.seq++
 		lb.broadcast()
 		lb.mu.Unlock()
@@ -87,8 +95,8 @@ func (lb *logBuffer) stream() backend.LogStream {
 		// wrapped, that's seq - size; otherwise 0.
 		lb.mu.Lock()
 		var cursor uint64
-		if lb.seq > uint64(lb.size) {
-			cursor = lb.seq - uint64(lb.size)
+		if lb.seq > lb.size {
+			cursor = lb.seq - lb.size
 		}
 		lb.mu.Unlock()
 
@@ -103,8 +111,8 @@ func (lb *logBuffer) stream() backend.LogStream {
 			// size would underflow to a huge value, hiding all lines —
 			// guard against that explicitly.
 			var oldest uint64
-			if seq > uint64(lb.size) {
-				oldest = seq - uint64(lb.size)
+			if seq > lb.size {
+				oldest = seq - lb.size
 			}
 			var pending []string
 			for cursor < seq {
@@ -112,7 +120,7 @@ func (lb *logBuffer) stream() backend.LogStream {
 				// buf[cursor % size] — but only if it hasn't been
 				// overwritten (cursor >= oldest).
 				if cursor >= oldest {
-					pending = append(pending, lb.buf[cursor%uint64(lb.size)])
+					pending = append(pending, lb.buf[cursor%lb.size])
 				}
 				cursor++
 			}
