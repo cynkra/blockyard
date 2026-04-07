@@ -2181,7 +2181,7 @@ const docTemplate = `{
                 "owner": {
                     "type": "string"
                 },
-                "pre_warmed_seats": {
+                "pre_warmed_sessions": {
                     "type": "integer"
                 },
                 "status": {
@@ -2335,7 +2335,7 @@ const docTemplate = `{
                 "owner": {
                     "type": "string"
                 },
-                "pre_warmed_seats": {
+                "pre_warmed_sessions": {
                     "type": "integer"
                 },
                 "refresh_schedule": {
@@ -2719,7 +2719,7 @@ const docTemplate = `{
                 "memory_limit": {
                     "type": "string"
                 },
-                "pre_warmed_seats": {
+                "pre_warmed_sessions": {
                     "type": "integer"
                 },
                 "refresh_schedule": {

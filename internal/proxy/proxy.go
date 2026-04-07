@@ -224,7 +224,7 @@ func Handler(srv *server.Server) http.Handler {
 			}
 
 			// Trigger pre-warm replacement if we just claimed a warm worker.
-			if wasIdle && app.PreWarmedSeats > 0 {
+			if wasIdle && app.PreWarmedSessions > 0 {
 				go ensurePreWarmed(context.Background(), srv, app) //nolint:gosec // G118: intentional background pre-warm, outlives request
 			}
 		}

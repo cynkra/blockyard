@@ -533,8 +533,8 @@ func TestCLI_Scale(t *testing.T) {
 		if body["max_sessions_per_worker"] != float64(10) {
 			t.Errorf("max_sessions = %v, want 10", body["max_sessions_per_worker"])
 		}
-		if body["pre_warmed_seats"] != float64(2) {
-			t.Errorf("pre_warm = %v, want 2", body["pre_warmed_seats"])
+		if body["pre_warmed_sessions"] != float64(2) {
+			t.Errorf("pre_warm = %v, want 2", body["pre_warmed_sessions"])
 		}
 	})
 

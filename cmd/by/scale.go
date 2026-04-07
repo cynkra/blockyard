@@ -36,7 +36,7 @@ func scaleCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("pre-warm") {
 				v, _ := cmd.Flags().GetInt("pre-warm")
-				body["pre_warmed_seats"] = v
+				body["pre_warmed_sessions"] = v
 			}
 			if cmd.Flags().Changed("runtime") {
 				v, _ := cmd.Flags().GetString("runtime")
@@ -73,7 +73,7 @@ func scaleCmd() *cobra.Command {
 	cmd.Flags().Float64("cpu", 0, "CPU limit")
 	cmd.Flags().Int("max-workers", 0, "Max workers per app")
 	cmd.Flags().Int("max-sessions", 0, "Max sessions per worker")
-	cmd.Flags().Int("pre-warm", 0, "Pre-warmed standby workers")
+	cmd.Flags().Int("pre-warm", 0, "Pre-warmed standby sessions")
 	cmd.Flags().String("runtime", "", `OCI runtime (e.g., "kata-runtime")`)
 	return cmd
 }

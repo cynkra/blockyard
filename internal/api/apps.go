@@ -41,7 +41,7 @@ type AppResponse struct {
 	CPULimit             *float64 `json:"cpu_limit"`
 	Title                *string  `json:"title"`
 	Description          *string  `json:"description"`
-	PreWarmedSeats       int      `json:"pre_warmed_seats"`
+	PreWarmedSessions    int      `json:"pre_warmed_sessions"`
 	CreatedAt            string   `json:"created_at"`
 	UpdatedAt            string   `json:"updated_at"`
 	DeletedAt            *string  `json:"deleted_at,omitempty"`
@@ -70,7 +70,7 @@ func appResponse(app *db.AppRow, workers server.WorkerMap) AppResponse {
 		CPULimit:             app.CPULimit,
 		Title:                app.Title,
 		Description:          app.Description,
-		PreWarmedSeats:       app.PreWarmedSeats,
+		PreWarmedSessions:    app.PreWarmedSessions,
 		CreatedAt:            app.CreatedAt,
 		UpdatedAt:            app.UpdatedAt,
 		DeletedAt:            app.DeletedAt,
@@ -317,7 +317,7 @@ type updateAppRequest struct {
 	AccessType           *string          `json:"access_type"`
 	Title                *string          `json:"title"`
 	Description          *string          `json:"description"`
-	PreWarmedSeats       *int             `json:"pre_warmed_seats"`
+	PreWarmedSessions    *int             `json:"pre_warmed_sessions"`
 	RefreshSchedule      *string          `json:"refresh_schedule"`
 	Image                *string          `json:"image"`
 	Runtime              *string          `json:"runtime"`
@@ -384,13 +384,13 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 				return
 			}
 		}
-		if body.PreWarmedSeats != nil {
-			if *body.PreWarmedSeats < 0 {
-				badRequest(w, "pre_warmed_seats must be non-negative")
+		if body.PreWarmedSessions != nil {
+			if *body.PreWarmedSessions < 0 {
+				badRequest(w, "pre_warmed_sessions must be non-negative")
 				return
 			}
-			if *body.PreWarmedSeats > 10 {
-				badRequest(w, "pre_warmed_seats must not exceed 10")
+			if *body.PreWarmedSessions > 10 {
+				badRequest(w, "pre_warmed_sessions must not exceed 10")
 				return
 			}
 		}
@@ -500,7 +500,7 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 			AccessType:           body.AccessType,
 			Title:                body.Title,
 			Description:          body.Description,
-			PreWarmedSeats:       body.PreWarmedSeats,
+			PreWarmedSessions:    body.PreWarmedSessions,
 			RefreshSchedule:      body.RefreshSchedule,
 			Image:                body.Image,
 			Runtime:              body.Runtime,
@@ -1174,9 +1174,9 @@ func parseUpdateAppForm(r *http.Request) updateAppRequest {
 			body.MaxSessionsPerWorker = &n
 		}
 	}
-	if v := r.FormValue("pre_warmed_seats"); v != "" {
+	if v := r.FormValue("pre_warmed_sessions"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			body.PreWarmedSeats = &n
+			body.PreWarmedSessions = &n
 		}
 	}
 	if v := r.FormValue("cpu_limit"); v != "" {

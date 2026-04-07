@@ -71,7 +71,7 @@ type appResponseV2JSON struct { //nolint:unused
 	CPULimit             *float64          `json:"cpu_limit"`
 	Title                *string           `json:"title"`
 	Description          *string           `json:"description"`
-	PreWarmedSeats       int               `json:"pre_warmed_seats"`
+	PreWarmedSessions    int               `json:"pre_warmed_sessions"`
 	Enabled              bool              `json:"enabled"`
 	RefreshSchedule      string            `json:"refresh_schedule"`
 	Image                string            `json:"image"`

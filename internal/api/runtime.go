@@ -615,7 +615,7 @@ func appResponseV2(app *db.AppRow, srv *server.Server) map[string]any {
 		"cpu_limit":              app.CPULimit,
 		"title":                  app.Title,
 		"description":            app.Description,
-		"pre_warmed_seats":       app.PreWarmedSeats,
+		"pre_warmed_sessions":    app.PreWarmedSessions,
 		"enabled":                app.Enabled,
 		"refresh_schedule":       app.RefreshSchedule,
 		"image":                  app.Image,

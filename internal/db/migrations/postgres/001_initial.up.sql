@@ -15,7 +15,7 @@ CREATE TABLE apps (
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
     deleted_at              TEXT,
-    pre_warmed_seats        INTEGER NOT NULL DEFAULT 0,
+    pre_warmed_sessions     INTEGER NOT NULL DEFAULT 0,
     refresh_schedule        TEXT NOT NULL DEFAULT '',
     last_refresh_at         TEXT,
     enabled                 INTEGER NOT NULL DEFAULT 1

@@ -109,7 +109,7 @@ definitions:
         type: string
       owner:
         type: string
-      pre_warmed_seats:
+      pre_warmed_sessions:
         type: integer
       status:
         type: string
@@ -210,7 +210,7 @@ definitions:
         type: string
       owner:
         type: string
-      pre_warmed_seats:
+      pre_warmed_sessions:
         type: integer
       refresh_schedule:
         type: string
@@ -460,7 +460,7 @@ definitions:
         type: integer
       memory_limit:
         type: string
-      pre_warmed_seats:
+      pre_warmed_sessions:
         type: integer
       refresh_schedule:
         type: string

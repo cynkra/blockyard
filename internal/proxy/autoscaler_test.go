@@ -365,12 +365,13 @@ func TestEnsurePreWarmedSpawnsWorkers(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 2
-	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 2
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 	app, _ = srv.DB.GetApp(app.ID)
 
 	ensurePreWarmed(context.Background(), srv, app)
 
+	// Default max_sessions_per_worker = 1, so 2 pre-warmed sessions → 2 workers.
 	workerIDs := srv.Workers.ForApp(app.ID)
 	if len(workerIDs) != 2 {
 		t.Errorf("expected 2 pre-warmed workers, got %d", len(workerIDs))
@@ -381,8 +382,8 @@ func TestEnsurePreWarmedPoolAlreadyFull(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 1
-	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 	app, _ = srv.DB.GetApp(app.ID)
 
 	// Spawn one idle worker — pool is already full.
@@ -400,11 +401,11 @@ func TestEnsurePreWarmedRespectsPerAppLimit(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 3
+	sessions := 3
 	maxWorkers := 2
 	srv.DB.UpdateApp(app.ID, db.AppUpdate{
-		PreWarmedSeats:   &seats,
-		MaxWorkersPerApp: &maxWorkers,
+		PreWarmedSessions: &sessions,
+		MaxWorkersPerApp:  &maxWorkers,
 	})
 	app, _ = srv.DB.GetApp(app.ID)
 
@@ -422,8 +423,8 @@ func TestEnsurePreWarmedRespectsGlobalLimit(t *testing.T) {
 
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 3
-	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 3
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 	app, _ = srv.DB.GetApp(app.ID)
 
 	ensurePreWarmed(context.Background(), srv, app)
@@ -433,11 +434,11 @@ func TestEnsurePreWarmedRespectsGlobalLimit(t *testing.T) {
 	}
 }
 
-func TestEnsurePreWarmedZeroSeatsNoop(t *testing.T) {
+func TestEnsurePreWarmedZeroNoop(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	// pre_warmed_seats = 0 (default) — should be a no-op.
+	// pre_warmed_sessions = 0 (default) — should be a no-op.
 	ensurePreWarmed(context.Background(), srv, app)
 
 	if srv.Workers.Count() != 0 {
@@ -445,12 +446,92 @@ func TestEnsurePreWarmedZeroSeatsNoop(t *testing.T) {
 	}
 }
 
+// TestEnsurePreWarmedMultiSessionWorker verifies that with max_sessions > 1,
+// a single idle worker satisfies a pre_warmed_sessions target up to
+// max_sessions_per_worker. This is the core behavior change from issue #160:
+// the unit is now free session slots, not idle workers.
+func TestEnsurePreWarmedMultiSessionWorker(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	sessions := 5
+	maxSessions := 5
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{
+		PreWarmedSessions:    &sessions,
+		MaxSessionsPerWorker: &maxSessions,
+	})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	ensurePreWarmed(context.Background(), srv, app)
+
+	// One worker exposes 5 free slots → target satisfied.
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 1 {
+		t.Errorf("expected 1 worker (5 free slots covers target), got %d", len(workerIDs))
+	}
+}
+
+// TestEnsurePreWarmedMultiSessionPartialConsumption verifies that once a slot
+// is consumed on the only idle worker, a second worker is spawned to restore
+// the target (overshooting by max_sessions - 1 slots).
+func TestEnsurePreWarmedMultiSessionPartialConsumption(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	sessions := 5
+	maxSessions := 5
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{
+		PreWarmedSessions:    &sessions,
+		MaxSessionsPerWorker: &maxSessions,
+	})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	// Spawn one worker and consume one slot.
+	wid, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setSession(srv, "s1", wid)
+
+	// freeSlots = 5-1 = 4 < 5 → spawn another worker.
+	ensurePreWarmed(context.Background(), srv, app)
+
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 2 {
+		t.Errorf("expected 2 workers (replenishing free slots), got %d", len(workerIDs))
+	}
+}
+
+// TestEnsurePreWarmedMultiSessionRoundsUp verifies that when the target is
+// larger than max_sessions_per_worker, spawn count rounds up to a whole
+// worker boundary (ceil(target / max_sessions)).
+func TestEnsurePreWarmedMultiSessionRoundsUp(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	sessions := 7
+	maxSessions := 3
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{
+		PreWarmedSessions:    &sessions,
+		MaxSessionsPerWorker: &maxSessions,
+	})
+	app, _ = srv.DB.GetApp(app.ID)
+
+	ensurePreWarmed(context.Background(), srv, app)
+
+	// ceil(7/3) = 3 workers, providing 9 free slots.
+	workerIDs := srv.Workers.ForApp(app.ID)
+	if len(workerIDs) != 3 {
+		t.Errorf("expected 3 workers (ceil(7/3)), got %d", len(workerIDs))
+	}
+}
+
 func TestPreWarmAppsFromDB(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 1
-	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 
 	// preWarmApps queries the DB — should find the app and spawn.
 	preWarmApps(context.Background(), srv)
@@ -465,8 +546,8 @@ func TestAutoscalePreWarmAfterEviction(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 1
-	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 	app, _ = srv.DB.GetApp(app.ID)
 
 	// Spawn a worker, then make it idle and evict it.
@@ -492,8 +573,8 @@ func TestEnsurePreWarmedClaimedWorkerReplacement(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 1
-	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 1
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 	app, _ = srv.DB.GetApp(app.ID)
 
 	// Spawn one idle worker (the warm pool).
@@ -519,8 +600,8 @@ func TestPreWarmAppsSkipsDraining(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	seats := 2
-	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 2
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 
 	// Register a draining worker so IsDraining returns true.
 	srv.Workers.Set("drain-w", server.ActiveWorker{AppID: app.ID})
@@ -536,7 +617,7 @@ func TestPreWarmAppsSkipsDraining(t *testing.T) {
 
 func TestPreWarmAppsNoPreWarmedApps(t *testing.T) {
 	srv := testAutoscaleServer(t)
-	// Create an app with 0 pre-warmed seats (default).
+	// Create an app with 0 pre-warmed sessions (default).
 	createTestApp(t, srv, "no-warm-app", true)
 
 	// Should be a no-op — must not panic.
@@ -552,9 +633,9 @@ func TestPreWarmAppsMultipleApps(t *testing.T) {
 	app1 := createTestApp(t, srv, "app-a", true)
 	app2 := createTestApp(t, srv, "app-b", true)
 
-	seats := 1
-	srv.DB.UpdateApp(app1.ID, db.AppUpdate{PreWarmedSeats: &seats})
-	srv.DB.UpdateApp(app2.ID, db.AppUpdate{PreWarmedSeats: &seats})
+	sessions := 1
+	srv.DB.UpdateApp(app1.ID, db.AppUpdate{PreWarmedSessions: &sessions})
+	srv.DB.UpdateApp(app2.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 
 	preWarmApps(context.Background(), srv)
 
