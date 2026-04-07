@@ -327,7 +327,13 @@ jobs:
           go-version-file: go.mod
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - run: go test -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
+      # Ubuntu 24.04 ships an AppArmor profile that blocks unprivileged
+      # user namespaces for most binaries (bwrap included). Running the
+      # test suite under sudo sidesteps this: root has CAP_SYS_ADMIN so
+      # bwrap --unshare-user works directly. This mirrors the design's
+      # "containerized mode" where blockyard runs as root (bwrap inherits
+      # root and configures arbitrary uid_maps).
+      - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -tags process_test -coverprofile=coverage-process.out -coverpkg=./internal/... ./internal/backend/process/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-process

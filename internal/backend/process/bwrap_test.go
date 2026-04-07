@@ -1,6 +1,8 @@
 package process
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -180,4 +182,78 @@ func TestBwrapBuildArgs(t *testing.T) {
 	assertBindMount(t, args, "--bind", "/data/.pkg-store", "/store")
 	assertFlagValue(t, args, "--uid", "60000")
 	assertFlagValue(t, args, "--gid", "65534")
+}
+
+func TestApplySeccompEmpty(t *testing.T) {
+	cmd := exec.Command("/bin/true")
+	args, err := applySeccomp(cmd, "")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if args != nil {
+		t.Errorf("expected nil args for empty profile, got %v", args)
+	}
+}
+
+func TestApplySeccompMissingFile(t *testing.T) {
+	cmd := exec.Command("/bin/true")
+	_, err := applySeccomp(cmd, "/nonexistent/seccomp.bpf")
+	if err == nil {
+		t.Fatal("expected error for missing profile")
+	}
+}
+
+func TestApplySeccompRealFile(t *testing.T) {
+	// Create a small temp file that stands in for a compiled BPF
+	// profile. applySeccomp only opens it and hands the fd to bwrap;
+	// we just verify the fd wiring, not the content.
+	tmp, err := os.CreateTemp("", "seccomp-*.bpf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	tmp.WriteString("fake")
+	tmp.Close()
+
+	cmd := exec.Command("/bin/true")
+	args, err := applySeccomp(cmd, tmp.Name())
+	if err != nil {
+		t.Fatalf("applySeccomp: %v", err)
+	}
+	if len(args) != 2 || args[0] != "--seccomp" {
+		t.Errorf("unexpected args: %v", args)
+	}
+	if args[1] != "3" {
+		t.Errorf("expected fd 3 for the first extra file, got %q", args[1])
+	}
+	if len(cmd.ExtraFiles) != 1 {
+		t.Errorf("expected one ExtraFile, got %d", len(cmd.ExtraFiles))
+	}
+	// Close the file the helper opened to avoid leaking the fd into
+	// other tests.
+	cmd.ExtraFiles[0].Close()
+}
+
+func TestSpliceBeforeSeparator(t *testing.T) {
+	cmd := exec.Command("bwrap", "--ro-bind", "/", "/", "--", "/bin/sh")
+	spliceBeforeSeparator(cmd, []string{"--seccomp", "3"})
+	want := []string{"bwrap", "--ro-bind", "/", "/", "--seccomp", "3", "--", "/bin/sh"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("wrong length: got %v, want %v", cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Errorf("arg[%d] = %q, want %q", i, cmd.Args[i], want[i])
+		}
+	}
+}
+
+func TestSpliceBeforeSeparatorMissingSeparator(t *testing.T) {
+	// When the separator is absent (shouldn't happen with well-formed
+	// bwrap args), the helper falls back to appending.
+	cmd := exec.Command("bwrap", "--ro-bind", "/", "/")
+	spliceBeforeSeparator(cmd, []string{"--seccomp", "3"})
+	if cmd.Args[len(cmd.Args)-1] != "3" {
+		t.Errorf("expected appended args, got %v", cmd.Args)
+	}
 }
