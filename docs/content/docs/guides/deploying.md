@@ -148,7 +148,7 @@ This is **not safe** for apps that store state in `reactiveValues`, count
 `actionButton` presses, accept file uploads, or generate random values —
 that state is lost when a new session starts.
 
-## Container security
+## Docker worker hardening
 
 Worker containers run with hardened defaults:
 
@@ -161,7 +161,9 @@ Worker containers run with hardened defaults:
 - **Cloud metadata blocked** — requests to `169.254.169.254` are dropped
   via iptables rules to prevent SSRF against cloud instance metadata
 
-These settings are not configurable — they are always applied.
+These settings are not configurable — they are always applied. For a
+comparison with the process backend and guidance on choosing between
+them, see [Backend Security](/docs/guides/backend-security/).
 
 ## Updating an app
 

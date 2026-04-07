@@ -214,7 +214,7 @@ Two classes of risk remain regardless of backend choice:
 
 ## Further reading
 
-- [Container security in the deploying guide](/docs/guides/deploying/#container-security)
+- [Docker worker hardening in the deploying guide](/docs/guides/deploying/#docker-worker-hardening)
   — the Docker backend's baseline hardening.
 - [Configuration reference](/docs/reference/config/) — `[server] backend`,
   the `[process]` section, and the full set of config keys.
