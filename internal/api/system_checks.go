@@ -18,7 +18,7 @@ import (
 //	@Tags         system
 //	@Produce      json
 //	@Success      200  {object}  preflight.Report
-//	@Failure      403  {object}  ErrorResponse
+//	@Failure      403  {object}  errorResponse
 //	@Router       /api/v1/system/checks [get]
 func GetSystemChecks(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +47,7 @@ func GetSystemChecks(srv *server.Server) http.HandlerFunc {
 //	@Tags         system
 //	@Produce      json
 //	@Success      200  {object}  preflight.Report
-//	@Failure      403  {object}  ErrorResponse
+//	@Failure      403  {object}  errorResponse
 //	@Router       /api/v1/system/checks/run [post]
 func RunSystemChecks(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

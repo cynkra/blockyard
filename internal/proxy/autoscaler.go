@@ -98,7 +98,7 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 	// Pre-warming: maintain warm pools for all configured apps.
 	// This runs after eviction so deficit counts are accurate.
 	// Also checks apps that currently have zero workers (not in
-	// appIDs above) — they may have pre_warmed_seats > 0 and need
+	// appIDs above) — they may have pre_warmed_sessions > 0 and need
 	// workers spawned from scratch.
 	preWarmApps(ctx, srv)
 
@@ -163,7 +163,7 @@ func tryScaleUp(ctx context.Context, srv *server.Server, app *db.AppRow, workerI
 	}
 }
 
-// preWarmApps checks all apps with pre_warmed_seats > 0 and spawns
+// preWarmApps checks all apps with pre_warmed_sessions > 0 and spawns
 // standby workers to maintain the target pool size. Runs on each
 // autoscaler tick as a safety net for the event-driven trigger.
 func preWarmApps(ctx context.Context, srv *server.Server) {
@@ -186,27 +186,39 @@ func preWarmApps(ctx context.Context, srv *server.Server) {
 // Spawns are routed through spawnGroup to deduplicate against concurrent
 // callers (event-driven trigger vs autoscaler tick) and the loading page
 // triggerSpawn path.
+//
+// Counts free session slots across non-draining workers (rather than
+// idle workers) so that with max_sessions_per_worker > 1, a single
+// partially-full worker can still satisfy the pre-warm target. Spawns
+// whole workers — the allocation unit — until free slots meet the
+// target, overshooting by at most max_sessions_per_worker - 1 slots.
 func ensurePreWarmed(ctx context.Context, srv *server.Server, app *db.AppRow) {
-	if app.PreWarmedSeats <= 0 {
+	if app.PreWarmedSessions <= 0 {
 		return
 	}
 
-	// Count non-draining workers with zero sessions (the idle pool).
-	idleCount := 0
-	for _, wid := range srv.Workers.ForAppAvailable(app.ID) {
-		if srv.Sessions.CountForWorker(wid) == 0 {
-			idleCount++
+	maxSessions := app.MaxSessionsPerWorker
+	if maxSessions < 1 {
+		maxSessions = 1
+	}
+
+	// Sum free session slots across non-draining workers.
+	availableWorkers := srv.Workers.ForAppAvailable(app.ID)
+	freeSlots := 0
+	for _, wid := range availableWorkers {
+		count := srv.Sessions.CountForWorker(wid)
+		free := maxSessions - count
+		if free > 0 {
+			freeSlots += free
 		}
 	}
 
-	deficit := app.PreWarmedSeats - idleCount
-	if deficit <= 0 {
+	if freeSlots >= app.PreWarmedSessions {
 		return
 	}
 
-	// Per-app limit check.
-	currentWorkers := len(srv.Workers.ForAppAvailable(app.ID))
-	for i := 0; i < deficit; i++ {
+	currentWorkers := len(availableWorkers)
+	for freeSlots < app.PreWarmedSessions {
 		if app.MaxWorkersPerApp != nil && currentWorkers >= *app.MaxWorkersPerApp {
 			slog.Debug("pre-warm: per-app limit reached",
 				"app_id", app.ID, "limit", *app.MaxWorkersPerApp)
@@ -219,7 +231,9 @@ func ensurePreWarmed(ctx context.Context, srv *server.Server, app *db.AppRow) {
 		}
 
 		slog.Info("pre-warm: spawning standby worker",
-			"app_id", app.ID, "deficit", deficit-i)
+			"app_id", app.ID,
+			"free_slots", freeSlots,
+			"target", app.PreWarmedSessions)
 		_, _, err := spawnGroup.do(app.ID, func() (string, string, error) {
 			return spawnWorker(ctx, srv, app)
 		})
@@ -229,6 +243,7 @@ func ensurePreWarmed(ctx context.Context, srv *server.Server, app *db.AppRow) {
 			break
 		}
 		currentWorkers++
+		freeSlots += maxSessions
 	}
 }
 

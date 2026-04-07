@@ -209,7 +209,7 @@ func Handler(srv *server.Server) http.Handler {
 				return
 			}
 			workerID, addr = wid, a
-			wasIdle := srv.Workers.ClearIdleSince(workerID)
+			srv.Workers.ClearIdleSince(workerID)
 			srv.Sessions.Set(sessionID, session.Entry{
 				WorkerID:   workerID,
 				UserSub:    callerSub,
@@ -223,8 +223,12 @@ func Handler(srv *server.Server) http.Handler {
 					"session_id", sessionID, "error", err)
 			}
 
-			// Trigger pre-warm replacement if we just claimed a warm worker.
-			if wasIdle && app.PreWarmedSeats > 0 {
+			// Every new session consumes a free slot — re-check the warm
+			// pool and replenish if needed. ensurePreWarmed is cheap and
+			// idempotent when the pool is satisfied, and spawnGroup
+			// dedupes concurrent callers so this never over-spawns. The
+			// autoscaler tick still runs as a safety net.
+			if app.PreWarmedSessions > 0 {
 				go ensurePreWarmed(context.Background(), srv, app) //nolint:gosec // G118: intentional background pre-warm, outlives request
 			}
 		}

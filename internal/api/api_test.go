@@ -2597,13 +2597,13 @@ func TestUpdateAppEmptyMemoryLimitAccepted(t *testing.T) {
 	}
 }
 
-func TestUpdateAppPreWarmedSeats(t *testing.T) {
+func TestUpdateAppPreWarmedSessions(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
-		strings.NewReader(`{"pre_warmed_seats":1}`))
+		strings.NewReader(`{"pre_warmed_sessions":1}`))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -2614,18 +2614,18 @@ func TestUpdateAppPreWarmedSeats(t *testing.T) {
 	}
 	var updated map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&updated)
-	if v := updated["pre_warmed_seats"]; v != float64(1) {
-		t.Errorf("expected pre_warmed_seats=1, got %v", v)
+	if v := updated["pre_warmed_sessions"]; v != float64(1) {
+		t.Errorf("expected pre_warmed_sessions=1, got %v", v)
 	}
 }
 
-func TestUpdateAppPreWarmedSeatsNegative(t *testing.T) {
+func TestUpdateAppPreWarmedSessionsNegative(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
-		strings.NewReader(`{"pre_warmed_seats":-1}`))
+		strings.NewReader(`{"pre_warmed_sessions":-1}`))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -2635,13 +2635,13 @@ func TestUpdateAppPreWarmedSeatsNegative(t *testing.T) {
 	}
 }
 
-func TestUpdateAppPreWarmedSeatsExceedsCap(t *testing.T) {
+func TestUpdateAppPreWarmedSessionsExceedsCap(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
 
 	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
-		strings.NewReader(`{"pre_warmed_seats":11}`))
+		strings.NewReader(`{"pre_warmed_sessions":11}`))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -2651,7 +2651,7 @@ func TestUpdateAppPreWarmedSeatsExceedsCap(t *testing.T) {
 	}
 }
 
-func TestGetAppIncludesPreWarmedSeats(t *testing.T) {
+func TestGetAppIncludesPreWarmedSessions(t *testing.T) {
 	_, ts := testServer(t)
 	created := createApp(t, ts, "my-app")
 	id := created["id"].(string)
@@ -2664,11 +2664,11 @@ func TestGetAppIncludesPreWarmedSeats(t *testing.T) {
 	var app map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&app)
 
-	if _, ok := app["pre_warmed_seats"]; !ok {
-		t.Error("expected pre_warmed_seats in response")
+	if _, ok := app["pre_warmed_sessions"]; !ok {
+		t.Error("expected pre_warmed_sessions in response")
 	}
-	if v := app["pre_warmed_seats"]; v != float64(0) {
-		t.Errorf("expected pre_warmed_seats=0, got %v", v)
+	if v := app["pre_warmed_sessions"]; v != float64(0) {
+		t.Errorf("expected pre_warmed_sessions=0, got %v", v)
 	}
 }
 

@@ -488,7 +488,7 @@ func TestParseUpdateAppForm(t *testing.T) {
 		"memory_limit":           {"512Mi"},
 		"max_workers_per_app":    {"3"},
 		"max_sessions_per_worker": {"10"},
-		"pre_warmed_seats":       {"2"},
+		"pre_warmed_sessions":    {"2"},
 		"cpu_limit":              {"1.5"},
 	}
 
@@ -519,8 +519,8 @@ func TestParseUpdateAppForm(t *testing.T) {
 	if body.MaxSessionsPerWorker == nil || *body.MaxSessionsPerWorker != 10 {
 		t.Errorf("expected max_sessions_per_worker=10, got %v", body.MaxSessionsPerWorker)
 	}
-	if body.PreWarmedSeats == nil || *body.PreWarmedSeats != 2 {
-		t.Errorf("expected pre_warmed_seats=2, got %v", body.PreWarmedSeats)
+	if body.PreWarmedSessions == nil || *body.PreWarmedSessions != 2 {
+		t.Errorf("expected pre_warmed_sessions=2, got %v", body.PreWarmedSessions)
 	}
 	if body.CPULimit == nil || *body.CPULimit != 1.5 {
 		t.Errorf("expected cpu_limit=1.5, got %v", body.CPULimit)
@@ -549,7 +549,7 @@ func TestParseUpdateAppFormInvalidNumbers(t *testing.T) {
 	form := url.Values{
 		"max_workers_per_app":    {"not-a-number"},
 		"max_sessions_per_worker": {"abc"},
-		"pre_warmed_seats":       {"xyz"},
+		"pre_warmed_sessions":    {"xyz"},
 		"cpu_limit":              {"nope"},
 	}
 	req := httptest.NewRequest("POST", "/", strings.NewReader(form.Encode()))
@@ -564,8 +564,8 @@ func TestParseUpdateAppFormInvalidNumbers(t *testing.T) {
 	if body.MaxSessionsPerWorker != nil {
 		t.Error("expected MaxSessionsPerWorker to be nil for invalid number")
 	}
-	if body.PreWarmedSeats != nil {
-		t.Error("expected PreWarmedSeats to be nil for invalid number")
+	if body.PreWarmedSessions != nil {
+		t.Error("expected PreWarmedSessions to be nil for invalid number")
 	}
 	if body.CPULimit != nil {
 		t.Error("expected CPULimit to be nil for invalid number")

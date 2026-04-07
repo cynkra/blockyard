@@ -206,7 +206,7 @@ CREATE TABLE apps_new (
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
     deleted_at              TEXT,
-    pre_warmed_seats        INTEGER NOT NULL DEFAULT 0,
+    pre_warmed_sessions     INTEGER NOT NULL DEFAULT 0,
     refresh_schedule        TEXT NOT NULL DEFAULT '',
     last_refresh_at         TEXT,
     enabled                 INTEGER NOT NULL DEFAULT 1
@@ -216,7 +216,7 @@ INSERT INTO apps_new SELECT
     max_workers_per_app, max_sessions_per_worker,
     memory_limit, cpu_limit, title, description,
     created_at, updated_at, deleted_at,
-    pre_warmed_seats, refresh_schedule, last_refresh_at, enabled
+    pre_warmed_sessions, refresh_schedule, last_refresh_at, enabled
 FROM apps;
 DROP TABLE apps;
 ALTER TABLE apps_new RENAME TO apps;
@@ -297,7 +297,7 @@ _, err = db.Exec(db.rebind(
         access_type = ?,
         title = ?,
         description = ?,
-        pre_warmed_seats = ?,
+        pre_warmed_sessions = ?,
         refresh_schedule = ?,
         image = ?,
         runtime = ?,
@@ -307,7 +307,7 @@ _, err = db.Exec(db.rebind(
     app.MemoryLimit, app.CPULimit,
     app.AccessType,
     app.Title, app.Description,
-    app.PreWarmedSeats,
+    app.PreWarmedSessions,
     app.RefreshSchedule,
     app.Image, app.Runtime,
     now, id,

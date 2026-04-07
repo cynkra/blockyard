@@ -206,7 +206,7 @@ caller's `relation` to the app. Workers are available via the
   "cpu_limit": null,
   "title": "My Dashboard",
   "description": "A sales analytics dashboard",
-  "pre_warmed_seats": 0,
+  "pre_warmed_sessions": 0,
   "enabled": true,
   "refresh_schedule": "",
   "created_at": "2025-01-15T09:30:00Z",
@@ -249,14 +249,14 @@ updated.
 | `access_type` | `string` | `"acl"` | `"acl"`, `"logged_in"`, or `"public"` (requires owner or admin) |
 | `title` | `string` | none | Human-readable title for the catalog |
 | `description` | `string` | none | Description for the catalog |
-| `pre_warmed_seats` | `integer` | `0` | Number of standby workers to keep pre-warmed (max 10) |
+| `pre_warmed_sessions` | `integer` | `0` | Target number of free session slots to keep warm across standby workers (max 10). With `max_sessions_per_worker=1` this equals the number of idle workers; with higher values, a single partially-full worker can cover multiple slots. |
 | `refresh_schedule` | `string` | none | Cron expression for automatic dependency refresh |
 
 **Response:** `200 OK` — updated app object.
 
 App response objects include the following additional fields beyond the
 example above: `max_workers_per_app`, `max_sessions_per_worker`,
-`memory_limit`, `cpu_limit`, `pre_warmed_seats`, and `refresh_schedule`.
+`memory_limit`, `cpu_limit`, `pre_warmed_sessions`, and `refresh_schedule`.
 
 ### `DELETE /api/v1/apps/{id}`
 

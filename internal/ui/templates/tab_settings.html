@@ -126,15 +126,15 @@
         </div>
     </div>
     <div class="field-group">
-        <label for="pre-warmed-seats">Pre-warmed seats</label>
+        <label for="pre-warmed-sessions">Pre-warmed sessions</label>
         <div class="field-row">
-            <input type="number" id="pre-warmed-seats" name="pre_warmed_seats"
-                   value="{{.App.PreWarmedSeats}}"
-                   data-original="{{.App.PreWarmedSeats}}"
+            <input type="number" id="pre-warmed-sessions" name="pre_warmed_sessions"
+                   value="{{.App.PreWarmedSessions}}"
+                   data-original="{{.App.PreWarmedSessions}}"
                    oninput="toggleSaveBtn(this)">
             <button class="field-save hidden"
                     hx-patch="/api/v1/apps/{{.App.ID}}"
-                    hx-include="[name='pre_warmed_seats']"
+                    hx-include="[name='pre_warmed_sessions']"
                     hx-swap="none"
                     hx-on::after-request="if(event.detail.successful){showToast('Saved','success');this.classList.add('hidden');var inp=this.closest('.field-row').querySelector('input,textarea');if(inp)inp.dataset.original=inp.value;htmx.trigger(document.body,'appSettingsChanged');}"><svg width="16" height="16"><use href="#i-save"/></svg></button>
         </div>

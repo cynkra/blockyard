@@ -227,7 +227,7 @@ type AppRow struct {
 	CreatedAt            string   `db:"created_at" json:"created_at"`
 	UpdatedAt            string   `db:"updated_at" json:"updated_at"`
 	DeletedAt            *string  `db:"deleted_at" json:"deleted_at,omitempty"`
-	PreWarmedSeats       int      `db:"pre_warmed_seats" json:"pre_warmed_seats"`
+	PreWarmedSessions    int      `db:"pre_warmed_sessions" json:"pre_warmed_sessions"`
 	RefreshSchedule      string   `db:"refresh_schedule" json:"refresh_schedule"`
 	LastRefreshAt        *string  `db:"last_refresh_at" json:"last_refresh_at,omitempty"`
 	Enabled              bool     `db:"enabled" json:"enabled"`
@@ -580,7 +580,7 @@ type AppUpdate struct {
 	AccessType           *string
 	Title                *string
 	Description          *string
-	PreWarmedSeats       *int
+	PreWarmedSessions    *int
 	RefreshSchedule      *string
 	Image                *string
 	Runtime              *string
@@ -618,8 +618,8 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 	if u.Description != nil {
 		app.Description = u.Description
 	}
-	if u.PreWarmedSeats != nil {
-		app.PreWarmedSeats = *u.PreWarmedSeats
+	if u.PreWarmedSessions != nil {
+		app.PreWarmedSessions = *u.PreWarmedSessions
 	}
 	if u.RefreshSchedule != nil {
 		app.RefreshSchedule = *u.RefreshSchedule
@@ -641,7 +641,7 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 			access_type = ?,
 			title = ?,
 			description = ?,
-			pre_warmed_seats = ?,
+			pre_warmed_sessions = ?,
 			refresh_schedule = ?,
 			image = ?,
 			runtime = ?,
@@ -651,7 +651,7 @@ func (db *DB) UpdateApp(id string, u AppUpdate) (*AppRow, error) {
 		app.MemoryLimit, app.CPULimit,
 		app.AccessType,
 		app.Title, app.Description,
-		app.PreWarmedSeats,
+		app.PreWarmedSessions,
 		app.RefreshSchedule,
 		app.Image, app.Runtime,
 		now, id,
@@ -710,11 +710,11 @@ func (db *DB) SetAppDataMounts(appID string, mounts []DataMountRow) error {
 	return tx.Commit()
 }
 
-// ListPreWarmedApps returns all non-deleted apps with pre_warmed_seats > 0.
+// ListPreWarmedApps returns all non-deleted apps with pre_warmed_sessions > 0.
 func (db *DB) ListPreWarmedApps() ([]AppRow, error) {
 	var apps []AppRow
 	err := db.DB.Select(&apps,
-		`SELECT * FROM apps WHERE pre_warmed_seats > 0 AND deleted_at IS NULL`)
+		`SELECT * FROM apps WHERE pre_warmed_sessions > 0 AND deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
