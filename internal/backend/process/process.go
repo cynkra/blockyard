@@ -134,11 +134,14 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 
 	// Seccomp — splice --seccomp <fd> args before the "--" separator.
 	// No-op when SeccompProfile is empty (phase 3-8 ships the profile).
-	secArgs, err := applySeccomp(cmd, b.cfg.SeccompProfile)
+	// secCleanup releases the parent-side fd; deferred so it runs on
+	// every error path including a Start failure inside the goroutine.
+	secArgs, secCleanup, err := applySeccomp(cmd, b.cfg.SeccompProfile)
 	if err != nil {
 		releaseSlots()
 		return fmt.Errorf("process backend: seccomp: %w", err)
 	}
+	defer secCleanup()
 	if len(secArgs) > 0 {
 		spliceBeforeSeparator(cmd, secArgs)
 	}
@@ -337,10 +340,11 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 	cmd := exec.CommandContext(ctx, b.cfg.BwrapPath, args...) //nolint:gosec // G204: args from validated config
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 
-	secArgs, err := applySeccomp(cmd, b.cfg.SeccompProfile)
+	secArgs, secCleanup, err := applySeccomp(cmd, b.cfg.SeccompProfile)
 	if err != nil {
 		return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
 	}
+	defer secCleanup()
 	if len(secArgs) > 0 {
 		spliceBeforeSeparator(cmd, secArgs)
 	}
@@ -365,7 +369,26 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 	if err != nil {
 		return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
 	}
-	if err := cmd.Start(); err != nil {
+
+	// Run Start+Wait in a dedicated goroutine that LockOSThreads and
+	// never unlocks. Same Pdeathsig race as Spawn: pak installs run
+	// for minutes, so a stray runtime thread retirement would SIGKILL
+	// bwrap mid-build. The ingest goroutines read the pipes from any
+	// thread — Pdeathsig only watches the forking thread.
+	started := make(chan error, 1)
+	waitDone := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		// Intentionally do NOT UnlockOSThread.
+		if err := cmd.Start(); err != nil {
+			started <- err
+			return
+		}
+		started <- nil
+		waitDone <- cmd.Wait()
+	}()
+
+	if err := <-started; err != nil {
 		return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
 	}
 
@@ -397,13 +420,13 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 	go ingest(stderr)
 	wg.Wait()
 
-	err = cmd.Wait()
+	waitErr := <-waitDone
 	logs := logsBuf.String()
 
-	if err != nil {
+	if waitErr != nil {
 		exitCode := 1
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		}
 		return backend.BuildResult{

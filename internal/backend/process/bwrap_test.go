@@ -186,20 +186,30 @@ func TestBwrapBuildArgs(t *testing.T) {
 
 func TestApplySeccompEmpty(t *testing.T) {
 	cmd := exec.Command("/bin/true")
-	args, err := applySeccomp(cmd, "")
+	args, cleanup, err := applySeccomp(cmd, "")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if args != nil {
 		t.Errorf("expected nil args for empty profile, got %v", args)
 	}
+	if cleanup == nil {
+		t.Error("cleanup must not be nil; callers defer it unconditionally")
+	} else {
+		cleanup() // no-op should not panic
+	}
 }
 
 func TestApplySeccompMissingFile(t *testing.T) {
 	cmd := exec.Command("/bin/true")
-	_, err := applySeccomp(cmd, "/nonexistent/seccomp.bpf")
+	_, cleanup, err := applySeccomp(cmd, "/nonexistent/seccomp.bpf")
 	if err == nil {
 		t.Fatal("expected error for missing profile")
+	}
+	if cleanup == nil {
+		t.Error("cleanup must not be nil even on error")
+	} else {
+		cleanup() // no-op should not panic
 	}
 }
 
@@ -216,10 +226,11 @@ func TestApplySeccompRealFile(t *testing.T) {
 	tmp.Close()
 
 	cmd := exec.Command("/bin/true")
-	args, err := applySeccomp(cmd, tmp.Name())
+	args, cleanup, err := applySeccomp(cmd, tmp.Name())
 	if err != nil {
 		t.Fatalf("applySeccomp: %v", err)
 	}
+	defer cleanup()
 	if len(args) != 2 || args[0] != "--seccomp" {
 		t.Errorf("unexpected args: %v", args)
 	}
@@ -229,9 +240,6 @@ func TestApplySeccompRealFile(t *testing.T) {
 	if len(cmd.ExtraFiles) != 1 {
 		t.Errorf("expected one ExtraFile, got %d", len(cmd.ExtraFiles))
 	}
-	// Close the file the helper opened to avoid leaking the fd into
-	// other tests.
-	cmd.ExtraFiles[0].Close()
 }
 
 func TestSpliceBeforeSeparator(t *testing.T) {

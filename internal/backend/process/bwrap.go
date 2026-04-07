@@ -154,21 +154,29 @@ func bwrapBuildArgs(_ *config.ProcessConfig, spec backend.BuildSpec, uid, gid in
 // format (not the Docker/OCI JSON format). Phase 3-8 ships the compiled
 // profile; this phase accepts it as a pre-compiled file.
 //
-// Returns the args to splice before "--" in the bwrap command line. If
-// profilePath is empty, returns (nil, nil) — seccomp is optional until
-// phase 3-8.
-func applySeccomp(cmd *exec.Cmd, profilePath string) ([]string, error) {
+// Returns:
+//   - the bwrap args to splice before "--" in the command line
+//   - a cleanup func that closes the parent-side fd; the caller must
+//     defer it so the fd is released regardless of whether cmd.Start
+//     succeeds or fails. The child gets its own duplicated fd from
+//     fork(), so closing the parent's copy after Start does not
+//     affect the sandboxed process.
+//
+// When profilePath is empty, returns (nil, no-op cleanup, nil) —
+// seccomp is optional until phase 3-8 ships the compiled profile.
+func applySeccomp(cmd *exec.Cmd, profilePath string) ([]string, func(), error) {
+	noop := func() {}
 	if profilePath == "" {
-		return nil, nil
+		return nil, noop, nil
 	}
 	f, err := os.Open(profilePath) //nolint:gosec // G304: path comes from validated config
 	if err != nil {
-		return nil, fmt.Errorf("open seccomp profile: %w", err)
+		return nil, noop, fmt.Errorf("open seccomp profile: %w", err)
 	}
 	// cmd.ExtraFiles[i] is exposed to the child as fd 3+i.
 	cmd.ExtraFiles = append(cmd.ExtraFiles, f)
 	fd := 3 + len(cmd.ExtraFiles) - 1
-	return []string{"--seccomp", strconv.Itoa(fd)}, nil
+	return []string{"--seccomp", strconv.Itoa(fd)}, func() { f.Close() }, nil
 }
 
 // spliceBeforeSeparator inserts extra into cmd.Args just before the
