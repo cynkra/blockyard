@@ -349,6 +349,17 @@ jobs:
     timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'process')
+    # Run inside rocker/r-ver so R is pre-installed at /usr/local/bin/R
+    # — same image blockyard.toml uses as the default worker image, so
+    # TestRSmokeBoot exercises R from the production path. --privileged
+    # is required for the unprivileged matrix leg to write
+    # kernel.apparmor_restrict_unprivileged_userns (a non-namespaced
+    # sysctl that the kernel enforces for container processes too).
+    # Tests still run as a non-root user for the setuid/unprivileged
+    # modes, so the capability matrix is preserved per-test.
+    container:
+      image: ghcr.io/rocker-org/r-ver:4.4.3
+      options: --privileged
     strategy:
       fail-fast: false
       matrix:
@@ -358,41 +369,60 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Install bubblewrap and R
-        # r-base-core is needed for the TestRSmokeBoot integration test
-        # which spawns `R --version` inside the bwrap sandbox to verify
-        # the constructed args + mounts let R actually start.
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap r-base-core
+      - name: Install bubblewrap and create non-root user
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bubblewrap
+          # Non-root user used by setuid and unprivileged modes.
+          # root mode doesn't need it but creating it is cheap.
+          useradd -m -u 2000 blockyard-runner
+          # setup-go puts Go in /opt/hostedtoolcache owned by root.
+          # The non-root user needs execute access on the Go binary;
+          # GOCACHE/GOMODCACHE will go to the non-root user's $HOME.
+          chmod -R a+rx /opt/hostedtoolcache/go || true
       - name: Configure mode (${{ matrix.mode }})
         run: |
           case "${{ matrix.mode }}" in
             root)
-              : # nothing extra; tests run under sudo below
+              : # nothing extra; test process runs as container root
               ;;
             setuid)
-              sudo chmod u+s /usr/bin/bwrap
+              chmod u+s /usr/bin/bwrap
               ;;
             unprivileged)
-              # Ubuntu 24.04 ships an AppArmor profile that blocks
-              # unprivileged uid_map writes. Disable the kernel-level
-              # toggle so the test process can exercise the
-              # unprivileged-userns failure path the preflight check
-              # is supposed to catch.
-              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+              # Disable the AppArmor restriction on unprivileged
+              # userns creation so bwrap can CREATE the namespace;
+              # the test still fails at uid_map write time (the
+              # blockyard-runner user has no subuid range), which
+              # is the silent-failure path the preflight check is
+              # meant to detect.
+              sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
               ;;
           esac
       - name: Run process backend tests (${{ matrix.mode }})
         run: |
           case "${{ matrix.mode }}" in
             root)
-              sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) \
-                go test -count=1 -tags process_test \
+              go test -count=1 -tags process_test \
                 -coverprofile=coverage-process-${{ matrix.mode }}.out \
                 -coverpkg=./internal/... \
                 ./internal/backend/process/...
               ;;
             *)
-              go test -count=1 -tags process_test \
+              # Run as the non-root user. chown the workspace and the
+              # module cache so go test can write coverage artifacts
+              # and cache intermediate builds.
+              chown -R blockyard-runner:blockyard-runner "$PWD"
+              chown -R blockyard-runner:blockyard-runner "$(go env GOMODCACHE)" 2>/dev/null || true
+              mkdir -p /home/blockyard-runner/.cache
+              chown -R blockyard-runner:blockyard-runner /home/blockyard-runner/.cache
+              # runuser -u preserves the environment including PATH
+              # (so go and R are still found) and just changes the
+              # effective UID/GID.
+              runuser -u blockyard-runner -- env PATH="$PATH" \
+                GOCACHE=/home/blockyard-runner/.cache/go-build \
+                GOMODCACHE="$(go env GOMODCACHE)" \
+                go test -count=1 -tags process_test \
                 -coverprofile=coverage-process-${{ matrix.mode }}.out \
                 -coverpkg=./internal/... \
                 ./internal/backend/process/...
