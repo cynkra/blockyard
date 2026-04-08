@@ -427,8 +427,24 @@ if cfg.Process == nil && envPrefixExists("BLOCKYARD_PROCESS_") {
 ### Step 2: Port allocator
 
 New file `internal/backend/process/ports.go`. The allocator manages a
-range of localhost ports, handing out free ports on `Alloc()` and
+range of localhost ports, handing out free ports on `Reserve()` and
 returning them on `Release()`. Backed by a bitset for O(1) allocation.
+
+`Reserve` does not just probe-and-release the candidate port — it
+listens on it and hands the live listener back to the caller, who
+must close it immediately before launching the child that will bind
+the port. Holding the listener through Spawn's setup work shrinks the
+TOCTOU window from "Spawn setup latency" (~ms) to "the gap between
+`ln.Close()` and `cmd.Start()`" (~µs). The probe-and-release pattern
+in earlier drafts left a multi-millisecond hole in which any host
+process could grab the port between the probe and the actual bind;
+phase 3-7 closes that race.
+
+The race after fork (`fork → exec → R interpreter boot → Shiny runApp
+→ bind` takes seconds) is irreducible without a shared-fd design and
+intentionally out of scope; the in-process bitset still prevents
+blockyard from re-picking a held port for a concurrent Spawn, and
+`Reserve` retries past externally-bound ports.
 
 ```go
 package process
@@ -448,43 +464,43 @@ type portAllocator struct {
 
 func newPortAllocator(start, end int) *portAllocator {
     size := end - start + 1
+    if size < 0 {
+        size = 0
+    }
     return &portAllocator{
         start: start,
         used:  make([]bool, size),
     }
 }
 
-// Alloc returns the next free port, or an error if all ports are in use.
-// After marking a port as allocated in the bitset, it verifies the port
-// is actually bindable (TCP listen + immediate close). This prevents
-// TOCTOU failures where another process on the host has already bound
-// the port. If the probe fails, the port is skipped and the scan
-// continues to the next free slot.
-func (p *portAllocator) Alloc() (int, error) {
+// Reserve picks a free port, holds a listener on it, and returns
+// (port, listener, nil). The caller MUST close the listener immediately
+// before invoking the child process that will bind the port — holding
+// the listener prevents any other host process from grabbing the port
+// during Spawn's setup work, shrinking the TOCTOU window from "Spawn
+// setup latency" (~ms) to "the gap between ln.Close() and cmd.Start()"
+// (~µs).
+//
+// If a candidate port cannot be bound (another host process already
+// holds it), the slot is skipped and the scan continues. The bitset
+// entry is set before returning so concurrent Reserves do not collide
+// on the same slot; Release returns the slot to the pool.
+func (p *portAllocator) Reserve() (int, net.Listener, error) {
     p.mu.Lock()
     defer p.mu.Unlock()
     for i, taken := range p.used {
-        if !taken {
-            port := p.start + i
-            if !probePort(port) {
-                continue // port in use by another process; skip
-            }
-            p.used[i] = true
-            return port, nil
+        if taken {
+            continue
         }
+        port := p.start + i
+        ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+        if err != nil {
+            continue // port in use by another host process; skip
+        }
+        p.used[i] = true
+        return port, ln, nil
     }
-    return 0, fmt.Errorf("process backend: all %d ports in use", len(p.used))
-}
-
-// probePort attempts a TCP listen on 127.0.0.1:port to verify the port
-// is available. Returns true if the listen succeeds (port is free).
-func probePort(port int) bool {
-    ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-    if err != nil {
-        return false
-    }
-    ln.Close()
-    return true
+    return 0, nil, fmt.Errorf("process backend: all %d ports in use", len(p.used))
 }
 
 // Release returns a port to the pool. No-op if the port is out of range.
@@ -1112,10 +1128,18 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
     }
     b.mu.Unlock()
 
-    port, err := b.ports.Alloc()
+    // Reserve a port AND hold a listener on it. The listener is closed
+    // inside the fork goroutine immediately before cmd.Start() so the
+    // kernel hands the port directly to the R child with the smallest
+    // possible window for another host process to race in. The deferred
+    // close is a safety net for error paths that return before the
+    // goroutine reaches its explicit close — closing an already-closed
+    // listener returns an error we ignore.
+    port, ln, err := b.ports.Reserve()
     if err != nil {
         return err
     }
+    defer func() { _ = ln.Close() }()
     uid, err := b.uids.Alloc()
     if err != nil {
         b.ports.Release(port)
@@ -1218,6 +1242,10 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
         runtime.LockOSThread()
         // Intentionally do NOT UnlockOSThread. See comment above.
 
+        // Drop the listener and immediately fork. Any code between
+        // these two lines extends the window in which another host
+        // process can grab the port — keep this pair adjacent.
+        _ = ln.Close()
         if err := cmd.Start(); err != nil {
             started <- err
             return
@@ -2351,7 +2379,7 @@ hangs off. Implementers of phase 3-7 should preserve them:
    (paired allocation, a second allocator over a disjoint range, or
    odd/even within a single range) is deferred to phase 3-9. Phase
    3-7 should avoid baking "one port per worker" into surrounding
-   code: `Spawn` calls `ports.Alloc()` once and stores the result in
+   code: `Spawn` calls `ports.Reserve()` once and stores the result in
    `workerProc.port`, which phase 3-9 extends with a second call and
    a second field — no structural changes to the lifecycle flow.
 
@@ -2846,7 +2874,7 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 | `internal/units/memory.go` | **create** | `ParseMemoryLimit()` moved from `internal/backend/docker` |
 | `internal/backend/process/process.go` | **create** | `ProcessBackend` struct implementing all twelve `Backend` methods (including `UpdateResources`, which returns `ErrNotSupported` — decision #6); `readProcTreeStats`, `collectDescendants`, `readOneProcStats` helpers |
 | `internal/backend/process/bwrap.go` | **create** | `bwrapArgs()`, `bwrapBuildArgs()`, `applySeccomp()`, `spliceBeforeSeparator()` |
-| `internal/backend/process/ports.go` | **create** | `portAllocator` with `Alloc()`, `Release()`, `InUse()` |
+| `internal/backend/process/ports.go` | **create** | `portAllocator` with `Reserve()`, `Release()`, `InUse()`. `Reserve` listens on the candidate port and hands the live listener to the caller, who must close it immediately before forking — minimizes the close→bind race window. |
 | `internal/backend/process/uids.go` | **create** | `uidAllocator` for per-worker host UIDs (parallel to `portAllocator`) |
 | `internal/backend/process/logs.go` | **create** | `logBuffer` with `ingest()` and `stream()` for LogStream delivery |
 | `internal/backend/process/preflight.go` | **create** | `RunPreflight()` and `check*` functions — bwrap, R, user namespaces, port range, resource-limit warning, worker egress probe. Lives in the `process` package (not `internal/preflight`) to break the import cycle that adding `Backend.Preflight()` would otherwise create. Imports `internal/preflight` for `Report`/`Result` types only. |

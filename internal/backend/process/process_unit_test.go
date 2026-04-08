@@ -306,9 +306,13 @@ func TestSpawnErrorPathsReleaseSlots(t *testing.T) {
 			name: "port_pool_exhausted",
 			setup: func(b *ProcessBackend) {
 				for {
-					if _, err := b.ports.Alloc(); err != nil {
-						break
+					_, ln, err := b.ports.Reserve()
+					if err != nil {
+						return
 					}
+					// We only need the bitset to be marked; the
+					// listener is incidental for this test.
+					ln.Close()
 				}
 			},
 			wantErr: "ports in use",
