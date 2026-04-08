@@ -50,3 +50,16 @@ func (u *uidAllocator) Release(uid int) {
 		u.used[idx] = false
 	}
 }
+
+// InUse returns the number of currently allocated UIDs.
+func (u *uidAllocator) InUse() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	n := 0
+	for _, taken := range u.used {
+		if taken {
+			n++
+		}
+	}
+	return n
+}

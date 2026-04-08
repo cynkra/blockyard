@@ -80,7 +80,13 @@ func checkRBinary(cfg *config.ProcessConfig) preflight.Result {
 }
 
 func checkUserNamespaces() preflight.Result {
-	data, err := os.ReadFile("/proc/sys/kernel/unprivileged_userns_clone")
+	return checkUserNamespacesAt("/proc/sys/kernel/unprivileged_userns_clone")
+}
+
+// checkUserNamespacesAt is checkUserNamespaces with an injectable
+// sysctl path so tests can run against fixture files.
+func checkUserNamespacesAt(path string) preflight.Result {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is hardcoded in prod, fixture in tests
 	if err != nil {
 		// File doesn't exist — kernel allows unprivileged userns by default.
 		return preflight.Result{
@@ -358,7 +364,7 @@ func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) prefli
 	var reachable, blocked []string
 	var critical bool
 	for _, t := range targets {
-		if probeReachable(cfg, probeUID, probeGID, t.addr) {
+		if probeReachableFn(cfg, probeUID, probeGID, t.addr) {
 			reachable = append(reachable, fmt.Sprintf("%s (%s)", t.name, t.addr))
 			if t.critical {
 				critical = true
@@ -395,6 +401,11 @@ func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) prefli
 		Category: "process",
 	}
 }
+
+// probeReachableFn is a test seam: tests swap it for a pure
+// predicate to exercise checkWorkerEgress's aggregation without
+// spawning bwrap.
+var probeReachableFn = probeReachable
 
 // probeReachable spawns the blockyard binary in probe mode under the
 // same bwrap config a worker would use, and reports whether the

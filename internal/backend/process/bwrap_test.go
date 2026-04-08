@@ -44,6 +44,23 @@ func assertFlagValue(t *testing.T, args []string, flag, want string) {
 	}
 }
 
+// pinnedSandboxFlags is the canonical list of flags every bwrap
+// command the process backend constructs must contain. If you drop
+// one here, assertContains stops guarding against its removal from
+// bwrapArgs / bwrapBuildArgs.
+var pinnedSandboxFlags = []string{
+	"--unshare-pid",
+	"--unshare-user",
+	"--unshare-uts",
+	"--die-with-parent",
+	"--new-session",
+	"--chdir",
+	"--tmpfs",
+	"--proc",
+	"--dev",
+	"--cap-drop",
+}
+
 // assertBindMount verifies that args contains a sequence
 // `kind src dst` (e.g. "--ro-bind /a /b").
 func assertBindMount(t *testing.T, args []string, kind, src, dst string) {
@@ -70,11 +87,17 @@ func TestBwrapArgs(t *testing.T) {
 
 	args := bwrapArgs(cfg, spec, 10000, 60000, 65534)
 
-	assertContains(t, args, "--unshare-pid")
-	assertContains(t, args, "--unshare-user")
-	assertContains(t, args, "--die-with-parent")
+	// Pin every sandbox flag — dropping one silently weakens isolation.
+	for _, flag := range pinnedSandboxFlags {
+		assertContains(t, args, flag)
+	}
 	assertFlagValue(t, args, "--uid", "60000")
 	assertFlagValue(t, args, "--gid", "65534")
+	assertFlagValue(t, args, "--chdir", "/tmp")
+	assertFlagValue(t, args, "--tmpfs", "/tmp")
+	assertFlagValue(t, args, "--proc", "/proc")
+	assertFlagValue(t, args, "--dev", "/dev")
+	assertFlagValue(t, args, "--cap-drop", "ALL")
 	assertBindMount(t, args, "--ro-bind", "/", "/")
 	assertBindMount(t, args, "--ro-bind", spec.BundlePath, spec.WorkerMount)
 
@@ -87,10 +110,37 @@ func TestBwrapArgs(t *testing.T) {
 		t.Errorf("expected R path %q after --, got %q", cfg.RPath, args[sepIdx+1])
 	}
 
-	// Default Cmd uses runApp with the allocated port.
+	// Workers share the host network stack (no --unshare-net), so
+	// Shiny must bind loopback — 0.0.0.0 would expose the app on the
+	// host's external interface, bypassing the proxy auth layer.
 	rest := strings.Join(args[sepIdx+1:], " ")
 	if !strings.Contains(rest, "port=10000") {
 		t.Errorf("default cmd should reference port=10000: %s", rest)
+	}
+	if !strings.Contains(rest, "host='127.0.0.1'") {
+		t.Errorf("default cmd must bind loopback, got: %s", rest)
+	}
+}
+
+// TestBwrapArgsOmitsUnsetOptionalMounts guards against regressions
+// that would produce optional mount flags for unset WorkerSpec
+// fields — each one would become an unexpected shadow mount.
+func TestBwrapArgsOmitsUnsetOptionalMounts(t *testing.T) {
+	cfg := &config.ProcessConfig{BwrapPath: "/usr/bin/bwrap", RPath: "/usr/bin/R"}
+	spec := backend.WorkerSpec{
+		WorkerID:    "w-1",
+		BundlePath:  "/data/bundles/app1/v1",
+		WorkerMount: "/app",
+	}
+	joined := strings.Join(bwrapArgs(cfg, spec, 10000, 60000, 65534), " ")
+	for _, absent := range []string{
+		"/blockyard-lib",
+		"/var/run/blockyard",
+		"/transfer",
+	} {
+		if strings.Contains(joined, absent) {
+			t.Errorf("unset field must not produce %q mount: %s", absent, joined)
+		}
 	}
 }
 
@@ -182,6 +232,21 @@ func TestBwrapBuildArgs(t *testing.T) {
 	assertBindMount(t, args, "--bind", "/data/.pkg-store", "/store")
 	assertFlagValue(t, args, "--uid", "60000")
 	assertFlagValue(t, args, "--gid", "65534")
+
+	// Builds share the worker flag set — see pinnedSandboxFlags.
+	for _, flag := range pinnedSandboxFlags {
+		assertContains(t, args, flag)
+	}
+
+	// The spec.Cmd must be after the -- separator, not before.
+	sepIdx := indexOf(args, "--")
+	if sepIdx < 0 {
+		t.Fatal("missing -- separator")
+	}
+	cmd := args[sepIdx+1:]
+	if len(cmd) != 3 || cmd[0] != "/usr/bin/R" {
+		t.Errorf("expected %v after --, got %v", spec.Cmd, cmd)
+	}
 }
 
 func TestApplySeccompEmpty(t *testing.T) {
@@ -242,6 +307,42 @@ func TestApplySeccompRealFile(t *testing.T) {
 	}
 }
 
+// TestApplySeccompFdCounterWithPreExistingExtraFiles guards the
+// fd = 3 + len(ExtraFiles) - 1 arithmetic. Inherited fd numbering
+// starts at 3 — if Spawn ever attaches a pipe before applySeccomp,
+// the profile fd shifts and this arithmetic must follow.
+func TestApplySeccompFdCounterWithPreExistingExtraFiles(t *testing.T) {
+	tmp, err := os.CreateTemp("", "seccomp-*.bpf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp.Name())
+	tmp.Close()
+
+	preExisting, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preExisting.Close()
+
+	cmd := exec.Command("/bin/true")
+	cmd.ExtraFiles = []*os.File{preExisting}
+
+	args, cleanup, err := applySeccomp(cmd, tmp.Name())
+	if err != nil {
+		t.Fatalf("applySeccomp: %v", err)
+	}
+	defer cleanup()
+	// With one pre-existing file at index 0 (fd 3) and the profile
+	// appended at index 1, the profile fd is 4.
+	if args[1] != "4" {
+		t.Errorf("expected fd 4 (3 + 1), got %q", args[1])
+	}
+	if len(cmd.ExtraFiles) != 2 {
+		t.Errorf("expected 2 ExtraFiles after append, got %d", len(cmd.ExtraFiles))
+	}
+}
+
 func TestSpliceBeforeSeparator(t *testing.T) {
 	cmd := exec.Command("bwrap", "--ro-bind", "/", "/", "--", "/bin/sh")
 	spliceBeforeSeparator(cmd, []string{"--seccomp", "3"})
@@ -263,5 +364,22 @@ func TestSpliceBeforeSeparatorMissingSeparator(t *testing.T) {
 	spliceBeforeSeparator(cmd, []string{"--seccomp", "3"})
 	if cmd.Args[len(cmd.Args)-1] != "3" {
 		t.Errorf("expected appended args, got %v", cmd.Args)
+	}
+}
+
+// TestSpliceBeforeSeparatorEmptyExtra — applySeccomp returns nil
+// args when seccomp is disabled; splicing nil must be a no-op.
+func TestSpliceBeforeSeparatorEmptyExtra(t *testing.T) {
+	cmd := exec.Command("bwrap", "--ro-bind", "/", "/", "--", "/bin/sh")
+	before := make([]string, len(cmd.Args))
+	copy(before, cmd.Args)
+	spliceBeforeSeparator(cmd, nil)
+	if len(cmd.Args) != len(before) {
+		t.Errorf("nil splice changed length: got %v", cmd.Args)
+	}
+	for i := range before {
+		if cmd.Args[i] != before[i] {
+			t.Errorf("arg[%d] changed: %q → %q", i, before[i], cmd.Args[i])
+		}
 	}
 }

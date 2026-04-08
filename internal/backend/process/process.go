@@ -665,33 +665,49 @@ func readOneProcStats(pid int) (rssKB, utime, stime uint64) {
 	if err != nil {
 		return 0, 0, 0
 	}
-	for _, line := range splitLines(string(statusData)) {
-		if strings.HasPrefix(line, "VmRSS:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				rssKB, _ = strconv.ParseUint(fields[1], 10, 64)
-			}
-			break
-		}
-	}
+	rssKB = parseVmRSSKB(string(statusData))
 
 	// CPU from /proc/{pid}/stat (fields 14+15: utime + stime in clock ticks).
 	statData, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)) //nolint:gosec // G304: /proc path
 	if err != nil {
 		return rssKB, 0, 0
 	}
-	statStr := string(statData)
-	commEnd := strings.LastIndex(statStr, ")")
-	if commEnd < 0 || commEnd+2 >= len(statStr) {
-		return rssKB, 0, 0
+	utime, stime = parseProcStatCPUTicks(string(statData))
+	return rssKB, utime, stime
+}
+
+// parseVmRSSKB extracts the VmRSS value (in kB) from /proc/<pid>/status
+// content. Returns 0 if absent or unparseable.
+func parseVmRSSKB(statusContent string) uint64 {
+	for _, line := range splitLines(statusContent) {
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				v, _ := strconv.ParseUint(fields[1], 10, 64)
+				return v
+			}
+			return 0
+		}
 	}
-	fields := strings.Fields(statStr[commEnd+2:])
+	return 0
+}
+
+// parseProcStatCPUTicks extracts utime+stime (clock ticks) from
+// /proc/<pid>/stat content. The comm field can contain spaces and
+// parens, so we split after the *last* ')'. Returns (0, 0) on
+// malformed input.
+func parseProcStatCPUTicks(statContent string) (utime, stime uint64) {
+	commEnd := strings.LastIndex(statContent, ")")
+	if commEnd < 0 || commEnd+2 >= len(statContent) {
+		return 0, 0
+	}
+	fields := strings.Fields(statContent[commEnd+2:])
 	// fields[0]=state, [1..]=field4+. utime=field14 → index 11, stime=field15 → index 12.
 	if len(fields) > 12 {
 		utime, _ = strconv.ParseUint(fields[11], 10, 64)
 		stime, _ = strconv.ParseUint(fields[12], 10, 64)
 	}
-	return rssKB, utime, stime
+	return utime, stime
 }
 
 // splitLines splits s into non-empty lines.

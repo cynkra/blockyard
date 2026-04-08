@@ -78,3 +78,16 @@ func TestUIDAllocatorReleaseOutOfRange(t *testing.T) {
 		t.Errorf("Alloc after out-of-range Release: %v", err)
 	}
 }
+
+// TestNewUIDAllocatorDefensiveNegativeRange verifies the constructor
+// clamps end < start to an empty pool instead of allocating a huge
+// slice with a negative length (which would panic in make).
+func TestNewUIDAllocatorDefensiveNegativeRange(t *testing.T) {
+	u := newUIDAllocator(100, 5)
+	if len(u.used) != 0 {
+		t.Errorf("expected empty used slice, got len=%d", len(u.used))
+	}
+	if _, err := u.Alloc(); err == nil {
+		t.Error("expected Alloc error on empty range")
+	}
+}

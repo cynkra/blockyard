@@ -1,6 +1,7 @@
 package process
 
 import (
+	"net"
 	"sync"
 	"testing"
 )
@@ -90,4 +91,63 @@ func TestPortAllocatorInUse(t *testing.T) {
 		t.Errorf("expected 1 in use, got %d", p.InUse())
 	}
 	p.Release(p2)
+}
+
+// TestPortAllocatorSkipsExternallyBoundPort covers the TOCTOU
+// recovery path: if another process already bound a port in the
+// range, Alloc must probe-fail past it to the next free slot rather
+// than hand out a dud port.
+func TestPortAllocatorSkipsExternallyBoundPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	boundPort := ln.Addr().(*net.TCPAddr).Port
+
+	p := newPortAllocator(boundPort, boundPort+2)
+	got, err := p.Alloc()
+	if err != nil {
+		t.Fatalf("Alloc: %v", err)
+	}
+	if got == boundPort {
+		t.Errorf("Alloc handed back the externally-bound port %d", got)
+	}
+	if got < boundPort || got > boundPort+2 {
+		t.Errorf("Alloc returned %d, outside range [%d..%d]", got, boundPort, boundPort+2)
+	}
+}
+
+func TestProbePortOccupied(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	if probePort(port) {
+		t.Errorf("probePort(%d) = true for an already-bound port", port)
+	}
+}
+
+// TestNewPortAllocatorDefensiveNegativeRange guards against end<start
+// panicking `make([]bool, -N)`. The defensive clamp produces an
+// empty pool whose Alloc always errors.
+func TestNewPortAllocatorDefensiveNegativeRange(t *testing.T) {
+	p := newPortAllocator(10, 5)
+	if len(p.used) != 0 {
+		t.Errorf("expected empty used slice, got len=%d", len(p.used))
+	}
+	if _, err := p.Alloc(); err == nil {
+		t.Error("expected Alloc error on empty range")
+	}
+}
+
+func TestPortAllocatorReleaseOutOfRange(t *testing.T) {
+	p := newPortAllocator(40400, 40402)
+	p.Release(0)     // below range
+	p.Release(99999) // above range
+	if p.InUse() != 0 {
+		t.Errorf("InUse changed after out-of-range releases: %d", p.InUse())
+	}
 }

@@ -28,8 +28,11 @@ type logBuffer struct {
 }
 
 func newLogBuffer(maxLines int) *logBuffer {
-	if maxLines < 0 {
-		maxLines = 0
+	// A zero-sized ring would divide-by-zero in ingest's `seq % size`
+	// and panic on the first line. Clamp to 1 so the invariant
+	// (len(buf) > 0) always holds; callers pass 10000 in practice.
+	if maxLines < 1 {
+		maxLines = 1
 	}
 	return &logBuffer{
 		buf:  make([]string, maxLines),

@@ -1874,3 +1874,64 @@ path = "/tmp/blockyard-test/db/blockyard.db"
 		t.Errorf("expected new field to win, got %q", cfg.Server.DefaultMemoryLimit)
 	}
 }
+
+// TestProcessBackendReversedRanges — end<start on either range is a
+// common typo; validate must surface the offending field before
+// downstream math goes negative.
+func TestProcessBackendReversedRanges(t *testing.T) {
+	cases := []struct {
+		name         string
+		processBlock string
+		wantField    string
+	}{
+		{
+			name: "port_range",
+			processBlock: `
+port_range_start       = 11000
+port_range_end         = 10999
+worker_uid_range_start = 60000
+worker_uid_range_end   = 60999
+`,
+			wantField: "port_range_end",
+		},
+		{
+			name: "worker_uid_range",
+			processBlock: `
+port_range_start       = 10000
+port_range_end         = 10099
+worker_uid_range_start = 60100
+worker_uid_range_end   = 60000
+`,
+			wantField: "worker_uid_range_end",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			badTOML := `
+[server]
+backend = "process"
+
+[process]` + tc.processBlock + `
+[storage]
+bundle_server_path = "/tmp/blockyard-test/bundles"
+
+[database]
+path = "/tmp/blockyard-test/db/blockyard.db"
+
+[proxy]
+`
+			dir := t.TempDir()
+			path := filepath.Join(dir, "blockyard.toml")
+			if err := os.WriteFile(path, []byte(badTOML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected error on reversed %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Errorf("error should name %q: %v", tc.wantField, err)
+			}
+		})
+	}
+}
