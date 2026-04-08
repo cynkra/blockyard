@@ -50,7 +50,7 @@ are blocked on both backends. The open questions are *network*,
 |---|---|---|
 | **Per-worker network** | Each worker gets a private bridge network. Inter-worker traffic is impossible at the kernel level; cloud metadata (`169.254.169.254`) is blocked via iptables per network. | Workers share the host network stack. Worker A can TCP-connect to worker B's loopback Shiny port, reach services on the host network, and (without operator firewall rules) hit cloud metadata. |
 | **Per-worker resource limits** | Memory and CPU limits are enforced by the kernel via cgroups. PID limits prevent fork bombs. | No cgroup delegation. The outer container's (or systemd slice's) limits act as a shared ceiling — one runaway worker can starve its siblings. |
-| **Syscall filtering** | Docker's default seccomp profile is applied automatically, blocking ~44 dangerous syscalls. | `process.seccomp_profile` accepts a pre-compiled BPF profile and `bwrap` applies it via `--seccomp`. No default profile is shipped yet — set the field explicitly, or rely on the other isolation layers (namespaces and capability dropping) in the meantime. |
+| **Syscall filtering** | Docker's default seccomp profile is applied automatically. | `process.seccomp_profile` accepts a pre-compiled BPF profile and `bwrap` applies it via `--seccomp`. No default profile is shipped yet — set the field explicitly, or rely on the other isolation layers (namespaces and capability dropping) in the meantime. |
 | **Server privilege model** | Server needs `/var/run/docker.sock`, which grants root-equivalent access to the host. | Server needs only a `bwrap` binary. In containerized mode, the outer container needs a custom seccomp profile that allows `CLONE_NEWUSER`, but no capabilities, no socket, and no daemon dependency. |
 
 The first three rows are strengths of the Docker backend. The last row is
@@ -75,10 +75,9 @@ Pick the **process backend** when:
 - The Docker socket is unacceptable — e.g. hardened hosts that prohibit
   Docker-out-of-Docker, or policies that forbid root-equivalent mounts in
   server containers.
-- Cold-start latency matters. The Docker backend adds ~500 ms–1 s for
-  container and network creation before R itself starts; the process
-  backend skips both steps and its sandbox setup is negligible by
-  comparison.
+- Cold-start latency matters. The Docker backend creates a container
+  and per-worker network on every spawn; the process backend skips
+  both steps.
 - The deployment is single-tenant or internal, and cross-worker network
   isolation is not part of the threat model.
 - Operational simplicity matters — no daemon, no socket, only a
