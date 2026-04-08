@@ -10,11 +10,16 @@ parent that has the expensive shared state loaded once, forked on
 demand into specialised children.
 
 The mechanism is symmetrical across both backends. The shared logic
-(session ↔ child bookkeeping, child-exit handling, cold-start hook)
-lives in `internal/zygote/`. The backend-specific bits (control
-transport, child reaping, R process spawn) live in each backend
-behind a new optional `Forking` capability interface alongside
-`Backend`.
+splits across two packages: `internal/zygotectl/` (control
+protocol client, wire types, embedded R script and C helper —
+no dependency on `backend`) and `internal/zygote/` (the
+`Manager` type that owns session ↔ child bookkeeping,
+child-exit handling, and the cold-start hook). The
+backend-specific bits (control transport, child reaping, R
+process spawn) live in each backend behind a new optional
+`Forking` capability interface alongside `Backend`. See design
+decision #5 for why the zygote support is split across two
+packages.
 
 The zygote model is **experimental** and requires **two levels of
 opt-in**: a server-wide `experimental.zygote` config flag AND a
@@ -198,15 +203,22 @@ regardless of kernel version.
 3. **`Forking` capability sub-interface** in `internal/backend/` —
    optional capability that backends may implement. Three methods:
    `Fork`, `KillChild`, `ChildExits`. Plus a `ChildExit` value type.
-4. **`internal/zygote/` package** — backend-agnostic. A `Manager`
-   type that owns the session ↔ child bookkeeping, subscribes to
-   `ChildExits()`, exposes `Fork(ctx, workerID, sessionID) (addr, error)`
-   to the rest of the server, and runs a periodic sweep that
-   cross-references its bookkeeping against the session store and
-   kills children whose session has vanished. The control protocol
-   client (line-delimited TCP, `AUTH` first frame) lives here as a
-   shared library used by both backend implementations.
-5. **`internal/zygote/zygote.R`** — embedded R script. Loads the
+4. **`internal/zygotectl/` and `internal/zygote/` packages** —
+   the zygote support is split across two packages to break an
+   import cycle (decision #5). `internal/zygotectl/` holds the
+   control-protocol surface (`Client`, `Info`, `Stats`,
+   `ChildExitMsg`, secret helpers) and has no dependency on
+   `backend`, so `backend.Forking` can reference
+   `*zygotectl.Client` on its interface without cycling.
+   `internal/zygote/` holds the backend-agnostic `Manager` type
+   that owns the session ↔ child bookkeeping, subscribes to
+   `ChildExits()`, exposes
+   `Fork(ctx, workerID, sessionID) (addr, error)` to the rest of
+   the server, runs a periodic sweep that cross-references its
+   bookkeeping against the session store and kills children
+   whose session has vanished, and drives the metrics-poll loop
+   (decision #15).
+5. **`internal/zygotectl/zygote.R`** — embedded R script. Loads the
    bundle's packages and byte-compiles the bundle's own R code
    (`global.R`, `app.R`) via `compiler::cmpfile()` so closures
    are inherited by children as `BCODESXP` from the start (see
@@ -222,7 +234,7 @@ regardless of kernel version.
    decision #4 for why). Embedded into the server binary via
    `//go:embed`, written to a host path at startup, bind-mounted
    into the worker container or bwrap sandbox.
-6. **`internal/zygote/zygote_helper.c`** — tiny C helper (~15
+6. **`internal/zygotectl/zygote_helper.c`** — tiny C helper (~15
    lines, no R headers) compiled per-architecture to a shared
    library. Loaded by `zygote.R` via `dyn.load` during startup
    to call `prctl(PR_SET_MEMORY_MERGE, 1)`, enabling kernel-level
@@ -272,7 +284,7 @@ regardless of kernel version.
     and a new `GET /api/v1/server/capabilities` endpoint that
     surfaces the effective `experimental.zygote` /
     `experimental.ksm` flags for the UI to gate its toggle
-    state. Worker detail page surfaces the cached `ZygoteInfo`
+    state. Worker detail page surfaces the cached `zygotectl.Info`
     (R version, KSM status, preload time) from `INFO`.
 14. **KSM preflight checks** — each backend's `Preflight()` impl
     (introduced in phase 3-7) gains two checks, but only when
@@ -497,6 +509,11 @@ Add to `internal/backend/backend.go` (after the `Backend` interface
 and `ErrNotSupported`):
 
 ```go
+import (
+    // ...existing imports...
+    "github.com/cynkra/blockyard/internal/zygotectl"
+)
+
 // Forking is an optional capability interface implemented by backends
 // that support the zygote worker model. A zygote worker is a
 // long-lived "zygote" process that has loaded the bundle's packages
@@ -506,6 +523,12 @@ and `ErrNotSupported`):
 // Backends that don't implement Forking simply omit the methods.
 // Code that wants to fork checks for the capability via type
 // assertion: `f, ok := srv.Backend.(backend.Forking)`.
+//
+// The `zygotectl` package (imported above) holds the control-protocol
+// client and its associated types. It has no dependency on this
+// package, so importing it here does not close an import cycle with
+// `internal/zygote` (which imports `backend` for Forking/ChildExit
+// and `zygotectl` for Client/Info/Stats).
 type Forking interface {
     // Fork creates a session-specific child inside the given worker.
     // Returns the child's network address ("ip:port") and an opaque
@@ -522,17 +545,17 @@ type Forking interface {
     // that produces events. The channel is closed when the backend
     // shuts down.
     ChildExits() <-chan ChildExit
-}
 
-// Note: metrics polling (STATS, decision #15) is not part of the
-// Forking interface. The `zygote` package imports `backend` for
-// `Forking` and `ChildExit`, so adding a `StatsClient(workerID)
-// *zygote.ControlClient` method here would create an import cycle.
-// Instead, `zygote.Manager` takes a `StatsClient` function via
-// `ManagerConfig` at construction time — each backend provides a
-// closure over its own per-worker state. Concrete backends still
-// implement the resolver, just as a method on their own type, not
-// on this interface.
+    // StatsClient resolves a workerID to its live zygote control
+    // client for metrics polling (decision #15). Returns nil if the
+    // worker is unknown or not in zygote mode. The Manager's metrics
+    // goroutine calls this on each tick; the backend continues to
+    // own the client's lifetime (creation at Spawn, destruction at
+    // Stop). The return type comes from the `zygotectl` package
+    // (the split-out protocol surface that has no dependency on
+    // `backend`), so there's no import cycle.
+    StatsClient(workerID string) *zygotectl.Client
+}
 
 // ChildExit is the event emitted by Forking.ChildExits when a
 // child process terminates.
@@ -547,13 +570,25 @@ type ChildExit struct {
 The interface lives in the same file as `Backend` because it's
 adjacent in concept. Implementations live in each backend's package.
 
-### Step 5: `internal/zygote/` package
+### Step 5: `internal/zygotectl/` and `internal/zygote/` packages
 
-New package containing the backend-agnostic glue: control protocol
-client (shared between Docker and process backend impls), Manager
-type, session ↔ child bookkeeping.
+The zygote support splits across two packages to break an
+import cycle cleanly. The boundary follows what depends on
+`backend.Forking` and what doesn't:
 
-**`internal/zygote/control.go`** — TCP control protocol client.
+- **`internal/zygotectl/`** — the control-protocol surface:
+  `Client`, `Info`, `Stats`, `ChildExitMsg`, the per-worker
+  secret helpers, and the embedded `zygote.R` / C helper. This
+  package imports only the standard library, so `backend` can
+  import it to reference `*zygotectl.Client` on the `Forking`
+  interface without cycling.
+- **`internal/zygote/`** — the `Manager` type that owns the
+  session ↔ child bookkeeping, subscribes to `Forking.ChildExits`,
+  and drives the metrics-poll loop. It imports both `backend`
+  (for `Forking` and `ChildExit`) and `zygotectl` (for `Client`
+  and `Stats`).
+
+**`internal/zygotectl/control.go`** — TCP control protocol client.
 Shared between both backend `Forking` implementations.
 
 > **Why bare TCP and not httpuv/HTTP?** I researched the
@@ -604,7 +639,7 @@ server → client (push, async): CHILDEXIT <childID> <exitCode> <reason>\n
 ```
 
 ```go
-package zygote
+package zygotectl
 
 import (
     "bufio"
@@ -618,7 +653,7 @@ import (
     "sync"
 )
 
-// ControlClient speaks the zygote control protocol over a single
+// Client speaks the zygote control protocol over a single
 // long-lived TCP connection. Used by both backend Forking
 // implementations. The reader goroutine dispatches request
 // responses to the requesting goroutine via a per-request channel;
@@ -632,11 +667,11 @@ import (
 // IDs — because Fork latency is dominated by the actual fork(2)
 // in R, and serialising at the client adds negligible overhead
 // compared to the inherent cost.
-type ControlClient struct {
+type Client struct {
     addr   string
     secret []byte
 
-    info ZygoteInfo // queried once at construction, read-only after
+    info Info // queried once at construction, read-only after
 
     reqMu sync.Mutex // serialises request/response cycles
 
@@ -664,20 +699,20 @@ type ChildExitMsg struct {
     Reason   string
 }
 
-// NewControlClient dials, authenticates, queries zygote info, then
+// NewClient dials, authenticates, queries zygote info, then
 // starts the background reader goroutine. Returns a ready client;
 // the caller is responsible for Close(). The setup is strictly
 // sequential — auth → INFO → start reader — because both auth and
 // INFO read directly from the connection and would race the reader
 // if it were already running.
-func NewControlClient(ctx context.Context, addr string, secret []byte) (*ControlClient, error) {
+func NewClient(ctx context.Context, addr string, secret []byte) (*Client, error) {
     var d net.Dialer
     conn, err := d.DialContext(ctx, "tcp", addr)
     if err != nil {
         return nil, fmt.Errorf("control: dial: %w", err)
     }
 
-    cc := &ControlClient{
+    cc := &Client{
         addr:   addr,
         secret: secret,
         conn:   conn,
@@ -707,7 +742,7 @@ func NewControlClient(ctx context.Context, addr string, secret []byte) (*Control
     return cc, nil
 }
 
-func (c *ControlClient) authenticate() error {
+func (c *Client) authenticate() error {
     // Send AUTH <hex secret>\n; expect OK\n.
     line := fmt.Sprintf("AUTH %x\n", c.secret)
     if _, err := c.conn.Write([]byte(line)); err != nil {
@@ -724,7 +759,7 @@ func (c *ControlClient) authenticate() error {
 }
 
 // Fork sends FORK <port> and returns (childID, pid).
-func (c *ControlClient) Fork(ctx context.Context, port int) (childID string, pid int, err error) {
+func (c *Client) Fork(ctx context.Context, port int) (childID string, pid int, err error) {
     line, err := c.request(ctx, fmt.Sprintf("FORK %d\n", port))
     if err != nil {
         return "", 0, err
@@ -742,7 +777,7 @@ func (c *ControlClient) Fork(ctx context.Context, port int) (childID string, pid
 }
 
 // Kill sends KILL <childID>. Idempotent.
-func (c *ControlClient) Kill(ctx context.Context, childID string) error {
+func (c *Client) Kill(ctx context.Context, childID string) error {
     line, err := c.request(ctx, fmt.Sprintf("KILL %s\n", childID))
     if err != nil {
         return err
@@ -760,19 +795,19 @@ func (c *ControlClient) Kill(ctx context.Context, childID string) error {
 // zygote.Manager's metrics goroutine — see decision #15. Uses the
 // same reqMu as FORK/KILL so metrics polling naturally defers to
 // in-flight cold starts.
-func (c *ControlClient) Stats(ctx context.Context) (ZygoteStats, error) {
+func (c *Client) Stats(ctx context.Context) (Stats, error) {
     resp, err := c.requestMulti(ctx, "STATS\n")
     if err != nil {
-        return ZygoteStats{}, err
+        return Stats{}, err
     }
     return parseStats(resp), nil
 }
 
-// ZygoteStats is the dynamic view of a zygote's current KSM merge
-// state. The zygote reads its own /proc/self/ksm_stat plus
+// Stats is the dynamic view of a zygote's current KSM merge state.
+// The zygote reads its own /proc/self/ksm_stat plus
 // /proc/<childpid>/ksm_stat for each tracked child and returns the
 // aggregated totals.
-type ZygoteStats struct {
+type Stats struct {
     KSMMergingPagesZygote   int  // pages from the zygote process itself
     KSMMergingPagesChildren int  // sum across all live children
     KSMMergingPagesTotal    int  // = zygote + children
@@ -780,13 +815,13 @@ type ZygoteStats struct {
     KSMStatSupported        bool // false on kernel < 6.1 (no /proc/<pid>/ksm_stat)
 }
 
-// parseStats parses a multi-line STATS response into ZygoteStats.
+// parseStats parses a multi-line STATS response into a Stats value.
 // Unknown keys are ignored (forward-compatible). Missing keys
 // leave the zero value in place.
-func parseStats(resp string) ZygoteStats {
+func parseStats(resp string) Stats {
     // ksm_stat_supported defaults true; zygote.R sets it to 0
     // explicitly when /proc/<pid>/ksm_stat is unavailable.
-    stats := ZygoteStats{KSMStatSupported: true}
+    stats := Stats{KSMStatSupported: true}
     for _, line := range strings.Split(resp, "\n") {
         key, val, ok := strings.Cut(line, "=")
         if !ok {
@@ -808,10 +843,10 @@ func parseStats(resp string) ZygoteStats {
     return stats
 }
 
-// ZygoteInfo is the structured view of a zygote's startup state,
+// Info is the structured view of a zygote's startup state,
 // populated from the INFO control command. Unknown keys are
 // ignored so the protocol can be extended backward-compatibly.
-type ZygoteInfo struct {
+type Info struct {
     RVersion  string
     KSMStatus string // "enabled", "disabled", "unsupported", "denied",
                     // "failed", "helper_missing", "dlopen_failed", "unknown"
@@ -822,23 +857,23 @@ type ZygoteInfo struct {
 
 // Info returns the cached zygote info populated at client
 // construction. Does not reach over the network — INFO is queried
-// once during NewControlClient before the reader goroutine starts.
-func (c *ControlClient) Info() ZygoteInfo { return c.info }
+// once during NewClient before the reader goroutine starts.
+func (c *Client) Info() Info { return c.info }
 
-// fetchInfo is called synchronously during NewControlClient after
+// fetchInfo is called synchronously during NewClient after
 // authentication but before the readLoop goroutine starts. It owns
 // the connection exclusively at this point, so it can read the
 // multi-line INFO response directly without coordinating with the
 // reader.
-func (c *ControlClient) fetchInfo(rd *bufio.Reader) (ZygoteInfo, error) {
+func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
     if _, err := c.conn.Write([]byte("INFO\n")); err != nil {
-        return ZygoteInfo{}, fmt.Errorf("control: info write: %w", err)
+        return Info{}, fmt.Errorf("control: info write: %w", err)
     }
-    info := ZygoteInfo{Unknown: map[string]string{}}
+    info := Info{Unknown: map[string]string{}}
     for {
         line, err := rd.ReadString('\n')
         if err != nil {
-            return ZygoteInfo{}, fmt.Errorf("control: info read: %w", err)
+            return Info{}, fmt.Errorf("control: info read: %w", err)
         }
         line = strings.TrimSpace(line)
         if line == "END" {
@@ -870,7 +905,7 @@ func (c *ControlClient) fetchInfo(rd *bufio.Reader) (ZygoteInfo, error) {
 // is held briefly (one write + one read from the response channel),
 // so the queue depth is bounded by the rate of incoming Fork calls
 // and not by anything blocking on R.
-func (c *ControlClient) request(ctx context.Context, line string) (string, error) {
+func (c *Client) request(ctx context.Context, line string) (string, error) {
     return c.sendAndWait(ctx, line, false)
 }
 
@@ -881,11 +916,11 @@ func (c *ControlClient) request(ctx context.Context, line string) (string, error
 // delivers the joined response as a single "\n"-separated string.
 // CHILDEXIT pushes arriving mid-response are still dispatched to
 // Exits, so async events do not disrupt multi-line accumulation.
-func (c *ControlClient) requestMulti(ctx context.Context, line string) (string, error) {
+func (c *Client) requestMulti(ctx context.Context, line string) (string, error) {
     return c.sendAndWait(ctx, line, true)
 }
 
-func (c *ControlClient) sendAndWait(ctx context.Context, line string, multi bool) (string, error) {
+func (c *Client) sendAndWait(ctx context.Context, line string, multi bool) (string, error) {
     c.reqMu.Lock()
     defer c.reqMu.Unlock()
 
@@ -920,7 +955,7 @@ func (c *ControlClient) sendAndWait(ctx context.Context, line string, multi bool
 // bytes are lost across the handoff. Handles both single-line
 // replies (FORK/KILL) and multi-line replies terminated by "END"
 // (STATS) — the sendAndWait caller sets pendingMultiline to pick.
-func (c *ControlClient) readLoop() {
+func (c *Client) readLoop() {
     defer close(c.closed)
     var multiBuf strings.Builder
     for {
@@ -970,7 +1005,7 @@ func (c *ControlClient) readLoop() {
     }
 }
 
-func (c *ControlClient) pushExit(line string) {
+func (c *Client) pushExit(line string) {
     // "CHILDEXIT <childID> <exitCode> <reason>"
     fields := strings.Fields(line)
     if len(fields) != 4 {
@@ -989,14 +1024,14 @@ func (c *ControlClient) pushExit(line string) {
 // the reader goroutine observed a read error. Backend Forking
 // implementations listen on this to detect zygote death and trigger
 // worker eviction. See Step 7 / Step 8 for the watcher goroutine.
-func (c *ControlClient) Done() <-chan struct{} {
+func (c *Client) Done() <-chan struct{} {
     return c.closed
 }
 
 // Close shuts down the client. Safe to call multiple times — the
 // underlying conn.Close is idempotent, and Done() fires exactly
 // once when readLoop observes the closed conn.
-func (c *ControlClient) Close() error {
+func (c *Client) Close() error {
     return c.conn.Close()
 }
 ```
@@ -1017,6 +1052,8 @@ import (
 
     "github.com/cynkra/blockyard/internal/backend"
     "github.com/cynkra/blockyard/internal/session"
+    "github.com/cynkra/blockyard/internal/telemetry"
+    "github.com/cynkra/blockyard/internal/zygotectl"
 )
 
 // Manager owns the session ↔ child bookkeeping for zygote workers.
@@ -1028,11 +1065,13 @@ type Manager struct {
     sweepInterval   time.Duration
     metricsInterval time.Duration
 
-    // StatsClient resolves workerID → *ControlClient so the metrics
-    // goroutine can call Stats() on each live zygote. Supplied by
-    // the backend at Manager construction time — the backend owns
-    // the client lifetime.
-    statsClient func(workerID string) *ControlClient
+    // statsClient resolves workerID → *zygotectl.Client so the
+    // metrics goroutine can call Stats() on each live zygote.
+    // Supplied by the backend at Manager construction time — the
+    // backend owns the client lifetime. Typically this is just
+    // forking.StatsClient, but we store it separately to keep the
+    // Manager from leaning on the interface method directly.
+    statsClient func(workerID string) *zygotectl.Client
 
     // AppIDFor resolves workerID → app_id for Prometheus label
     // population. Supplied by the caller (usually
@@ -1040,9 +1079,9 @@ type Manager struct {
     appIDFor func(workerID string) string
 
     mu            sync.Mutex
-    bySession     map[string]childRef // sessionID → (workerID, childID)
-    lastStats     map[string]ZygoteStats // workerID → most recent STATS result
-    workersActive map[string]struct{}    // workerID set; populated via NotifyWorkerAlive, cleared via NotifyWorkerGone
+    bySession     map[string]childRef       // sessionID → (workerID, childID)
+    lastStats     map[string]zygotectl.Stats // workerID → most recent STATS result
+    workersActive map[string]struct{}       // workerID set; populated via NotifyWorkerAlive, cleared via NotifyWorkerGone
 
     stop chan struct{}
 }
@@ -1057,7 +1096,7 @@ type childRef struct {
 type ManagerConfig struct {
     SweepInterval   time.Duration
     MetricsInterval time.Duration
-    StatsClient     func(workerID string) *ControlClient
+    StatsClient     func(workerID string) *zygotectl.Client
     AppIDFor        func(workerID string) string
 }
 
@@ -1076,7 +1115,7 @@ func NewManager(forking backend.Forking, sessions session.Store, cfg ManagerConf
         statsClient:     cfg.StatsClient,
         appIDFor:        cfg.AppIDFor,
         bySession:       make(map[string]childRef),
-        lastStats:       make(map[string]ZygoteStats),
+        lastStats:       make(map[string]zygotectl.Stats),
         workersActive:   make(map[string]struct{}),
         stop:            make(chan struct{}),
     }
@@ -1092,7 +1131,7 @@ func NewManager(forking backend.Forking, sessions session.Store, cfg ManagerConf
 // Used by the worker detail page to render without a protocol
 // round-trip. Returns the zero value when no stats have been
 // polled yet for this worker.
-func (m *Manager) LastStats(workerID string) ZygoteStats {
+func (m *Manager) LastStats(workerID string) zygotectl.Stats {
     m.mu.Lock()
     defer m.mu.Unlock()
     return m.lastStats[workerID]
@@ -1319,12 +1358,15 @@ func (m *Manager) handleExit(ev backend.ChildExit) {
 }
 ```
 
-**`internal/zygote/secret.go`** — generation and read-back of the
-per-worker control secret. Used by both backend `Forking` impls
-when spawning a zygote and by the cleanup path.
+**`internal/zygotectl/secret.go`** — generation and read-back of
+the per-worker control secret. Used by both backend `Forking` impls
+when spawning a zygote and by the cleanup path. Lives in
+`zygotectl` (not `zygote`) because it has no dependency on
+`backend`, and the backend packages already import `zygotectl`
+for the `Client` type.
 
 ```go
-package zygote
+package zygotectl
 
 import (
     "crypto/rand"
@@ -1358,13 +1400,13 @@ which is already mounted read-only into the worker container at
 `/var/run/blockyard/`. The zygote reads it from
 `/var/run/blockyard/control.secret`.
 
-### Step 6: `internal/zygote/zygote.R`
+### Step 6: `internal/zygotectl/zygote.R`
 
 The zygote R script. Embedded into the server binary via `//go:embed`.
 Loads packages, listens on the control port, handles control commands,
 forks children, reaps via `mc.waitpid` on a 100ms `socketSelect` poll.
 
-**`internal/zygote/zygote.R`:**
+**`internal/zygotectl/zygote.R`:**
 
 ```r
 # blockyard zygote — long-lived R process that pre-loads packages
@@ -1386,7 +1428,7 @@ forks children, reaps via `mc.waitpid` on a 100ms `socketSelect` poll.
 #   BLOCKYARD_HELPER_PATH      — path to the zygote native helper (.so)
 #   R_LIBS                     — set externally for the worker library
 #
-# Protocol: see internal/zygote/control.go for the wire format.
+# Protocol: see internal/zygotectl/control.go for the wire format.
 
 POLL_SECS <- 0.1  # bounds CHILDEXIT push latency
 
@@ -1414,7 +1456,7 @@ zygote_info <- list(
 )
 
 # Load the native helper and enable KSM. The helper is a tiny C
-# shared library (see internal/zygote/zygote_helper.c) shipped
+# shared library (see internal/zygotectl/zygote_helper.c) shipped
 # embedded in the blockyard binary and written to the host at
 # zygote spawn, bind-mounted into the worker at BLOCKYARD_HELPER_PATH.
 # R loads it via dyn.load; the `enable_ksm` symbol is called via
@@ -1839,7 +1881,7 @@ Notes on the design:
   (HenrikBengtsson/Wishlist-for-R#35). The fix shipped in 2017
   and is well below any plausible runtime target.
 
-**`internal/zygote/zygote_helper.c`** — the native helper called by
+**`internal/zygotectl/zygote_helper.c`** — the native helper called by
 `zygote.R` to enable KSM. Deliberately tiny and dependency-free:
 no R headers, no Rcpp, no stdlib beyond what `prctl` needs. Compiles
 to a shared library with a standard C compiler, embedded per-arch
@@ -1888,10 +1930,10 @@ the architecture-appropriate binary via a build-tag-guarded
 Cross-compilation uses the standard `CC=aarch64-linux-gnu-gcc`
 pattern; no Go-level cgo is required.
 
-Embed everything in `internal/zygote/embed.go`:
+Embed everything in `internal/zygotectl/embed.go`:
 
 ```go
-package zygote
+package zygotectl
 
 import _ "embed"
 
@@ -1907,7 +1949,7 @@ Plus per-architecture `.so` embeds (e.g. `embed_linux_amd64.go`):
 ```go
 //go:build linux && amd64
 
-package zygote
+package zygotectl
 
 import _ "embed"
 
@@ -1921,8 +1963,8 @@ spawn and bind-mount into the worker.
 ### Step 7: Docker `Forking` implementation
 
 New file `internal/backend/docker/forking.go`. Implements the
-`backend.Forking` interface for the Docker backend. Uses the shared
-`zygote.ControlClient` for the wire protocol.
+`backend.Forking` interface for the Docker backend. Uses the
+shared `zygotectl.Client` for the wire protocol.
 
 Key elements:
 
@@ -1936,7 +1978,7 @@ import (
     "sync"
 
     "github.com/cynkra/blockyard/internal/backend"
-    "github.com/cynkra/blockyard/internal/zygote"
+    "github.com/cynkra/blockyard/internal/zygotectl"
 )
 
 // dockerForking adds the Forking capability to DockerBackend.
@@ -1945,7 +1987,7 @@ import (
 
 // Per-worker control state, kept on DockerBackend alongside workers.
 type forkState struct {
-    client      *zygote.ControlClient
+    client      *zygotectl.Client
     secret      []byte
     portRangeLo int
     portRangeHi int
@@ -2019,12 +2061,12 @@ func (d *DockerBackend) ChildExits() <-chan backend.ChildExit {
     return d.childExits
 }
 
-// StatsClient resolves a workerID to its live zygote control
-// client for metrics polling. Not part of the Forking interface
-// (import-cycle avoidance — see the note after Step 4); wired
-// into zygote.Manager via ManagerConfig.StatsClient in
-// cmd/blockyard/main.go.
-func (d *DockerBackend) StatsClient(workerID string) *zygote.ControlClient {
+// StatsClient implements backend.Forking. Resolves a workerID to
+// its live zygote control client for metrics polling. The return
+// type `*zygotectl.Client` comes from the `zygotectl` package
+// which has no dependency on `backend`, so this method can live
+// on the interface without cycling.
+func (d *DockerBackend) StatsClient(workerID string) *zygotectl.Client {
     d.mu.Lock()
     ws, ok := d.workers[workerID]
     d.mu.Unlock()
@@ -2057,8 +2099,9 @@ func (s *forkState) releasePortLocked(_ int) { /* no-op for the linear scan */ }
 ```
 
 `d.childExits` is a `chan backend.ChildExit` initialised in
-`NewDockerBackend`. A goroutine per worker translates `zygote.ChildExitMsg`
-into `backend.ChildExit` and forwards onto the shared channel:
+`NewDockerBackend`. A goroutine per worker translates
+`zygotectl.ChildExitMsg` into `backend.ChildExit` and forwards
+onto the shared channel:
 
 ```go
 // In DockerBackend.Spawn, after the control client is connected
@@ -2163,13 +2206,13 @@ func (d *DockerBackend) zygoteContainerAddr(ctx context.Context, ws *workerState
      `HelperSO` byte slice).
 4. After `ContainerStart`, the server waits for the control port
    to accept connections (TCP probe with backoff), then
-   `zygote.NewControlClient(ctx, "ip:3837", secret)`. The client
+   `zygotectl.NewClient(ctx, "ip:3837", secret)`. The client
    constructor synchronously fetches `INFO` and logs the KSM
    status alongside R version and preload time.
-5. The connected `ControlClient` is stored in `ws.fork`, along
-   with the cached `ZygoteInfo` (`ws.fork.info = client.Info()`)
-   so `ws.fork.info.KSMStatus` is available for API/UI exposure
-   without another network round-trip.
+5. The connected `*zygotectl.Client` is stored in `ws.fork`,
+   along with the cached `zygotectl.Info` (`ws.fork.info =
+   client.Info()`) so `ws.fork.info.KSMStatus` is available for
+   API/UI exposure without another network round-trip.
 6. `srv.Zygotes.NotifyWorkerAlive(workerID)` is called so the
    Manager's metrics goroutine starts polling this worker on the
    next metrics tick (decision #15). The matching
@@ -2243,7 +2286,7 @@ type WorkerSpec struct {
 ```
 
 `ControlSecret` is generated by the cold-start path via
-`zygote.WriteSecret(tokenDir)` and attached to the spec.
+`zygotectl.WriteSecret(tokenDir)` and attached to the spec.
 `Zygote` and `KSM` are populated from the *effective* state
 computed via `effectiveZygoteState(srv.Config, app)` in
 `coldstart.go` (see Step 9 for the helper). This is the
@@ -2297,11 +2340,11 @@ that phase 3-7 establishes). Differences from the Docker version:
   child *before* killing the bwrap process, mirroring the Docker
   case. Without this, `zygote.Manager.bySession` retains stale
   references after worker eviction.
-- `StatsClient(workerID string) *zygote.ControlClient` — same
-  shape as the Docker backend's method, returning the live
-  control client so `zygote.Manager` can poll `STATS` on the
-  metrics tick (decision #15). Called via the `ManagerConfig`
-  wired in `main.go`.
+- `StatsClient(workerID string) *zygotectl.Client` — same shape
+  as the Docker backend's method, implementing the same
+  `backend.Forking` interface method. Returns the live control
+  client so `zygote.Manager` can poll `STATS` on the metrics
+  tick (decision #15).
 - `Spawn` calls `srv.Zygotes.NotifyWorkerAlive(workerID)` after
   the control client is connected, and `Stop` calls
   `NotifyWorkerGone(workerID)` before tearing the bwrap process
@@ -2320,11 +2363,12 @@ that phase 3-7 establishes). Differences from the Docker version:
 
 The structural similarity is large enough that the
 `forking.go` files in both backends could share helper functions
-in `internal/zygote/`. `Manager.Fork` and the sweep/exit loops
-already live there; the per-worker control state (`forkState`)
-could too if it doesn't reach into backend-specific types. For
-phase 3-9 I'd duplicate it in each backend and DRY in a follow-up
-once both are working — premature abstraction risk.
+in `internal/zygote/` or `internal/zygotectl/`. `Manager.Fork`
+and the sweep/exit loops already live in `zygote`; the
+per-worker control state (`forkState`) could move to `zygote`
+if it doesn't reach into backend-specific types. For phase 3-9
+I'd duplicate it in each backend and DRY in a follow-up once
+both are working — premature abstraction risk.
 
 **Port allocator extension.** Phase 3-7 ships a single
 `portAllocator` over `port_range_start..port_range_end` for the
@@ -2418,7 +2462,7 @@ effectiveZygote, effectiveKSM := effectiveZygoteState(srv.Config, app)
 var controlSecret []byte
 if effectiveZygote && tokDir != "" {
     var err error
-    controlSecret, err = zygote.WriteSecret(tokDir)
+    controlSecret, err = zygotectl.WriteSecret(tokDir)
     if err != nil {
         cleanupLocal()
         return "", "", fmt.Errorf("zygote: write secret: %w", err)
@@ -2495,32 +2539,16 @@ the runtime kill switch from decision #18 means no zygote path
 ever runs:
 
 ```go
-// The concrete backend reference (*docker.Backend or
-// *process.Backend) is retained alongside the interface
-// reference because StatsClient is not on the Forking interface
-// — see the note after Step 4 for the import-cycle reasoning.
-// Each concrete backend exposes its own StatsClient(workerID)
-// *zygote.ControlClient method.
 flags := srv.Config.ExperimentalFlags()
 if flags.Zygote {
     if forking, ok := backend.(backend.Forking); ok {
-        var statsClient func(wid string) *zygote.ControlClient
-        switch b := backend.(type) {
-        case *docker.Backend:
-            statsClient = b.StatsClient
-        case *process.Backend:
-            statsClient = b.StatsClient
-        default:
-            statsClient = func(string) *zygote.ControlClient { return nil }
-        }
-
         srv.Zygotes = zygote.NewManager(
             forking,
             srv.Sessions,
             zygote.ManagerConfig{
                 SweepInterval:   srv.Config.Proxy.AutoscalerInterval.Duration,
                 MetricsInterval: srv.Config.Proxy.ZygoteMetricsInterval.Duration,
-                StatsClient:     statsClient,
+                StatsClient:     forking.StatsClient, // interface method
                 AppIDFor: func(wid string) string {
                     return srv.WorkerApp(wid)
                 },
@@ -2530,13 +2558,11 @@ if flags.Zygote {
 }
 ```
 
-`StatsClient` is a concrete method on each backend struct, not a
-method on the `Forking` interface — adding it to the interface
-would force `backend` to import `zygote` for the
-`*zygote.ControlClient` return type, closing an import cycle
-with `zygote`'s existing import of `backend`. The type-switch
-in main.go is the pragmatic alternative; the concrete backends
-are a closed set managed by blockyard itself.
+`StatsClient` is a method on the `Forking` interface. The
+return type `*zygotectl.Client` comes from the split-out
+`zygotectl` package (Step 5) which has no dependency on
+`backend`, so the interface can reference it without closing an
+import cycle.
 
 `srv.Zygotes` is `nil` when either the server-wide flag is off
 *or* the configured backend doesn't implement `Forking`.
@@ -2935,57 +2961,59 @@ if c.ZygoteMetricsInterval.Duration == 0 {
 
 #### Unit tests
 
-**`internal/zygote/control_test.go`** — control protocol over a
+**`internal/zygotectl/control_test.go`** — control protocol over a
 loopback test server:
 
 ```go
-func TestControlClient_AuthOK(t *testing.T)
+func TestClient_AuthOK(t *testing.T)
 // Spin up a test TCP listener that speaks the protocol; verify
 // AUTH succeeds with the right secret.
 
-func TestControlClient_AuthRejected(t *testing.T)
+func TestClient_AuthRejected(t *testing.T)
 // Same with wrong secret → returns auth error.
 
-func TestControlClient_ForkAndKill(t *testing.T)
+func TestClient_ForkAndKill(t *testing.T)
 // FORK 3839 → OK c1 12345; KILL c1 → OK.
 
-func TestControlClient_ChildExitPushed(t *testing.T)
+func TestClient_ChildExitPushed(t *testing.T)
 // Test server pushes CHILDEXIT; client surfaces it on Exits.
 
-func TestControlClient_ConnectionClose(t *testing.T)
+func TestClient_ConnectionClose(t *testing.T)
 // Drop the connection mid-request; pending request returns error.
 
-func TestControlClient_ConcurrentForks(t *testing.T)
+func TestClient_ConcurrentForks(t *testing.T)
 // Two goroutines call Fork against one client at the same time.
 // Both succeed (queued on reqMu), neither errors with "request
 // in flight".
 
-func TestControlClient_InfoAtStartup(t *testing.T)
+func TestClient_InfoAtStartup(t *testing.T)
 // Test server responds to INFO with a canned key=value block.
-// NewControlClient succeeds; client.Info() returns the parsed
-// ZygoteInfo with all expected fields populated.
+// NewClient succeeds; client.Info() returns the parsed Info
+// with all expected fields populated.
 
-func TestControlClient_InfoUnknownKeys(t *testing.T)
+func TestClient_InfoUnknownKeys(t *testing.T)
 // Test server includes unrecognised keys (future-compat). Client
-// parses them into ZygoteInfo.Unknown without erroring.
+// parses them into Info.Unknown without erroring.
 
-func TestControlClient_Stats(t *testing.T)
+func TestClient_Stats(t *testing.T)
 // Test server responds to STATS with a canned multi-line block
-// terminated by END. Client.Stats(ctx) returns a ZygoteStats
-// with the parsed values.
+// terminated by END. Client.Stats(ctx) returns a Stats value
+// with the parsed fields.
 
-func TestControlClient_StatsInterleavedWithChildExit(t *testing.T)
+func TestClient_StatsInterleavedWithChildExit(t *testing.T)
 // Test server pushes a CHILDEXIT in the middle of a STATS
 // response. Verify the CHILDEXIT is dispatched to Exits and
 // the STATS response still parses correctly once END arrives.
 // Covers the multi-line reader accumulation path.
 
-func TestControlClient_StatsUnknownKeys(t *testing.T)
+func TestClient_StatsUnknownKeys(t *testing.T)
 // STATS response includes future keys. Client ignores them
 // without erroring and populates the known keys correctly.
 ```
 
-**`internal/zygote/manager_test.go`** — using a mock `Forking`:
+**`internal/zygote/manager_test.go`** — using a mock `Forking`
+(note: unchanged location — `Manager` stays in the `zygote`
+package; only the control-protocol types moved to `zygotectl`):
 
 ```go
 type mockForking struct {
@@ -3013,7 +3041,7 @@ func TestManager_SweepIgnoresLiveSessions(t *testing.T)
 
 func TestManager_MetricsLoopPollsActiveWorkers(t *testing.T)
 // NotifyWorkerAlive twice; the mock StatsClient returns canned
-// ZygoteStats for each. Tick the metrics loop. Verify
+// zygotectl.Stats for each. Tick the metrics loop. Verify
 // LastStats(w) returns the expected values for both workers
 // and the Prometheus gauges were updated with matching labels.
 
@@ -3160,7 +3188,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | `internal/api/server.go` | **update** | New `GET /api/v1/server/capabilities` endpoint returning effective `experimental.*` flags (admin-only) |
 | `internal/api/runtime.go` | **update** | Add `zygote` and `ksm` to `appResponseV2()` |
 | `internal/api/swagger_types.go` | **update** | Add `zygote`, `ksm`, and capabilities shape to swagger response types |
-| `internal/ui/templates/tab_settings.html` | **update** | Zygote and KSM toggles, admin-gated, server-capabilities-gated; worker detail surfaces `ZygoteInfo` from `INFO` |
+| `internal/ui/templates/tab_settings.html` | **update** | Zygote and KSM toggles, admin-gated, server-capabilities-gated; worker detail surfaces `zygotectl.Info` from `INFO` |
 | `cmd/by/scale.go` | **update** | `--zygote` and `--ksm` flags |
 | `cmd/blockyard/main.go` | **update** | Construct `zygote.Manager` when backend implements `Forking`; write embedded `HelperSO` and `ZygoteScript` to host paths at startup |
 | `internal/server/state.go` | **update** | `Zygotes *zygote.Manager` field on `Server` |
@@ -3175,19 +3203,19 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | `internal/db/migrations/sqlite/003_zygote.down.sql` | Migration down (SQLite) |
 | `internal/db/migrations/postgres/003_zygote.up.sql` | Migration up (PostgreSQL) |
 | `internal/db/migrations/postgres/003_zygote.down.sql` | Migration down (PostgreSQL) |
-| `internal/zygote/control.go` | TCP control protocol client (shared between backends) |
-| `internal/zygote/control_test.go` | Control protocol unit tests |
-| `internal/zygote/manager.go` | `Manager` type, session ↔ child bookkeeping, exit handler, sweep loop |
+| `internal/zygotectl/control.go` | TCP control protocol client (`Client`, `Info`, `Stats`, `ChildExitMsg`) — shared between backends |
+| `internal/zygotectl/control_test.go` | Control protocol unit tests |
+| `internal/zygotectl/secret.go` | Per-worker control secret generation |
+| `internal/zygotectl/secret_test.go` | Secret round-trip test |
+| `internal/zygotectl/zygote.R` | Embedded zygote R script |
+| `internal/zygotectl/zygote_helper.c` | Tiny C helper for `prctl(PR_SET_MEMORY_MERGE)` |
+| `internal/zygotectl/zygote_helper_linux_amd64.so` | Precompiled amd64 helper (build artifact, tracked) |
+| `internal/zygotectl/zygote_helper_linux_arm64.so` | Precompiled arm64 helper (build artifact, tracked) |
+| `internal/zygotectl/embed.go` | `//go:embed` declarations for the R script, C source, and arch-neutral metadata |
+| `internal/zygotectl/embed_linux_amd64.go` | Build-tag-guarded embed of the amd64 `.so` |
+| `internal/zygotectl/embed_linux_arm64.go` | Build-tag-guarded embed of the arm64 `.so` |
+| `internal/zygote/manager.go` | `Manager` type, session ↔ child bookkeeping, exit handler, sweep loop, metrics-poll loop |
 | `internal/zygote/manager_test.go` | Manager unit tests with mock `Forking` |
-| `internal/zygote/secret.go` | Per-worker control secret generation |
-| `internal/zygote/secret_test.go` | Secret round-trip test |
-| `internal/zygote/zygote.R` | Embedded zygote R script |
-| `internal/zygote/zygote_helper.c` | Tiny C helper for `prctl(PR_SET_MEMORY_MERGE)` |
-| `internal/zygote/zygote_helper_linux_amd64.so` | Precompiled amd64 helper (build artifact, tracked) |
-| `internal/zygote/zygote_helper_linux_arm64.so` | Precompiled arm64 helper (build artifact, tracked) |
-| `internal/zygote/embed.go` | `//go:embed` declarations for the R script, C source, and arch-neutral metadata |
-| `internal/zygote/embed_linux_amd64.go` | Build-tag-guarded embed of the amd64 `.so` |
-| `internal/zygote/embed_linux_arm64.go` | Build-tag-guarded embed of the arm64 `.so` |
 | `internal/backend/docker/forking.go` | Docker `Forking` implementation |
 | `internal/backend/docker/forking_integration_test.go` | Docker zygote integration tests (`docker_test`) |
 | `internal/backend/process/forking.go` | Process `Forking` implementation |
@@ -3265,15 +3293,32 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    If httpuv ever ships a single-threaded mode (or if a
    hypothetical successor with a single-threaded I/O loop
    appears), the wire layer can be migrated cleanly — the
-   protocol surface is small, and `internal/zygote/control.go`
+   protocol surface is small, and `internal/zygotectl/control.go`
    plus `zygote.R` are the only files affected. No external
    client of this protocol exists.
 
-5. **Shared `zygote.ControlClient` and `zygote.Manager`.** The
-   wire protocol and session-bookkeeping logic are identical
-   across backends. They live in `internal/zygote/` and both
-   `Forking` implementations import them. Only the dial address
-   and the per-worker spawn details differ between backends.
+5. **Shared `zygotectl.Client` and `zygote.Manager`, split across
+   two packages to break an import cycle.** The wire protocol
+   and session-bookkeeping logic are identical across backends.
+   They live in `internal/zygotectl/` (the control protocol
+   surface — `Client`, `Info`, `Stats`, `ChildExitMsg`, secret
+   helpers, embedded R script and C helper; no dependency on
+   `backend`) and `internal/zygote/` (the `Manager` type;
+   imports both `backend` and `zygotectl`). Both backend
+   `Forking` implementations import `zygotectl` directly and
+   store `*zygotectl.Client` in their per-worker state. Only
+   the dial address and the per-worker spawn details differ
+   between backends.
+
+   **Why the split:** without it, `backend` cannot expose
+   `StatsClient(workerID) *zygotectl.Client` on the `Forking`
+   interface, because `backend` would need to import a package
+   containing the control client while that same package would
+   need to import `backend` (for `Forking` and `ChildExit`).
+   Splitting the control-protocol types into a leaf package
+   (no blockyard dependencies) breaks the cycle: `backend`
+   imports `zygotectl`, `zygote.Manager` imports both `backend`
+   and `zygotectl`, and nothing forms a cycle.
 
 6. **Resource limit semantics unchanged.** `memory_limit` and
    `cpu_limit` keep their current meaning per backend: Docker
@@ -3561,8 +3606,8 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     Three decisions shape how that data flows:
 
     - **`STATS` is a new command, not a field on `INFO`.** `INFO`
-      is queried once at `NewControlClient` time and cached
-      read-only — that's correct for static facts (R version,
+      is queried once at `NewClient` time and cached read-only
+      — that's correct for static facts (R version,
       KSM enablement status, preload time) but wrong for
       continuously-changing metrics. Mixing the two would force
       either re-querying `INFO` on every metrics tick (and
@@ -3969,10 +4014,10 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 7. **Shared control state extraction.** The `forkState` per-worker
    struct is duplicated between the Docker and process backend
    `forking.go` files. After both backends are working and
-   tests are green, that struct can move into `internal/zygote/`
-   as a shared type — but only if the test surface confirms the
-   semantics are truly identical. Premature DRY here would be
-   risky.
+   tests are green, that struct can move into
+   `internal/zygote/` or `internal/zygotectl/` as a shared type
+   — but only if the test surface confirms the semantics are
+   truly identical. Premature DRY here would be risky.
 
 8. **Asymmetric / signed control auth.** The pre-shared secret
    model is sufficient because the per-worker bridge (Docker) and
