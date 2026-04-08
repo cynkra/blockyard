@@ -56,16 +56,17 @@ replaces the "create a new server instance" step).
   the compiled profile that phase 3-7 left as `SeccompProfile = ""`.
   Phase 3-8 also refactors the UID allocator — phase 3-7's in-memory
   implementation remains as one of two backends.
-- **Issue cynkra/blockyard#173** — tightens the port allocator's
-  `Alloc`→`cmd.Start` race window by holding the listener through
-  setup and closing it immediately before fork. Independent of phase
-  3-8 scope; filed because phase 3-8's rolling update makes the
-  existing pre-phase-3-8 race more visible. Phase 3-8 assumes this
-  fix is in place and layers the Redis-backed port allocator on top
-  — #173 narrows the local window to microseconds, Redis closes the
-  cross-server window end-to-end. The `Reserve() (port, listener)`
-  signature from #173 is the baseline for step 7's port allocator
-  interface.
+- **Issue cynkra/blockyard#173** (merged) — tightened the port
+  allocator's `Alloc`→`cmd.Start` race window by holding the listener
+  through setup and closing it immediately before fork. Filed and
+  merged as a standalone prep step for phase 3-8 because phase 3-8's
+  rolling update makes the existing pre-phase-3-8 race more visible.
+  The port allocator's `Reserve() (port, net.Listener, error)` method
+  and Spawn's close-then-fork pattern are now in `internal/backend/
+  process/`; phase 3-8 step 7 wraps this in an interface and adds a
+  Redis-backed implementation. Together: #173 narrows the local
+  single-process window to microseconds, Redis closes the cross-server
+  window end-to-end.
 
 The dependency on phase 3-5 is the largest: roughly half of phase 3-8's
 work happens inside `internal/orchestrator/` rebuilding the package so
@@ -1105,7 +1106,7 @@ servers during the overlap; `WorkersForServer` filters to the caller's
 own. The hostname is read on-demand rather than passed at construction
 time — `os.Hostname()` is stable for the lifetime of the process, and
 phase 3-3's `RedisWorkerMap` already uses the hostname as its server
-identifier (`main.go:260` calls `server.NewRedisWorkerMap(rc, hostname)`),
+identifier (`main.go:261` calls `server.NewRedisWorkerMap(rc, hostname)`),
 so the two sites agree by construction.
 
 Why add a method rather than extend `ActiveWorker` with a `ServerID`
@@ -1183,11 +1184,11 @@ servers allocate concurrently:
   per-worker isolation phase 3-7 advertises — the GID-based egress
   firewall still works (same GID), but "each worker has its own host
   UID" doesn't hold during cutover.
-- **Ports**: probabilistic collision. Issue #173 tightens the
-  pre-fork window via a held listener, but the "post-fork window"
-  survives: both probes succeed for port 10500 (nothing actually
-  holds it at probe time), both close their listeners, both
-  `cmd.Start()` → one child wins at `bind()`, the other gets
+- **Ports**: probabilistic collision. Issue #173 tightened the
+  single-process window via a held listener, but the cross-server
+  window survives: both probes succeed for port 10500 (neither
+  actually holds it at probe time), both close their listeners,
+  both `cmd.Start()` → one child wins at `bind()`, the other gets
   `EADDRINUSE` and the worker crashes. R startup is seconds-long,
   so that window is real during cutover.
 
@@ -1257,10 +1258,11 @@ func New(ctx context.Context, fullCfg *config.Config) (*ProcessBackend, error) {
 }
 ```
 
-In-memory constructors wrap the existing bitset types with no
-behavior changes beyond the Reserve signature update from #173.
-Redis constructors capture the hostname as the "owner" identifier
-so startup cleanup can distinguish own stale keys from peers'.
+In-memory constructors wrap the existing bitset types behind the new
+interfaces with no behavior changes — #173 already landed the Reserve
+signature the interface adopts. Redis constructors capture the hostname
+as the "owner" identifier so startup cleanup can distinguish own stale
+keys from peers'.
 
 **Redis client ownership**: `process.New` opens its own
 `redisstate.Client` rather than borrowing `srv.RedisClient` from
@@ -1665,13 +1667,13 @@ variant image and hits `/healthz` (see step 5).
 | `internal/orchestrator/process_integration_test.go` | create | `process_test`. End-to-end rolling update against real Redis. |
 | `internal/orchestrator/helpers.go` | update | Keep `waitReady`/`activate`/`checkReady`/`generateActivationToken`. `waitReady` signature changes from `(ctx, containerID) (addr, err)` to `(ctx, addr) error` — the caller passes an already-resolved address (cached on `newServerInstance.Addr()` at `CreateInstance` time), and `waitReady` only polls `/readyz`. Move Docker-specific helpers (`pullImage`, `containerAddr`, `killAndRemove`, `currentImageBase/Tag`) to `clone_docker.go`; the inspect-retry loop that used to live in `waitReady` moves into `dockerServerFactory.CreateInstance`. |
 | `internal/orchestrator/rollback.go` | update | Factory-driven restart; 501 path for the process factory. |
-| `internal/orchestrator/orchestrator_test.go` | update | Mock `ServerFactory` instead of `dockerClient`. |
+| `internal/orchestrator/orchestrator_test.go` | update | Non-trivial rework (~1600 lines, ~12 test functions, a full `mockDocker` fake). Every `Update`/`Watchdog` call site updates to the collapsed signatures; `mockDocker` moves to the new `clone_docker_test.go` alongside its implementation; the remaining orchestrator tests mock `ServerFactory` with a lightweight fake to exercise the backend-agnostic state machine. |
 | `internal/drain/drain.go` | update | Add `FinishIdleWait time.Duration` field on the `Drainer` struct; `Finish` calls an unexported `waitForIdle(maxWait)` helper when the field is non-zero. `waitForIdle` polls `Srv.Workers.WorkersForServer(hostname)` + `Srv.Sessions.CountForWorkers(own)` at 5s intervals until zero sessions or the timeout elapses. No new public method, no new call sites. |
 | `internal/drain/drain_test.go` | update | Tests for the idle-wait prelude: `Finish` with `FinishIdleWait = 0` matches today's behavior; with non-zero, it waits for zero sessions before tearing down; timeout path proceeds with remaining sessions logged. |
 | `cmd/blockyard/main.go` | update | (additional to existing factory-map changes) Set `drainer.FinishIdleWait` at construction based on the resolved backend type — `cfg.Update.DrainIdleWait.Duration` for process (falling back to 5 min when `cfg.Update` is nil), zero for docker. The helper `finishIdleWaitForBackend` lives in a small file in `cmd/blockyard/` that type-asserts against the concrete backend. |
 | `internal/config/config.go` | update | Add `UpdateConfig.AltBindRange` (default `"8090-8099"`), `UpdateConfig.DrainIdleWait` (default `5m` via `updateDefaults`), `Config.ConfigPath` (programmatic, no TOML tag). |
 | `internal/units/portrange.go` | create | Shared port range parser. |
-| `internal/api/admin.go` | update | `handleAdminUpdate` adapts to the collapsed `Update (bool, error)` signature and drops the `UpdateResult`/`ContainerID` plumbing — the admin goroutine no longer threads an opaque instance through the Update → Watchdog hand-off. `handleAdminRollback` returns 501 for the process factory variant. |
+| `internal/api/admin.go` | update | `handleAdminUpdate` adapts to the collapsed `Update (bool, error)` signature and drops the `UpdateResult`/`ContainerID` plumbing — the admin goroutine no longer threads an opaque instance through the Update → Watchdog hand-off. The `orch == nil` branch in both `handleAdminUpdate` and `handleAdminRollback` replaces its pre-phase-3-8 error text ("rolling updates require Docker container mode") with a backend-agnostic "containerized mode detected; use your container runtime's update mechanism" — accurate now that the process backend also supports rolling updates in native mode. `handleAdminRollback` additionally returns 501 when the active factory is the process factory (previous version's binary is not available for rollback — see step 6). |
 | `internal/server/workermap_iface.go` | update | Add `WorkersForServer(serverID string) []string` to the `WorkerMap` interface. |
 | `internal/server/workermap_redis.go` | update | Implement `WorkersForServer` via SCAN + HGET on the `server_id` hash field (pattern lifted from the existing `ForApp`). The field is already written by `Set` — phase 3-3 populates it but nothing reads it back. This is the reader. |
 | `internal/server/workermap_memory.go` | update | Implement `WorkersForServer` as `m.All()` — in single-node mode every worker belongs to "this" server, so the filter is a no-op. |
@@ -1679,11 +1681,11 @@ variant image and hits `/healthz` (see step 5).
 | `internal/backend/process/uids_redis.go` | create | `redisUIDAllocator` — Redis-backed implementation. Lua script for atomic SETNX scan, shared ownership-checked DEL script, `CleanupOwnedOrphans` for startup cleanup. |
 | `internal/backend/process/uids_redis_test.go` | create | Unit tests against miniredis: alloc/release, exhaustion, concurrent alloc returns distinct UIDs. |
 | `internal/backend/process/uids_cleanup_test.go` | create | `CleanupOwnedOrphans` scoping — removes own stale entries, leaves peer entries alone. |
-| `internal/backend/process/ports.go` | update | Refactor `portAllocator` into an interface with `Reserve() (port, ln, err)` + `Release`; rename the existing bitset type to `memoryPortAllocator`. The Reserve signature matches the #173 held-listener pattern. |
+| `internal/backend/process/ports.go` | update | Refactor `portAllocator` into an interface with `Reserve() (port, ln, err)` + `Release`; rename the existing bitset type to `memoryPortAllocator`. The `Reserve` signature is already in place post-#173; phase 3-8 only introduces the interface seam and renames the concrete type. |
 | `internal/backend/process/ports_redis.go` | create | `redisPortAllocator` — Redis-backed implementation. SETNX Lua script with `skip_from` argument for probe-retry, kernel-probe retry loop in Go, shared ownership-checked DEL script, `CleanupOwnedOrphans` for startup cleanup. |
 | `internal/backend/process/ports_redis_test.go` | create | Unit tests against miniredis: Reserve/Release, exhaustion, concurrent Reserve returns distinct ports, probe-failure retry loop exercise (synthetic collision via pre-bound listener). |
 | `internal/backend/process/ports_cleanup_test.go` | create | `CleanupOwnedOrphans` scoping — mirror of the UID cleanup test. |
-| `internal/backend/process/process.go` | update | `New(ctx, cfg)` picks both allocator implementations based on `fullCfg.Redis`; when Redis is configured `New` opens its own `redisstate.Client` (ordering in main.go keeps backend construction ahead of `redisstate.New`, so borrowing `srv.RedisClient` is not available at construction time — see step 7 discussion). `CleanupOrphanResources` delegates to each Redis allocator when it's the active one. Spawn uses `Reserve()` and closes the held listener immediately before the fork goroutine's `cmd.Start()`. |
+| `internal/backend/process/process.go` | update | `New(ctx, cfg)` picks both allocator implementations based on `fullCfg.Redis`; when Redis is configured `New` opens its own `redisstate.Client` (ordering in main.go keeps backend construction ahead of `redisstate.New`, so borrowing `srv.RedisClient` is not available at construction time — see step 7 discussion). `CleanupOrphanResources` delegates to each Redis allocator when it's the active one. Spawn's `Reserve()` + close-before-`cmd.Start()` pattern is unchanged from #173 — only the allocator instance behind the interface differs. |
 | `docker/server.Dockerfile` | update | Add `BUILD_TAGS` build arg defaulting to docker variant tags. |
 | `docker/server-process.Dockerfile` | create | Process-backend image. rocker/r-ver base, bwrap, BPF profile, `-tags 'minimal,process_backend'`. |
 | `docker/server-everything.Dockerfile` | create | Both backends. rocker/r-ver base, R + bwrap + iptables, default tags. |
