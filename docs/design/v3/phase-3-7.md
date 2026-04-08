@@ -746,8 +746,10 @@ func bwrapBuildArgs(cfg *config.ProcessConfig, spec backend.BuildSpec, uid, gid 
 Seccomp is handled separately from argument construction because
 bwrap's `--seccomp <fd>` flag takes a file descriptor number, not a
 file path. The caller must open the compiled BPF profile, pass the fd
-to bwrap, and close it after the process starts. This is encapsulated
-in a helper:
+to bwrap, and close the parent-side fd once Start either succeeds or
+fails — the child has its own forked copy and does not depend on the
+parent fd staying open. `applySeccomp` returns both the splice args
+and a cleanup func so the caller can `defer` it unconditionally:
 
 ```go
 // applySeccomp opens the seccomp BPF profile and configures cmd to pass
@@ -756,19 +758,29 @@ in a helper:
 // format (not the Docker/OCI JSON format). Phase 3-8 ships the compiled
 // profile; this phase accepts it as a pre-compiled file.
 //
-// Returns the args to prepend before "--" in the bwrap command line.
-func applySeccomp(cmd *exec.Cmd, profilePath string) ([]string, error) {
+// Returns:
+//   - the bwrap args to splice before "--" in the command line
+//   - a cleanup func that closes the parent-side fd; the caller must
+//     defer it so the fd is released on every path (Start success or
+//     failure). The child gets its own duplicated fd from fork(), so
+//     closing the parent's copy after Start does not affect the
+//     sandboxed process.
+//
+// When profilePath is empty, returns (nil, no-op cleanup, nil) —
+// seccomp is optional until phase 3-8 ships the compiled profile.
+func applySeccomp(cmd *exec.Cmd, profilePath string) ([]string, func(), error) {
+    noop := func() {}
     if profilePath == "" {
-        return nil, nil
+        return nil, noop, nil
     }
     f, err := os.Open(profilePath)
     if err != nil {
-        return nil, fmt.Errorf("open seccomp profile: %w", err)
+        return nil, noop, fmt.Errorf("open seccomp profile: %w", err)
     }
-    // cmd.ExtraFiles[0] becomes fd 3 in the child.
+    // cmd.ExtraFiles[i] is exposed to the child as fd 3+i.
     cmd.ExtraFiles = append(cmd.ExtraFiles, f)
     fd := 3 + len(cmd.ExtraFiles) - 1
-    return []string{"--seccomp", strconv.Itoa(fd)}, nil
+    return []string{"--seccomp", strconv.Itoa(fd)}, func() { f.Close() }, nil
 }
 
 // spliceBeforeSeparator inserts extra into cmd.Args just before the
@@ -791,11 +803,12 @@ func spliceBeforeSeparator(cmd *exec.Cmd, extra []string) {
 ```
 
 The `Spawn` and `Build` methods call `applySeccomp` after creating the
-`exec.Cmd`, then `spliceBeforeSeparator` inserts the `--seccomp <fd>`
-flags before `--` in `cmd.Args`. The seccomp profile file is closed by
-the OS when the child process execs (Go sets `O_CLOEXEC` by default,
-but bwrap reads the fd before exec). When `SeccompProfile` is empty,
-`applySeccomp` returns nil and the splice is skipped — seccomp is
+`exec.Cmd`, `defer` the returned cleanup, and then
+`spliceBeforeSeparator` inserts the `--seccomp <fd>` flags before `--`
+in `cmd.Args`. The deferred cleanup closes the parent-side fd after
+Start — the child has its own forked copy and does not depend on the
+parent fd. When `SeccompProfile` is empty, `applySeccomp` returns a
+no-op cleanup and no args and the splice is skipped — seccomp is
 optional until phase 3-8 ships the compiled BPF profile.
 
 ### Step 4: Log capture
@@ -820,19 +833,27 @@ import (
 // Subscribers track a global sequence number so their cursor stays
 // valid across ring wraps. Each subscriber gets its own notification
 // channel so broadcasts wake all viewers, not just one.
+//
+// size and seq are both uint64 so the modulo math in ingest/stream
+// does not need conversions that gosec G115 flags. The API accepts
+// maxLines as int because that matches how Go code typically expresses
+// buffer capacity.
 type logBuffer struct {
     mu     sync.Mutex
     buf    []string         // fixed-size ring buffer
-    size   int              // len(buf), set at init
+    size   uint64           // len(buf), set at init
     seq    uint64           // total lines written (monotonic); buf index = seq % size
     closed bool
     subs   []chan struct{}   // per-subscriber notification channels
 }
 
 func newLogBuffer(maxLines int) *logBuffer {
+    if maxLines < 0 {
+        maxLines = 0
+    }
     return &logBuffer{
         buf:  make([]string, maxLines),
-        size: maxLines,
+        size: uint64(maxLines),
     }
 }
 
@@ -869,7 +890,7 @@ func (lb *logBuffer) ingest(r io.Reader) {
     scanner := bufio.NewScanner(r)
     for scanner.Scan() {
         lb.mu.Lock()
-        lb.buf[lb.seq%uint64(lb.size)] = scanner.Text()
+        lb.buf[lb.seq%lb.size] = scanner.Text()
         lb.seq++
         lb.broadcast()
         lb.mu.Unlock()
@@ -894,8 +915,8 @@ func (lb *logBuffer) stream() backend.LogStream {
         // wrapped, that's seq - size; otherwise 0.
         lb.mu.Lock()
         var cursor uint64
-        if lb.seq > uint64(lb.size) {
-            cursor = lb.seq - uint64(lb.size)
+        if lb.seq > lb.size {
+            cursor = lb.seq - lb.size
         }
         lb.mu.Unlock()
 
@@ -904,13 +925,22 @@ func (lb *logBuffer) stream() backend.LogStream {
             seq := lb.seq
             closed := lb.closed
             // Copy out any lines between cursor and current seq.
+            //
+            // The oldest still-resident line has global sequence number
+            // max(0, seq-size). Computing seq-size on uint64 when
+            // seq < size would underflow to a huge value, hiding all
+            // lines — guard explicitly.
+            var oldest uint64
+            if seq > lb.size {
+                oldest = seq - lb.size
+            }
             var pending []string
             for cursor < seq {
                 // The line at global sequence number `cursor` lives at
                 // buf[cursor % size] — but only if it hasn't been
-                // overwritten (cursor >= seq - size).
-                if cursor >= seq-uint64(lb.size) {
-                    pending = append(pending, lb.buf[cursor%uint64(lb.size)])
+                // overwritten (cursor >= oldest).
+                if cursor >= oldest {
+                    pending = append(pending, lb.buf[cursor%lb.size])
                 }
                 cursor++
             }
@@ -937,7 +967,12 @@ func (lb *logBuffer) stream() backend.LogStream {
 
     return backend.LogStream{
         Lines: ch,
-        Close: func() { close(done) },
+        Close: func() {
+            // done may already have been closed by the goroutine;
+            // ignore the panic so double-close is safe.
+            defer func() { _ = recover() }()
+            close(done)
+        },
     }
 }
 ```
@@ -1006,14 +1041,22 @@ type ProcessBackend struct {
 }
 
 // New creates a ProcessBackend. Verifies that bwrap exists at the
-// configured path. The full config is stored so Preflight() can read
-// the addresses of Redis/OpenBao/database for the egress probe and
-// the server-level resource-limit fields for the warning check.
+// configured path and that the worker mount point can be reached from
+// inside the bwrap sandbox (see ensureBundleMountPoint below). The
+// full config is stored so Preflight() can read Redis/OpenBao/database
+// addresses for the egress probe and the server-level resource-limit
+// fields for the warning check.
 func New(fullCfg *config.Config) (*ProcessBackend, error) {
     cfg := fullCfg.Process
+    if cfg == nil {
+        return nil, fmt.Errorf("process backend: [process] config section is required")
+    }
     if _, err := exec.LookPath(cfg.BwrapPath); err != nil {
         return nil, fmt.Errorf("process backend: bwrap not found at %q: %w",
             cfg.BwrapPath, err)
+    }
+    if err := ensureBundleMountPoint(fullCfg.Storage.BundleWorkerPath); err != nil {
+        return nil, err
     }
     return &ProcessBackend{
         cfg:     cfg,
@@ -1024,6 +1067,20 @@ func New(fullCfg *config.Config) (*ProcessBackend, error) {
     }, nil
 }
 
+// ensureBundleMountPoint guarantees that bwrap will be able to bind the
+// worker bundle at the configured path. bwrap cannot mkdir inside the
+// read-only root — the path must either be under the in-sandbox /tmp
+// tmpfs or already exist on the host before the sandbox launches. If
+// neither is true, bwrap fails on first Spawn with the confusing error
+// "Can't mkdir <path>: Read-only file system". Catching the missing
+// directory at startup gives operators a clear, actionable message.
+//
+// Strategy 1: a path under /tmp is always fine — bwrap mounts a fresh
+// tmpfs at /tmp in every sandbox and can create the directory inside it.
+// Strategy 2: otherwise the path must exist on the host (idempotent
+// MkdirAll; surfaces a multi-option remediation error on failure).
+func ensureBundleMountPoint(path string) error
+
 // Preflight implements backend.Backend. The check functions live in
 // the same package (this file's siblings) — see preflight.go for the
 // implementations. Returning the report through the interface lets
@@ -1032,19 +1089,28 @@ func (b *ProcessBackend) Preflight(_ context.Context) (*preflight.Report, error)
     return RunPreflight(b.cfg, b.fullCfg), nil
 }
 
-func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) error {
-    // Warn when per-app resource limits are set: the process backend
-    // does not enforce them (decision #6). checkResourceLimits only
-    // catches the [server] defaults, so without this warning an app
-    // with `memory_limit = "512m"` in the database would silently get
-    // unlimited workers with no trace in the logs.
-    if spec.MemoryLimit != "" || spec.CPULimit > 0 {
-        slog.Warn("process backend: per-worker resource limits are ignored",
-            "worker_id", spec.WorkerID,
-            "app_id", spec.AppID,
-            "memory_limit", spec.MemoryLimit,
-            "cpu_limit", spec.CPULimit)
+func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
+    // Per-app resource limits are silently ignored on this backend
+    // (decision #6). The warning lives in api/apps.go at the moment
+    // the limit is set — emitting it here would fire on every spawn
+    // for every app for the lifetime of the deployment.
+
+    // Reject spawns over a still-live entry with the same worker ID.
+    // An entry whose done channel is already closed (process exited,
+    // slots released) is cleared so the new spawn can take its place —
+    // matches the Docker semantic where you can recreate a container
+    // with the same name after the previous one exited.
+    b.mu.Lock()
+    if existing, ok := b.workers[spec.WorkerID]; ok {
+        select {
+        case <-existing.done:
+            delete(b.workers, spec.WorkerID)
+        default:
+            b.mu.Unlock()
+            return fmt.Errorf("process backend: worker %q is already running", spec.WorkerID)
+        }
     }
+    b.mu.Unlock()
 
     port, err := b.ports.Alloc()
     if err != nil {
@@ -1078,10 +1144,15 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
 
     // Seccomp — splice --seccomp <fd> args before the "--" separator.
     // No-op when SeccompProfile is empty (phase 3-8 ships the profile).
-    if secArgs, err := applySeccomp(cmd, b.cfg.SeccompProfile); err != nil {
+    // secCleanup releases the parent-side fd; deferred so it runs on
+    // every error path including a Start failure inside the goroutine.
+    secArgs, secCleanup, err := applySeccomp(cmd, b.cfg.SeccompProfile)
+    if err != nil {
         releaseSlots()
         return fmt.Errorf("process backend: seccomp: %w", err)
-    } else if len(secArgs) > 0 {
+    }
+    defer secCleanup()
+    if len(secArgs) > 0 {
         spliceBeforeSeparator(cmd, secArgs)
     }
 
@@ -1124,14 +1195,53 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
         return fmt.Errorf("process backend: stderr pipe: %w", err)
     }
 
-    // Pin this goroutine to its OS thread across the fork. Pdeathsig
-    // fires when the *thread* that forked the child exits — without
-    // LockOSThread the Go runtime may retire the thread and trigger
-    // a spurious SIGKILL to bwrap.
-    runtime.LockOSThread()
-    err = cmd.Start()
-    runtime.UnlockOSThread()
-    if err != nil {
+    // Fork + wait must run on the same pinned OS thread. Pdeathsig
+    // fires when the thread that *forked* the child exits — not when
+    // a goroutine hosting that thread is rescheduled. Locking around
+    // cmd.Start() alone is not enough: after UnlockOSThread the Go
+    // runtime is free to retire the thread while the child is still
+    // running, which triggers a stray SIGKILL to bwrap. Instead,
+    // dedicate one goroutine to the child's full lifetime: it
+    // LockOSThreads once, never unlocks, and Start+Wait both run on
+    // the same thread. When the goroutine returns after Wait, there
+    // is no child left to kill.
+    //
+    // The wait is gated on a `proceed` channel so the main path can
+    // register the worker in b.workers before the wait goroutine runs
+    // its cleanup. Otherwise an immediate exit would race cleanup
+    // ahead of registration, leaving a stale map entry whose slots
+    // have already been released.
+    done := make(chan struct{})
+    started := make(chan error, 1)
+    proceed := make(chan struct{})
+    go func() {
+        runtime.LockOSThread()
+        // Intentionally do NOT UnlockOSThread. See comment above.
+
+        if err := cmd.Start(); err != nil {
+            started <- err
+            return
+        }
+        started <- nil
+
+        <-proceed
+
+        _ = cmd.Wait()
+        close(done)
+        // Release port + UID so they can be reused — the worker no
+        // longer holds them. Do NOT delete the map entry: keep it
+        // around so Logs() can replay buffered stderr/stdout for
+        // post-mortem diagnosis. The entry persists until an explicit
+        // Stop() / RemoveResource() prunes it (matches the Docker
+        // semantic where stopped containers remain listable until
+        // `docker rm`).
+        b.ports.Release(port)
+        b.uids.Release(uid)
+        slog.Info("process backend: worker exited",
+            "worker_id", spec.WorkerID, "port", port, "uid", uid)
+    }()
+
+    if err := <-started; err != nil {
         releaseSlots()
         return fmt.Errorf("process backend: start bwrap: %w", err)
     }
@@ -1142,19 +1252,6 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
     // entire worker lifetime.
     go logs.ingest(stdout)
     go logs.ingest(stderr)
-
-    done := make(chan struct{})
-    go func() {
-        _ = cmd.Wait()
-        close(done)
-        b.mu.Lock()
-        delete(b.workers, spec.WorkerID)
-        b.mu.Unlock()
-        b.ports.Release(port)
-        b.uids.Release(uid)
-        slog.Info("process backend: worker exited",
-            "worker_id", spec.WorkerID, "port", port, "uid", uid)
-    }()
 
     b.mu.Lock()
     b.workers[spec.WorkerID] = &workerProc{
@@ -1167,6 +1264,10 @@ func (b *ProcessBackend) Spawn(ctx context.Context, spec backend.WorkerSpec) err
         done:    done,
     }
     b.mu.Unlock()
+
+    // Tell the wait goroutine that registration is done and it is
+    // safe to reap + release slots on exit.
+    close(proceed)
 
     slog.Info("process backend: spawned worker",
         "worker_id", spec.WorkerID,
@@ -1184,19 +1285,34 @@ func (b *ProcessBackend) Stop(_ context.Context, id string) error {
         return fmt.Errorf("process backend: worker %q not found", id)
     }
 
+    // Fast path: if the worker has already exited (e.g. crashed
+    // before the caller noticed), the wait goroutine has closed
+    // `done` and released slots — just drop the map entry and skip
+    // the SIGTERM-SIGKILL dance for a dead process.
+    select {
+    case <-w.done:
+        b.mu.Lock()
+        delete(b.workers, id)
+        b.mu.Unlock()
+        return nil
+    default:
+    }
+
     // SIGTERM, then wait up to 10s, then SIGKILL.
     _ = w.process.Signal(syscall.SIGTERM)
 
     select {
     case <-w.done:
-        return nil
     case <-time.After(10 * time.Second):
+        slog.Warn("process backend: worker did not exit after SIGTERM, sending SIGKILL",
+            "worker_id", id)
+        _ = w.process.Kill()
+        <-w.done
     }
 
-    slog.Warn("process backend: worker did not exit after SIGTERM, sending SIGKILL",
-        "worker_id", id)
-    _ = w.process.Kill()
-    <-w.done
+    b.mu.Lock()
+    delete(b.workers, id)
+    b.mu.Unlock()
     return nil
 }
 
@@ -1261,10 +1377,14 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
     cmd := exec.CommandContext(ctx, b.cfg.BwrapPath, args...) //nolint:gosec // G204: args from validated config
     cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 
-    // Seccomp — same splice as Spawn.
-    if secArgs, err := applySeccomp(cmd, b.cfg.SeccompProfile); err != nil {
+    // Seccomp — same splice as Spawn. secCleanup closes the parent-side
+    // fd once Start has run (successful or not).
+    secArgs, secCleanup, err := applySeccomp(cmd, b.cfg.SeccompProfile)
+    if err != nil {
         return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
-    } else if len(secArgs) > 0 {
+    }
+    defer secCleanup()
+    if len(secArgs) > 0 {
         spliceBeforeSeparator(cmd, secArgs)
     }
 
@@ -1291,7 +1411,26 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
     if err != nil {
         return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
     }
-    if err := cmd.Start(); err != nil {
+
+    // Run Start+Wait in a dedicated thread-pinned goroutine. Same
+    // Pdeathsig race as Spawn: pak installs run for minutes, so a
+    // stray Go runtime thread retirement would SIGKILL bwrap mid-build.
+    // The ingest goroutines below read the pipes from any thread —
+    // Pdeathsig only watches the forking thread.
+    started := make(chan error, 1)
+    waitDone := make(chan error, 1)
+    go func() {
+        runtime.LockOSThread()
+        // Intentionally do NOT UnlockOSThread.
+        if err := cmd.Start(); err != nil {
+            started <- err
+            return
+        }
+        started <- nil
+        waitDone <- cmd.Wait()
+    }()
+
+    if err := <-started; err != nil {
         return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
     }
 
@@ -1325,12 +1464,13 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
     go ingest(stderr)
     wg.Wait()
 
-    err = cmd.Wait()
+    waitErr := <-waitDone
     logs := logsBuf.String()
 
-    if err != nil {
+    if waitErr != nil {
         exitCode := 1
-        if exitErr, ok := err.(*exec.ExitError); ok {
+        var exitErr *exec.ExitError
+        if errors.As(waitErr, &exitErr) {
             exitCode = exitErr.ExitCode()
         }
         return backend.BuildResult{
@@ -1367,8 +1507,18 @@ func (b *ProcessBackend) RemoveResource(_ context.Context, r backend.ManagedReso
     if !ok {
         return nil // already gone
     }
-    _ = w.process.Kill()
-    <-w.done
+    // Force-kill if still alive (RemoveResource is the orphan cleanup
+    // path — no grace period needed), then wait for the wait goroutine
+    // to release slots and prune the map entry.
+    select {
+    case <-w.done:
+    default:
+        _ = w.process.Kill()
+        <-w.done
+    }
+    b.mu.Lock()
+    delete(b.workers, r.ID)
+    b.mu.Unlock()
     return nil
 }
 
@@ -1537,7 +1687,7 @@ case "process":
         os.Exit(1)
     }
 default: // "docker"
-    be, err = docker.New(context.Background(), cfg, cfg.Storage.BundleServerPath)
+    be, err = docker.New(context.Background(), cfg, cfg.Storage.BundleServerPath, version)
     if err != nil {
         slog.Error("failed to create docker backend", "error", err)
         os.Exit(1)
@@ -1555,12 +1705,16 @@ import "github.com/cynkra/blockyard/internal/backend/process"
 `*config.DockerConfig`; after moving `default_memory_limit` and
 `default_cpu_limit` from `DockerConfig` to `ServerConfig` the backend
 needs to read both sections, so `New()` takes the full `*config.Config`
-(parallel to `process.New`). Inside the backend, the existing
-`d.config.DefaultMemoryLimit` / `d.config.DefaultCPULimit` reads at
-`docker.go:450-458` become `d.fullCfg.Server.DefaultMemoryLimit` /
-`d.fullCfg.Server.DefaultCPULimit`. The `DockerBackend` struct gains a
-`fullCfg *config.Config` field alongside the existing `config
-*config.DockerConfig` shortcut; `New()` sets both from its argument.
+(parallel to `process.New`). It also takes `serverVersion` so the
+docker-preflight builder-cache check (moved into
+`internal/backend/docker/preflight.go`) can resolve the correct
+`by-builder` binary. Inside the backend, the existing
+`d.config.DefaultMemoryLimit` / `d.config.DefaultCPULimit` reads become
+`d.fullCfg.Server.DefaultMemoryLimit` /
+`d.fullCfg.Server.DefaultCPULimit`. The `DockerBackend` struct gains
+`fullCfg *config.Config` and `serverVersion string` fields alongside
+the existing `config *config.DockerConfig` shortcut; `New()` sets them
+all from its arguments.
 
 The `docker.Image` validation in `validate()` moves into the `case
 "docker"` branch (step 1) so it does not reject process-backend configs
@@ -2457,10 +2611,16 @@ Two files, both guarded by `//go:build process_test`:
 
 - `internal/backend/process/process_integration_test.go` —
   `package process_test` (external). Exercises the exported API only
-  (`process.New`, `Spawn`, `WorkerResourceUsage`, etc.).
+  (`process.New`, `Spawn`, `WorkerResourceUsage`, etc.). Includes a
+  cached `detectBwrapMode` probe that classifies the host bwrap into
+  `unavailable` / `no-host-map` / `host-mapped`; lifecycle tests skip
+  on `unavailable` and `no-host-map` (every spawn would fail with
+  "setting up uid map: Permission denied"), run fully on
+  `host-mapped`.
 - `internal/backend/process/preflight_internal_test.go` —
   `package process` (internal). Holds `TestCheckBwrapHostUIDMapping`
   and any future tests that need to call unexported check functions.
+  Same `process_test` build tag as the integration file.
 
 ```go
 //go:build process_test
@@ -2626,17 +2786,27 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
     }
 }
 
-// TestCheckBwrapHostUIDMapping runs under the internal `process` build
-// tag (not `process_test`) because it needs to call the unexported
-// `checkBwrapHostUIDMapping` directly. An alternative would be to invoke
-// `RunPreflight` and scan the report for the "bwrap_host_uid_mapping"
-// result by name, but direct invocation produces clearer failure
-// messages. This test file therefore lives in `package process`, not
-// `package process_test`; the integration tests above that only touch
-// exported API can stay in the external test package.
+// TestCheckBwrapHostUIDMapping lives in `package process` (not
+// `package process_test`) because it needs to call the unexported
+// `checkBwrapHostUIDMapping` directly. An alternative would be to
+// invoke `RunPreflight` and scan the report for the
+// "bwrap_host_uid_mapping" result by name, but direct invocation
+// produces clearer failure messages. It shares the `process_test`
+// build tag with the external integration tests above so a single
+// `-tags process_test` flag runs the whole suite.
+//
+// The test is strict per deployment mode: when bwrap can write a
+// host-effective uid_map (root caller or setuid bwrap) the check must
+// return OK; when bwrap can spawn but cannot write a foreign uid_map
+// (unprivileged caller without setuid) the check MUST return Error
+// and the message must name the requested vs observed UID. Both modes
+// are valid CI configurations and we want to catch regressions in
+// either one. See `detectBwrapMode` / `probeBwrapModeInternal` for
+// the three-way probe (unavailable / no-host-map / host-mapped).
 func TestCheckBwrapHostUIDMapping(t *testing.T) {
-    if _, err := exec.LookPath("bwrap"); err != nil {
-        t.Skip("bwrap not available")
+    mode := probeBwrapModeInternal(t)
+    if mode == "unavailable" {
+        t.Skip("bwrap not available or unprivileged userns disabled")
     }
 
     cfg := &config.ProcessConfig{
@@ -2648,25 +2818,20 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 
     result := checkBwrapHostUIDMapping(cfg)
 
-    // This test is strict about the outcome only when we know what
-    // mode bwrap is in. On a CI host where bwrap is not setuid and
-    // we are not root, an Error result is the correct answer and
-    // demonstrates the check is working. On a host with setuid bwrap
-    // or when running as root, OK is the correct answer. In either
-    // case the check must complete — not error out parsing /proc or
-    // hang on the child.
-    switch result.Severity {
-    case preflight.SeverityOK:
-        // Expected when running as root or with setuid bwrap.
-    case preflight.SeverityError:
-        // Expected with unprivileged bwrap as a non-root caller.
-        // Verify the message names both the requested and observed UIDs
-        // so operators can act on it.
+    switch mode {
+    case "host-mapped":
+        if result.Severity != preflight.SeverityOK {
+            t.Errorf("expected OK in host-mapped mode, got %v: %q",
+                result.Severity, result.Message)
+        }
+    case "no-host-map":
+        if result.Severity != preflight.SeverityError {
+            t.Errorf("expected Error in no-host-map mode, got %v: %q",
+                result.Severity, result.Message)
+        }
         if !strings.Contains(result.Message, "requested uid") {
             t.Errorf("error message missing requested uid context: %q", result.Message)
         }
-    default:
-        t.Errorf("unexpected severity %v: %q", result.Severity, result.Message)
     }
 }
 ```
@@ -2808,17 +2973,20 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 6. **No per-worker resource limits.** Same rationale. cgroup delegation
    is difficult inside containers and adds a systemd dependency on
    native hosts. The outer container's cgroup limits serve as a shared
-   ceiling in containerized mode. Two consequences flow from this:
+   ceiling in containerized mode. Three consequences flow from this:
    - `UpdateResources` returns `backend.ErrNotSupported` — there is
      nothing to live-update. `api/apps.go` checks for `ErrNotSupported`
      and skips its warning log so app-update requests don't spam one
      warning per worker.
-   - `Spawn` emits a one-time `slog.Warn` when `spec.MemoryLimit` or
-     `spec.CPULimit` is non-zero. `checkResourceLimits` catches the
-     `[server]` defaults at startup, but apps can set their own limits
-     via the API after startup, and those land in `WorkerSpec` fields.
-     Silently ignoring them would be a footgun; the warning gives
-     operators a breadcrumb that the limit did not take effect.
+   - `checkResourceLimits` warns when the `[server]` defaults
+     (`default_memory_limit`, `default_cpu_limit`) are set but the
+     backend cannot enforce them.
+   - `api/apps.go` warns and returns an `X-Blockyard-Warning` response
+     header when the caller sets per-app `memory_limit` / `cpu_limit`
+     on the process backend. Emitting the warning at the set-time API
+     boundary (rather than on every `Spawn`) gives operators a single
+     breadcrumb per configuration change instead of one line per
+     worker for the lifetime of the deployment.
 
 7. **SIGTERM → SIGKILL escalation with 10s grace.** Matches Docker's
    default `docker stop` behavior. `Stop()` sends SIGTERM to the bwrap

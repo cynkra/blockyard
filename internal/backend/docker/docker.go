@@ -1208,13 +1208,11 @@ func deleteIptablesRulesByCommentWithRunner(ctx context.Context, run cmdRunner, 
 	}
 }
 
-// CleanupOrphanMetadataRules removes all blockyard iptables rules left over
-// from previous runs. Called at server startup. Uses prefix matching
-// (without closing quote) so that all per-worker rules are matched.
-func CleanupOrphanMetadataRules() {
-	cleanupOrphanMetadataRulesWithRunner(context.Background(), defaultCmdRunner)
-}
-
+// cleanupOrphanMetadataRulesWithRunner removes all blockyard iptables
+// rules left over from previous runs. Called via
+// (*DockerBackend).CleanupOrphanResources at server startup. Uses
+// prefix matching (without closing quote) so all per-worker rules are
+// matched.
 func cleanupOrphanMetadataRulesWithRunner(ctx context.Context, run cmdRunner) {
 	out, err := run(ctx, "iptables", "-S", "DOCKER-USER")
 	if err != nil {
