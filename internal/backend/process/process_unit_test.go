@@ -722,6 +722,7 @@ func TestPreflightDelegates(t *testing.T) {
 	}
 	if report == nil {
 		t.Fatal("expected non-nil report")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	wantNames := map[string]bool{
 		"bwrap_available":        false,
