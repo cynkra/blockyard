@@ -358,8 +358,11 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Install bubblewrap and R
+        # r-base-core is needed for the TestRSmokeBoot integration test
+        # which spawns `R --version` inside the bwrap sandbox to verify
+        # the constructed args + mounts let R actually start.
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap r-base-core
       - name: Configure mode (${{ matrix.mode }})
         run: |
           case "${{ matrix.mode }}" in

@@ -320,3 +320,88 @@ func TestUpdateResourcesNotSupported(t *testing.T) {
 		t.Errorf("expected ErrNotSupported, got %v", err)
 	}
 }
+
+// TestRSmokeBoot is a minimal end-to-end check that R can actually
+// run inside the bwrap sandbox the process backend constructs. None
+// of the lifecycle tests above exercise the real default Cmd path
+// (R + shiny::runApp); they all stub R with /bin/sleep. This test
+// runs `R --version` instead of a Shiny app — just enough to verify
+// that the bwrap mounts let the R binary find its libraries, that
+// the env var setup is sane, and that the constructed args don't
+// silently break the R startup. Phase 3-8 will add a proper Shiny
+// boot test once it ships the production worker image with pak; for
+// now this catches the most likely regression class (broken arg
+// construction, missing system mounts, env var typos).
+func TestRSmokeBoot(t *testing.T) {
+	requireHostUIDMapping(t)
+	rPath, err := exec.LookPath("R")
+	if err != nil {
+		t.Skip("R not installed; skipping smoke test")
+	}
+
+	cfg := &config.Config{
+		Server:  config.ServerConfig{Backend: "process"},
+		Storage: config.StorageConfig{BundleWorkerPath: "/tmp/app"},
+		Process: &config.ProcessConfig{
+			BwrapPath:      "bwrap",
+			RPath:          rPath,
+			PortRangeStart: 19400,
+			PortRangeEnd:   19499,
+			WorkerUIDStart: 69400,
+			WorkerUIDEnd:   69499,
+			WorkerGID:      65534,
+		},
+	}
+	be, err := process.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	spec := backend.WorkerSpec{
+		WorkerID:    "r-smoke",
+		BundlePath:  t.TempDir(),
+		WorkerMount: "/tmp/app",
+		Cmd:         []string{rPath, "--version"},
+	}
+
+	// Open the log stream BEFORE Spawn so we capture R's stderr from
+	// the start (R prints version info and exits in well under a
+	// second; the integration test's other path of "Logs() after
+	// Stop()" wouldn't catch it).
+	if err := be.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer be.Stop(ctx, spec.WorkerID)
+
+	stream, err := be.Logs(ctx, spec.WorkerID)
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	defer stream.Close()
+
+	// R --version exits in milliseconds. Wait for the wait goroutine
+	// to reap the process so the log buffer is closed and the stream
+	// drain returns; otherwise we'd block waiting for more lines that
+	// never come.
+	deadline := time.After(10 * time.Second)
+	var lines []string
+	collecting := true
+	for collecting {
+		select {
+		case line, ok := <-stream.Lines:
+			if !ok {
+				collecting = false
+				break
+			}
+			lines = append(lines, line)
+		case <-deadline:
+			t.Fatalf("timed out waiting for R output; collected so far: %v", lines)
+		}
+	}
+
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "R version") {
+		t.Errorf("expected output to contain 'R version', got:\n%s", joined)
+	}
+}
