@@ -115,9 +115,25 @@ designed for exactly that trade-off.
   Phase 3-9 assumes phase 3-7 leaves the network namespace shared
   (no `--unshare-net`), which makes loopback TCP a viable control
   transport.
-- **Phase 3-8** — process backend packaging. Not directly required,
-  but the seccomp profile finalised in 3-8 is what phase 3-10 will
-  apply post-fork.
+- **Phase 3-8** — process backend packaging. Provides the
+  `portAllocator` interface (`Reserve() (port, ln net.Listener, err error)`
+  + `Release`) and both the `memoryPortAllocator` and
+  `redisPortAllocator` implementations that phase 3-9's two new
+  allocators reuse — phase 3-9 instantiates each implementation
+  three times (one per range), branching on `cfg.Redis != nil`
+  the same way phase 3-8 does for the existing `ports`
+  allocator. Phase 3-9 also lifts phase 3-8's hardcoded
+  `"port:"` Redis key prefix to a constructor parameter so the
+  three allocators can share `redisPortAllocator` against
+  disjoint key namespaces. Phase 3-8 also provides
+  `drainer.FinishIdleWait`, which gracefully waits zygote
+  sessions out during a process-backend rolling update — zygote
+  sessions have `Entry.WorkerID = zygoteWorkerID` so they're
+  counted by `Sessions.CountForWorkers(own)` unchanged, and the
+  zygote worker (with all its forked children) survives until
+  the last session ends or the timeout elapses. The seccomp
+  profile finalised in 3-8 is what phase 3-10 will apply
+  post-fork.
 
 ## Deliverables
 
@@ -1399,14 +1415,22 @@ import (
 // so type assertions on backend.Forking just work.
 
 // Per-worker control state, kept on DockerBackend alongside workers.
+// childPort is a small in-package free-list over the container-
+// internal child port range. Each container has its own copy of
+// the range on its own bridge, so allocation is purely per-worker
+// bookkeeping — there's no host-side `net.Listen` probe to
+// perform (the ports live inside the container's network
+// namespace, not on the host), and therefore no reuse of the
+// phase-3-8 host-side `portAllocator` interface here. The process
+// backend uses a single host-wide phase-3-8 allocator instead
+// (Step 8) because its child ports *are* host ports.
 type forkState struct {
     client      *zygotectl.Client
     secret      []byte
     portRangeLo int
     portRangeHi int
-    nextPort    int
     childAddrs  map[string]string // childID → "ip:port"
-    childPort   map[string]int    // childID → port (for free-list)
+    childPort   map[string]int    // childID → port (for free-list bookkeeping)
     mu          sync.Mutex
 }
 
@@ -1438,6 +1462,9 @@ func (d *DockerBackend) Fork(ctx context.Context, workerID, sessionID string) (s
     if err != nil {
         // Best-effort kill, then bubble the error.
         _ = ws.fork.client.Kill(ctx, childID)
+        ws.fork.mu.Lock()
+        ws.fork.releasePortLocked(port)
+        ws.fork.mu.Unlock()
         return "", "", err
     }
 
@@ -1459,7 +1486,7 @@ func (d *DockerBackend) KillChild(ctx context.Context, workerID, childID string)
     }
     err := ws.fork.client.Kill(ctx, childID)
     ws.fork.mu.Lock()
-    if port, ok := ws.fork.childPort[childID]; ok {
+    if port, hasPort := ws.fork.childPort[childID]; hasPort {
         ws.fork.releasePortLocked(port)
         delete(ws.fork.childPort, childID)
     }
@@ -1474,9 +1501,10 @@ func (d *DockerBackend) ChildExits() <-chan backend.ChildExit {
     return d.childExits
 }
 
-// allocPortLocked / releasePortLocked: simple sequential allocator
-// over the configured range. The actual implementation will use a
-// bitset or free-list for stability.
+// allocPortLocked / releasePortLocked: simple per-container free
+// list. Container-internal ports — no kernel probe, no host-side
+// listener hold, no cross-worker collision concern (every container
+// has its own copy of the range on its own bridge network).
 func (s *forkState) allocPortLocked() int {
     for p := s.portRangeLo; p <= s.portRangeHi; p++ {
         used := false
@@ -1493,7 +1521,7 @@ func (s *forkState) allocPortLocked() int {
     return 0
 }
 
-func (s *forkState) releasePortLocked(_ int) { /* no-op for the linear scan */ }
+func (s *forkState) releasePortLocked(_ int) { /* free-list lookup is the map; no extra state */ }
 ```
 
 `d.childExits` is a `chan backend.ChildExit` initialised in
@@ -1740,11 +1768,21 @@ if it doesn't reach into backend-specific types. For phase 3-9
 I'd duplicate it in each backend and DRY in a follow-up once
 both are working — premature abstraction risk.
 
-**Port allocator extension.** Phase 3-7 ships a single
-`portAllocator` over `port_range_start..port_range_end` for the
-shiny port of non-zygote workers. Phase 3-9 adds two more
-allocators alongside it on `ProcessBackend`, giving three
-independent host-wide ranges:
+**Port allocator extension (process backend only).** Phase 3-8
+turned the process backend's existing single-range port allocator
+into an interface (`portAllocator` with
+`Reserve() (port int, ln net.Listener, err error)` and
+`Release(port int) error`) plus two implementations
+(`memoryPortAllocator` and `redisPortAllocator`) — both living in
+`internal/backend/process/`. Phase 3-9 adds two more *instances*
+of that same interface on `ProcessBackend` — no new allocator type,
+just extra ranges — giving three independent host-wide ranges:
+
+(The Docker backend does *not* reuse this interface. Docker child
+ports live inside per-container bridge networks, so there's no
+host-side `net.Listen` probe to perform and no cross-worker
+collision to coordinate. The Docker `forkState` carries its own
+small per-worker free list, see Step 7.)
 
 | Allocator | Config field | Purpose |
 |-----------|--------------|---------|
@@ -1752,15 +1790,74 @@ independent host-wide ranges:
 | `controlPorts` | `zygote_control_range_*` (new) | One control port per zygote worker |
 | `childPorts` | `zygote_child_range_*` (new) | One child port per forked session |
 
-Three allocators rather than carving subranges out of one because
-each has a different sizing rule and preflight wants to validate
-them independently:
+Three independent instances rather than carving subranges out of
+one because each has a different sizing rule and preflight wants
+to validate them independently:
 
 - `ports` is sized for peak non-zygote worker count (and the
   rolling-update overlap headroom phase 3-7 already documents).
 - `controlPorts` is sized for peak zygote worker count.
 - `childPorts` is sized for peak zygote worker count ×
   `max_sessions_per_worker`.
+
+**Both new instances mirror phase 3-8's memory-vs-Redis split.**
+Phase 3-8 added `memoryPortAllocator` and `redisPortAllocator`
+implementations selected by `process.New` based on
+`fullCfg.Redis != nil`. Phase 3-9 routes the two new ranges
+through the same branch — when Redis is configured, all three
+allocators are Redis-backed; when it isn't, all three are
+memory-backed:
+
+```go
+// In process.New, after the existing ports/uids construction
+// from phase 3-8:
+if fullCfg.Redis != nil {
+    b.controlPorts = newRedisPortAllocator(client,
+        cfg.ZygoteControlRangeStart, cfg.ZygoteControlRangeEnd,
+        hostname, "controlport:")
+    b.childPorts = newRedisPortAllocator(client,
+        cfg.ZygoteChildRangeStart, cfg.ZygoteChildRangeEnd,
+        hostname, "childport:")
+} else {
+    b.controlPorts = newMemoryPortAllocator(
+        cfg.ZygoteControlRangeStart, cfg.ZygoteControlRangeEnd)
+    b.childPorts = newMemoryPortAllocator(
+        cfg.ZygoteChildRangeStart, cfg.ZygoteChildRangeEnd)
+}
+```
+
+This requires one small extension to phase 3-8's
+`newRedisPortAllocator` constructor: a fourth `keyPrefix string`
+parameter so the three allocators write to disjoint key
+namespaces (`{prefix}port:<N>`, `{prefix}controlport:<N>`,
+`{prefix}childport:<N>`). Phase 3-8 hardcodes the prefix as
+`"port:"` inside the constructor; phase 3-9 lifts it to a
+parameter and updates the existing `b.ports` call site to pass
+`"port:"` explicitly. The Lua scripts (SETNX scan, ownership-
+checked DEL) take the prefix from `KEYS[1]` already, so no
+script changes — only the Go-side wiring.
+
+`CleanupOwnedOrphans` extends symmetrically: phase 3-8's
+`ProcessBackend.CleanupOrphanResources` already type-asserts
+`b.ports.(*redisPortAllocator)` and calls cleanup on hit; phase
+3-9 adds two more parallel branches for `b.controlPorts` and
+`b.childPorts`. Each Redis allocator instance owns its own key
+namespace, so the cleanups are independent and the order is
+irrelevant.
+
+This closes the cross-server collision window for the new
+ranges during a process-backend rolling-update overlap, the
+same way phase 3-8 closes it for `ports` and `uids`. There is
+no rolling-update × zygote caveat to document — operators
+running rolling updates with zygote enabled get the same
+correctness guarantees as for non-zygote workers.
+
+The `childPorts` allocator additionally inherits phase 3-8's
+kernel-probe retry loop on the Redis variant: after a SETNX
+claim, `net.Listen` probes the port to catch non-blockyard host
+processes binding inside the range, and on failure DELs the
+claim and advances `skip_from`. The same probe loop runs for
+the memory variant via `memoryPortAllocator`'s built-in retry.
 
 The default ranges for the process backend's containerised
 deployment mode (where the outer container has effectively the
@@ -1781,17 +1878,41 @@ phase, alongside the existing port-range validation) verifies all
 three are non-overlapping, each end >= start, and each is sized
 for at least one peak worker plus rolling-update headroom.
 
-Allocation lifecycle on the process backend:
+Allocation lifecycle on the process backend (note: all three
+allocators share the phase 3-8 `Reserve()`/`Release()` semantics —
+`Reserve` returns a `(port, ln)` pair where `ln` holds the kernel
+binding through setup, and the caller closes `ln` immediately
+before the worker process binds for itself, narrowing the
+single-process race window per #173):
 
-- Non-zygote worker `Spawn`: `ports.Alloc()` once, stored in
-  `workerProc.port`. Released in the cleanup goroutine.
-- Zygote `Spawn`: `controlPorts.Alloc()` once, stored in
-  `workerProc.controlPort`. Released in the cleanup goroutine.
-  No child ports are reserved up-front — `Forking.Fork` allocates
-  lazily.
-- `Forking.Fork`: `childPorts.Alloc()` once per call, recorded in
-  `forkState.childPort[childID]`. Released in `Forking.KillChild`
-  and in the synthetic-exit path of `Stop` (Step 8 above).
+- Non-zygote worker `Spawn`: `ports.Reserve()` once; the held
+  listener is closed immediately before `cmd.Start()` (the
+  existing #173 pattern). Released by `ports.Release()` in the
+  cleanup goroutine.
+- Zygote `Spawn`: `controlPorts.Reserve()` once; the held
+  listener is closed immediately before `cmd.Start()` so the
+  bwrapped R zygote can bind on it. Released by
+  `controlPorts.Release()` in the cleanup goroutine. No child
+  ports are reserved up-front — `Forking.Fork` allocates lazily.
+- `Forking.Fork`: `childPorts.Reserve()` once per call; the
+  held listener is closed immediately before the FORK control
+  command is sent to the zygote, recorded in
+  `forkState.childPort[childID]`. Released by
+  `childPorts.Release()` in `Forking.KillChild` and in the
+  synthetic-exit path of `Stop` (Step 8 above).
+
+The `childPorts` Reserve→close→FORK sequence has a residual race
+window: between closing the Go-side listener and the R child
+calling `runApp(port = N)` (which triggers httpuv's bind), the
+port is unheld. R startup and httpuv initialisation take
+seconds, so the window exists but is bounded. Both allocator
+variants protect against it the same way — the Redis variant
+holds the SETNX claim across the FORK round-trip (peers see the
+key and skip past), and both variants probe via `net.Listen` on
+each Reserve to catch non-blockyard processes binding inside the
+range. We do not pass the listener FD into the R child via
+`SCM_RIGHTS`; the complexity isn't justified given the existing
+probe + ownership coordination.
 
 `Forking.Fork` returning "no free ports" is a real failure mode
 but vanishingly rare with the default range — operators who push
@@ -2373,6 +2494,33 @@ func TestDockerForking_StopIdempotentUnderRace(t *testing.T)
 Skipped when bwrap is unavailable, same pattern as the rest of the
 process backend tests.
 
+**`internal/backend/process/ports_redis_test.go`** (extends phase
+3-8's existing tests) — three additional cases on the
+`controlport:` and `childport:` namespaces:
+
+```go
+func TestRedisPortAllocator_NamespaceIsolation(t *testing.T)
+// Construct three allocators against one miniredis with prefixes
+// "port:", "controlport:", "childport:". Reserve the same numeric
+// port (e.g. 11000) on each. Verify all three succeed — claims
+// in one namespace do not block claims in another.
+
+func TestRedisPortAllocator_ControlPortConcurrentReserve(t *testing.T)
+// Mirror of phase 3-8's existing concurrent-Reserve test, run
+// against the controlport namespace. N goroutines call Reserve;
+// all return distinct ports.
+
+func TestRedisPortAllocator_ChildPortCleanup(t *testing.T)
+// Populate the childport namespace with stale entries owned by
+// the local hostname plus a peer hostname. Call CleanupOwnedOrphans
+// on the child-port allocator. Verify only the local stale entries
+// are removed and the controlport / port namespaces are untouched.
+```
+
+These exercise the cross-server collision-avoidance path
+end-to-end for the new ranges, the same way phase 3-8's existing
+`ports_redis_test.go` exercises it for the existing range.
+
 **`internal/proxy/coldstart_test.go`** — extend with zygote-aware
 cold-start:
 
@@ -2422,7 +2570,11 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | `internal/db/db.go` | **update** | `Zygote` on `AppRow` and `AppUpdate`, UPDATE SQL |
 | `internal/backend/backend.go` | **update** | `Forking` interface, `ChildExit` type, `WorkerSpec.Zygote`/`ControlSecret`/`ChildPortRange` |
 | `internal/backend/docker/docker.go` | **update** | Spawn branch for zygote (Cmd, env vars, mount, control client connect); `Addr`/`HealthCheck` branch on `ws.fork` to use control port; `Stop` synthesises ChildExit events before container teardown; `workerState.stopping` flag + idempotent `Stop`; control-connection watcher goroutine that calls `Stop` on `client.Done()` when not stopping |
-| `internal/backend/process/process.go` | **update** | Same shape as `docker.go`: spawn branch, `Addr`/`HealthCheck` branch on `workerProc.fork`, synthesised-ChildExit on `Stop`, `workerProc.stopping` flag + idempotent `Stop`, control-connection watcher; plus `controlPorts` and `childPorts` allocators |
+| `internal/backend/process/process.go` | **update** | Same shape as `docker.go`: spawn branch, `Addr`/`HealthCheck` branch on `workerProc.fork`, synthesised-ChildExit on `Stop`, `workerProc.stopping` flag + idempotent `Stop`, control-connection watcher; plus `controlPorts` and `childPorts` allocators on the backend struct, constructed in `process.New` via the same `cfg.Redis != nil` branch phase 3-8 already uses for `b.ports`; `CleanupOrphanResources` extends to call the new allocators' `CleanupOwnedOrphans` when they're the Redis variants |
+| `internal/backend/process/ports.go` | **update** | Lift the hardcoded `"port:"` Redis key prefix into a constructor parameter (`newRedisPortAllocator(client, lo, hi, hostname, keyPrefix)`) so the existing `b.ports` and the two new `b.controlPorts` / `b.childPorts` instances write to disjoint key namespaces. Phase 3-8's existing call site updates to pass `"port:"` explicitly. The `memoryPortAllocator` constructor is unchanged. |
+| `internal/backend/process/ports_redis.go` | **update** | Constructor takes the new `keyPrefix` parameter and passes it as the `KEYS[1]` prefix in both the SETNX-scan and ownership-checked-DEL Lua scripts. Scripts themselves are unchanged (they already read the prefix from `KEYS[1]`). `CleanupOwnedOrphans` scans `{prefix}<keyPrefix><N>` instead of the hardcoded form. |
+| `internal/backend/process/ports_redis_test.go` | **update** | Existing tests pass `"port:"` explicitly. Add tests covering the new `controlport:` and `childport:` namespaces (concurrent Reserve, exhaustion, ownership-checked Release, three-way namespace isolation: claiming control port 11000 does not block port 11000 in the `port:` namespace). |
+| `internal/backend/process/ports_cleanup_test.go` | **update** | Mirror of `ports_redis_test.go` updates: cleanup scoping per namespace, no cross-namespace deletion. |
 | `internal/session/store.go` | **update** | `Addr` field on `Entry` |
 | `internal/session/redis.go` | **update** | Hash schema gains `addr` field |
 | `internal/proxy/proxy.go` | **update** | Pass `sessionID` to `ensureWorker`, populate `Entry.Addr`, zygote unreachable-child fallback |
