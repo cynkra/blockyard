@@ -665,6 +665,7 @@ func TestWorkerResourceUsageLiveChild(t *testing.T) {
 	}
 	if first == nil {
 		t.Fatal("first call returned nil stats")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	if first.MemoryUsageBytes == 0 {
 		t.Error("expected non-zero RSS for a live process")
@@ -682,6 +683,7 @@ func TestWorkerResourceUsageLiveChild(t *testing.T) {
 	}
 	if second == nil {
 		t.Fatal("second call returned nil stats")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	// sleep consumes ~0 CPU; value must be a finite, sane number.
 	if second.CPUPercent < 0 || second.CPUPercent > 100 {
