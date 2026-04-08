@@ -260,16 +260,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Database.Path = "/data/db/blockyard.db"
 	}
 	if cfg.Storage.BundleWorkerPath == "" {
-		// Docker workers run in an image that has /app baked in, but
-		// the process backend's sandbox is a read-only bind of the
-		// host root where bwrap can't mkdir /app. Place the bundle
-		// under /tmp, which is mounted as a writable tmpfs inside the
-		// sandbox and where bwrap can freely create mount targets.
-		if cfg.Server.Backend == "process" {
-			cfg.Storage.BundleWorkerPath = "/tmp/app"
-		} else {
-			cfg.Storage.BundleWorkerPath = "/app"
-		}
+		cfg.Storage.BundleWorkerPath = "/app"
 	}
 	if cfg.Storage.BundleRetention == 0 {
 		cfg.Storage.BundleRetention = 50

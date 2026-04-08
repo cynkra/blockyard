@@ -307,6 +307,87 @@ func TestCollectDescendantsSelf(t *testing.T) {
 	_ = collectDescendants(os.Getpid())
 }
 
+func TestEnsureBundleMountPointEmpty(t *testing.T) {
+	if err := ensureBundleMountPoint(""); err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestEnsureBundleMountPointRelative(t *testing.T) {
+	if err := ensureBundleMountPoint("relative/path"); err == nil {
+		t.Error("expected error for relative path")
+	}
+}
+
+func TestEnsureBundleMountPointUnderTmp(t *testing.T) {
+	// Anything under /tmp is handled by the in-sandbox tmpfs and
+	// requires no host setup. ensureBundleMountPoint should accept
+	// it without touching the host filesystem, even if the path
+	// doesn't exist.
+	if err := ensureBundleMountPoint("/tmp/blockyard-nonexistent-test-path"); err != nil {
+		t.Errorf("unexpected error for /tmp path: %v", err)
+	}
+	if _, err := os.Stat("/tmp/blockyard-nonexistent-test-path"); !os.IsNotExist(err) {
+		t.Error("ensureBundleMountPoint must not touch the host for /tmp paths")
+		os.RemoveAll("/tmp/blockyard-nonexistent-test-path")
+	}
+}
+
+// nonTmpTempDir creates a temp directory NOT under /tmp so tests
+// exercise the host-mkdir branch of ensureBundleMountPoint instead
+// of the /tmp shortcut.
+func nonTmpTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/var/tmp", "blockyard-process-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+func TestEnsureBundleMountPointExisting(t *testing.T) {
+	dir := nonTmpTempDir(t)
+	if err := ensureBundleMountPoint(dir); err != nil {
+		t.Errorf("unexpected error for existing dir: %v", err)
+	}
+}
+
+func TestEnsureBundleMountPointExistingNotDir(t *testing.T) {
+	dir := nonTmpTempDir(t)
+	notDir := dir + "/file"
+	if err := os.WriteFile(notDir, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBundleMountPoint(notDir); err == nil {
+		t.Error("expected error when path exists as a file, not a directory")
+	}
+}
+
+func TestEnsureBundleMountPointCreatesNew(t *testing.T) {
+	dir := nonTmpTempDir(t)
+	target := dir + "/new/nested/dir"
+	if err := ensureBundleMountPoint(target); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("expected directory to exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("expected created path to be a directory")
+	}
+}
+
+func TestEnsureBundleMountPointCreationFails(t *testing.T) {
+	// Try to create a directory under a path that's read-only or
+	// nonexistent at a parent that we can't write to. /proc is the
+	// canonical "you can't write here" path.
+	if err := ensureBundleMountPoint("/proc/blockyard-test-nonexistent"); err == nil {
+		t.Error("expected error creating directory under /proc")
+	}
+}
+
 func TestSplitLines(t *testing.T) {
 	cases := []struct {
 		in   string

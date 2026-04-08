@@ -55,9 +55,11 @@ type ProcessBackend struct {
 }
 
 // New creates a ProcessBackend. Verifies that bwrap exists at the
-// configured path. The full config is stored so Preflight() can read
-// the addresses of Redis/OpenBao/database for the egress probe and
-// the server-level resource-limit fields for the warning check.
+// configured path and that the worker mount point can be reached
+// from inside the bwrap sandbox. The full config is stored so
+// Preflight() can read the addresses of Redis/OpenBao/database for
+// the egress probe and the server-level resource-limit fields for
+// the warning check.
 func New(fullCfg *config.Config) (*ProcessBackend, error) {
 	cfg := fullCfg.Process
 	if cfg == nil {
@@ -67,6 +69,9 @@ func New(fullCfg *config.Config) (*ProcessBackend, error) {
 		return nil, fmt.Errorf("process backend: bwrap not found at %q: %w",
 			cfg.BwrapPath, err)
 	}
+	if err := ensureBundleMountPoint(fullCfg.Storage.BundleWorkerPath); err != nil {
+		return nil, err
+	}
 	return &ProcessBackend{
 		cfg:     cfg,
 		fullCfg: fullCfg,
@@ -74,6 +79,57 @@ func New(fullCfg *config.Config) (*ProcessBackend, error) {
 		uids:    newUIDAllocator(cfg.WorkerUIDStart, cfg.WorkerUIDEnd),
 		workers: make(map[string]*workerProc),
 	}, nil
+}
+
+// ensureBundleMountPoint guarantees that bwrap will be able to bind
+// the worker bundle at the configured path. There are two writable
+// surfaces in the sandbox bwrap can mkdir under:
+//
+//  1. The fresh tmpfs we mount at /tmp inside every sandbox. Anything
+//     under /tmp works without touching the host filesystem because
+//     bwrap creates the directory inside the in-sandbox tmpfs.
+//
+//  2. The host filesystem itself, brought in via --ro-bind / /. If
+//     the configured path exists on the host before bwrap launches,
+//     it appears as an empty read-only directory inside the sandbox
+//     and bwrap can bind onto it without needing to mkdir.
+//
+// Anything else fails at the first Spawn with bwrap's confusing
+// "Can't mkdir <path>: Read-only file system" error. We catch the
+// missing directory at startup and either create it or surface a
+// clear error pointing operators at the actionable fixes.
+func ensureBundleMountPoint(path string) error {
+	if path == "" {
+		return fmt.Errorf("process backend: storage.bundle_worker_path must not be empty")
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("process backend: storage.bundle_worker_path must be absolute, got %q", path)
+	}
+	// Strategy 1: under /tmp — handled by the in-sandbox tmpfs.
+	if path == "/tmp" || strings.HasPrefix(path, "/tmp/") {
+		return nil
+	}
+	// Strategy 2: the path must exist on the host. Try to create it
+	// idempotently; if it already exists we're done.
+	if info, err := os.Stat(path); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("process backend: bundle_worker_path %q exists but is not a directory", path)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil { //nolint:gosec // G301: directory needs to be readable by every worker UID
+		return fmt.Errorf(
+			"process backend: cannot create bundle mount point %q on the host: %w. "+
+				"The process backend bind-mounts each worker's bundle at this path "+
+				"inside the bwrap sandbox; bwrap cannot create the directory itself "+
+				"because the sandbox root is read-only. Options:\n"+
+				"  • Set storage.bundle_worker_path to a path under /tmp (e.g. /tmp/app) — "+
+				"bwrap mounts a fresh tmpfs there inside every sandbox\n"+
+				"  • Pre-create %q on the host with mode 0755\n"+
+				"  • Run blockyard with permissions to create %q (containerized mode as root)",
+			path, err, path, path)
+	}
+	return nil
 }
 
 // Preflight implements backend.Backend by delegating to RunPreflight.
