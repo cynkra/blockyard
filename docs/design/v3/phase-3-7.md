@@ -16,7 +16,7 @@ profile, Dockerfile, release binaries) are deferred to phase 3-8.
 
 Independent of the operations track (phases 3-2 through 3-5). Can be
 developed in parallel with phase 3-6 (data mounts) and phase 3-9
-(pre-fork).
+(zygote workers).
 
 ---
 
@@ -2351,13 +2351,13 @@ mentioned above. This is acceptable for the use case: scale-to-zero
 deployments expect cold starts, and internal-only deployments have
 infrequent rolling updates.
 
-### Step 9: Phase 3-9 (pre-fork) forward compatibility
+### Step 9: Phase 3-9 (zygote workers) forward compatibility
 
-Phase 3-9 adds a pre-fork worker pool with a control channel between
+Phase 3-9 adds a zygote worker model with a control channel between
 blockyard and each pooled worker (send `RunApp`, receive health,
-etc.). The Docker backend uses per-worker bridge IPs on a fixed
-control port with token auth. For parity, the process backend needs
-an equivalent control transport.
+etc.). On the Docker backend, phase 3-9 routes that channel over
+per-worker bridge IPs on a fixed control port with token auth. For
+parity, the process backend needs an equivalent control transport.
 
 Phase 3-7 does not implement that transport — it belongs to phase 3-9
 — but it establishes three load-bearing contracts that phase 3-9
@@ -2374,24 +2374,27 @@ hangs off. Implementers of phase 3-7 should preserve them:
    binding (decision #20) and the preflight egress probe (step 7);
    phase 3-9 adds a third dependency.
 3. **Port allocator is per-worker state, not per-port semantics** —
-   phase 3-9 extends `portAllocator` (step 2) to hand out a unique
-   control port in addition to the shiny port. The concrete scheme
-   (paired allocation, a second allocator over a disjoint range, or
-   odd/even within a single range) is deferred to phase 3-9. Phase
-   3-7 should avoid baking "one port per worker" into surrounding
-   code: `Spawn` calls `ports.Reserve()` once and stores the result in
-   `workerProc.port`, which phase 3-9 extends with a second call and
-   a second field — no structural changes to the lifecycle flow.
+   phase 3-9 adds two more allocators alongside the one phase 3-7
+   ships, over disjoint host-wide ranges
+   (`zygote_control_range_*` for zygote control ports,
+   `zygote_child_range_*` for forked-session shiny ports). Phase
+   3-7's allocator continues to serve non-zygote shiny ports
+   unchanged. Phase 3-7 should therefore avoid baking "one port per
+   worker" into surrounding code: `Spawn` calls `ports.Alloc()`
+   once and stores the result in `workerProc.port`, but phase 3-9
+   adds a second `controlPort` field for zygote workers (and
+   per-child port tracking inside `forkState`) without altering
+   the existing lifecycle flow.
 
 **Sketch (full design in phase-3-9.md).** The process-backend
-pre-fork control transport is TCP on localhost with token auth, same
+zygote control transport is TCP on localhost with token auth, same
 wire protocol as the Docker backend: first frame from the controller
 is `AUTH <token>\n`, token read from the mounted
 `/var/run/blockyard` directory. The abstract `Forking` interface has
 two implementations (Docker, process), both addressing children by
 `host:port` — the Docker impl uses the per-worker bridge IP, the
 process impl uses `127.0.0.1 + allocated control port`.
-`prefork.Manager` is fully backend-agnostic; only the constructor
+`zygote.Manager` is fully backend-agnostic; only the constructor
 differs.
 
 **Why TCP, not a Unix socket.** A pathname socket on the host
