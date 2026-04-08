@@ -11,7 +11,7 @@ v3 has two tracks. The **operations track** adds rolling updates with zero
 downtime: interface extraction for session/worker stores, Redis-backed
 shared state, worker token persistence, drain mode, and the `by admin
 update` CLI command. The **runtime track** adds the process backend
-(bubblewrap sandboxing), the pre-fork worker model for Docker, and
+(bubblewrap sandboxing), the zygote worker model for Docker, and
 per-app container configuration (data mounts, multiple execution images,
 dynamic resource limits, per-app OCI runtime selection).
 
@@ -32,7 +32,7 @@ cmd/
 
 internal/
 ├── backend/
-│   ├── docker/                    # (existing) — pre-fork worker model additions
+│   ├── docker/                    # (existing) — zygote worker model additions
 │   └── process/                   # NEW: bubblewrap process backend
 │       ├── process.go             # Backend interface implementation
 │       ├── bwrap.go               # bubblewrap command construction
@@ -54,10 +54,14 @@ internal/
 │   └── redisstate.go              # Redis client setup, health check, availability detection
 ├── drain/                         # NEW: drain mode orchestration
 │   └── drain.go                   # SIGUSR1 handler, drain sequence, passive→active transition
-└── prefork/                       # NEW: pre-fork worker model
-    ├── zygote.go                  # template process management (control socket protocol)
-    ├── child.go                   # child lifecycle, port allocation, reaping
-    └── sandbox.go                 # post-fork sandboxing (unshare, seccomp, capabilities)
+└── zygote/                        # NEW: zygote worker model
+    ├── control.go                 # TCP control protocol client (phase 3-9)
+    ├── manager.go                 # session↔child bookkeeping + sweep loop
+    ├── secret.go                  # per-worker control secret
+    ├── zygote.R                   # embedded R script (socketSelect polling)
+    ├── zygote_helper.c            # KSM helper (prctl wrapper)
+    ├── embed.go                   # //go:embed declarations
+    └── sandbox.go                 # NEW in phase 3-10: post-fork sandboxing
 ```
 
 ## New Dependencies
@@ -792,7 +796,7 @@ Deployment artifacts and documentation for the process backend.
 
 1. **Custom seccomp profile** — JSON file based on Docker's default,
    adding `CLONE_NEWUSER` to the allowlist. Shipped at
-   `docker/blockyard-seccomp.json`. Shared with the pre-fork model
+   `docker/blockyard-seccomp.json`. Shared with the zygote model
    (phase 3-10).
 
 2. **Containerized deployment mode** — Dockerfile shipping blockyard, R,
@@ -817,45 +821,38 @@ Deployment artifacts and documentation for the process backend.
    its listener so the new server can take over, with a reverse proxy
    routing based on health checks.
 
-### Phase 3-9: Pre-Fork Mechanism
+### Phase 3-9: Zygote Worker Model
 
-The core fork mechanism for the Docker backend's multi-session mode.
-Hardening is phase 3-10.
+Long-lived **zygote** R process (one per worker) that pre-loads a
+bundle's packages, then forks per-session children on demand via
+`parallel::mcfork`. Works on both Docker and process backends via an
+optional `backend.Forking` capability interface. **See
+`phase-3-9.md` for the full design, wire protocol, and KSM story.**
 
-**Deliverables:**
+**High-level deliverables (summary only; details live in `phase-3-9.md`):**
 
-1. **Pre-fork package** (`internal/prefork/`) — manages the template
-   (zygote) process and forked children.
+1. **`zygote` column + `backend.Forking` capability interface** — per-app
+   opt-in, validated against the backend.
+2. **`internal/zygote/` package** — `Manager` with session↔child
+   bookkeeping and sweep loop, TCP line-protocol `ControlClient`,
+   embedded `zygote.R` and `zygote_helper.c` (for KSM via
+   `prctl(PR_SET_MEMORY_MERGE)`).
+3. **Docker and process backend `Forking` implementations** — zygote
+   spawn with control port, control client, control-connection watcher
+   for unexpected disconnect, idempotent `Stop` with synthesised
+   `ChildExit` events.
+4. **Session-addressed routing** — `session.Entry.Addr` holds the
+   per-child shiny address; proxy reads it directly, registry path
+   unchanged for non-zygote sessions.
+5. **Cleanup convergence** — three paths (child exit, worker stop,
+   sweep loop) converge on the same manager bookkeeping cleanup.
+6. **Tests** — control protocol unit tests, `INFO` round-trip, Docker
+   and process integration tests (spawn → fork → kill → crash
+   detection → control-loss eviction), KSM helper fallback.
 
-2. **Zygote process** — R script that loads all app packages, calls
-   `gc()`, then listens on a Unix socket for fork commands. Mounted
-   at `/blockyard/zygote.R`.
+### Phase 3-10: Zygote Hardening
 
-3. **Control socket protocol** — server communicates with zygote via
-   `docker exec` to the Unix socket:
-   - `FORK <port>` → fork child, returns PID
-   - `KILL <pid>` → terminate child
-   - `STATUS` → list live children
-
-4. **Port allocation** — ports from a configured range (e.g.,
-   3839-3938, bounded by `max_sessions_per_worker`). Proxy routes to
-   `container_ip:port` per child.
-
-5. **Child lifecycle** — `KILL` on disconnect + cache TTL expiry. Zygote
-   reaps via `waitpid()`. When all children exit + idle timeout, keep
-   container alive (warm template) or stop (configurable, default: keep).
-
-6. **Config** — per-app boolean `pre_fork` (default `false`, requires
-   `max_sessions_per_worker > 1`). Docker backend uses pre-fork flow
-   when enabled.
-
-7. **Tests** — integration tests (tagged `docker_test`): start zygote,
-   fork two children on different ports, verify independent health
-   checks, kill one and verify the other continues.
-
-### Phase 3-10: Pre-Fork Hardening
-
-Post-fork sandboxing and security hardening for the pre-fork model.
+Post-fork sandboxing and security hardening for the zygote model.
 
 **Deliverables:**
 
@@ -870,7 +867,7 @@ Post-fork sandboxing and security hardening for the pre-fork model.
 2. **Docker security options** — container create call adds
    `--security-opt seccomp=blockyard-seccomp.json` (same profile as
    process backend, phase 3-8) and `--security-opt apparmor=unconfined`
-   (Ubuntu 23.10+ only) when pre-fork is enabled.
+   (Ubuntu 23.10+ only) when the zygote model is enabled.
 
 3. **Environment variable hardening** — `OMP_NUM_THREADS=1` and
    `MKL_NUM_THREADS=1` in the template process before forking.
@@ -917,11 +914,11 @@ Phase 3-7: Process Backend Core
 Phase 3-8: Process Backend Packaging & Deployment
   └── depends on: phase 3-7 (needs the backend implementation)
 
-Phase 3-9: Pre-Fork Mechanism
+Phase 3-9: Zygote Worker Model
   └── independent of: process backend (enhances Docker backend)
   └── can be developed in parallel with anything after 3-1
 
-Phase 3-10: Pre-Fork Hardening
+Phase 3-10: Zygote Hardening
   └── depends on: phase 3-9 (mechanism must exist)
   └── depends on: phase 3-8 (shares seccomp profile)
 ```
@@ -932,7 +929,7 @@ Phase 3-10: Pre-Fork Hardening
 2. Phase 3-2 → 3-3 → 3-4 → 3-5 (operations track, sequential)
 3. Phase 3-6 (per-app config) — in parallel with operations track
 4. Phase 3-7 → 3-8 (process backend, sequential)
-5. Phase 3-9 → 3-10 (pre-fork, sequential)
+5. Phase 3-9 → 3-10 (zygote, sequential)
 
 Phases 3-6, 3-7, and 3-9 are independent of each other and of the
 operations track. They can be developed in parallel.
@@ -969,7 +966,7 @@ operations track. They can be developed in parallel.
   reflected in inspect.
 - **Process backend** (tagged `process_test`) — spawn, health, fs
   isolation, cleanup. Skipped without bwrap.
-- **Pre-fork** (tagged `docker_test`) — zygote, fork, independent
+- **Zygote** (tagged `docker_test`) — zygote, fork, independent
   health checks, `/tmp` isolation, child cleanup.
 - **Redis network isolation** (tagged `docker_test`) — worker cannot
   connect to Redis.
@@ -1012,9 +1009,13 @@ operations track. They can be developed in parallel.
    cgroupfs delegation. Process backend targets lightweight deployments
    where the outer container or system provides resource limits.
 
-10. **Control socket for pre-fork.** Zygote listens on a Unix socket.
-    `docker exec` connects (one exec per fork). Avoids an in-container
-    agent while keeping Docker API frequency low.
+10. **Control channel for the zygote model.** TCP on the per-worker
+    Docker bridge (or process-backend loopback), line-delimited
+    protocol, pre-shared secret AUTH, `base::socketSelect`-driven
+    poll loop on the R side. Unix sockets and `docker exec` were both
+    rejected — see `phase-3-9.md` decision #4 for the reasoning
+    (socket file permissions conflict with per-worker UIDs; `docker
+    exec` has 50-200ms overhead per fork; `httpuv` is fork-unsafe).
 
 11. **Interface extraction and token persistence as one phase.** Both
     are prerequisites for shared state with the same conceptual goal:
