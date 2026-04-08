@@ -155,14 +155,16 @@ func buildWSEchoBinary(t *testing.T) string {
 	return sharedWSBinary.path
 }
 
-// dockerTestConfig returns a DockerConfig suitable for integration tests.
-func dockerTestConfig(t *testing.T) *config.DockerConfig {
+// dockerTestConfig returns a Config suitable for integration tests.
+func dockerTestConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return &config.DockerConfig{
-		Socket:    "/var/run/docker.sock",
-		Image:     testutil.AlpineImage(t),
-		ShinyPort: 8080,
-		PakVersion: "stable",
+	return &config.Config{
+		Docker: config.DockerConfig{
+			Socket:     "/var/run/docker.sock",
+			Image:      testutil.AlpineImage(t),
+			ShinyPort:  8080,
+			PakVersion: "stable",
+		},
 	}
 }
 
@@ -175,7 +177,7 @@ func dockerWSTestSetup(t *testing.T, wsBinary string) (*server.Server, *httptest
 	tmp := t.TempDir()
 
 	// Create DockerBackend.
-	be, err := dockerbe.New(ctx, dockerTestConfig(t), tmp)
+	be, err := dockerbe.New(ctx, dockerTestConfig(t), tmp, "test")
 	if err != nil {
 		t.Fatalf("docker backend: %v", err)
 	}

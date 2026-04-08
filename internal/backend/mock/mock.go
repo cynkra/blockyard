@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/preflight"
 )
 
 type MockBackend struct {
@@ -198,8 +200,18 @@ func (b *MockBackend) ListManaged(_ context.Context) ([]backend.ManagedResource,
 	return result, nil
 }
 
-func (b *MockBackend) ContainerStats(_ context.Context, _ string) (*backend.ContainerStatsResult, error) {
-	return &backend.ContainerStatsResult{}, nil
+func (b *MockBackend) WorkerResourceUsage(_ context.Context, _ string) (*backend.WorkerResourceUsageResult, error) {
+	return &backend.WorkerResourceUsageResult{}, nil
+}
+
+// CleanupOrphanResources is a no-op for the mock backend.
+func (b *MockBackend) CleanupOrphanResources(_ context.Context) error {
+	return nil
+}
+
+// Preflight returns an empty success report for the mock backend.
+func (b *MockBackend) Preflight(_ context.Context) (*preflight.Report, error) {
+	return &preflight.Report{RanAt: time.Now().UTC()}, nil
 }
 
 func (b *MockBackend) UpdateResources(_ context.Context, id string, mem int64, nanoCPUs int64) error {

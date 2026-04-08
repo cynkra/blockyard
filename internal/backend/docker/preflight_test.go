@@ -1,6 +1,6 @@
 //go:build docker_test
 
-package preflight
+package docker
 
 import (
 	"context"
@@ -14,8 +14,8 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 
-	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/preflight"
 )
 
 func testDockerClient(t *testing.T) *client.Client {
@@ -34,12 +34,28 @@ func testDockerClient(t *testing.T) *client.Client {
 
 func ensureAlpine(t *testing.T, ctx context.Context, cli *client.Client) {
 	t.Helper()
-	if err := ensureImage(ctx, cli, "alpine:latest"); err != nil {
+	if err := ensurePreflightImage(ctx, cli, "alpine:latest"); err != nil {
 		t.Fatalf("pull alpine: %v", err)
 	}
 }
 
-// --- RunDockerChecks ---
+// newPreflightTestBackend builds a DockerBackend pointing at the host
+// docker socket with the supplied image and mount mode. Used by the
+// docker_test-tagged tests below to call check helpers directly.
+func newPreflightTestBackend(t *testing.T, cli *client.Client, image string, mode MountMode) *DockerBackend {
+	t.Helper()
+	full := &config.Config{Docker: config.DockerConfig{Image: image}}
+	return &DockerBackend{
+		client:   cli,
+		config:   &full.Docker,
+		fullCfg:  full,
+		mountCfg: MountConfig{Mode: mode},
+		runCmd:   defaultCmdRunner,
+		workers:  make(map[string]*workerState),
+	}
+}
+
+// --- runDockerChecks ---
 
 func TestRunDockerChecks_AllPass(t *testing.T) {
 	cli := testDockerClient(t)
@@ -49,19 +65,15 @@ func TestRunDockerChecks_AllPass(t *testing.T) {
 	storePath := t.TempDir()
 	ensureAlpine(t, ctx, cli)
 
-	deps := DockerDeps{
-		Client:    cli,
-		MountCfg:  docker.MountConfig{Mode: docker.MountModeNative},
-		Config:    &config.DockerConfig{Image: "alpine:latest"},
-		StorePath: storePath,
-	}
+	d := newPreflightTestBackend(t, cli, "alpine:latest", MountModeNative)
+	deps := PreflightDeps{StorePath: storePath}
 
-	report := RunDockerChecks(ctx, deps)
+	report := runDockerChecks(ctx, d, deps)
 	if report == nil {
 		t.Fatal("expected non-nil report")
 	}
 	for _, r := range report.Results {
-		if r.Severity == SeverityError {
+		if r.Severity == preflight.SeverityError {
 			t.Errorf("check %q failed: %s", r.Name, r.Message)
 		}
 	}
@@ -72,18 +84,15 @@ func TestRunDockerChecks_ImagePullFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	deps := DockerDeps{
-		Client:    cli,
-		Config:    &config.DockerConfig{Image: "nonexistent-registry.invalid/no-such-image:never"},
-		StorePath: t.TempDir(),
-	}
+	d := newPreflightTestBackend(t, cli, "nonexistent-registry.invalid/no-such-image:never", MountModeNative)
+	deps := PreflightDeps{StorePath: t.TempDir()}
 
-	report := RunDockerChecks(ctx, deps)
+	report := runDockerChecks(ctx, d, deps)
 	var foundImagePull bool
 	for _, r := range report.Results {
 		if r.Name == "image_pull" {
 			foundImagePull = true
-			if r.Severity != SeverityError {
+			if r.Severity != preflight.SeverityError {
 				t.Errorf("image_pull severity = %v, want Error", r.Severity)
 			}
 		}
@@ -110,14 +119,10 @@ func TestRunDockerChecks_VolumeMode(t *testing.T) {
 
 	ensureAlpine(t, ctx, cli)
 
-	deps := DockerDeps{
-		Client:    cli,
-		MountCfg:  docker.MountConfig{Mode: docker.MountModeVolume},
-		Config:    &config.DockerConfig{Image: "alpine:latest"},
-		StorePath: t.TempDir(),
-	}
+	d := newPreflightTestBackend(t, cli, "alpine:latest", MountModeVolume)
+	deps := PreflightDeps{StorePath: t.TempDir()}
 
-	report := RunDockerChecks(ctx, deps)
+	report := runDockerChecks(ctx, d, deps)
 	// In volume mode, bind-mount checks (ro_bind, by_builder) are skipped.
 	for _, r := range report.Results {
 		if r.Name == "ro_bind_visibility" || r.Name == "by_builder_exec" {
@@ -136,15 +141,11 @@ func TestCheckROBindVisibility(t *testing.T) {
 	storePath := t.TempDir()
 	ensureAlpine(t, ctx, cli)
 
-	deps := DockerDeps{
-		Client:    cli,
-		MountCfg:  docker.MountConfig{Mode: docker.MountModeNative},
-		Config:    &config.DockerConfig{Image: "alpine:latest"},
-		StorePath: storePath,
-	}
+	d := newPreflightTestBackend(t, cli, "alpine:latest", MountModeNative)
+	deps := PreflightDeps{StorePath: storePath}
 
-	res := checkROBindVisibility(ctx, deps)
-	if res.Severity != SeverityOK {
+	res := checkROBindVisibility(ctx, d, deps)
+	if res.Severity != preflight.SeverityOK {
 		t.Errorf("severity = %v, want OK: %s", res.Severity, res.Message)
 	}
 }
@@ -153,10 +154,12 @@ func TestCheckROBindVisibility(t *testing.T) {
 
 func TestCheckByBuilder(t *testing.T) {
 	t.Run("skipped when binary empty", func(t *testing.T) {
-		deps := DockerDeps{BuilderBin: ""}
+		cli := testDockerClient(t)
+		d := newPreflightTestBackend(t, cli, "alpine:latest", MountModeNative)
+		deps := PreflightDeps{BuilderBin: ""}
 		ctx := context.Background()
-		res := checkByBuilder(ctx, deps)
-		if res.Severity != SeverityOK {
+		res := checkByBuilder(ctx, d, deps)
+		if res.Severity != preflight.SeverityOK {
 			t.Errorf("severity = %v, want OK when BuilderBin is empty", res.Severity)
 		}
 	})
@@ -172,15 +175,11 @@ func TestCheckByBuilder(t *testing.T) {
 		script := filepath.Join(t.TempDir(), "by-builder")
 		os.WriteFile(script, []byte("#!/bin/sh\necho usage\n"), 0o755)
 
-		deps := DockerDeps{
-			Client:     cli,
-			MountCfg:   docker.MountConfig{Mode: docker.MountModeNative},
-			Config:     &config.DockerConfig{Image: "alpine:latest"},
-			BuilderBin: script,
-		}
+		d := newPreflightTestBackend(t, cli, "alpine:latest", MountModeNative)
+		deps := PreflightDeps{BuilderBin: script}
 
-		res := checkByBuilder(ctx, deps)
-		if res.Severity != SeverityOK {
+		res := checkByBuilder(ctx, d, deps)
+		if res.Severity != preflight.SeverityOK {
 			t.Errorf("severity = %v, want OK: %s", res.Severity, res.Message)
 		}
 	})
@@ -196,37 +195,33 @@ func TestCheckByBuilder(t *testing.T) {
 		bad := filepath.Join(t.TempDir(), "by-builder")
 		os.WriteFile(bad, []byte("not an executable"), 0o755)
 
-		deps := DockerDeps{
-			Client:     cli,
-			MountCfg:   docker.MountConfig{Mode: docker.MountModeNative},
-			Config:     &config.DockerConfig{Image: "alpine:latest"},
-			BuilderBin: bad,
-		}
+		d := newPreflightTestBackend(t, cli, "alpine:latest", MountModeNative)
+		deps := PreflightDeps{BuilderBin: bad}
 
-		res := checkByBuilder(ctx, deps)
-		if res.Severity != SeverityError {
+		res := checkByBuilder(ctx, d, deps)
+		if res.Severity != preflight.SeverityError {
 			t.Errorf("severity = %v, want Error for bad binary: %s", res.Severity, res.Message)
 		}
 	})
 }
 
-// --- ensureImage ---
+// --- ensurePreflightImage ---
 
-func TestEnsureImage_AlreadyPresent(t *testing.T) {
+func TestEnsurePreflightImage_AlreadyPresent(t *testing.T) {
 	cli := testDockerClient(t)
 	ctx := context.Background()
 	ensureAlpine(t, ctx, cli) // pre-pull
 	// Second call should be a no-op (image inspect succeeds).
-	if err := ensureImage(ctx, cli, "alpine:latest"); err != nil {
-		t.Errorf("ensureImage for present image: %v", err)
+	if err := ensurePreflightImage(ctx, cli, "alpine:latest"); err != nil {
+		t.Errorf("ensurePreflightImage for present image: %v", err)
 	}
 }
 
-func TestEnsureImage_NonexistentImage(t *testing.T) {
+func TestEnsurePreflightImage_NonexistentImage(t *testing.T) {
 	cli := testDockerClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err := ensureImage(ctx, cli, "nonexistent-registry.invalid/no-such-image:never")
+	err := ensurePreflightImage(ctx, cli, "nonexistent-registry.invalid/no-such-image:never")
 	if err == nil {
 		t.Error("expected error for nonexistent image")
 	}
@@ -368,7 +363,7 @@ func TestCheckHardLink(t *testing.T) {
 		storePath := filepath.Join(t.TempDir(), ".pkg-store")
 		os.MkdirAll(storePath, 0o755)
 		res := checkHardLink(storePath)
-		if res.Severity != SeverityOK {
+		if res.Severity != preflight.SeverityOK {
 			t.Errorf("severity = %v, want OK: %s", res.Severity, res.Message)
 		}
 	})

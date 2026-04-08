@@ -15,27 +15,27 @@ func runDynamicChecks(ctx context.Context, deps RuntimeDeps) *Report {
 	r := &Report{RanAt: time.Now().UTC()}
 
 	// Health probes (same subsystems as readyz).
-	r.add(checkDatabase(ctx, deps))
-	r.add(checkDocker(ctx, deps))
+	r.Add(checkDatabase(ctx, deps))
+	r.Add(checkBackend(ctx, deps))
 	if deps.RedisPing != nil {
-		r.add(checkRedis(ctx, deps))
+		r.Add(checkRedis(ctx, deps))
 	}
 	if deps.IDPCheck != nil {
-		r.add(checkIDP(ctx, deps))
+		r.Add(checkIDP(ctx, deps))
 	}
 	if deps.VaultCheck != nil {
-		r.add(checkVault(ctx, deps))
+		r.Add(checkVault(ctx, deps))
 	}
 	if deps.VaultTokenOK != nil {
-		r.add(checkVaultToken(deps))
+		r.Add(checkVaultToken(deps))
 	}
 
 	// Runtime checks.
 	if deps.StorePath != "" {
-		r.add(checkDiskSpace(deps.StorePath))
+		r.Add(checkDiskSpace(deps.StorePath))
 	}
 	if deps.UpdateVersion != nil {
-		r.add(checkUpdateAvailable(deps))
+		r.Add(checkUpdateAvailable(deps))
 	}
 
 	return r
@@ -70,29 +70,29 @@ func checkDatabase(ctx context.Context, deps RuntimeDeps) Result {
 	}
 }
 
-func checkDocker(ctx context.Context, deps RuntimeDeps) Result {
-	const name = "docker"
+func checkBackend(ctx context.Context, deps RuntimeDeps) Result {
+	const name = "backend"
 	const category = "runtime"
 
-	if deps.DockerPing == nil {
-		return Result{Name: name, Severity: SeverityOK, Message: "Docker check not available", Category: category}
+	if deps.BackendPing == nil {
+		return Result{Name: name, Severity: SeverityOK, Message: "backend check not available", Category: category}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, runtimeCheckTimeout)
 	defer cancel()
 
-	if err := deps.DockerPing(ctx); err != nil {
+	if err := deps.BackendPing(ctx); err != nil {
 		return Result{
 			Name:     name,
 			Severity: SeverityError,
-			Message:  fmt.Sprintf("Docker socket unreachable: %v", err),
+			Message:  fmt.Sprintf("backend unreachable: %v", err),
 			Category: category,
 		}
 	}
 	return Result{
 		Name:     name,
 		Severity: SeverityOK,
-		Message:  "Docker socket is responsive",
+		Message:  "backend is responsive",
 		Category: category,
 	}
 }

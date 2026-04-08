@@ -21,6 +21,7 @@ type Config struct {
 	Storage   StorageConfig    `toml:"storage"`
 	Database  DatabaseConfig   `toml:"database"`
 	Proxy     ProxyConfig      `toml:"proxy"`
+	Process      *ProcessConfig      `toml:"process"`       // nil when backend != "process"
 	Redis        *RedisConfig        `toml:"redis"`         // nil when not configured
 	OIDC         *OidcConfig         `toml:"oidc"`          // nil when not configured
 	Openbao      *OpenbaoConfig      `toml:"openbao"`       // nil when not configured
@@ -63,21 +64,43 @@ type ServerConfig struct {
 	DrainTimeout    Duration `toml:"drain_timeout"`
 	LogLevel             string   `toml:"log_level"`              // debug, info, warn, error (default: info)
 	TrustedProxies       []string `toml:"trusted_proxies"`        // CIDRs whose X-Forwarded-For to trust (e.g. ["10.0.0.0/8"])
-	SkipDockerPreflight  bool     `toml:"skip_docker_preflight"`  // skip Docker-dependent preflight checks at startup
+	Backend              string   `toml:"backend"`                // "docker" (default) or "process"
+	SkipPreflight        bool     `toml:"skip_preflight"`         // skip backend-specific preflight checks at startup
+	DefaultMemoryLimit   string   `toml:"default_memory_limit"`   // fallback memory limit for workers (e.g. "2g")
+	DefaultCPULimit      float64  `toml:"default_cpu_limit"`      // fallback CPU limit for workers (fractional vCPUs)
 	BootstrapToken       string   `toml:"bootstrap_token"`        // dev only: one-time token exchanged for a real PAT via POST /api/v1/bootstrap
+
+	// Deprecated; copied into SkipPreflight by migrateDeprecatedFields and
+	// removed in the next release.
+	DeprecatedSkipDockerPreflight bool `toml:"skip_docker_preflight"`
+}
+
+// ProcessConfig configures the process (bubblewrap) backend.
+type ProcessConfig struct {
+	BwrapPath      string `toml:"bwrap_path"`             // path to bubblewrap binary
+	RPath          string `toml:"r_path"`                 // path to R binary
+	SeccompProfile string `toml:"seccomp_profile"`        // path to compiled BPF seccomp profile; empty = no seccomp
+	PortRangeStart int    `toml:"port_range_start"`       // first port for workers (inclusive)
+	PortRangeEnd   int    `toml:"port_range_end"`         // last port for workers (inclusive)
+	WorkerUIDStart int    `toml:"worker_uid_range_start"` // first host UID for workers (inclusive)
+	WorkerUIDEnd   int    `toml:"worker_uid_range_end"`   // last host UID for workers (inclusive)
+	WorkerGID      int    `toml:"worker_gid"`             // shared host GID for all workers (used by egress firewall rules)
 }
 
 type DockerConfig struct {
-	Socket             string            `toml:"socket"`
-	Image              string            `toml:"image"`
-	ShinyPort          int               `toml:"shiny_port"`
-	PakVersion         string            `toml:"pak_version"`           // "stable" (default), or pinned version
-	ServiceNetwork     string            `toml:"service_network"`       // Docker network whose containers are made reachable from workers
-	StoreRetention     Duration          `toml:"store_retention"`        // 0 = disabled (store grows indefinitely)
-	DefaultMemoryLimit string            `toml:"default_memory_limit"`  // fallback memory limit for workers (e.g. "2g"); 0 = unlimited
-	DefaultCPULimit    float64           `toml:"default_cpu_limit"`     // fallback CPU limit for workers (e.g. 4.0); 0 = unlimited
-	Runtime            string            `toml:"runtime"`               // OCI runtime; empty = Docker daemon default
-	RuntimeDefaults    map[string]string `toml:"runtime_defaults"`      // per-access-type defaults (e.g. public=kata-runtime)
+	Socket          string            `toml:"socket"`
+	Image           string            `toml:"image"`
+	ShinyPort       int               `toml:"shiny_port"`
+	PakVersion      string            `toml:"pak_version"`      // "stable" (default), or pinned version
+	ServiceNetwork  string            `toml:"service_network"`  // Docker network whose containers are made reachable from workers
+	Runtime         string            `toml:"runtime"`          // OCI runtime; empty = Docker daemon default
+	RuntimeDefaults map[string]string `toml:"runtime_defaults"` // per-access-type defaults (e.g. public=kata-runtime)
+
+	// Deprecated; copied into the new locations by migrateDeprecatedFields
+	// and removed in the next release.
+	DeprecatedDefaultMemoryLimit string   `toml:"default_memory_limit"`
+	DeprecatedDefaultCPULimit    float64  `toml:"default_cpu_limit"`
+	DeprecatedStoreRetention     Duration `toml:"store_retention"`
 }
 
 type StorageConfig struct {
@@ -86,6 +109,7 @@ type StorageConfig struct {
 	BundleRetention     int               `toml:"bundle_retention"`
 	MaxBundleSize       int64             `toml:"max_bundle_size"`
 	SoftDeleteRetention Duration          `toml:"soft_delete_retention"`
+	StoreRetention      Duration          `toml:"store_retention"` // R library cache eviction; 0 = disabled
 	DataMounts          []DataMountSource `toml:"data_mounts"`
 }
 
@@ -167,6 +191,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	migrateDeprecatedFields(&cfg)
 	applyDefaults(&cfg)
 	applyEnvOverrides(&cfg)
 
@@ -177,15 +202,44 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// migrateDeprecatedFields copies values from old [docker]/[server] field
+// locations into their new homes when the new field is unset and the
+// old field is present. Emits a deprecation warning for each move.
+// Called once from Load(), between toml.Unmarshal and applyDefaults.
+func migrateDeprecatedFields(cfg *Config) {
+	if cfg.Server.DefaultMemoryLimit == "" && cfg.Docker.DeprecatedDefaultMemoryLimit != "" {
+		cfg.Server.DefaultMemoryLimit = cfg.Docker.DeprecatedDefaultMemoryLimit
+		slog.Warn("config: docker.default_memory_limit is deprecated; use server.default_memory_limit")
+	}
+	if cfg.Server.DefaultCPULimit == 0 && cfg.Docker.DeprecatedDefaultCPULimit != 0 {
+		cfg.Server.DefaultCPULimit = cfg.Docker.DeprecatedDefaultCPULimit
+		slog.Warn("config: docker.default_cpu_limit is deprecated; use server.default_cpu_limit")
+	}
+	if cfg.Storage.StoreRetention.Duration == 0 && cfg.Docker.DeprecatedStoreRetention.Duration != 0 {
+		cfg.Storage.StoreRetention = cfg.Docker.DeprecatedStoreRetention
+		slog.Warn("config: docker.store_retention is deprecated; use storage.store_retention")
+	}
+	if !cfg.Server.SkipPreflight && cfg.Server.DeprecatedSkipDockerPreflight {
+		cfg.Server.SkipPreflight = true
+		slog.Warn("config: server.skip_docker_preflight is deprecated; use server.skip_preflight")
+	}
+}
+
 func applyDefaults(cfg *Config) {
 	if cfg.Server.Bind == "" {
 		cfg.Server.Bind = "127.0.0.1:8080"
+	}
+	if cfg.Server.Backend == "" {
+		cfg.Server.Backend = "docker"
 	}
 	if cfg.Server.ShutdownTimeout.Duration == 0 {
 		cfg.Server.ShutdownTimeout.Duration = 30 * time.Second
 	}
 	if cfg.Server.DrainTimeout.Duration == 0 {
 		cfg.Server.DrainTimeout.Duration = 30 * time.Second
+	}
+	if cfg.Process != nil {
+		processDefaults(cfg.Process)
 	}
 	if cfg.Docker.Socket == "" {
 		cfg.Docker.Socket = "/var/run/docker.sock"
@@ -289,6 +343,30 @@ func openbaoDefaults(c *OpenbaoConfig) {
 	}
 }
 
+func processDefaults(c *ProcessConfig) {
+	if c.BwrapPath == "" {
+		c.BwrapPath = "/usr/bin/bwrap"
+	}
+	if c.RPath == "" {
+		c.RPath = "/usr/bin/R"
+	}
+	if c.PortRangeStart == 0 {
+		c.PortRangeStart = 10000
+	}
+	if c.PortRangeEnd == 0 {
+		c.PortRangeEnd = 10999
+	}
+	if c.WorkerUIDStart == 0 {
+		c.WorkerUIDStart = 60000
+	}
+	if c.WorkerUIDEnd == 0 {
+		c.WorkerUIDEnd = 60999
+	}
+	if c.WorkerGID == 0 {
+		c.WorkerGID = 65534 // nogroup
+	}
+}
+
 // applyEnvOverrides walks cfg via reflection, deriving the env var name
 // from toml struct tags (BLOCKYARD_ + section + _ + field, uppercased).
 // Supported field types: string, int, int64, float64, Duration, Secret, *Secret.
@@ -330,6 +408,12 @@ func applyEnvOverrides(cfg *Config) {
 	if cfg.Update == nil && envPrefixExists("BLOCKYARD_UPDATE_") {
 		cfg.Update = &UpdateConfig{}
 		updateDefaults(cfg.Update)
+	}
+
+	// Auto-construct [process] section if any BLOCKYARD_PROCESS_* env var is set.
+	if cfg.Process == nil && envPrefixExists("BLOCKYARD_PROCESS_") {
+		cfg.Process = &ProcessConfig{}
+		processDefaults(cfg.Process)
 	}
 
 	applyEnvToStruct(reflect.ValueOf(cfg).Elem(), "BLOCKYARD")
@@ -512,8 +596,28 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 }
 
 func validate(cfg *Config) error {
-	if cfg.Docker.Image == "" {
-		return fmt.Errorf("config: docker.image must not be empty")
+	switch cfg.Server.Backend {
+	case "docker":
+		if cfg.Docker.Image == "" {
+			return fmt.Errorf("config: docker.image must not be empty")
+		}
+	case "process":
+		if cfg.Process == nil {
+			return fmt.Errorf("config: [process] section required when backend = \"process\"")
+		}
+		if cfg.Process.PortRangeEnd < cfg.Process.PortRangeStart {
+			return fmt.Errorf("config: process.port_range_end must be >= port_range_start")
+		}
+		if cfg.Process.WorkerUIDEnd < cfg.Process.WorkerUIDStart {
+			return fmt.Errorf("config: process.worker_uid_range_end must be >= worker_uid_range_start")
+		}
+		uidCount := cfg.Process.WorkerUIDEnd - cfg.Process.WorkerUIDStart + 1
+		portCount := cfg.Process.PortRangeEnd - cfg.Process.PortRangeStart + 1
+		if uidCount < portCount {
+			return fmt.Errorf("config: process.worker_uid_range must be at least as large as port_range (got %d UIDs vs %d ports)", uidCount, portCount)
+		}
+	default:
+		return fmt.Errorf("config: server.backend must be \"docker\" or \"process\", got %q", cfg.Server.Backend)
 	}
 
 	if cfg.OIDC != nil {

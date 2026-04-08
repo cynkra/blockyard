@@ -128,8 +128,8 @@ func (r *Report) Log() {
 	}
 }
 
-// add appends a result to the report and updates the summary.
-func (r *Report) add(res Result) {
+// Add appends a result to the report and updates the summary.
+func (r *Report) Add(res Result) {
 	r.Results = append(r.Results, res)
 	switch res.Severity {
 	case SeverityError:

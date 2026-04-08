@@ -159,7 +159,7 @@ func TestCheckNoDefaultMemoryLimit(t *testing.T) {
 
 	t.Run("ok when set", func(t *testing.T) {
 		cfg := &config.Config{
-			Docker: config.DockerConfig{DefaultMemoryLimit: "2g"},
+			Server: config.ServerConfig{DefaultMemoryLimit: "2g"},
 		}
 		r := RunConfigChecks(cfg)
 		assertOK(t, r, "no_default_memory_limit")
@@ -177,7 +177,7 @@ func TestCheckNoDefaultCPULimit(t *testing.T) {
 
 	t.Run("ok when set", func(t *testing.T) {
 		cfg := &config.Config{
-			Docker: config.DockerConfig{DefaultCPULimit: 4.0},
+			Server: config.ServerConfig{DefaultCPULimit: 4.0},
 		}
 		r := RunConfigChecks(cfg)
 		assertOK(t, r, "no_default_cpu_limit")

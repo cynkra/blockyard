@@ -17,11 +17,11 @@ func TestCheckerLatestNilBeforeInit(t *testing.T) {
 func TestCheckerInitPopulatesLatest(t *testing.T) {
 	c := NewChecker(RuntimeDeps{
 		DBPing:     func(ctx context.Context) error { return nil },
-		DockerPing: func(ctx context.Context) error { return nil },
+		BackendPing: func(ctx context.Context) error { return nil },
 	})
 
 	configReport := &Report{}
-	configReport.add(Result{Name: "test_config", Severity: SeverityOK, Message: "ok", Category: "config"})
+	configReport.Add(Result{Name: "test_config", Severity: SeverityOK, Message: "ok", Category: "config"})
 
 	c.Init(context.Background(), configReport, nil)
 
@@ -55,7 +55,7 @@ func TestCheckerRunDynamicUpdatesLatest(t *testing.T) {
 			callCount++
 			return nil
 		},
-		DockerPing: func(ctx context.Context) error { return nil },
+		BackendPing: func(ctx context.Context) error { return nil },
 	})
 
 	c.Init(context.Background(), &Report{}, nil)
@@ -74,7 +74,7 @@ func TestCheckerRunDynamicUpdatesLatest(t *testing.T) {
 func TestCheckerConcurrentAccess(t *testing.T) {
 	c := NewChecker(RuntimeDeps{
 		DBPing:     func(ctx context.Context) error { return nil },
-		DockerPing: func(ctx context.Context) error { return nil },
+		BackendPing: func(ctx context.Context) error { return nil },
 	})
 	c.Init(context.Background(), &Report{}, nil)
 
@@ -96,11 +96,11 @@ func TestCheckerConcurrentAccess(t *testing.T) {
 func TestCheckerStaticResultsPreserved(t *testing.T) {
 	c := NewChecker(RuntimeDeps{
 		DBPing:     func(ctx context.Context) error { return nil },
-		DockerPing: func(ctx context.Context) error { return nil },
+		BackendPing: func(ctx context.Context) error { return nil },
 	})
 
 	configReport := &Report{}
-	configReport.add(Result{Name: "static_check", Severity: SeverityWarning, Message: "static", Category: "config"})
+	configReport.Add(Result{Name: "static_check", Severity: SeverityWarning, Message: "static", Category: "config"})
 	c.Init(context.Background(), configReport, nil)
 
 	// Run dynamic several times.
@@ -126,7 +126,7 @@ func TestCheckerRunDynamicCancelledContext(t *testing.T) {
 			<-ctx.Done()
 			return ctx.Err()
 		},
-		DockerPing: func(ctx context.Context) error { return nil },
+		BackendPing: func(ctx context.Context) error { return nil },
 	})
 	c.Init(context.Background(), &Report{}, nil)
 
@@ -157,12 +157,12 @@ func TestCheckerRunDynamicCancelledContext(t *testing.T) {
 func TestCheckerResultsSortedBySeverity(t *testing.T) {
 	c := NewChecker(RuntimeDeps{
 		DBPing:     func(ctx context.Context) error { return errors.New("down") },
-		DockerPing: func(ctx context.Context) error { return nil },
+		BackendPing: func(ctx context.Context) error { return nil },
 	})
 
 	// Config report with a warning.
 	configReport := &Report{}
-	configReport.add(Result{Name: "warn_check", Severity: SeverityWarning, Message: "warn", Category: "config"})
+	configReport.Add(Result{Name: "warn_check", Severity: SeverityWarning, Message: "warn", Category: "config"})
 
 	c.Init(context.Background(), configReport, nil)
 	report := c.Latest()

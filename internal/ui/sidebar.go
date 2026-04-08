@@ -366,8 +366,8 @@ func (ui *UI) runtimeTab(srv *server.Server) http.HandlerFunc {
 				Status: status,
 			}
 
-			// Container stats (best-effort).
-			stats, err := srv.Backend.ContainerStats(context.Background(), wid)
+			// Worker resource usage (best-effort).
+			stats, err := srv.Backend.WorkerResourceUsage(context.Background(), wid)
 			if err == nil && stats != nil {
 				wv.CPUPercent = stats.CPUPercent
 				wv.MemoryUsageBytes = stats.MemoryUsageBytes
@@ -585,7 +585,7 @@ func (ui *UI) workerDetailTab(srv *server.Server) http.HandlerFunc {
 
 		var cpuPercent float64
 		var memoryUsageBytes uint64
-		stats, err := srv.Backend.ContainerStats(context.Background(), workerID)
+		stats, err := srv.Backend.WorkerResourceUsage(context.Background(), workerID)
 		if err == nil && stats != nil {
 			cpuPercent = stats.CPUPercent
 			memoryUsageBytes = stats.MemoryUsageBytes

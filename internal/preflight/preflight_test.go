@@ -15,8 +15,8 @@ func TestReportHasErrors(t *testing.T) {
 
 	t.Run("warnings only", func(t *testing.T) {
 		r := &Report{}
-		r.add(Result{Name: "a", Severity: SeverityWarning, Message: "warn"})
-		r.add(Result{Name: "b", Severity: SeverityInfo, Message: "info"})
+		r.Add(Result{Name: "a", Severity: SeverityWarning, Message: "warn"})
+		r.Add(Result{Name: "b", Severity: SeverityInfo, Message: "info"})
 		if r.HasErrors() {
 			t.Error("report with only warnings/info should not have errors")
 		}
@@ -24,8 +24,8 @@ func TestReportHasErrors(t *testing.T) {
 
 	t.Run("contains error", func(t *testing.T) {
 		r := &Report{}
-		r.add(Result{Name: "a", Severity: SeverityWarning, Message: "warn"})
-		r.add(Result{Name: "b", Severity: SeverityError, Message: "err"})
+		r.Add(Result{Name: "a", Severity: SeverityWarning, Message: "warn"})
+		r.Add(Result{Name: "b", Severity: SeverityError, Message: "err"})
 		if !r.HasErrors() {
 			t.Error("report with an error should have errors")
 		}
@@ -35,7 +35,7 @@ func TestReportHasErrors(t *testing.T) {
 func TestReportHasWarnings(t *testing.T) {
 	t.Run("ok only", func(t *testing.T) {
 		r := &Report{}
-		r.add(Result{Name: "a", Severity: SeverityOK, Message: "ok"})
+		r.Add(Result{Name: "a", Severity: SeverityOK, Message: "ok"})
 		if r.HasWarnings() {
 			t.Error("report with only OK results should not have warnings")
 		}
@@ -43,7 +43,7 @@ func TestReportHasWarnings(t *testing.T) {
 
 	t.Run("has warning", func(t *testing.T) {
 		r := &Report{}
-		r.add(Result{Name: "a", Severity: SeverityWarning, Message: "warn"})
+		r.Add(Result{Name: "a", Severity: SeverityWarning, Message: "warn"})
 		if !r.HasWarnings() {
 			t.Error("report with a warning should have warnings")
 		}
@@ -51,7 +51,7 @@ func TestReportHasWarnings(t *testing.T) {
 
 	t.Run("has error", func(t *testing.T) {
 		r := &Report{}
-		r.add(Result{Name: "a", Severity: SeverityError, Message: "err"})
+		r.Add(Result{Name: "a", Severity: SeverityError, Message: "err"})
 		if !r.HasWarnings() {
 			t.Error("report with an error should have warnings")
 		}
@@ -61,10 +61,10 @@ func TestReportHasWarnings(t *testing.T) {
 func TestReportAdd(t *testing.T) {
 	r := &Report{}
 
-	r.add(Result{Name: "ok", Severity: SeverityOK, Message: "msg"})
-	r.add(Result{Name: "warn", Severity: SeverityWarning, Message: "msg"})
-	r.add(Result{Name: "err", Severity: SeverityError, Message: "msg"})
-	r.add(Result{Name: "info", Severity: SeverityInfo, Message: "msg"})
+	r.Add(Result{Name: "ok", Severity: SeverityOK, Message: "msg"})
+	r.Add(Result{Name: "warn", Severity: SeverityWarning, Message: "msg"})
+	r.Add(Result{Name: "err", Severity: SeverityError, Message: "msg"})
+	r.Add(Result{Name: "info", Severity: SeverityInfo, Message: "msg"})
 
 	if len(r.Results) != 4 {
 		t.Errorf("expected 4 results, got %d", len(r.Results))
@@ -186,10 +186,10 @@ func TestReportRecount(t *testing.T) {
 
 func TestReportLog(t *testing.T) {
 	r := &Report{}
-	r.add(Result{Name: "a", Severity: SeverityOK, Message: "ok"})
-	r.add(Result{Name: "b", Severity: SeverityWarning, Message: "warn"})
-	r.add(Result{Name: "c", Severity: SeverityError, Message: "err"})
-	r.add(Result{Name: "d", Severity: SeverityInfo, Message: "info"})
+	r.Add(Result{Name: "a", Severity: SeverityOK, Message: "ok"})
+	r.Add(Result{Name: "b", Severity: SeverityWarning, Message: "warn"})
+	r.Add(Result{Name: "c", Severity: SeverityError, Message: "err"})
+	r.Add(Result{Name: "d", Severity: SeverityInfo, Message: "info"})
 
 	// Log should not panic. We're just covering the method.
 	r.Log()
@@ -197,7 +197,7 @@ func TestReportLog(t *testing.T) {
 
 func TestReportJSONRoundTrip(t *testing.T) {
 	r := &Report{}
-	r.add(Result{Name: "a", Severity: SeverityWarning, Message: "test", Category: "config"})
+	r.Add(Result{Name: "a", Severity: SeverityWarning, Message: "test", Category: "config"})
 
 	data, err := json.Marshal(r)
 	if err != nil {

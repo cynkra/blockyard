@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/telemetry"
 )
@@ -70,8 +69,10 @@ func StartupCleanup(ctx context.Context, srv *server.Server, passive bool) error
 	// In passive mode, skip destructive operations that would kill
 	// workers the old server is handing off.
 	if !passive {
-		// Remove orphaned iptables rules from previous runs.
-		docker.CleanupOrphanMetadataRules()
+		// Remove backend-specific orphaned state (Docker: iptables rules).
+		if err := srv.Backend.CleanupOrphanResources(ctx); err != nil {
+			slog.Warn("startup: orphan resource cleanup failed", "error", err)
+		}
 	}
 
 	// Clean up orphaned staging directories from previous runs.

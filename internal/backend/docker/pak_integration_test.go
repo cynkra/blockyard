@@ -21,13 +21,15 @@ import (
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
-func pakTestConfig(t *testing.T) *config.DockerConfig {
+func pakTestConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return &config.DockerConfig{
-		Socket:     "/var/run/docker.sock",
-		Image:      testutil.TOMLDockerImage(t),
-		ShinyPort:  8080,
-		PakVersion: "stable",
+	return &config.Config{
+		Docker: config.DockerConfig{
+			Socket:     "/var/run/docker.sock",
+			Image:      testutil.TOMLDockerImage(t),
+			ShinyPort:  8080,
+			PakVersion: "stable",
+		},
 	}
 }
 
@@ -38,7 +40,7 @@ func TestBuildE2E_PakBuild(t *testing.T) {
 	image := testutil.TOMLDockerImage(t)
 
 	ctx := context.Background()
-	b, err := New(ctx, pakTestConfig(t), t.TempDir())
+	b, err := New(ctx, pakTestConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -92,7 +94,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 	image := testutil.TOMLDockerImage(t)
 
 	ctx := context.Background()
-	be, err := New(ctx, pakTestConfig(t), t.TempDir())
+	be, err := New(ctx, pakTestConfig(t), t.TempDir(), "test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

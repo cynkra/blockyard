@@ -1,6 +1,9 @@
 [server]
 bind             = "127.0.0.1:8080"
 shutdown_timeout = "30s"
+# backend            = "docker"        # "docker" (default) or "process"
+# default_memory_limit = "2g"          # fallback memory limit per worker; 0 = unlimited
+# default_cpu_limit    = 4.0           # fallback CPU limit per worker; 0 = unlimited
 # management_bind = "127.0.0.1:9100"  # separate listener for /healthz, /readyz, /metrics
 # log_level      = "info"             # trace, debug, info, warn, error
 # trusted_proxies = ["10.0.0.0/8", "172.16.0.0/12"]  # CIDRs whose X-Forwarded-For to trust for rate limiting
@@ -10,8 +13,17 @@ socket     = "/var/run/docker.sock"
 image      = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port = 3838
 pak_version = "stable"
-# default_memory_limit = "2g"  # fallback memory limit per worker; 0 = unlimited
-# default_cpu_limit    = 4.0   # fallback CPU limit per worker; 0 = unlimited
+
+# Optional: process backend (bubblewrap-sandboxed workers, no Docker)
+# Used when [server] backend = "process"
+# [process]
+# bwrap_path             = "/usr/bin/bwrap"
+# r_path                 = "/usr/bin/R"
+# port_range_start       = 10000
+# port_range_end         = 10999
+# worker_uid_range_start = 60000
+# worker_uid_range_end   = 60999
+# worker_gid             = 65534
 
 [storage]
 bundle_server_path = "/data/bundles"
