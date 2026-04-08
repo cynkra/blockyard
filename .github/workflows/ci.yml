@@ -400,7 +400,16 @@ jobs:
               ;;
           esac
       - name: Run process backend tests (${{ matrix.mode }})
+        # /github/home (the HOME Actions sets inside container jobs)
+        # isn't writable as root in the rocker container, so go's
+        # default module cache path blows up. Point GOCACHE/GOMODCACHE
+        # at /tmp which is always world-writable. Same override used
+        # for root and non-root test runs so the paths are symmetric.
+        env:
+          GOCACHE: /tmp/gocache
+          GOMODCACHE: /tmp/gomodcache
         run: |
+          mkdir -p "$GOCACHE" "$GOMODCACHE"
           case "${{ matrix.mode }}" in
             root)
               go test -count=1 -tags process_test \
@@ -409,19 +418,14 @@ jobs:
                 ./internal/backend/process/...
               ;;
             *)
-              # Run as the non-root user. chown the workspace and the
-              # module cache so go test can write coverage artifacts
-              # and cache intermediate builds.
-              chown -R blockyard-runner:blockyard-runner "$PWD"
-              chown -R blockyard-runner:blockyard-runner "$(go env GOMODCACHE)" 2>/dev/null || true
-              mkdir -p /home/blockyard-runner/.cache
-              chown -R blockyard-runner:blockyard-runner /home/blockyard-runner/.cache
-              # runuser -u preserves the environment including PATH
-              # (so go and R are still found) and just changes the
-              # effective UID/GID.
-              runuser -u blockyard-runner -- env PATH="$PATH" \
-                GOCACHE=/home/blockyard-runner/.cache/go-build \
-                GOMODCACHE="$(go env GOMODCACHE)" \
+              # Run as the non-root user. chown the workspace + cache
+              # so go test can write coverage and cache artifacts.
+              chown -R blockyard-runner:blockyard-runner "$PWD" "$GOCACHE" "$GOMODCACHE"
+              # runuser -u preserves PATH so go and R are still found.
+              runuser -u blockyard-runner -- env \
+                PATH="$PATH" \
+                GOCACHE="$GOCACHE" \
+                GOMODCACHE="$GOMODCACHE" \
                 go test -count=1 -tags process_test \
                 -coverprofile=coverage-process-${{ matrix.mode }}.out \
                 -coverpkg=./internal/... \
