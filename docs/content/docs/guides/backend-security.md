@@ -160,20 +160,19 @@ of these must hold:
 
 - **Blockyard runs as root** (typical containerized mode, where
   blockyard is PID 1 root inside a container). bwrap inherits root and
-  can set up any uid_map. This is the recommended mode and works with
-  any distro-provided bwrap.
-- **bwrap is setuid root on the host.** Default on Fedora/RHEL but
-  *not* on Debian 12+ or Ubuntu 24.04+. On those distros, native
-  non-root deployments need an operator-installed setuid bwrap
-  (`sudo chmod u+s /usr/bin/bwrap`).
+  can set up any uid_map.
+- **bwrap is setuid root on the host** (`sudo chmod u+s /usr/bin/bwrap`
+  if the distro package doesn't ship it that way). Required for native
+  non-root deployments.
 
 If neither condition holds, workers still start — but they all run
 under blockyard's own host UID, and the operator's iptables rules
 silently match nothing. Blockyard's preflight catches this at startup
-by spawning a bwrap probe with a distinct sandbox UID and verifying
-the child's host-side `/proc/<pid>/status` reports the requested UID.
-Run the server with your config and check the preflight report before
-the first worker spawns.
+by spawning a bwrap probe with a distinct sandbox UID and checking
+whether the child's host-side `/proc/<pid>/status` reports the
+requested UID. If it reports an error here, your iptables rules will
+not work until you add the setuid bit (or switch to running blockyard
+as root).
 
 ### 3. Apply resource limits outside the sandbox
 
