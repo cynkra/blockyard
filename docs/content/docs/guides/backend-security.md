@@ -75,9 +75,10 @@ Pick the **process backend** when:
 - The Docker socket is unacceptable — e.g. hardened hosts that prohibit
   Docker-out-of-Docker, or policies that forbid root-equivalent mounts in
   server containers.
-- Cold-start latency matters. The process backend adds ~2 ms of overhead
-  before R itself starts; the Docker backend adds ~500 ms–1 s for
-  container and network creation.
+- Cold-start latency matters. The Docker backend adds ~500 ms–1 s for
+  container and network creation before R itself starts; the process
+  backend skips both steps and its sandbox setup is negligible by
+  comparison.
 - The deployment is single-tenant or internal, and cross-worker network
   isolation is not part of the threat model.
 - Operational simplicity matters — no daemon, no socket, only a
