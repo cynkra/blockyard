@@ -169,10 +169,18 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	}
 	b.mu.Unlock()
 
-	port, err := b.ports.Alloc()
+	// Reserve a port AND hold a listener on it. The listener is closed
+	// inside the fork goroutine immediately before cmd.Start() so the
+	// kernel hands the port directly to the R child with the smallest
+	// possible window for another host process to race in. The deferred
+	// close is a safety net for error paths that return before the
+	// goroutine reaches its explicit close — closing an already-closed
+	// listener returns an error we ignore.
+	port, ln, err := b.ports.Reserve()
 	if err != nil {
 		return err
 	}
+	defer func() { _ = ln.Close() }()
 	uid, err := b.uids.Alloc()
 	if err != nil {
 		b.ports.Release(port)
@@ -266,6 +274,10 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 		runtime.LockOSThread()
 		// Intentionally do NOT UnlockOSThread. See comment above.
 
+		// Drop the listener and immediately fork. Any code between
+		// these two lines extends the window in which another host
+		// process can grab the port — keep this pair adjacent.
+		_ = ln.Close()
 		if err := cmd.Start(); err != nil {
 			started <- err
 			return

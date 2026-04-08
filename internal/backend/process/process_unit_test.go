@@ -306,9 +306,13 @@ func TestSpawnErrorPathsReleaseSlots(t *testing.T) {
 			name: "port_pool_exhausted",
 			setup: func(b *ProcessBackend) {
 				for {
-					if _, err := b.ports.Alloc(); err != nil {
-						break
+					_, ln, err := b.ports.Reserve()
+					if err != nil {
+						return
 					}
+					// We only need the bitset to be marked; the
+					// listener is incidental for this test.
+					ln.Close()
 				}
 			},
 			wantErr: "ports in use",
@@ -661,6 +665,7 @@ func TestWorkerResourceUsageLiveChild(t *testing.T) {
 	}
 	if first == nil {
 		t.Fatal("first call returned nil stats")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	if first.MemoryUsageBytes == 0 {
 		t.Error("expected non-zero RSS for a live process")
@@ -678,6 +683,7 @@ func TestWorkerResourceUsageLiveChild(t *testing.T) {
 	}
 	if second == nil {
 		t.Fatal("second call returned nil stats")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	// sleep consumes ~0 CPU; value must be a finite, sane number.
 	if second.CPUPercent < 0 || second.CPUPercent > 100 {
@@ -716,6 +722,7 @@ func TestPreflightDelegates(t *testing.T) {
 	}
 	if report == nil {
 		t.Fatal("expected non-nil report")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	wantNames := map[string]bool{
 		"bwrap_available":        false,

@@ -26,13 +26,19 @@ func newPortAllocator(start, end int) *portAllocator {
 	}
 }
 
-// Alloc returns the next free port, or an error if all ports are in use.
-// After marking a port as allocated in the bitset, it verifies the port
-// is actually bindable (TCP listen + immediate close). This prevents
-// TOCTOU failures where another process on the host has already bound
-// the port. If the probe fails, the port is skipped and the scan
-// continues to the next free slot.
-func (p *portAllocator) Alloc() (int, error) {
+// Reserve picks a free port, holds a listener on it, and returns
+// (port, listener, nil). The caller MUST close the listener immediately
+// before invoking the child process that will bind the port — holding
+// the listener prevents any other host process from grabbing the port
+// during Spawn's setup work, shrinking the TOCTOU window from "Spawn
+// setup latency" (~ms) to "the gap between ln.Close() and cmd.Start()"
+// (~µs).
+//
+// If a candidate port cannot be bound (another host process already
+// holds it), the slot is skipped and the scan continues. The bitset
+// entry is set before returning so concurrent Reserves do not collide
+// on the same slot; Release returns the slot to the pool.
+func (p *portAllocator) Reserve() (int, net.Listener, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, taken := range p.used {
@@ -40,24 +46,14 @@ func (p *portAllocator) Alloc() (int, error) {
 			continue
 		}
 		port := p.start + i
-		if !probePort(port) {
-			continue // port in use by another process; skip
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue // port in use by another host process; skip
 		}
 		p.used[i] = true
-		return port, nil
+		return port, ln, nil
 	}
-	return 0, fmt.Errorf("process backend: all %d ports in use", len(p.used))
-}
-
-// probePort attempts a TCP listen on 127.0.0.1:port to verify the port
-// is available. Returns true if the listen succeeds (port is free).
-func probePort(port int) bool {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return false
-	}
-	ln.Close()
-	return true
+	return 0, nil, fmt.Errorf("process backend: all %d ports in use", len(p.used))
 }
 
 // Release returns a port to the pool. No-op if the port is out of range.

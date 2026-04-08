@@ -365,6 +365,7 @@ func TestRunPreflightPopulatesReport(t *testing.T) {
 	report := RunPreflight(cfg, fullCfg)
 	if report == nil {
 		t.Fatal("expected non-nil report")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	expected := map[string]bool{
 		"bwrap_available":        false,
