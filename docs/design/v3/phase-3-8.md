@@ -283,22 +283,46 @@ splits along that seam:
   `checkReady`, `generateActivationToken`, `listenPort`. HTTP-level,
   backend-agnostic. The Docker-specific helpers (`pullImage`,
   `containerAddr`, `killAndRemove`, `currentImageBase/Tag`) move out.
+  `waitReady`'s signature changes from `(ctx, containerID) (addr, err)`
+  to `(ctx, addr string) error` — no more container-address lookup
+  inside the poll loop, because `CreateInstance` has already
+  resolved the address before returning. The Docker-specific
+  inspect-retry that used to live in `waitReady` moves into
+  `dockerServerFactory.CreateInstance`, bounded by the same ctx
+  deadline the orchestrator sets from `cfg.Proxy.WorkerStartTimeout`.
 - `internal/orchestrator/serverfactory.go` (new, untagged) — defines
   the `ServerFactory` and `newServerInstance` interfaces the core
   uses to delegate "create a new server instance":
 
   ```go
   type ServerFactory interface {
+      // CreateInstance starts the new server instance and blocks until
+      // its address is resolvable. On success, the returned instance's
+      // Addr() is immediately usable for polling and activation — no
+      // async resolution, no retry loop required by the caller. The
+      // ctx's deadline (set by the orchestrator from
+      // cfg.Proxy.WorkerStartTimeout) bounds address resolution; the
+      // remaining budget flows through to waitReady for /readyz polling.
       CreateInstance(ctx context.Context, ref string, extraEnv []string, sender task.Sender) (newServerInstance, error)
       PreUpdate(ctx context.Context, version string, sender task.Sender) error
   }
 
   type newServerInstance interface {
       ID() string            // stable identifier for logging
-      Addr() string          // host:port the orchestrator will poll/activate
+      Addr() string          // host:port; cheap, synchronous, cached at CreateInstance time
       Kill(ctx context.Context) // tear down on failure or watchdog rollback
   }
   ```
+
+  `Addr()` is a cached synchronous getter because both variants can
+  cache the address at creation time: the process factory already
+  knows the alt-bind port before `cmd.Start`, and the Docker factory
+  runs its own inspect-retry loop inside `CreateInstance` until the
+  container's IP appears in `NetworkSettings.Networks`, only then
+  returning the instance. This keeps `waitReady` a pure /readyz
+  poller and means `o.activeInstance.Addr()` calls from Update and
+  Watchdog (see the collapsed hand-off in step 6) need no context
+  or error handling.
 
 - `internal/orchestrator/clone_docker.go` (new, tagged) — Docker
   implementation: `dockerServerFactory`, `dockerInstance`,
@@ -544,8 +568,8 @@ stages (docs, css-builder, builder, seccomp-compiler).
   gains `-tags 'minimal,docker_backend'`. Output image:
   `ghcr.io/cynkra/blockyard-docker:<v>`.
 - **`docker/server-process.Dockerfile`** (new) produces the
-  process-backend image. Based on `rocker/r-ver:4.4.3` (see
-  rationale below). Installs `bubblewrap`, `ca-certificates`,
+  process-backend image. Based on `ghcr.io/rocker-org/r-ver:4.4.3`
+  (see rationale below). Installs `bubblewrap`, `ca-certificates`,
   `curl` via apt. Copies the `blockyard` binary built with
   `-tags 'minimal,process_backend'`, the compiled BPF blob from
   the `seccomp-compiler` stage, and `docker/blockyard-seccomp.json`
@@ -556,14 +580,15 @@ stages (docs, css-builder, builder, seccomp-compiler).
   `server-process.Dockerfile` + `iptables` in apt-get + no build
   tags on `go build` (default includes both backends). Output
   image: `ghcr.io/cynkra/blockyard:<v>`. Base is also
-  `rocker/r-ver:4.4.3` since R is the expensive dependency and
-  including it makes the `iptables` tooling cheap by comparison.
+  `ghcr.io/rocker-org/r-ver:4.4.3` since R is the expensive
+  dependency and including it makes the `iptables` tooling cheap
+  by comparison.
 
 Key `seccomp-compiler` stage (shared by process and everything
 variants):
 
 ```dockerfile
-FROM golang:1.25.8-alpine AS seccomp-compiler
+FROM golang:1.25.9-alpine AS seccomp-compiler
 RUN apk add --no-cache build-base libseccomp-dev
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -586,11 +611,15 @@ the maintenance burden. Alpine + R is not viable — R on musl has
 known numerics and locale issues, and many R packages fail to build
 against musl.
 
-The pinned tag `rocker/r-ver:4.4.3` matches what phase 3-7's CI
-already uses (`.github/workflows/ci.yml` process-backend matrix runs
-inside `ghcr.io/rocker-org/r-ver:4.4.3`). Test environment and
-runtime image must agree on the R version — drift between them is a
-silent reproducibility hazard for R package builds.
+The pinned tag `ghcr.io/rocker-org/r-ver:4.4.3` matches what phase
+3-7's CI already uses (`.github/workflows/ci.yml` process-backend
+matrix runs inside the same image) and what `blockyard.toml` ships
+as the default worker image. Dockerfile, CI, and default config all
+reference the GHCR mirror (not Docker Hub's `rocker/r-ver`) to
+avoid Docker Hub anonymous-pull rate limits and keep a single
+source of truth for R versions. Test environment and runtime image
+must agree on the R version — drift between them is a silent
+reproducibility hazard for R package builds.
 
 **Three Dockerfiles, not one with `ARG` switches.** Dockerfile
 conditionals (via `ARG`-driven shell tricks) make the build harder
@@ -704,14 +733,19 @@ Docker variant.
 1. `by admin update` triggers `Orchestrator.Update(ctx, channel, sender)`.
 2. `Update` calls `factory.PreUpdate` (variant-specific: docker pulls
    the new image, process just backs up the DB).
-3. `Update` generates an activation token and calls
-   `factory.CreateInstance(ctx, version, []string{...}, sender)`.
+3. `Update` generates an activation token, derives a ctx with
+   `cfg.Proxy.WorkerStartTimeout` as its deadline, and calls
+   `factory.CreateInstance(startCtx, version, []string{...}, sender)`.
    For the process variant, this picks a free port from
-   `[update] alt_bind_range`, resolves `os.Executable()`, and
+   `[update] alt_bind_range`, resolves `executableFn()`, and
    `cmd.Start()`s a new blockyard child with an env containing
    `BLOCKYARD_PASSIVE=1`, `BLOCKYARD_SERVER_BIND=0.0.0.0:<altport>`,
    and `BLOCKYARD_ACTIVATION_TOKEN=<token>`. Everything else from the
-   old server's env is copied. `Setsid: true`, no `Pdeathsig`.
+   old server's env is copied. `Setsid: true`, no `Pdeathsig`. The
+   Docker variant blocks inside `CreateInstance` running its inspect
+   loop against the same `startCtx` until the container's IP lands in
+   `NetworkSettings.Networks`, then returns with `Addr()` populated.
+   The remaining `startCtx` budget flows into the next step.
 
    The bind override goes through `applyEnvOverrides` (the reflective
    `BLOCKYARD_<SECTION>_<FIELD>` walker in `internal/config/config.go`),
@@ -720,8 +754,13 @@ Docker variant.
    and `BLOCKYARD_ACTIVATION_TOKEN` are special direct env vars
    (read via `os.Getenv` in `main.go` and `internal/api/admin.go`)
    and stay as-is.
-4. `waitReady` polls `/readyz` on the new instance's addr (via
-   loopback, `127.0.0.1:<altport>`) until 200.
+4. `waitReady(startCtx, inst.Addr())` polls `/readyz` on the new
+   instance's addr (via loopback, `127.0.0.1:<altport>`, for the
+   process variant; container IP for Docker) until 200. The same
+   `startCtx` bounds both this poll and the preceding `CreateInstance`,
+   so the total "new-server-becomes-healthy" budget remains
+   `cfg.Proxy.WorkerStartTimeout` — matching today's single-budget
+   semantics rather than splitting into two independent timeouts.
 5. `drainFn()` on the old server (health → 503). The operator's
    reverse proxy stops routing new traffic to the old port.
 6. `activate(ctx, newAddr)` posts to `/admin/activate` on the new
@@ -729,32 +768,51 @@ Docker variant.
 7. The orchestrator enters watchdog mode. When the watch period
    elapses and the new instance is healthy, `runScheduledOnce`
    signals `exitFn()`, which wakes the main goroutine's `doneCh`
-   select. Main calls `drainer.Finish` — and because `Drainer.
-   FinishIdleWait` is set to `cfg.Server.ShutdownTimeout` on the
-   process backend, `Finish` first polls the old server's local
-   session count until it reaches zero (or the timeout elapses)
-   and only then proceeds with the normal teardown.
+   select. Main calls `drainer.Finish` — and because
+   `Drainer.FinishIdleWait` is set to
+   `cfg.Update.DrainIdleWait.Duration` on the process backend
+   (default 5 minutes), `Finish` first polls the old server's
+   local session count until it reaches zero (or the timeout
+   elapses) and only then proceeds with the normal teardown.
 8. The new server, being a child of the old server but *without*
    `Pdeathsig`, survives the old's exit. Its parent becomes
    init/systemd. The new server's autoscaler rebuilds the worker
    pool from new traffic.
 
-#### Alt bind range config
+#### Alt bind range + idle-wait config
 
-New field in `UpdateConfig`:
+Two new fields in `UpdateConfig`:
 
 ```go
 type UpdateConfig struct {
-    Schedule     string   `toml:"schedule"`
-    Channel      string   `toml:"channel"`
-    WatchPeriod  Duration `toml:"watch_period"`
-    AltBindRange string   `toml:"alt_bind_range"` // e.g. "8090-8099"
+    Schedule      string   `toml:"schedule"`
+    Channel       string   `toml:"channel"`
+    WatchPeriod   Duration `toml:"watch_period"`
+    AltBindRange  string   `toml:"alt_bind_range"`  // e.g. "8090-8099"
+    DrainIdleWait Duration `toml:"drain_idle_wait"` // max time to wait for sessions before teardown
 }
 ```
 
-Default `"8090-8099"` in `applyDefaults()`. Parsing and free-port
-selection go through a new shared helper `internal/units/portrange.go`
-(used by both the worker port range and the alt bind range).
+`AltBindRange` defaults to `"8090-8099"` in `applyDefaults()`.
+Parsing and free-port selection go through a new shared helper
+`internal/units/portrange.go` (used by both the worker port range
+and the alt bind range).
+
+`DrainIdleWait` defaults to `5 * time.Minute` — same as
+`WatchPeriod`'s default and a reasonable ceiling for "most
+interactive sessions finish naturally while the operator's
+rolling update is in progress." `updateDefaults()` populates the
+default when the field is unset. Only the process backend reads
+this field (via `finishIdleWaitForBackend`); the Docker backend
+cuts over hard and relies on the reverse proxy to drain in-flight
+requests, so the field is ignored there.
+
+No explicit "disable" semantic — the process backend needs a
+non-zero idle-wait because workers are killed by `Pdeathsig` when
+the old server exits, and sessions on those workers end abruptly
+unless the idle-wait lets them finish first. Operators who want a
+faster cutover set `drain_idle_wait = "10s"` (or similar); the
+floor is the 5-second poll interval inside `waitForIdle`.
 
 The orchestrator picks a free port by calling `net.Listen` and
 closing immediately. TOCTOU window is small but non-zero — if the
@@ -855,6 +913,81 @@ func (p *processInstance) Kill(ctx context.Context) {
 The `setEnv`/`stripEnv` helpers are small idempotent operations on
 `[]string` KEY=VALUE slices.
 
+#### Collapsed `Update`/`Watchdog` hand-off
+
+Today's `Orchestrator.Update` returns a `*UpdateResult{ContainerID,
+Addr}` that the admin handler extracts and passes to `Watchdog`:
+
+```go
+ur, err := orch.Update(bgCtx, channel, sender)
+// ...
+orch.Watchdog(bgCtx, ur.ContainerID, ur.Addr, watchPeriod, sender)
+```
+
+With the `newServerInstance` interface landing, `ContainerID` is
+no longer meaningful (the process factory has no container IDs —
+it has a PID and a `Kill` closure). Rather than expose the
+interface through `UpdateResult` and leak it into the API layer,
+phase 3-8 collapses the hand-off: the orchestrator holds the
+active instance in a private field, set during `Update` and
+consumed during `Watchdog` / `Rollback`.
+
+```go
+type Orchestrator struct {
+    // ...existing fields...
+    factory        ServerFactory
+    activeInstance newServerInstance // set by Update, read by Watchdog/Rollback
+}
+
+func (o *Orchestrator) Update(ctx context.Context, channel string, sender task.Sender) (bool, error) {
+    // ... check for update, PreUpdate, backup, CreateInstance ...
+    inst, err := o.factory.CreateInstance(ctx, ref, []string{...}, sender)
+    // ...
+    o.activeInstance = inst
+    // ... waitReady(ctx, inst.Addr()), drainFn, activate(ctx, inst.Addr()) ...
+    return true, nil
+}
+
+func (o *Orchestrator) Watchdog(ctx context.Context, watchPeriod time.Duration, sender task.Sender) error {
+    defer func() { o.activeInstance = nil }()
+    addr := o.activeInstance.Addr()
+    for {
+        // ... poll /readyz on addr ...
+        // on failure:
+        o.activeInstance.Kill(ctx)
+        o.undrainFn()
+        return err
+    }
+}
+```
+
+Admin handler becomes:
+
+```go
+updated, err := orch.Update(bgCtx, channel, sender)
+if err != nil { /* ... */ }
+if !updated {
+    sender.Complete(task.Completed)
+    orch.SetState("idle")
+    return
+}
+watchPeriod := /* ... */
+if err := orch.Watchdog(bgCtx, watchPeriod, sender); err != nil { /* ... */ }
+```
+
+No `UpdateResult` type, no hand-off of opaque instance data
+through the admin goroutine. The orchestrator's state machine
+(`idle` → `updating` → `watching` → `idle`) already serializes
+`Update` → `Watchdog` transitions via `CASState`, so the
+`activeInstance` field is only ever read between those phases by
+one caller — no additional locking needed beyond the existing
+state machine discipline.
+
+`Rollback` follows the same pattern: `CreateInstance` → stash on
+`activeInstance` → waitReady/drain/activate → clear on return.
+Rollback has no watchdog, so the field lives for the duration of
+one `Rollback` call.
+
 #### `Config.ConfigPath`
 
 The factory needs the config file path so the new blockyard reads
@@ -941,10 +1074,12 @@ drainer = &drain.Drainer{
 
 where `finishIdleWaitForBackend` lives in `cmd/blockyard/` (same
 package that already knows about concrete backend types via the
-factory map) and returns `cfg.Server.ShutdownTimeout.Duration` for
-the process backend, zero otherwise. Both the post-watchdog
-`doneCh` path and the SIGUSR1 path call the same `drainer.Finish`
-— no new entry points, no variant-aware call sites.
+factory map) and returns `cfg.Update.DrainIdleWait.Duration` for
+the process backend, or 5 minutes when `cfg.Update` is nil
+(operator didn't declare `[update]` in TOML). For the Docker
+backend it returns zero. Both the post-watchdog `doneCh` path
+and the SIGUSR1 path call the same `drainer.Finish` — no new
+entry points, no variant-aware call sites.
 
 Why this shape, not a separate `FinishWhenIdle` public method: the
 variant choice belongs in main.go, which already knows about both
@@ -1099,7 +1234,7 @@ listener) that UIDs don't need.
 `process.New` picks both implementations based on `cfg.Redis`:
 
 ```go
-func New(fullCfg *config.Config) (*ProcessBackend, error) {
+func New(ctx context.Context, fullCfg *config.Config) (*ProcessBackend, error) {
     // ...existing setup...
     cfg := fullCfg.Process
     if fullCfg.Redis != nil {
@@ -1127,10 +1262,22 @@ behavior changes beyond the Reserve signature update from #173.
 Redis constructors capture the hostname as the "owner" identifier
 so startup cleanup can distinguish own stale keys from peers'.
 
-Redis connection reuse: both allocators share one `redisstate.Client`.
-Whether `process.New` opens its own connection or borrows from
-`server.Server` (via a constructor arg) is an implementation
-detail — pick whichever avoids duplicating config resolution.
+**Redis client ownership**: `process.New` opens its own
+`redisstate.Client` rather than borrowing `srv.RedisClient` from
+the server struct. The server's Redis client is created after
+backend construction in today's main.go (`main.go:118` constructs
+backend; `main.go:248` initializes Redis), and phase 3-8 does not
+reorder that sequence — the reorder is a larger-surface change
+than the wasted connection pool (~10 idle conns at go-redis
+defaults) for one extra client, and the ordering dependency
+elsewhere in main.go (Docker backend's preflight reads
+`fullCfg.Redis.URL` as a string at construction time) makes the
+reorder non-trivial to prove safe. `process.New` gains a
+`context.Context` parameter so the Redis ping has a timeout; the
+backend holds the client for the lifetime of the process and
+relies on OS-level FD reclamation at exit — no new `Close()`
+method on the Backend interface, because Redis writes through
+`go-redis` are synchronous and there is nothing to flush.
 
 #### Redis key schema
 
@@ -1432,12 +1579,46 @@ the whole reason we moved to Redis in the first place.
 `internal/orchestrator/clone_process_test.go` — unit tests for
 `pickAltBind`, env helpers, `processInstance.Addr` loopback rewrite,
 and `Kill` timeout escalation.
+
 `internal/orchestrator/process_integration_test.go`
-(`//go:build process_test`) — end-to-end rolling update test:
+(`//go:build process_test`) — end-to-end rolling update test.
+Before the test body runs, `TestMain` calls `go build -o
+<tempdir>/blockyard ./cmd/blockyard` once to produce a real
+blockyard binary (caching defeats the build cost on repeat runs),
+then overrides a test seam on `processServerFactory`:
+
+```go
+// clone_process.go (production)
+var executableFn = os.Executable // overridable in tests
+
+func (f *processServerFactory) CreateInstance(...) {
+    self, err := executableFn()
+    // ...
+}
+```
+
+The test writes:
+
+```go
+func TestMain(m *testing.M) {
+    bin := buildBlockyardBinary() // go build to t.TempDir()
+    orchestrator.ExecutableFnForTest = func() (string, error) { return bin, nil }
+    os.Exit(m.Run())
+}
+```
+
+(`ExecutableFnForTest` is an exported test seam on the
+orchestrator package that assigns to the unexported
+`executableFn`.) This means `os.Executable()` inside the running
+test binary never gets called from the factory — it always
+returns the pre-built blockyard path — and the child process is
+a real blockyard reading the test's miniredis instance.
+
+Flow:
 1. Start an in-process Redis via `miniredis` (`github.com/alicebob/miniredis/v2`).
    `testcontainers` is not viable here — phase 3-7's CI runs the
-   process backend tests inside the `rocker/r-ver:4.4.3` container,
-   which has no Docker socket to spawn child containers.
+   process backend tests inside the `ghcr.io/rocker-org/r-ver:4.4.3`
+   container, which has no Docker socket to spawn child containers.
 2. Start an old blockyard with `backend = "process"` against the
    miniredis instance.
 3. POST `/api/v1/admin/update` with a mocked GitHub check returning
@@ -1474,22 +1655,23 @@ variant image and hits `/healthz` (see step 5).
 | `cmd/seccomp-compile/main_test.go` | create | Round-trip test. |
 | `cmd/seccomp-merge/main.go` | create | ~80-line Go program (no CGO) that merges upstream moby profile + blockyard overlay. |
 | `internal/build/deps_test.go` | create | Asserts `go list -deps` output excludes the right packages per variant. |
-| `internal/orchestrator/orchestrator.go` | update | Drop the `docker dockerClient` and `serverID string` fields and the `dockerClient` interface itself; take a `ServerFactory` instead. Every method that touches `o.docker` (`pullImage`, `currentImageBase`, `currentImageTag`, `containerAddr`, `killAndRemove`, `cloneConfig`, `startClone`) either moves into `clone_docker.go` or routes through the factory. `Update`/`Watchdog`/`Rollback` use the factory. The `New` constructor's signature changes (drops the `*client.Client` and `serverID` args, adds a `ServerFactory`); all call sites in `cmd/blockyard/main.go` and `orchestrator_test.go` move with it. This is the largest non-test code chunk in the phase. |
+| `internal/orchestrator/orchestrator.go` | update | Drop the `docker dockerClient` and `serverID string` fields and the `dockerClient` interface itself; take a `ServerFactory` instead. Every method that touches `o.docker` (`pullImage`, `currentImageBase`, `currentImageTag`, `containerAddr`, `killAndRemove`, `cloneConfig`, `startClone`) either moves into `clone_docker.go` or routes through the factory. `Update`/`Watchdog`/`Rollback` use the factory. Add `activeInstance newServerInstance` field — set by `Update` from `CreateInstance`'s return, read by `Watchdog` for polling/kill and cleared on return; `Rollback` uses it within one call. Public API collapses: `Update` returns `(bool, error)` instead of `(*UpdateResult, error)`; `Watchdog` drops `newID`/`newAddr` params and reads from `activeInstance`. `UpdateResult` type is removed. The `New` constructor's signature changes (drops the `*client.Client` and `serverID` args, adds a `ServerFactory`); all call sites in `cmd/blockyard/main.go` and `orchestrator_test.go` move with it. This is the largest non-test code chunk in the phase. |
 | `internal/orchestrator/serverfactory.go` | create | `ServerFactory` and `newServerInstance` interfaces. |
 | `internal/orchestrator/clone.go` | delete | Replaced by `clone_docker.go`. |
 | `internal/orchestrator/clone_docker.go` | create | `!minimal \|\| docker_backend`. Docker factory, instance, container clone, image pull, kill. |
-| `internal/orchestrator/clone_process.go` | create | `!minimal \|\| process_backend`. Process factory, fork+exec, `pickAltBind`, env helpers. |
+| `internal/orchestrator/clone_process.go` | create | `!minimal \|\| process_backend`. Process factory, fork+exec, `pickAltBind`, env helpers. Package-level `var executableFn = os.Executable` as a test seam so `process_integration_test.go` can point the factory at a pre-built blockyard binary. |
 | `internal/orchestrator/clone_process_test.go` | create | Unit tests for process factory internals. |
+| `internal/orchestrator/export_test.go` | create | Exports `ExecutableFnForTest` (assigns to unexported `executableFn`) so the integration test can inject a pre-built blockyard binary path from its `TestMain`. |
 | `internal/orchestrator/process_integration_test.go` | create | `process_test`. End-to-end rolling update against real Redis. |
-| `internal/orchestrator/helpers.go` | update | Keep `waitReady`/`activate`/`checkReady`/`generateActivationToken`. Move Docker-specific helpers to `clone_docker.go`. |
+| `internal/orchestrator/helpers.go` | update | Keep `waitReady`/`activate`/`checkReady`/`generateActivationToken`. `waitReady` signature changes from `(ctx, containerID) (addr, err)` to `(ctx, addr) error` — the caller passes an already-resolved address (cached on `newServerInstance.Addr()` at `CreateInstance` time), and `waitReady` only polls `/readyz`. Move Docker-specific helpers (`pullImage`, `containerAddr`, `killAndRemove`, `currentImageBase/Tag`) to `clone_docker.go`; the inspect-retry loop that used to live in `waitReady` moves into `dockerServerFactory.CreateInstance`. |
 | `internal/orchestrator/rollback.go` | update | Factory-driven restart; 501 path for the process factory. |
 | `internal/orchestrator/orchestrator_test.go` | update | Mock `ServerFactory` instead of `dockerClient`. |
 | `internal/drain/drain.go` | update | Add `FinishIdleWait time.Duration` field on the `Drainer` struct; `Finish` calls an unexported `waitForIdle(maxWait)` helper when the field is non-zero. `waitForIdle` polls `Srv.Workers.WorkersForServer(hostname)` + `Srv.Sessions.CountForWorkers(own)` at 5s intervals until zero sessions or the timeout elapses. No new public method, no new call sites. |
 | `internal/drain/drain_test.go` | update | Tests for the idle-wait prelude: `Finish` with `FinishIdleWait = 0` matches today's behavior; with non-zero, it waits for zero sessions before tearing down; timeout path proceeds with remaining sessions logged. |
-| `cmd/blockyard/main.go` | update | (additional to existing factory-map changes) Set `drainer.FinishIdleWait` at construction based on the resolved backend type — `cfg.Server.ShutdownTimeout.Duration` for process, zero for docker. The helper `finishIdleWaitForBackend` lives in a small file in `cmd/blockyard/` that type-asserts against the concrete backend. |
-| `internal/config/config.go` | update | Add `UpdateConfig.AltBindRange` (default `"8090-8099"`), `Config.ConfigPath` (programmatic, no TOML tag). |
+| `cmd/blockyard/main.go` | update | (additional to existing factory-map changes) Set `drainer.FinishIdleWait` at construction based on the resolved backend type — `cfg.Update.DrainIdleWait.Duration` for process (falling back to 5 min when `cfg.Update` is nil), zero for docker. The helper `finishIdleWaitForBackend` lives in a small file in `cmd/blockyard/` that type-asserts against the concrete backend. |
+| `internal/config/config.go` | update | Add `UpdateConfig.AltBindRange` (default `"8090-8099"`), `UpdateConfig.DrainIdleWait` (default `5m` via `updateDefaults`), `Config.ConfigPath` (programmatic, no TOML tag). |
 | `internal/units/portrange.go` | create | Shared port range parser. |
-| `internal/api/admin.go` | update | `handleAdminRollback` returns 501 for the process factory variant. |
+| `internal/api/admin.go` | update | `handleAdminUpdate` adapts to the collapsed `Update (bool, error)` signature and drops the `UpdateResult`/`ContainerID` plumbing — the admin goroutine no longer threads an opaque instance through the Update → Watchdog hand-off. `handleAdminRollback` returns 501 for the process factory variant. |
 | `internal/server/workermap_iface.go` | update | Add `WorkersForServer(serverID string) []string` to the `WorkerMap` interface. |
 | `internal/server/workermap_redis.go` | update | Implement `WorkersForServer` via SCAN + HGET on the `server_id` hash field (pattern lifted from the existing `ForApp`). The field is already written by `Set` — phase 3-3 populates it but nothing reads it back. This is the reader. |
 | `internal/server/workermap_memory.go` | update | Implement `WorkersForServer` as `m.All()` — in single-node mode every worker belongs to "this" server, so the filter is a no-op. |
@@ -1501,7 +1683,7 @@ variant image and hits `/healthz` (see step 5).
 | `internal/backend/process/ports_redis.go` | create | `redisPortAllocator` — Redis-backed implementation. SETNX Lua script with `skip_from` argument for probe-retry, kernel-probe retry loop in Go, shared ownership-checked DEL script, `CleanupOwnedOrphans` for startup cleanup. |
 | `internal/backend/process/ports_redis_test.go` | create | Unit tests against miniredis: Reserve/Release, exhaustion, concurrent Reserve returns distinct ports, probe-failure retry loop exercise (synthetic collision via pre-bound listener). |
 | `internal/backend/process/ports_cleanup_test.go` | create | `CleanupOwnedOrphans` scoping — mirror of the UID cleanup test. |
-| `internal/backend/process/process.go` | update | `New` picks both allocator implementations based on `fullCfg.Redis`; `CleanupOrphanResources` delegates to each Redis allocator when it's the active one. Spawn uses `Reserve()` and closes the held listener immediately before the fork goroutine's `cmd.Start()`. |
+| `internal/backend/process/process.go` | update | `New(ctx, cfg)` picks both allocator implementations based on `fullCfg.Redis`; when Redis is configured `New` opens its own `redisstate.Client` (ordering in main.go keeps backend construction ahead of `redisstate.New`, so borrowing `srv.RedisClient` is not available at construction time — see step 7 discussion). `CleanupOrphanResources` delegates to each Redis allocator when it's the active one. Spawn uses `Reserve()` and closes the held listener immediately before the fork goroutine's `cmd.Start()`. |
 | `docker/server.Dockerfile` | update | Add `BUILD_TAGS` build arg defaulting to docker variant tags. |
 | `docker/server-process.Dockerfile` | create | Process-backend image. rocker/r-ver base, bwrap, BPF profile, `-tags 'minimal,process_backend'`. |
 | `docker/server-everything.Dockerfile` | create | Both backends. rocker/r-ver base, R + bwrap + iptables, default tags. |
@@ -1647,6 +1829,19 @@ variant image and hits `/healthz` (see step 5).
     the in-memory map one-line simple (single-node = all workers
     are ours) and avoids touching every `ActiveWorker{...}`
     construction site in tests.
+
+    Timeout source is a new `[update] drain_idle_wait` field
+    (default 5 minutes), not a reuse of `ShutdownTimeout` or
+    `DrainTimeout`. Neither existing field maps cleanly onto "wait
+    for sessions to finish during a rolling update": `DrainTimeout`
+    is already passed to `Finish` as its HTTP-teardown budget, and
+    reusing it would couple "idle wait" and "teardown" into one
+    knob with `2 * DrainTimeout` worst case; `ShutdownTimeout` is
+    semantically the SIGTERM budget and reusing it would make
+    SIGTERM shutdown and rolling-update idle-wait co-vary. The
+    new field lives in `[update]` alongside `watch_period` and
+    `alt_bind_range` so all process-orchestrator tuning knobs
+    cluster together.
 
 14. **Port and UID allocators: Redis when present, in-memory
     otherwise; no fallback.** Both resources can collide across
