@@ -162,7 +162,8 @@ func TestSpawnAndStop(t *testing.T) {
 	requireHostUIDMapping(t)
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Backend: "process"},
+		Server:  config.ServerConfig{Backend: "process"},
+		Storage: config.StorageConfig{BundleWorkerPath: "/tmp/app"},
 		Process: &config.ProcessConfig{
 			BwrapPath:      "bwrap",
 			RPath:          "/bin/sleep", // sleep stands in for R in lifecycle tests
@@ -217,7 +218,8 @@ func TestSpawnAndStop(t *testing.T) {
 func TestWorkerResourceUsageUnknownWorker(t *testing.T) {
 	requireBwrap(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Backend: "process"},
+		Server:  config.ServerConfig{Backend: "process"},
+		Storage: config.StorageConfig{BundleWorkerPath: "/tmp/app"},
 		Process: &config.ProcessConfig{
 			BwrapPath:      "bwrap",
 			RPath:          "/bin/sleep",
@@ -246,7 +248,8 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 	requireHostUIDMapping(t)
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{Backend: "process"},
+		Server:  config.ServerConfig{Backend: "process"},
+		Storage: config.StorageConfig{BundleWorkerPath: "/tmp/app"},
 		Process: &config.ProcessConfig{
 			BwrapPath:      "bwrap",
 			RPath:          "/bin/sleep",
@@ -295,7 +298,8 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 func TestUpdateResourcesNotSupported(t *testing.T) {
 	requireBwrap(t)
 	cfg := &config.Config{
-		Server: config.ServerConfig{Backend: "process"},
+		Server:  config.ServerConfig{Backend: "process"},
+		Storage: config.StorageConfig{BundleWorkerPath: "/tmp/app"},
 		Process: &config.ProcessConfig{
 			BwrapPath:      "bwrap",
 			RPath:          "/bin/sleep",
