@@ -385,6 +385,22 @@ func UpdateApp(srv *server.Server) http.HandlerFunc {
 				return
 			}
 		}
+		// The process backend cannot enforce per-worker resource
+		// limits — there is no cgroup delegation, so memory and CPU
+		// caps set on individual apps would be silently ignored at
+		// spawn time. Warn the user *here*, at the moment they're
+		// setting the value, rather than emitting one warning per
+		// worker spawn for the lifetime of the deployment.
+		settingLimit := (body.MemoryLimit != nil && *body.MemoryLimit != "") ||
+			(body.CPULimit != nil && *body.CPULimit > 0)
+		if settingLimit && srv.Config.Server.Backend == "process" {
+			msg := "process backend does not enforce per-worker memory_limit/cpu_limit; the value will be stored but ignored at spawn time. Use the docker backend if you need cgroup-enforced limits."
+			slog.Warn("api: per-app resource limit ignored on process backend", //nolint:gosec // G706: slog structured logging handles this
+				"app_id", id,
+				"memory_limit", stringOrEmpty(body.MemoryLimit),
+				"cpu_limit", floatOrZero(body.CPULimit))
+			w.Header().Add("X-Blockyard-Warning", msg)
+		}
 		if body.PreWarmedSessions != nil {
 			if *body.PreWarmedSessions < 0 {
 				badRequest(w, "pre_warmed_sessions must be non-negative")

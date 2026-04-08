@@ -146,18 +146,10 @@ func (b *ProcessBackend) CleanupOrphanResources(_ context.Context) error {
 }
 
 func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error {
-	// Warn when per-app resource limits are set: the process backend
-	// does not enforce them (decision #6). checkResourceLimits only
-	// catches the [server] defaults, so without this warning an app
-	// with `memory_limit = "512m"` in the database would silently get
-	// unlimited workers with no trace in the logs.
-	if spec.MemoryLimit != "" || spec.CPULimit > 0 {
-		slog.Warn("process backend: per-worker resource limits are ignored",
-			"worker_id", spec.WorkerID,
-			"app_id", spec.AppID,
-			"memory_limit", spec.MemoryLimit,
-			"cpu_limit", spec.CPULimit)
-	}
+	// Per-app resource limits are silently ignored on this backend
+	// (decision #6). The warning lives in api/apps.go at the moment
+	// the value is set — emitting it here would fire on every spawn
+	// for every app for the lifetime of the deployment.
 
 	// If an entry for this worker ID already exists, refuse to spawn
 	// over a live one. An entry that has already exited (its done

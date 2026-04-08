@@ -400,6 +400,68 @@ func TestUpdateApp(t *testing.T) {
 	if updated["memory_limit"] != "512m" {
 		t.Errorf("expected memory_limit=512m, got %v", updated["memory_limit"])
 	}
+	// Default test backend is "docker"; the warning header must NOT be set.
+	if w := resp.Header.Get("X-Blockyard-Warning"); w != "" {
+		t.Errorf("unexpected warning header on docker backend: %q", w)
+	}
+}
+
+func TestUpdateAppWarnsOnProcessBackendLimit(t *testing.T) {
+	srv, ts := testServer(t)
+	srv.Config.Server.Backend = "process"
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"memory_limit", `{"memory_limit":"512m"}`},
+		{"cpu_limit", `{"cpu_limit":2.0}`},
+		{"both", `{"memory_limit":"1g","cpu_limit":1.5}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id, strings.NewReader(tc.body))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != 200 {
+				b, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+			}
+			warning := resp.Header.Get("X-Blockyard-Warning")
+			if warning == "" {
+				t.Error("expected X-Blockyard-Warning header on process backend, got none")
+			}
+			if !strings.Contains(warning, "process backend") {
+				t.Errorf("warning should mention process backend: %q", warning)
+			}
+		})
+	}
+}
+
+func TestUpdateAppNoWarningWhenLimitNotSet(t *testing.T) {
+	srv, ts := testServer(t)
+	srv.Config.Server.Backend = "process"
+	created := createApp(t, ts, "my-app")
+	id := created["id"].(string)
+
+	// Update something OTHER than memory/cpu — no warning expected.
+	req := authReq("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(`{"max_workers_per_app":3}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	if w := resp.Header.Get("X-Blockyard-Warning"); w != "" {
+		t.Errorf("unexpected warning when not setting memory/cpu: %q", w)
+	}
 }
 
 func TestUpdateAppRejectsInvalidSessionLimit(t *testing.T) {
