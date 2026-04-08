@@ -23,129 +23,74 @@ packages.
 
 The zygote model is **experimental** and requires **two levels of
 opt-in**: a server-wide `experimental.zygote` config flag AND a
-per-app `zygote` boolean column. KSM is a separate, independent
-opt-in with the same two-level shape: `experimental.ksm` in server
-config AND a per-app `ksm` column. All four flags default off;
-operators who upgrade blockyard get identical behaviour to the
-prior version until they explicitly flip them. See design decision
-#18 for the full gating rationale. The existing shared-multiplexing
-mode (`max_sessions_per_worker > 1` without the zygote flag) is
+per-app `zygote` boolean column. Both default off; operators who
+upgrade blockyard get identical behaviour to the prior version
+until they explicitly flip them. See design decision #15 for the
+full gating rationale. The existing shared-multiplexing mode
+(`max_sessions_per_worker > 1` without the zygote flag) is
 unchanged and remains the default for multi-session apps.
 
-Phase 3-9 lands the **mechanism** only. Phase 3-10 adds post-fork
-sandboxing (private mount namespace, `/tmp` isolation, seccomp,
-capability dropping, per-process rlimits).
+Phase 3-9 lands the **mechanism** only — the two unconditional
+benefits (startup-latency elimination and per-session isolation).
+Phase 3-10 adds post-fork sandboxing (private mount namespace,
+`/tmp` isolation, seccomp, capability dropping, per-process
+rlimits) and the opt-in KSM memory-sharing story (C helper,
+`STATS` observability, preflight, byte-compilation,
+`oom_score_adj` pinning). See `phase-3-10-draft.md` for the
+KSM design — it was originally folded into phase 3-9 but carved
+out to keep this phase focused on the mechanism. Nothing in phase
+3-9 depends on KSM; KSM is layered on top in 3-10 without
+revisiting the protocol surface other than to add a `STATS`
+command and two fields to `INFO`.
 
 ## What the zygote model actually optimizes
 
-Three distinct benefits, with different durability properties:
+Two durable benefits, both unconditional on any supported host:
 
-1. **Session startup latency (durable, the main point).** Forking
-   a zygote takes single-digit milliseconds. Starting a fresh R
+1. **Session startup latency (the main point).** Forking a
+   zygote takes single-digit milliseconds. Starting a fresh R
    process and loading a heavy bundle's packages takes
    seconds-to-tens-of-seconds for rstan, arrow, sf, torch, large
    model files, and so on. For apps where cold start is the
    user-visible bottleneck — interactive dashboards, frequent
    intermittent users, scale-to-zero deployments — the zygote
    model dramatically improves first-byte time on every new
-   session. This benefit is unconditional and survives any
-   runtime behaviour.
+   session.
 
-2. **Per-session isolation (durable).** Each child is a separate
-   R process. GC pauses freeze only the affected child, not
-   all multiplexed sessions. Crashes don't take down siblings.
-   No shared global mutation between users. Shared multi-session
+2. **Per-session isolation.** Each child is a separate R
+   process. GC pauses freeze only the affected child, not all
+   multiplexed sessions. Crashes don't take down siblings. No
+   shared global mutation between users. Shared multi-session
    mode couples all of these together for memory efficiency;
    the zygote model trades that coupling for isolation.
 
-3. **Memory sharing via copy-on-write (opportunistic,
-   host-dependent).** Forked children start by sharing every
-   page with the zygote via the kernel's COW mechanism. A
-   freshly-forked session has near-zero marginal memory. But
-   R's generational GC writes mark bits to SEXP headers during
-   level-2 collections, dirtying every page containing a live
-   SEXP and breaking COW. Without a recovery mechanism, the
-   memory advantage decays to "each child holds its own private
-   copy of the package memory" after a few GC cycles.
+**Memory sharing via copy-on-write is an opportunistic
+third benefit that does not ship in phase 3-9.** Forked children
+start by sharing every page with the zygote via the kernel's
+COW mechanism, but R's generational GC writes mark bits to SEXP
+headers during level-2 collections, dirtying every page
+containing a live SEXP and breaking COW. Recovering that sharing
+needs a kernel-level merge mechanism (KSM via
+`prctl(PR_SET_MEMORY_MERGE)` on Linux 6.4+), up-front
+byte-compilation of bundle code so the JIT doesn't mutate closure
+headers post-fork, and `oom_score_adj` pinning so the kernel OOM
+killer reaps children first when KSM recovery lags behind a
+coordinated GC burst. That whole story lives in phase 3-10 — see
+`phase-3-10-draft.md` decisions K1, K3, and K5. Phase 3-9 ships
+the zygote mechanism alone; it delivers benefits #1 and #2
+unchanged regardless of whether phase 3-10 ever lands.
 
-   Phase 3-9 ships an opt-in for **kernel same-page merging
-   (KSM)** via `prctl(PR_SET_MEMORY_MERGE, 1)` (Linux 6.4+).
-   When enabled, ksmd scans for pages that are still
-   bit-identical across children after GC and re-merges them.
-   How much sharing this actually recovers is workload-dependent
-   and currently unmeasured for R: pages untouched by per-child
-   mutation (REFCNT bumps, attribute writes) merge cleanly,
-   while pages where any child has mutated a shared object do
-   not. Up-front bundle compilation (decision #17) eliminates
-   the JIT as a source of per-child mutation; that's a
-   prerequisite for KSM doing useful work on user code. Meta
-   reports ~10% of host RAM saved on Instagram, but Python's
-   object model is structurally different from R's, so that
-   figure is a directional anchor at best. See design decision
-   #13 for the full KSM reasoning, observability, and fallback
-   behaviour, and decision #18 for the opt-in gating.
-
-   **Five gates must all be open for the memory benefit to
-   materialise:**
-
-   1. **`experimental.zygote = true`** in the server config
-      (decision #18). Default off.
-   2. **`apps.zygote = true`** on the specific app (decision
-      #18). Default off.
-   3. **`experimental.ksm = true`** in the server config
-      (decision #18). Default off; independent of
-      `experimental.zygote`.
-   4. **`apps.ksm = true`** on the specific app (decision #18).
-      Default off; API rejects turning it on without
-      `apps.zygote = true`.
-   5. **Host-side KSM is available and tuned.** Three
-      sub-conditions that all apply at the host level:
-      - **Kernel ≥ 6.4** (the version that added
-        `PR_SET_MEMORY_MERGE`). Hosts with it: Ubuntu 24.04 LTS
-        (6.8), Debian 13 trixie when it ships, Fedora 39+,
-        Amazon Linux 2023, most rolling distros. Hosts
-        *without* it: Ubuntu 22.04 LTS (5.15), Debian 12
-        bookworm (6.1), RHEL 9 / AlmaLinux 9 / Rocky 9 (5.14),
-        k8s nodes on older base images. If you're deploying to
-        an enterprise distro released before mid-2024, assume
-        you don't have it until you check.
-      - **`/sys/kernel/mm/ksm/run == 1`**. ksmd is off by
-        default on most distros. Operators must enable it.
-      - **`pages_to_scan` tuned above the desktop default of
-        100.** Stock defaults scan at ~20 MB/sec, which is far
-        too slow for multi-GB R bundles. See decision #13 for
-        tuning guidance.
-
-   Gates 1–4 are the opt-in (application-level); gate 5 is the
-   host capability (infrastructure-level). When any fail, the
-   zygote model still ships and still delivers benefits #1 and
-   #2 (startup latency and isolation) unchanged — only the
-   memory-sharing story degrades to the PSOCK-equivalent steady
-   state. The preflight checks (deliverable #14) warn on the
-   host sub-conditions when the opt-in gates are open, so
-   operators can see the problem without reading this document.
-   Operators who have not opted into KSM see no preflight noise.
-
-**When to enable the zygote model.** Two separate value
-propositions, and they apply on different hosts:
-
-- **Startup latency + isolation (available everywhere).** Apps
-  where cold start is the user-visible bottleneck — interactive
-  dashboards, frequent intermittent users, scale-to-zero
-  deployments — and per-session isolation matters. No kernel
-  requirement beyond what the rest of blockyard needs; the
-  zygote model delivers these benefits on any supported host.
-- **Memory sharing (opportunistic, 6.4+ only).** Apps with
-  large package footprints where RAM is the constraint. Only
-  consider this as a reason to choose the zygote model if all
-  three gates above are open on your target hosts. Otherwise
-  shared multi-session mode (`max_sessions_per_worker > 1`
-  without `zygote`) is usually a better fit for tight RAM
-  budgets — it was designed for exactly that trade-off.
+**When to enable the zygote model.** Apps where cold start is the
+user-visible bottleneck — interactive dashboards, frequent
+intermittent users, scale-to-zero deployments — and per-session
+isolation matters. No kernel requirement beyond what the rest of
+blockyard needs; the zygote model delivers these benefits on any
+supported host.
 
 Apps with small package sets, fast loads, and tight RAM budgets
 are usually better served by shared multi-session mode
-regardless of kernel version.
+(`max_sessions_per_worker > 1` without `zygote`), which was
+designed for exactly that trade-off.
 
 ---
 
@@ -160,11 +105,11 @@ regardless of kernel version.
 - **Phase 3-3** — Redis shared state. The Redis `SessionStore`
   implementation must persist and read back `Entry.Addr` so the
   field survives a rolling update.
-- **Phase 3-6** — per-app config. This phase adds two per-app
-  fields (`zygote` and `ksm`) following the same pattern: DB
-  column → `AppRow` → `AppUpdate` → API → CLI → UI. See
-  decision #18 for the two-level opt-in that layers server-wide
-  config flags on top of the per-app fields.
+- **Phase 3-6** — per-app config. This phase adds one per-app
+  field (`zygote`) following the same pattern: DB column →
+  `AppRow` → `AppUpdate` → API → CLI → UI. See decision #15
+  for the two-level opt-in that layers the server-wide
+  `experimental.zygote` flag on top of the per-app column.
 - **Phase 3-7** — process backend core. The process backend's
   `Forking` implementation extends the bwrap spawn flow built here.
   Phase 3-9 assumes phase 3-7 leaves the network namespace shared
@@ -176,24 +121,19 @@ regardless of kernel version.
 
 ## Deliverables
 
-1. **Two-level opt-in gating for zygote and KSM** — see
-   decision #18 for the full gating model. This deliverable
-   has two layers, both default off:
-   - **`experimental.zygote` and `experimental.ksm` server-wide
-     config flags**: new `[experimental]` section on `Config`,
-     both default off when the section is absent. Config-load
-     validation rejects `experimental.ksm = true` without
-     `experimental.zygote = true`. Runtime paths short-circuit
-     to non-zygote behaviour whenever the respective flag is
-     off, giving operators a kill switch without database
-     updates.
-   - **`zygote` and `ksm` columns** on the `apps` table: both
-     added in migration `003_zygote` following expand-only
-     rules, both default to `0` (off). `zygote` is validated
-     to require `max_sessions_per_worker > 1` and the
-     server-wide `experimental.zygote` flag; `ksm` is
-     validated to require `zygote = true` on the same app and
-     the server-wide `experimental.ksm` flag.
+1. **Two-level opt-in gating for zygote** — see decision #15
+   for the full gating model. This deliverable has two layers,
+   both default off:
+   - **`experimental.zygote` server-wide config flag**: new
+     `[experimental]` section on `Config`, default off when the
+     section is absent. Runtime paths short-circuit to
+     non-zygote behaviour whenever the flag is off, giving
+     operators a kill switch without database updates.
+   - **`zygote` column** on the `apps` table: added in
+     migration `003_zygote` following expand-only rules,
+     defaults to `0` (off). Validated to require
+     `max_sessions_per_worker > 1` and the server-wide
+     `experimental.zygote` flag.
 2. **`session.Entry.Addr`** — new field on the session store entry.
    Populated at session creation; read by the proxy on every
    subsequent request. Gives zygote sessions a per-child routing
@@ -206,154 +146,97 @@ regardless of kernel version.
 4. **`internal/zygotectl/` and `internal/zygote/` packages** —
    the zygote support is split across two packages to break an
    import cycle (decision #5). `internal/zygotectl/` holds the
-   control-protocol surface (`Client`, `Info`, `Stats`,
-   `ChildExitMsg`, secret helpers) and has no dependency on
-   `backend`, so `backend.Forking` can reference
-   `*zygotectl.Client` on its interface without cycling.
-   `internal/zygote/` holds the backend-agnostic `Manager` type
-   that owns the session ↔ child bookkeeping, subscribes to
-   `ChildExits()`, exposes
-   `Fork(ctx, workerID, sessionID) (addr, error)` to the rest of
-   the server, runs a periodic sweep that cross-references its
-   bookkeeping against the session store and kills children
-   whose session has vanished, and drives the metrics-poll loop
-   (decision #15).
-5. **`internal/zygotectl/zygote.R`** — embedded R script. Loads the
-   bundle's packages and byte-compiles the bundle's own R code
-   (`global.R`, `app.R`) via `compiler::cmpfile()` so closures
-   are inherited by children as `BCODESXP` from the start (see
-   decision #17), captures the `shinyApp()` arguments so children
-   run `runApp(captured_app, ...)` without re-sourcing, listens
-   on the control TCP port, handles
-   `FORK`/`KILL`/`STATUS`/`INFO`/`STATS`/`AUTH`, pushes
-   `CHILDEXIT` from a `socketSelect`-driven 100ms poll loop.
-   Each forked child writes `1000` to `/proc/self/oom_score_adj`
-   immediately after fork so the OOM killer prefers children
-   over the zygote under memory pressure (see decision #16).
-   Single-threaded throughout — no `httpuv`/`later` (see
+   control-protocol surface (`Client`, `Info`, `ChildExitMsg`,
+   secret helpers) and has no dependency on `backend`, so
+   `backend.Forking` can reference `zygotectl` types on its
+   interface without cycling. `internal/zygote/` holds the
+   backend-agnostic `Manager` type that owns the session ↔
+   child bookkeeping, subscribes to `ChildExits()`, exposes
+   `Fork(ctx, workerID, sessionID) (addr, error)` to the rest
+   of the server, and runs a periodic sweep that
+   cross-references its bookkeeping against the session store
+   and kills children whose session has vanished.
+5. **`internal/zygotectl/zygote.R`** — embedded R script. Loads
+   the bundle's packages, sources `app.R` to capture the
+   `shinyApp()` arguments for child `runApp`, listens on the
+   control TCP port, handles `FORK`/`KILL`/`STATUS`/`INFO`/`AUTH`,
+   pushes `CHILDEXIT` from a `socketSelect`-driven 100ms poll
+   loop. Single-threaded throughout — no `httpuv`/`later` (see
    decision #4 for why). Embedded into the server binary via
    `//go:embed`, written to a host path at startup, bind-mounted
-   into the worker container or bwrap sandbox.
-6. **`internal/zygotectl/zygote_helper.c`** — tiny C helper (~15
-   lines, no R headers) compiled per-architecture to a shared
-   library. Loaded by `zygote.R` via `dyn.load` during startup
-   to call `prctl(PR_SET_MEMORY_MERGE, 1)`, enabling kernel-level
-   KSM page deduplication across forked children. The call is
-   gated on the `BLOCKYARD_KSM_ENABLED` env var (decision #18) —
-   when absent or `0`, the helper is not loaded and
-   `ksm_status` is reported as `disabled`. When enabled:
-   graceful fallback on older kernels (EINVAL) and seccomp-
-   restricted environments (EPERM); failures surface via the
-   `INFO` control command for ops visibility. See decision #13
-   for the full KSM strategy and decision #18 for the opt-in
-   gating.
-7. **Docker `Forking` implementation** — adds zygote-mode container
+   into the worker container or bwrap sandbox. Phase 3-10 will
+   extend this script with up-front byte-compilation, KSM
+   helper loading, a `STATS` handler, and child `oom_score_adj`
+   pinning — see `phase-3-10-draft.md` Step K6.
+6. **Docker `Forking` implementation** — adds zygote-mode container
    spawn, control port `3837` on the per-worker bridge, child port
    range allocation, control client wired to the shared protocol,
    control-connection watcher goroutine that evicts the worker on
    unexpected disconnect, and idempotent `Stop` hardening.
-8. **Process `Forking` implementation** — adds zygote-mode bwrap
+7. **Process `Forking` implementation** — adds zygote-mode bwrap
    spawn, control port allocation from a host-wide range, control
    client, same control-connection watcher / idempotent-Stop
    hardening as the Docker impl. Requires phase 3-7's port
    allocator.
-9. **Per-worker control secret** — a 32-byte random secret written
+8. **Per-worker control secret** — a 32-byte random secret written
    to the per-worker token dir at spawn (alongside the existing
    `token` file). Server holds the secret in memory; zygote reads
    it from the mounted token dir. Used as `AUTH` first frame.
-10. **Cold-start integration** — `ensureWorker` calls
-    `zygote.Manager.Fork` after spawning/finding a zygote worker
-    for zygote apps. The returned address goes onto `session.Entry.Addr`.
-11. **Proxy fallback** — extend the existing
+9. **Cold-start integration** — `ensureWorker` calls
+   `zygote.Manager.Fork` after spawning/finding a zygote worker
+   for zygote apps. The returned address goes onto `session.Entry.Addr`.
+10. **Proxy fallback** — extend the existing
     "session worker not in registry" fallback (`proxy.go:167`) to
     also cover "session addr unreachable", deleting the stale
     session and falling through to cold-start. Pairs with the
-    control-connection watcher in deliverables #7 and #8: when
+    control-connection watcher in deliverables #6 and #7: when
     a zygote dies unexpectedly, the watcher evicts the worker
     and this fallback catches the sessions that were still
     routed there.
-12. **Manager child sweep** — `zygote.Manager` runs its own
+11. **Manager child sweep** — `zygote.Manager` runs its own
     periodic tick that cross-references its `bySession` map against
     `session.Store.Get` and kills children whose session has
     disappeared (TTL expiry on Redis, `Sessions.Delete` from any
     code path on memory). Removes the need for a `SweepIdle` return
     value change and works symmetrically across both stores.
-13. **API/CLI/UI** — `zygote` and `ksm` fields on
-    `updateAppRequest`, `--zygote` and `--ksm` flags on
-    `by scale`, settings tab toggles in the UI (admin only),
-    and a new `GET /api/v1/server/capabilities` endpoint that
-    surfaces the effective `experimental.zygote` /
-    `experimental.ksm` flags for the UI to gate its toggle
-    state. Worker detail page surfaces the cached `zygotectl.Info`
-    (R version, KSM status, preload time) from `INFO`.
-14. **KSM preflight checks** — each backend's `Preflight()` impl
-    (introduced in phase 3-7) gains two checks, but only when
-    both `experimental.ksm = true` in server config AND at least
-    one app has `ksm = true`: read `/sys/kernel/mm/ksm/run` and
-    `/sys/kernel/mm/ksm/pages_to_scan`. If `run=0`, emit a
-    warning that KSM is not running on this host and the zygote
-    model's memory benefits will be reduced. If `run=1` but
-    `pages_to_scan` is at the kernel default (100), emit a
-    warning that the scan rate is too low for server-class
-    workloads and recommend the operator bump it (typical:
-    `echo 2000 > /sys/kernel/mm/ksm/pages_to_scan`). Both
-    warnings are non-fatal; the zygote model still works.
-    Operators who have not opted into KSM see no preflight
-    noise about it.
-15. **KSM observability** — see decision #15. The control protocol
-    gains a `STATS` command (distinct from `INFO`, which stays
-    cached startup state) returning dynamic per-zygote KSM merge
-    counts read from `/proc/self/ksm_stat` and
-    `/proc/<childpid>/ksm_stat`. `zygote.Manager` runs a
-    metrics-poll goroutine per zygote that calls `Stats` on a
-    `metrics_interval` tick (default 30s) and updates labeled
-    Prometheus gauges in `internal/telemetry/metrics.go`:
-    `blockyard_zygote_ksm_merging_pages{app_id, worker_id}` plus
-    `blockyard_zygote_ksm_merging_pages_total{app_id, worker_id}`
-    (zygote vs zygote+children). A separate server-level scraper
-    populates a host-global `blockyard_host_ksm_pages_sharing`
-    gauge from `/sys/kernel/mm/ksm/pages_sharing`. The worker
-    detail page surfaces the latest cached per-zygote value
-    alongside `KSMStatus`.
-16. **Tests** — interface compliance, control protocol unit tests
-    including the new `INFO` and `STATS` commands and multi-line
-    parsing, Docker integration test (zygote start, FORK two
-    children, independent health, KILL one, INFO reports expected
-    fields), process integration test (same flow under bwrap),
-    session round-trip including the new `Addr` field, KSM helper
-    test that asserts graceful fallback on a mocked `prctl`
-    failure path, and a KSM-effectiveness integration test that
-    forks two children, forces `gc(full=TRUE)` in each, polls
-    `STATS` until `ksm_merging_pages_total > 0` (or times out
-    with the captured value logged), and skips itself if
-    `/sys/kernel/mm/ksm/run == 0` on the test host.
+12. **API/CLI/UI** — `zygote` field on `updateAppRequest`,
+    `--zygote` flag on `by scale`, settings tab toggle in the
+    UI (admin only), and a new `GET /api/v1/server/capabilities`
+    endpoint that surfaces the effective `experimental.zygote`
+    flag for the UI to gate its toggle state. Worker detail
+    page surfaces the cached `zygotectl.Info` (R version,
+    preload time) from `INFO`.
+13. **Tests** — interface compliance, control protocol unit tests
+    including the `INFO` command, Docker integration test
+    (zygote start, FORK two children, independent health, KILL
+    one, INFO reports expected fields), process integration
+    test (same flow under bwrap), session round-trip including
+    the new `Addr` field.
 
 ---
 
 ## Step-by-step
 
-### Step 1: Migration — `zygote` and `ksm` columns
+### Step 1: Migration — `zygote` column
 
-Migration `003_zygote` adds two boolean columns. Both additive,
+Migration `003_zygote` adds one boolean column. Additive,
 nullable-equivalent (default 0), backward-compatible per phase 3-1
 rules. Phase 3-7 does not add migrations, so `003` is correct as of
-phase 3-9. Both columns belong to the same migration because the
-two features ship together (even though they're independently
-gated — see decision #18).
+phase 3-9. Phase 3-10 will add a separate `004_ksm` migration for
+the KSM opt-in.
 
 **`internal/db/migrations/sqlite/003_zygote.up.sql`:**
 
 ```sql
 -- phase: expand
 ALTER TABLE apps ADD COLUMN zygote INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE apps ADD COLUMN ksm    INTEGER NOT NULL DEFAULT 0;
 ```
 
 **`internal/db/migrations/sqlite/003_zygote.down.sql`:**
 
 ```sql
 -- SQLite does not support DROP COLUMN before 3.35.0. Recreate the
--- table without the columns. Same pattern as migration 002.
+-- table without the column. Same pattern as migration 002.
 CREATE TABLE apps_new (
     id                      TEXT PRIMARY KEY,
     name                    TEXT NOT NULL,
@@ -395,17 +278,15 @@ CREATE UNIQUE INDEX idx_apps_name_live ON apps(name) WHERE deleted_at IS NULL;
 ```sql
 -- phase: expand
 ALTER TABLE apps ADD COLUMN zygote BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE apps ADD COLUMN ksm    BOOLEAN NOT NULL DEFAULT FALSE;
 ```
 
 **`internal/db/migrations/postgres/003_zygote.down.sql`:**
 
 ```sql
-ALTER TABLE apps DROP COLUMN ksm;
 ALTER TABLE apps DROP COLUMN zygote;
 ```
 
-### Step 2: DB layer — `AppRow.Zygote`/`AppRow.KSM`, `AppUpdate.Zygote`/`AppUpdate.KSM`
+### Step 2: DB layer — `AppRow.Zygote`, `AppUpdate.Zygote`
 
 Add to `AppRow` in `internal/db/db.go` (after `Runtime`, line 235):
 
@@ -413,7 +294,6 @@ Add to `AppRow` in `internal/db/db.go` (after `Runtime`, line 235):
 type AppRow struct {
     // ...existing fields...
     Zygote bool `db:"zygote" json:"zygote"`
-    KSM    bool `db:"ksm"    json:"ksm"`
 }
 ```
 
@@ -423,24 +303,20 @@ Add to `AppUpdate` (line 587):
 type AppUpdate struct {
     // ...existing fields...
     Zygote *bool
-    KSM    *bool
 }
 ```
 
-Update `UpdateApp()` (line 591) to handle the new fields:
+Update `UpdateApp()` (line 591) to handle the new field:
 
 ```go
 if u.Zygote != nil {
     app.Zygote = *u.Zygote
 }
-if u.KSM != nil {
-    app.KSM = *u.KSM
-}
 ```
 
-Add `zygote = ?` and `ksm = ?` to the UPDATE SQL alongside the
-other fields, plus `app.Zygote` and `app.KSM` to the bind list.
-Insert path (`CreateApp`) defaults both to `false`.
+Add `zygote = ?` to the UPDATE SQL alongside the other fields,
+plus `app.Zygote` to the bind list. Insert path (`CreateApp`)
+defaults to `false`.
 
 ### Step 3: `session.Entry.Addr` field
 
@@ -509,11 +385,6 @@ Add to `internal/backend/backend.go` (after the `Backend` interface
 and `ErrNotSupported`):
 
 ```go
-import (
-    // ...existing imports...
-    "github.com/cynkra/blockyard/internal/zygotectl"
-)
-
 // Forking is an optional capability interface implemented by backends
 // that support the zygote worker model. A zygote worker is a
 // long-lived "zygote" process that has loaded the bundle's packages
@@ -524,11 +395,11 @@ import (
 // Code that wants to fork checks for the capability via type
 // assertion: `f, ok := srv.Backend.(backend.Forking)`.
 //
-// The `zygotectl` package (imported above) holds the control-protocol
-// client and its associated types. It has no dependency on this
-// package, so importing it here does not close an import cycle with
-// `internal/zygote` (which imports `backend` for Forking/ChildExit
-// and `zygotectl` for Client/Info/Stats).
+// Phase 3-10 extends this interface with a StatsClient method
+// for KSM metrics polling. Splitting the control-protocol types
+// into `internal/zygotectl/` (decision #5) already breaks the
+// import cycle that method will need, so the addition is a pure
+// additive change.
 type Forking interface {
     // Fork creates a session-specific child inside the given worker.
     // Returns the child's network address ("ip:port") and an opaque
@@ -545,16 +416,6 @@ type Forking interface {
     // that produces events. The channel is closed when the backend
     // shuts down.
     ChildExits() <-chan ChildExit
-
-    // StatsClient resolves a workerID to its live zygote control
-    // client for metrics polling (decision #15). Returns nil if the
-    // worker is unknown or not in zygote mode. The Manager's metrics
-    // goroutine calls this on each tick; the backend continues to
-    // own the client's lifetime (creation at Spawn, destruction at
-    // Stop). The return type comes from the `zygotectl` package
-    // (the split-out protocol surface that has no dependency on
-    // `backend`), so there's no import cycle.
-    StatsClient(workerID string) *zygotectl.Client
 }
 
 // ChildExit is the event emitted by Forking.ChildExits when a
@@ -572,21 +433,20 @@ adjacent in concept. Implementations live in each backend's package.
 
 ### Step 5: `internal/zygotectl/` and `internal/zygote/` packages
 
-The zygote support splits across two packages to break an
-import cycle cleanly. The boundary follows what depends on
-`backend.Forking` and what doesn't:
+The zygote support splits across two packages to keep the
+control-protocol surface decoupled from `backend`. The boundary
+follows what depends on `backend.Forking` and what doesn't:
 
 - **`internal/zygotectl/`** — the control-protocol surface:
-  `Client`, `Info`, `Stats`, `ChildExitMsg`, the per-worker
-  secret helpers, and the embedded `zygote.R` / C helper. This
-  package imports only the standard library, so `backend` can
-  import it to reference `*zygotectl.Client` on the `Forking`
-  interface without cycling.
+  `Client`, `Info`, `ChildExitMsg`, the per-worker secret
+  helpers, and the embedded `zygote.R` script. This package
+  imports only the standard library, so nothing forms an import
+  cycle when phase 3-10 extends `backend.Forking` with a
+  `StatsClient(workerID) *zygotectl.Client` method.
 - **`internal/zygote/`** — the `Manager` type that owns the
-  session ↔ child bookkeeping, subscribes to `Forking.ChildExits`,
-  and drives the metrics-poll loop. It imports both `backend`
-  (for `Forking` and `ChildExit`) and `zygotectl` (for `Client`
-  and `Stats`).
+  session ↔ child bookkeeping and subscribes to
+  `Forking.ChildExits`. It imports both `backend` (for `Forking`
+  and `ChildExit`) and `zygotectl` (for `Client`).
 
 **`internal/zygotectl/control.go`** — TCP control protocol client.
 Shared between both backend `Forking` implementations.
@@ -623,17 +483,10 @@ server → client: <childID> <pid> <port> <state>\n... END\n
 client → server: INFO\n
 server → client: <key>=<value>\n... END\n
                  # Static, queried once at construction. Known keys:
-                 # r_version, ksm_status, ksm_errno, preload_ms.
-                 # Parser ignores unknown keys (forward-compatible).
-
-client → server: STATS\n
-server → client: <key>=<value>\n... END\n
-                 # Dynamic, polled on a metrics tick. Known keys:
-                 # ksm_merging_pages_zygote, ksm_merging_pages_children,
-                 # ksm_merging_pages_total, child_count.
-                 # Values read by zygote.R from /proc/<pid>/ksm_stat
-                 # for itself and each tracked child PID. Parser
-                 # ignores unknown keys (forward-compatible).
+                 # r_version, preload_ms. Phase 3-10 adds ksm_status
+                 # and ksm_errno. Parser ignores unknown keys
+                 # (forward-compatible), so the 3-10 additions land
+                 # without a protocol bump.
 
 server → client (push, async): CHILDEXIT <childID> <exitCode> <reason>\n
 ```
@@ -675,11 +528,10 @@ type Client struct {
 
     reqMu sync.Mutex // serialises request/response cycles
 
-    mu               sync.Mutex
-    conn             net.Conn
-    reader           *bufio.Reader
-    pending          chan reply // current in-flight request reply
-    pendingMultiline bool       // current request expects multi-line reply
+    mu      sync.Mutex
+    conn    net.Conn
+    reader  *bufio.Reader
+    pending chan reply // current in-flight request reply
 
     Exits  chan ChildExitMsg // CHILDEXIT pushes from server
     closed chan struct{}
@@ -735,7 +587,6 @@ func NewClient(ctx context.Context, addr string, secret []byte) (*Client, error)
     slog.Info("zygote: control client ready",
         "addr", addr,
         "r_version", info.RVersion,
-        "ksm_status", info.KSMStatus,
         "preload_ms", info.PreloadMS)
 
     go cc.readLoop()
@@ -788,69 +639,13 @@ func (c *Client) Kill(ctx context.Context, childID string) error {
     return nil
 }
 
-// Stats sends the STATS command and returns the dynamic per-zygote
-// KSM merge counts. Unlike Info(), which is cached startup state
-// returned without a network round-trip, Stats() always hits the
-// zygote over TCP. Called on the metrics-poll tick by
-// zygote.Manager's metrics goroutine — see decision #15. Uses the
-// same reqMu as FORK/KILL so metrics polling naturally defers to
-// in-flight cold starts.
-func (c *Client) Stats(ctx context.Context) (Stats, error) {
-    resp, err := c.requestMulti(ctx, "STATS\n")
-    if err != nil {
-        return Stats{}, err
-    }
-    return parseStats(resp), nil
-}
-
-// Stats is the dynamic view of a zygote's current KSM merge state.
-// The zygote reads its own /proc/self/ksm_stat plus
-// /proc/<childpid>/ksm_stat for each tracked child and returns the
-// aggregated totals.
-type Stats struct {
-    KSMMergingPagesZygote   int  // pages from the zygote process itself
-    KSMMergingPagesChildren int  // sum across all live children
-    KSMMergingPagesTotal    int  // = zygote + children
-    ChildCount              int  // number of live children contributing
-    KSMStatSupported        bool // false on kernel < 6.1 (no /proc/<pid>/ksm_stat)
-}
-
-// parseStats parses a multi-line STATS response into a Stats value.
-// Unknown keys are ignored (forward-compatible). Missing keys
-// leave the zero value in place.
-func parseStats(resp string) Stats {
-    // ksm_stat_supported defaults true; zygote.R sets it to 0
-    // explicitly when /proc/<pid>/ksm_stat is unavailable.
-    stats := Stats{KSMStatSupported: true}
-    for _, line := range strings.Split(resp, "\n") {
-        key, val, ok := strings.Cut(line, "=")
-        if !ok {
-            continue
-        }
-        switch key {
-        case "ksm_merging_pages_zygote":
-            stats.KSMMergingPagesZygote, _ = strconv.Atoi(val)
-        case "ksm_merging_pages_children":
-            stats.KSMMergingPagesChildren, _ = strconv.Atoi(val)
-        case "ksm_merging_pages_total":
-            stats.KSMMergingPagesTotal, _ = strconv.Atoi(val)
-        case "child_count":
-            stats.ChildCount, _ = strconv.Atoi(val)
-        case "ksm_stat_supported":
-            stats.KSMStatSupported = val == "1"
-        }
-    }
-    return stats
-}
-
 // Info is the structured view of a zygote's startup state,
 // populated from the INFO control command. Unknown keys are
-// ignored so the protocol can be extended backward-compatibly.
+// ignored so the protocol can be extended backward-compatibly
+// — phase 3-10 adds ksm_status and ksm_errno without a schema
+// bump via this mechanism.
 type Info struct {
     RVersion  string
-    KSMStatus string // "enabled", "disabled", "unsupported", "denied",
-                    // "failed", "helper_missing", "dlopen_failed", "unknown"
-    KSMErrno  int
     PreloadMS int
     Unknown   map[string]string // forward-compat: unrecognised keys
 }
@@ -886,10 +681,6 @@ func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
         switch key {
         case "r_version":
             info.RVersion = val
-        case "ksm_status":
-            info.KSMStatus = val
-        case "ksm_errno":
-            info.KSMErrno, _ = strconv.Atoi(val)
         case "preload_ms":
             info.PreloadMS, _ = strconv.Atoi(val)
         default:
@@ -905,35 +696,22 @@ func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
 // is held briefly (one write + one read from the response channel),
 // so the queue depth is bounded by the rate of incoming Fork calls
 // and not by anything blocking on R.
+//
+// Phase 3-10 adds a multi-line variant for the STATS command;
+// extending this loop to accumulate lines until "END" is a small
+// delta. See phase-3-10-draft.md Step K5.
 func (c *Client) request(ctx context.Context, line string) (string, error) {
-    return c.sendAndWait(ctx, line, false)
-}
-
-// requestMulti is the multi-line variant used by STATS (and would
-// be used by STATUS if we ever need it from Go — fetchInfo for INFO
-// stays synchronous during construction, see its comment). The
-// reader goroutine accumulates lines until it sees "END" and
-// delivers the joined response as a single "\n"-separated string.
-// CHILDEXIT pushes arriving mid-response are still dispatched to
-// Exits, so async events do not disrupt multi-line accumulation.
-func (c *Client) requestMulti(ctx context.Context, line string) (string, error) {
-    return c.sendAndWait(ctx, line, true)
-}
-
-func (c *Client) sendAndWait(ctx context.Context, line string, multi bool) (string, error) {
     c.reqMu.Lock()
     defer c.reqMu.Unlock()
 
     c.mu.Lock()
     ch := make(chan reply, 1)
     c.pending = ch
-    c.pendingMultiline = multi
     _, err := c.conn.Write([]byte(line))
     c.mu.Unlock()
     if err != nil {
         c.mu.Lock()
         c.pending = nil
-        c.pendingMultiline = false
         c.mu.Unlock()
         return "", fmt.Errorf("control: write: %w", err)
     }
@@ -952,12 +730,11 @@ func (c *Client) sendAndWait(ctx context.Context, line string, multi bool) (stri
 // them. Synchronous request replies go to the pending channel;
 // CHILDEXIT pushes go to Exits. Uses the same bufio.Reader that
 // auth and fetchInfo used during construction, so no buffered
-// bytes are lost across the handoff. Handles both single-line
-// replies (FORK/KILL) and multi-line replies terminated by "END"
-// (STATS) — the sendAndWait caller sets pendingMultiline to pick.
+// bytes are lost across the handoff. Single-line replies only in
+// phase 3-9 (FORK/KILL); phase 3-10 extends this to accumulate
+// multi-line STATS responses terminated by "END".
 func (c *Client) readLoop() {
     defer close(c.closed)
-    var multiBuf strings.Builder
     for {
         line, err := c.reader.ReadString('\n')
         if err != nil {
@@ -971,37 +748,14 @@ func (c *Client) readLoop() {
 
         c.mu.Lock()
         ch := c.pending
-        multi := c.pendingMultiline
+        c.pending = nil
         c.mu.Unlock()
 
         if ch == nil {
             // No pending request — unexpected reply, drop.
             continue
         }
-
-        if !multi {
-            // Single-line reply: hand over and clear.
-            c.mu.Lock()
-            c.pending = nil
-            c.mu.Unlock()
-            ch <- reply{line: line}
-            continue
-        }
-
-        // Multi-line mode: accumulate until "END".
-        if line == "END" {
-            c.mu.Lock()
-            c.pending = nil
-            c.pendingMultiline = false
-            c.mu.Unlock()
-            ch <- reply{line: multiBuf.String()}
-            multiBuf.Reset()
-            continue
-        }
-        if multiBuf.Len() > 0 {
-            multiBuf.WriteByte('\n')
-        }
-        multiBuf.WriteString(line)
+        ch <- reply{line: line}
     }
 }
 
@@ -1052,36 +806,21 @@ import (
 
     "github.com/cynkra/blockyard/internal/backend"
     "github.com/cynkra/blockyard/internal/session"
-    "github.com/cynkra/blockyard/internal/telemetry"
-    "github.com/cynkra/blockyard/internal/zygotectl"
 )
 
 // Manager owns the session ↔ child bookkeeping for zygote workers.
 // It is backend-agnostic — the backend-specific bits live in the
-// Forking implementation it wraps.
+// Forking implementation it wraps. Phase 3-10 extends this type
+// with a metrics-poll loop for KSM observability (see
+// phase-3-10-draft.md Step K8); phase 3-9 ships the session
+// bookkeeping and sweep loop only.
 type Manager struct {
-    forking         backend.Forking
-    sessions        session.Store
-    sweepInterval   time.Duration
-    metricsInterval time.Duration
+    forking       backend.Forking
+    sessions      session.Store
+    sweepInterval time.Duration
 
-    // statsClient resolves workerID → *zygotectl.Client so the
-    // metrics goroutine can call Stats() on each live zygote.
-    // Supplied by the backend at Manager construction time — the
-    // backend owns the client lifetime. Typically this is just
-    // forking.StatsClient, but we store it separately to keep the
-    // Manager from leaning on the interface method directly.
-    statsClient func(workerID string) *zygotectl.Client
-
-    // AppIDFor resolves workerID → app_id for Prometheus label
-    // population. Supplied by the caller (usually
-    // `func(wid string) string { return srv.WorkerApp(wid) }`).
-    appIDFor func(workerID string) string
-
-    mu            sync.Mutex
-    bySession     map[string]childRef       // sessionID → (workerID, childID)
-    lastStats     map[string]zygotectl.Stats // workerID → most recent STATS result
-    workersActive map[string]struct{}       // workerID set; populated via NotifyWorkerAlive, cleared via NotifyWorkerGone
+    mu        sync.Mutex
+    bySession map[string]childRef // sessionID → (workerID, childID)
 
     stop chan struct{}
 }
@@ -1094,139 +833,27 @@ type childRef struct {
 // ManagerConfig bundles the optional dependencies so NewManager
 // doesn't grow a long positional parameter list.
 type ManagerConfig struct {
-    SweepInterval   time.Duration
-    MetricsInterval time.Duration
-    StatsClient     func(workerID string) *zygotectl.Client
-    AppIDFor        func(workerID string) string
+    SweepInterval time.Duration
 }
 
 func NewManager(forking backend.Forking, sessions session.Store, cfg ManagerConfig) *Manager {
     if cfg.SweepInterval <= 0 {
         cfg.SweepInterval = 30 * time.Second
     }
-    if cfg.MetricsInterval <= 0 {
-        cfg.MetricsInterval = 30 * time.Second
-    }
     m := &Manager{
-        forking:         forking,
-        sessions:        sessions,
-        sweepInterval:   cfg.SweepInterval,
-        metricsInterval: cfg.MetricsInterval,
-        statsClient:     cfg.StatsClient,
-        appIDFor:        cfg.AppIDFor,
-        bySession:       make(map[string]childRef),
-        lastStats:       make(map[string]zygotectl.Stats),
-        workersActive:   make(map[string]struct{}),
-        stop:            make(chan struct{}),
+        forking:       forking,
+        sessions:      sessions,
+        sweepInterval: cfg.SweepInterval,
+        bySession:     make(map[string]childRef),
+        stop:          make(chan struct{}),
     }
     go m.exitLoop()
     go m.sweepLoop()
-    if cfg.StatsClient != nil {
-        go m.metricsLoop()
-    }
     return m
 }
 
-// LastStats returns the most recently polled stats for a worker.
-// Used by the worker detail page to render without a protocol
-// round-trip. Returns the zero value when no stats have been
-// polled yet for this worker.
-func (m *Manager) LastStats(workerID string) zygotectl.Stats {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    return m.lastStats[workerID]
-}
-
-// metricsLoop polls STATS from every live zygote on the metrics
-// tick and updates labeled Prometheus gauges. Runs only when
-// ManagerConfig.StatsClient is set — i.e. when the backend
-// supports dynamic stats collection. Missing or failing STATS
-// calls are logged at debug level but do not block the loop;
-// the next tick tries again. See decision #15.
-func (m *Manager) metricsLoop() {
-    t := time.NewTicker(m.metricsInterval)
-    defer t.Stop()
-    for {
-        select {
-        case <-t.C:
-            m.pollMetricsOnce()
-        case <-m.stop:
-            return
-        }
-    }
-}
-
-func (m *Manager) pollMetricsOnce() {
-    m.mu.Lock()
-    workers := make([]string, 0, len(m.workersActive))
-    for wid := range m.workersActive {
-        workers = append(workers, wid)
-    }
-    m.mu.Unlock()
-
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-
-    for _, wid := range workers {
-        client := m.statsClient(wid)
-        if client == nil {
-            continue
-        }
-        stats, err := client.Stats(ctx)
-        if err != nil {
-            slog.Debug("zygote: stats poll failed",
-                "worker_id", wid, "error", err)
-            continue
-        }
-        m.mu.Lock()
-        m.lastStats[wid] = stats
-        m.mu.Unlock()
-
-        appID := ""
-        if m.appIDFor != nil {
-            appID = m.appIDFor(wid)
-        }
-        telemetry.ZygoteKSMMergingPages.WithLabelValues(appID, wid).
-            Set(float64(stats.KSMMergingPagesZygote))
-        telemetry.ZygoteKSMMergingPagesTotal.WithLabelValues(appID, wid).
-            Set(float64(stats.KSMMergingPagesTotal))
-    }
-}
-
-// Stop terminates the sweep, exit, and metrics loops. Safe to
-// call once.
+// Stop terminates the sweep and exit loops. Safe to call once.
 func (m *Manager) Stop() { close(m.stop) }
-
-// NotifyWorkerAlive signals that a zygote worker has been
-// successfully spawned and its control client is ready. Called by
-// the backend's Spawn path after the control client constructor
-// has succeeded. Enables metrics polling for the worker. Safe to
-// call multiple times — idempotent.
-func (m *Manager) NotifyWorkerAlive(workerID string) {
-    m.mu.Lock()
-    m.workersActive[workerID] = struct{}{}
-    m.mu.Unlock()
-}
-
-// NotifyWorkerGone signals that a zygote worker has been stopped,
-// evicted, or crashed. Called by the backend's Stop path and the
-// control-connection watcher. Removes the worker from metrics
-// polling and clears its cached stats. Safe to call multiple
-// times — idempotent.
-func (m *Manager) NotifyWorkerGone(workerID string) {
-    m.mu.Lock()
-    delete(m.workersActive, workerID)
-    delete(m.lastStats, workerID)
-    m.mu.Unlock()
-    // Best-effort: clear the Prometheus gauges so stopped workers
-    // don't leave stale values in metrics exports.
-    appID := ""
-    if m.appIDFor != nil {
-        appID = m.appIDFor(workerID)
-    }
-    telemetry.ZygoteKSMMergingPages.DeleteLabelValues(appID, workerID)
-    telemetry.ZygoteKSMMergingPagesTotal.DeleteLabelValues(appID, workerID)
-}
 
 // Fork creates a child for sessionID inside the given worker.
 // Returns the child's network address. The mapping from sessionID
@@ -1425,7 +1052,6 @@ forks children, reaps via `mc.waitpid` on a 100ms `socketSelect` poll.
 #   BLOCKYARD_CONTROL_BIND     — IP to bind ("0.0.0.0" by default)
 #   BLOCKYARD_SECRET_PATH      — path to control.secret file
 #   BLOCKYARD_PORT_RANGE       — "lo-hi" port range for forked children
-#   BLOCKYARD_HELPER_PATH      — path to the zygote native helper (.so)
 #   R_LIBS                     — set externally for the worker library
 #
 # Protocol: see internal/zygotectl/control.go for the wire format.
@@ -1436,8 +1062,6 @@ bundle_path  <- Sys.getenv("BLOCKYARD_BUNDLE_PATH",  "/shiny")
 control_port <- as.integer(Sys.getenv("BLOCKYARD_CONTROL_PORT", "3837"))
 secret_path  <- Sys.getenv("BLOCKYARD_SECRET_PATH",  "/var/run/blockyard/control.secret")
 port_range   <- Sys.getenv("BLOCKYARD_PORT_RANGE",   "3839-3938")
-helper_path  <- Sys.getenv("BLOCKYARD_HELPER_PATH",  "/blockyard/zygote_helper.so")
-ksm_enabled  <- Sys.getenv("BLOCKYARD_KSM_ENABLED",  "0") == "1"
 
 # Read the control secret. Cached at startup and compared on each
 # AUTH frame.
@@ -1448,108 +1072,29 @@ secret_hex   <- paste(format(as.hexmode(as.integer(secret_bytes)), width = 2),
 # zygote_info holds structured facts about this zygote that the
 # blockyard server can query via the control-protocol `INFO`
 # command. Filled in during startup; never mutated after that.
+# Phase 3-10 adds ksm_status / ksm_errno fields here when KSM
+# support lands (see phase-3-10-draft.md Step K6).
 zygote_info <- list(
-  r_version       = R.version.string,
-  ksm_status      = "unknown",
-  ksm_errno       = 0L,
-  preload_ms      = NA_integer_
+  r_version  = R.version.string,
+  preload_ms = NA_integer_
 )
 
-# Load the native helper and enable KSM. The helper is a tiny C
-# shared library (see internal/zygotectl/zygote_helper.c) shipped
-# embedded in the blockyard binary and written to the host at
-# zygote spawn, bind-mounted into the worker at BLOCKYARD_HELPER_PATH.
-# R loads it via dyn.load; the `enable_ksm` symbol is called via
-# the `.C` interface (no R headers on the C side).
+# Pre-load the bundle. We source app.R under a stubbed shinyApp()
+# so packages are loaded and the shinyApp arguments are captured
+# without starting the shiny server. Children then call
+# runApp(captured_app, ...) on the captured object, which means
+# app.R is parsed and evaluated exactly once, in the zygote.
 #
-# KSM is skipped entirely unless BLOCKYARD_KSM_ENABLED=1 is set in
-# the environment — see design decision #18 for the opt-in model.
-# The blockyard server passes the env var only when both
-# experimental.ksm (server config) and apps.ksm (per-app) are true.
-#
-# Failure modes, all non-fatal:
-#   - Opt-in absent:        set ksm_status = "disabled"
-#   - Helper file missing:  log, set ksm_status = "helper_missing"
-#   - dyn.load fails:       log, set ksm_status = "dlopen_failed"
-#   - prctl returns EINVAL: kernel < 6.4, set ksm_status = "unsupported"
-#   - prctl returns EPERM:  seccomp/capability blocked, set ksm_status = "denied"
-#   - prctl returns other:  set ksm_status = "failed" with errno
-#   - prctl returns 0:      set ksm_status = "enabled"
-enable_ksm <- function() {
-  if (!ksm_enabled) {
-    zygote_info$ksm_status <<- "disabled"
-    message("blockyard_zygote event=ksm_init status=disabled reason=opt_in_absent")
-    return(invisible())
-  }
-  if (!file.exists(helper_path)) {
-    zygote_info$ksm_status <<- "helper_missing"
-    message("blockyard_zygote event=ksm_init status=helper_missing path=",
-            helper_path)
-    return(invisible())
-  }
-  ok <- tryCatch({
-    dyn.load(helper_path)
-    TRUE
-  }, error = function(e) {
-    zygote_info$ksm_status <<- "dlopen_failed"
-    message("blockyard_zygote event=ksm_init status=dlopen_failed error=",
-            conditionMessage(e))
-    FALSE
-  })
-  if (!ok) return(invisible())
-
-  result <- .C("enable_ksm", result = integer(1))$result
-  if (result == 0L) {
-    zygote_info$ksm_status <<- "enabled"
-    message("blockyard_zygote event=ksm_init status=enabled")
-  } else if (result == 22L) {  # EINVAL
-    zygote_info$ksm_status <<- "unsupported"
-    zygote_info$ksm_errno  <<- result
-    message("blockyard_zygote event=ksm_init status=unsupported reason=kernel_too_old errno=22")
-  } else if (result == 1L) {   # EPERM
-    zygote_info$ksm_status <<- "denied"
-    zygote_info$ksm_errno  <<- result
-    message("blockyard_zygote event=ksm_init status=denied reason=seccomp_or_capability errno=1")
-  } else {
-    zygote_info$ksm_status <<- "failed"
-    zygote_info$ksm_errno  <<- result
-    message("blockyard_zygote event=ksm_init status=failed errno=", result)
-  }
-}
-enable_ksm()
-
-# Pre-load all packages declared by the bundle AND byte-compile
-# the bundle's own R code up front. Both happen in the zygote so
-# children inherit the results via COW.
-#
-# For *packages*: we respect whatever compilation state they ship
-# with. Most CRAN packages arrive byte-compiled at install time
-# (R_COMPILE_PKGS=1 default); those that don't have a reason
-# (`ByteCompile: no` in DESCRIPTION) and we do not override it.
-# Walking namespaces to mass-recompile would second-guess package
-# authors across the entire dependency tree.
-#
-# For *bundle code* (global.R, app.R): we use compiler::cmpfile()
-# to produce a .Rc file with compiled function bodies, then
-# compiler::loadcmp() evaluates the compiled expressions into a
-# persistent env. Every `foo <- function(...) { ... }` assignment
-# in bundle code creates a closure whose body is already a
-# BCODESXP — no R_cmpfun1 / SET_BODY mutation ever needs to run
-# in children, no closure-header pages get dirtied by the JIT
-# path, and KSM has a much larger pool of stable pages to merge.
-# See design decision #17.
-#
-# shinyApp() and runApp() are stubbed so that sourcing app.R
-# populates the search path with library() calls and captures
-# the shinyApp() arguments without actually starting the server.
-# The captured app object is held in captured_app and reused by
-# the FORK handler — children call runApp(captured_app, ...)
-# instead of re-sourcing app.R. This means app.R is parsed,
-# compiled, and evaluated exactly once, in the zygote.
+# Phase 3-10 replaces the naive source() with compiler::cmpfile()
+# so bundle closures are born as BCODESXP before fork (see
+# phase-3-10-draft.md decision K3). That optimisation is tied to
+# the KSM track because its primary motivation is preventing the
+# JIT from mutating closure pages post-fork; it also saves 100–500ms
+# per cold start independently, but we keep the simpler source()
+# path in phase 3-9 to match the minimal mechanism scope.
 #
 # Crashes here are fatal — the zygote is unusable if its bundle
 # didn't load.
-bundle_env   <- NULL  # persistent env holding compiled bundle closures
 captured_app <- NULL  # shiny.appobj captured during app.R evaluation
 
 preload_bundle <- function() {
@@ -1560,22 +1105,11 @@ preload_bundle <- function() {
   }
   env$runApp <- function(appDir = ".", ...) invisible(NULL)
 
-  compile_and_load <- function(src) {
-    if (!file.exists(src)) return(invisible())
-    rc <- tempfile(fileext = ".Rc")
-    on.exit(unlink(rc), add = TRUE)
-    compiler::cmpfile(src, rc)
-    compiler::loadcmp(rc, envir = env)
+  load_if_present <- function(src) {
+    if (file.exists(src)) sys.source(src, envir = env)
   }
-
-  # Match shiny's normal loading order: global.R first, then app.R.
-  compile_and_load(file.path(bundle_path, "global.R"))
-  compile_and_load(file.path(bundle_path, "app.R"))
-
-  # Promote env to top level so its compiled closures survive past
-  # preload_bundle() returning and are inherited by forked children
-  # via COW.
-  bundle_env <<- env
+  load_if_present(file.path(bundle_path, "global.R"))
+  load_if_present(file.path(bundle_path, "app.R"))
 }
 
 preload_start <- Sys.time()
@@ -1594,10 +1128,7 @@ if (is.null(captured_app)) {
 
 # Hygiene: full GC after package preload. Puts every surviving
 # SEXP into the oldest generation with stable mark state, so
-# children fork from a clean, deterministic heap. Does NOT preserve
-# COW across level-2 GCs in children (R's mark-flipping writes to
-# every live SEXP header regardless), but makes the initial post-fork
-# state predictable and avoids shipping half-marked objects.
+# children fork from a clean, deterministic heap.
 gc(full = TRUE)
 message("blockyard_zygote event=gc_hygiene status=ok")
 
@@ -1683,24 +1214,14 @@ handle_command <- function(line) {
     cid <- next_child_id()
     pid <- parallel:::mcfork()
     if (inherits(pid, "masterProcess")) {
-      # Child: raise oom_score_adj to the max (1000) so the kernel's
-      # OOM killer prefers this child over the zygote under memory
-      # pressure. Raising your own oom_score_adj is unprivileged
-      # (CAP_SYS_RESOURCE is only needed to *lower* it), so this
-      # works without coupling to phase 3-10's capability story.
-      # See design decision #16 for the full rationale.
-      tryCatch(
-        writeLines("1000", "/proc/self/oom_score_adj"),
-        error = function(e) message(
-          "blockyard_zygote_child event=oom_adj_failed error=",
-          conditionMessage(e))
-      )
-      # Close the inherited control connection, run the app on
-      # the assigned port. runApp receives the shiny.appobj that
+      # Child: close the inherited control connection, run the app
+      # on the assigned port. runApp receives the shiny.appobj that
       # was captured during zygote preload — no re-sourcing of
-      # app.R in the child, so all bundle closures stay in the
-      # COW-shared pages inherited from the zygote. See design
-      # decision #17.
+      # app.R in the child.
+      #
+      # Phase 3-10 adds an oom_score_adj=1000 self-write here so
+      # the kernel OOM killer reaps a child before the zygote
+      # under memory pressure (see phase-3-10-draft.md decision K5).
       tryCatch({
         close(con)
         Sys.setenv(SHINY_PORT = as.character(port))
@@ -1708,7 +1229,7 @@ handle_command <- function(line) {
           # Fallback: bundle did not call shinyApp() at the top
           # level (unusual structure, e.g. ui.R + server.R split,
           # or a conditional shinyApp() call). Re-source in the
-          # child, accepting the per-child JIT and COW-break cost.
+          # child, accepting the per-child re-parse cost.
           shiny::runApp(bundle_path, port = port)
         } else {
           shiny::runApp(captured_app, port = port)
@@ -1739,56 +1260,11 @@ handle_command <- function(line) {
     # Structured zygote facts for the blockyard server to query at
     # startup and expose via API/UI. Key=value lines, terminated by
     # "END". Adding new fields is backward-compatible — the Go-side
-    # parser skips unknown keys.
+    # parser skips unknown keys. Phase 3-10 adds ksm_status and
+    # ksm_errno fields here.
     writeLines(sprintf("r_version=%s\n", zygote_info$r_version),
                con, sep = "")
-    writeLines(sprintf("ksm_status=%s\n", zygote_info$ksm_status),
-               con, sep = "")
-    writeLines(sprintf("ksm_errno=%d\n", zygote_info$ksm_errno),
-               con, sep = "")
     writeLines(sprintf("preload_ms=%d\n", zygote_info$preload_ms),
-               con, sep = "")
-    writeLines("END\n", con, sep = "")
-  } else if (cmd == "STATS") {
-    # Dynamic per-zygote KSM merge counts. Polled on a metrics tick
-    # by zygote.Manager (see design decision #15). Reads
-    # /proc/self/ksm_stat plus /proc/<childpid>/ksm_stat for each
-    # tracked child and returns the aggregated totals. Kernel < 6.1
-    # has no /proc/<pid>/ksm_stat; we detect that and return
-    # ksm_stat_supported=0 so the Go side can record the failure
-    # mode without flooding logs.
-    read_ksm_merging_pages <- function(pid) {
-      path <- sprintf("/proc/%d/ksm_stat", pid)
-      if (!file.exists(path)) return(NA_integer_)
-      lines <- tryCatch(readLines(path), error = function(e) character())
-      for (line in lines) {
-        if (startsWith(line, "ksm_merging_pages ")) {
-          return(as.integer(sub("^ksm_merging_pages\\s+", "", line)))
-        }
-      }
-      return(0L)
-    }
-    zygote_pages <- read_ksm_merging_pages(Sys.getpid())
-    supported <- !is.na(zygote_pages)
-    if (!supported) zygote_pages <- 0L
-    child_pages <- 0L
-    child_count <- 0L
-    for (cid in ls(children)) {
-      child_info <- get(cid, envir = children)
-      pages <- read_ksm_merging_pages(child_info$pid)
-      if (!is.na(pages)) child_pages <- child_pages + pages
-      child_count <- child_count + 1L
-    }
-    total_pages <- zygote_pages + child_pages
-    writeLines(sprintf("ksm_merging_pages_zygote=%d\n",   zygote_pages),
-               con, sep = "")
-    writeLines(sprintf("ksm_merging_pages_children=%d\n", child_pages),
-               con, sep = "")
-    writeLines(sprintf("ksm_merging_pages_total=%d\n",    total_pages),
-               con, sep = "")
-    writeLines(sprintf("child_count=%d\n",                child_count),
-               con, sep = "")
-    writeLines(sprintf("ksm_stat_supported=%d\n", if (supported) 1L else 0L),
                con, sep = "")
     writeLines("END\n", con, sep = "")
   } else {
@@ -1881,56 +1357,7 @@ Notes on the design:
   (HenrikBengtsson/Wishlist-for-R#35). The fix shipped in 2017
   and is well below any plausible runtime target.
 
-**`internal/zygotectl/zygote_helper.c`** — the native helper called by
-`zygote.R` to enable KSM. Deliberately tiny and dependency-free:
-no R headers, no Rcpp, no stdlib beyond what `prctl` needs. Compiles
-to a shared library with a standard C compiler, embedded per-arch
-in the blockyard binary.
-
-```c
-#include <sys/prctl.h>
-#include <errno.h>
-
-/*
- * blockyard zygote native helper.
- *
- * Called from zygote.R via `dyn.load` + `.C("enable_ksm", integer(1))`.
- * The .C interface uses plain pointer arguments — no R headers needed
- * on the C side — so this file builds with a bare C compiler and has
- * no link-time dependency on libR.
- *
- * The function enables `PR_SET_MEMORY_MERGE` on the current process's
- * mm_struct. The flag is inherited by all `parallel::mcfork` children
- * via `ksm_fork` in the kernel, so setting it once on the zygote
- * covers every child process forked afterward.
- *
- * Linux 6.4+ defines PR_SET_MEMORY_MERGE as 67. On older kernels the
- * value is unused and the prctl returns EINVAL, which we surface as
- * the result so the R side can log it distinctly from other failures.
- */
-
-#ifndef PR_SET_MEMORY_MERGE
-#define PR_SET_MEMORY_MERGE 67
-#endif
-
-void enable_ksm(int *result) {
-    if (prctl(PR_SET_MEMORY_MERGE, 1, 0, 0, 0) == 0) {
-        *result = 0;
-    } else {
-        *result = errno;
-    }
-}
-```
-
-Build: `cc -shared -fPIC -o zygote_helper.so zygote_helper.c`. Done
-at blockyard build time via a Makefile rule that produces one `.so`
-per supported architecture (amd64, arm64, etc.); the Go build embeds
-the architecture-appropriate binary via a build-tag-guarded
-`//go:embed` in `embed_linux_amd64.go` / `embed_linux_arm64.go`.
-Cross-compilation uses the standard `CC=aarch64-linux-gnu-gcc`
-pattern; no Go-level cgo is required.
-
-Embed everything in `internal/zygotectl/embed.go`:
+Embed the R script in `internal/zygotectl/embed.go`:
 
 ```go
 package zygotectl
@@ -1939,26 +1366,12 @@ import _ "embed"
 
 //go:embed zygote.R
 var ZygoteScript []byte
-
-//go:embed zygote_helper.c
-var HelperSource []byte  // kept for debugging / reproducibility only
 ```
 
-Plus per-architecture `.so` embeds (e.g. `embed_linux_amd64.go`):
-
-```go
-//go:build linux && amd64
-
-package zygotectl
-
-import _ "embed"
-
-//go:embed zygote_helper_linux_amd64.so
-var HelperSO []byte
-```
-
-`HelperSO` is what the backends actually write to disk at zygote
-spawn and bind-mount into the worker.
+Phase 3-10 extends this file with a `zygote_helper.c` source embed
+plus per-architecture `HelperSO` embeds for the compiled
+`.so` binaries (see `phase-3-10-draft.md` Step K4). Phase 3-9
+ships only the R script.
 
 ### Step 7: Docker `Forking` implementation
 
@@ -2059,21 +1472,6 @@ func (d *DockerBackend) KillChild(ctx context.Context, workerID, childID string)
 // fed by all per-worker control clients.
 func (d *DockerBackend) ChildExits() <-chan backend.ChildExit {
     return d.childExits
-}
-
-// StatsClient implements backend.Forking. Resolves a workerID to
-// its live zygote control client for metrics polling. The return
-// type `*zygotectl.Client` comes from the `zygotectl` package
-// which has no dependency on `backend`, so this method can live
-// on the interface without cycling.
-func (d *DockerBackend) StatsClient(workerID string) *zygotectl.Client {
-    d.mu.Lock()
-    ws, ok := d.workers[workerID]
-    d.mu.Unlock()
-    if !ok || ws.fork == nil {
-        return nil
-    }
-    return ws.fork.client
 }
 
 // allocPortLocked / releasePortLocked: simple sequential allocator
@@ -2189,36 +1587,21 @@ func (d *DockerBackend) zygoteContainerAddr(ctx context.Context, ws *workerState
    instead of the current `shiny::runApp(...)`.
 2. Additional env vars: `BLOCKYARD_BUNDLE_PATH`,
    `BLOCKYARD_CONTROL_PORT=3837`, `BLOCKYARD_PORT_RANGE`,
-   `BLOCKYARD_SECRET_PATH=/var/run/blockyard/control.secret`,
-   `BLOCKYARD_HELPER_PATH=/blockyard/zygote_helper.so`,
-   and `BLOCKYARD_KSM_ENABLED=1` iff `spec.KSM` is set (which is
-   itself only set when both `experimental.ksm = true` in server
-   config AND `apps.ksm = true` for this app — see decision #18).
-   When the env var is absent or `0`, `zygote.R`'s `enable_ksm()`
-   sets `ksm_status = "disabled"` and skips the `prctl` call
-   entirely.
-3. Two bind mounts added under `/blockyard/` (read-only):
-   - Host `{BundleServerPath}/.zygote/zygote.R` → container
-     `/blockyard/zygote.R` (the embedded R script).
-   - Host `{BundleServerPath}/.zygote/zygote_helper.so` → container
-     `/blockyard/zygote_helper.so` (the architecture-appropriate
-     KSM helper, written at server startup from the embedded
-     `HelperSO` byte slice).
+   `BLOCKYARD_SECRET_PATH=/var/run/blockyard/control.secret`.
+3. One bind mount added under `/blockyard/` (read-only): Host
+   `{BundleServerPath}/.zygote/zygote.R` → container
+   `/blockyard/zygote.R` (the embedded R script). Phase 3-10
+   adds a second bind mount for the KSM helper `.so` alongside
+   this one.
 4. After `ContainerStart`, the server waits for the control port
    to accept connections (TCP probe with backoff), then
    `zygotectl.NewClient(ctx, "ip:3837", secret)`. The client
-   constructor synchronously fetches `INFO` and logs the KSM
-   status alongside R version and preload time.
+   constructor synchronously fetches `INFO` and logs the R
+   version and preload time.
 5. The connected `*zygotectl.Client` is stored in `ws.fork`,
    along with the cached `zygotectl.Info` (`ws.fork.info =
-   client.Info()`) so `ws.fork.info.KSMStatus` is available for
-   API/UI exposure without another network round-trip.
-6. `srv.Zygotes.NotifyWorkerAlive(workerID)` is called so the
-   Manager's metrics goroutine starts polling this worker on the
-   next metrics tick (decision #15). The matching
-   `NotifyWorkerGone(workerID)` call happens in `Backend.Stop`
-   before the container teardown, mirroring the synthesised
-   `ChildExit` events that already drain the session bookkeeping.
+   client.Info()`) so startup info is available for API/UI
+   exposure without another network round-trip.
 
 **`Backend.Addr` and `HealthCheck` for zygote workers.** Both
 methods inspect `ws.fork` and branch:
@@ -2277,7 +1660,6 @@ on the same worker drains an empty child set on the second call.
 type WorkerSpec struct {
     // ...existing fields...
     Zygote        bool   // zygote mode
-    KSM           bool   // enable KSM in the zygote (decision #18)
     ControlSecret []byte // 32-byte secret to bind into the worker
     ChildPortRange string // "lo-hi" for child ports inside the container
                           // (Docker zygote mode only; process backend uses
@@ -2287,15 +1669,15 @@ type WorkerSpec struct {
 
 `ControlSecret` is generated by the cold-start path via
 `zygotectl.WriteSecret(tokenDir)` and attached to the spec.
-`Zygote` and `KSM` are populated from the *effective* state
-computed via `effectiveZygoteState(srv.Config, app)` in
-`coldstart.go` (see Step 9 for the helper). This is the
-**runtime kill switch** from decision #18 — flipping either
-`experimental.*` flag off in server config disables the
-corresponding feature for every app without touching the
-database. Apps with `apps.zygote = true` in the db silently
-fall through to the non-zygote path when the server-wide flag
-is off.
+`Zygote` is populated from the *effective* state computed via
+`effectiveZygoteState(srv.Config, app)` in `coldstart.go` (see
+Step 9 for the helper). This is the **runtime kill switch**
+from decision #15 — flipping `experimental.zygote` off in
+server config disables the feature for every app without
+touching the database. Apps with `apps.zygote = true` in the db
+silently fall through to the non-zygote path when the
+server-wide flag is off. Phase 3-10 adds a `KSM bool` field
+here when the KSM opt-in lands.
 
 `ChildPortRange` is read from a new `[docker] zygote_child_port_range`
 config field (default `3839-3938`) and is only meaningful for the
@@ -2310,15 +1692,12 @@ Mirror of step 7 for the process backend. Lives in
 `internal/backend/process/forking.go` (a new file inside the package
 that phase 3-7 establishes). Differences from the Docker version:
 
-- Spawn: bwrap invocation with two bind mounts under `/blockyard/`:
-  `--ro-bind {bundleServerPath}/.zygote/zygote.R /blockyard/zygote.R`
-  and
-  `--ro-bind {bundleServerPath}/.zygote/zygote_helper.so /blockyard/zygote_helper.so`.
+- Spawn: bwrap invocation with one bind mount under `/blockyard/`:
+  `--ro-bind {bundleServerPath}/.zygote/zygote.R /blockyard/zygote.R`.
   The per-worker token dir comes in via
   `--ro-bind {tokenDir} /var/run/blockyard`. The R command is
-  `R -f /blockyard/zygote.R`. Env vars include
-  `BLOCKYARD_HELPER_PATH=/blockyard/zygote_helper.so` so the
-  zygote can find the KSM helper.
+  `R -f /blockyard/zygote.R`. Phase 3-10 adds a second bind
+  mount for the KSM helper.
 - Control transport: TCP on `127.0.0.1:{allocatedControlPort}`.
   The control port is allocated from a dedicated host-wide range
   (see "Port allocator extension" below). The bwrap sandbox shares
@@ -2340,15 +1719,6 @@ that phase 3-7 establishes). Differences from the Docker version:
   child *before* killing the bwrap process, mirroring the Docker
   case. Without this, `zygote.Manager.bySession` retains stale
   references after worker eviction.
-- `StatsClient(workerID string) *zygotectl.Client` — same shape
-  as the Docker backend's method, implementing the same
-  `backend.Forking` interface method. Returns the live control
-  client so `zygote.Manager` can poll `STATS` on the metrics
-  tick (decision #15).
-- `Spawn` calls `srv.Zygotes.NotifyWorkerAlive(workerID)` after
-  the control client is connected, and `Stop` calls
-  `NotifyWorkerGone(workerID)` before tearing the bwrap process
-  down, mirroring the Docker backend.
 - **Control-connection watcher** — same pattern as the Docker
   backend. A per-worker goroutine blocks on
   `ws.fork.client.Done()` and calls `ProcessBackend.Stop` if the
@@ -2435,20 +1805,18 @@ and `internal/proxy/proxy.go` (the session-creation path).
 
 **`coldstart.go` — `spawnWorker` and `ensureWorker`.**
 
-Both functions start by computing the *effective* zygote/KSM
-state from the server-wide experimental flags and the per-app
-flags — the two-level opt-in from decision #18. This is the
-**runtime kill switch**: flipping either `experimental.*` flag
-off in server config disables the feature for every app
-without touching the database.
+Both functions start by computing the *effective* zygote state
+from the server-wide `experimental.zygote` flag and the per-app
+`app.Zygote` bool — the two-level opt-in from decision #15. This
+is the **runtime kill switch**: flipping `experimental.zygote`
+off in server config disables the feature for every app without
+touching the database.
 
 ```go
 // Helper used by both spawnWorker and ensureWorker.
-func effectiveZygoteState(cfg *config.Config, app *db.AppRow) (zygote, ksm bool) {
+func effectiveZygoteState(cfg *config.Config, app *db.AppRow) bool {
     flags := cfg.ExperimentalFlags() // nil-safe (Step 13)
-    zygote = flags.Zygote && app.Zygote
-    ksm    = flags.KSM    && app.KSM && zygote
-    return
+    return flags.Zygote && app.Zygote
 }
 ```
 
@@ -2457,7 +1825,7 @@ generation and spec construction:
 
 ```go
 // In spawnWorker, after the existing token-refresher block:
-effectiveZygote, effectiveKSM := effectiveZygoteState(srv.Config, app)
+effectiveZygote := effectiveZygoteState(srv.Config, app)
 
 var controlSecret []byte
 if effectiveZygote && tokDir != "" {
@@ -2472,7 +1840,6 @@ if effectiveZygote && tokDir != "" {
 spec := backend.WorkerSpec{
     // ...existing fields...
     Zygote:         effectiveZygote,
-    KSM:            effectiveKSM,
     ControlSecret:  controlSecret,
     ChildPortRange: srv.Config.Docker.ZygoteChildPortRange,
 }
@@ -2485,7 +1852,7 @@ Apps with `apps.zygote = true` in the db but
 `experimental.zygote = false` in server config fall through to
 the non-zygote branch silently — their runtime behaviour is
 identical to `apps.zygote = false`. This is the kill switch
-from decision #18.
+from decision #15.
 
 `ensureWorker` calls into the Manager after the worker is
 healthy — again using the effective state, not `app.Zygote`:
@@ -2493,8 +1860,7 @@ healthy — again using the effective state, not `app.Zygote`:
 ```go
 // In ensureWorker, after the existing lb.Assign / spawnWorker
 // block, before returning:
-effectiveZygote, _ := effectiveZygoteState(srv.Config, app)
-if effectiveZygote && srv.Zygotes != nil {
+if effectiveZygoteState(srv.Config, app) && srv.Zygotes != nil {
     addr, err := srv.Zygotes.Fork(ctx, wid, sessionID)
     if err != nil {
         return "", "", fmt.Errorf("zygote: fork: %w", err)
@@ -2535,7 +1901,7 @@ The `srv.Zygotes` field is a `*zygote.Manager`, initialised in
 `cmd/blockyard/main.go` after the backend is constructed — but
 *only* if `experimental.zygote` is enabled in the server config.
 When the flag is off, the Manager isn't constructed at all, and
-the runtime kill switch from decision #18 means no zygote path
+the runtime kill switch from decision #15 means no zygote path
 ever runs:
 
 ```go
@@ -2546,23 +1912,12 @@ if flags.Zygote {
             forking,
             srv.Sessions,
             zygote.ManagerConfig{
-                SweepInterval:   srv.Config.Proxy.AutoscalerInterval.Duration,
-                MetricsInterval: srv.Config.Proxy.ZygoteMetricsInterval.Duration,
-                StatsClient:     forking.StatsClient, // interface method
-                AppIDFor: func(wid string) string {
-                    return srv.WorkerApp(wid)
-                },
+                SweepInterval: srv.Config.Proxy.AutoscalerInterval.Duration,
             },
         )
     }
 }
 ```
-
-`StatsClient` is a method on the `Forking` interface. The
-return type `*zygotectl.Client` comes from the split-out
-`zygotectl` package (Step 5) which has no dependency on
-`backend`, so the interface can reference it without closing an
-import cycle.
 
 `srv.Zygotes` is `nil` when either the server-wide flag is off
 *or* the configured backend doesn't implement `Forking`.
@@ -2656,11 +2011,11 @@ return type. The Manager's sweep loop is the load-bearing cleanup
 path for zygote children regardless of which session store is
 configured.
 
-### Step 12: API / CLI / UI surface for `zygote` and `ksm`
+### Step 12: API / CLI / UI surface for `zygote`
 
-Mirror the phase 3-6 pattern. Both fields are independently
-gated against their respective server-wide flags — see decision
-#18 for the rationale.
+Mirror the phase 3-6 pattern. The `zygote` field is gated
+against the `experimental.zygote` server-wide flag — see
+decision #15 for the rationale.
 
 **API** — extend `updateAppRequest` in `internal/api/apps.go`:
 
@@ -2668,7 +2023,6 @@ gated against their respective server-wide flags — see decision
 type updateAppRequest struct {
     // ...existing fields...
     Zygote *bool `json:"zygote"`
-    KSM    *bool `json:"ksm"`
 }
 ```
 
@@ -2683,32 +2037,23 @@ effectiveZygote := app.Zygote
 if body.Zygote != nil {
     effectiveZygote = *body.Zygote
 }
-effectiveKSM := app.KSM
-if body.KSM != nil {
-    effectiveKSM = *body.KSM
-}
 effectiveMax := app.MaxSessionsPerWorker
 if body.MaxSessionsPerWorker != nil {
     effectiveMax = *body.MaxSessionsPerWorker
 }
 
-// Server-wide experimental gates (decision #18). Both must be
-// enabled before the corresponding per-app flag can transition
-// from false to true. Flags that are already true in the db can
-// stay true even when the server-wide gate is off — the runtime
-// short-circuits to the non-zygote path — but the API rejects
-// new transitions so operators don't accidentally commit
-// intent that isn't currently runnable.
+// Server-wide experimental gate (decision #15). Must be enabled
+// before apps.zygote can transition from false to true. Flags
+// that are already true in the db can stay true even when the
+// server-wide gate is off — the runtime short-circuits to the
+// non-zygote path — but the API rejects new transitions so
+// operators don't accidentally commit intent that isn't
+// currently runnable.
 flags := srv.Config.ExperimentalFlags() // nil-safe accessor (Step 13)
 transitioningToZygote := body.Zygote != nil && *body.Zygote && !app.Zygote
-transitioningToKSM    := body.KSM    != nil && *body.KSM    && !app.KSM
 
 if transitioningToZygote && !flags.Zygote {
     badRequest(w, "zygote feature not enabled in server config (set experimental.zygote = true)")
-    return
-}
-if transitioningToKSM && !flags.KSM {
-    badRequest(w, "ksm feature not enabled in server config (set experimental.ksm = true)")
     return
 }
 
@@ -2728,15 +2073,9 @@ if effectiveZygote {
         }
     }
 }
-
-// KSM requires zygote on the same effective end-state.
-if effectiveKSM && !effectiveZygote {
-    badRequest(w, "ksm requires zygote to be enabled")
-    return
-}
 ```
 
-Add `Zygote` and `KSM` to `appResponseV2()` in
+Add `Zygote` to `appResponseV2()` in
 `internal/api/runtime.go` and to `swagger_types.go`. The response
 reflects the *stored* intent; the UI combines it with the
 server-wide capabilities (see below) to show the *effective*
@@ -2749,42 +2088,34 @@ endpoint — whichever is closer to existing patterns) that returns:
 ```json
 {
   "experimental": {
-    "zygote": true,
-    "ksm": false
+    "zygote": true
   }
 }
 ```
 
 The UI reads this at page load to decide whether to enable or
-disable the zygote and ksm toggles. Admin-only — the capability
-list is considered operational info, not exposed to non-admin
-users.
+disable the zygote toggle. Admin-only — the capability list is
+considered operational info, not exposed to non-admin users.
+Phase 3-10 adds an `experimental.ksm` field here.
 
 **CLI** — extend `by scale` in `cmd/by/scale.go`:
 
 ```go
 cmd.Flags().Bool("zygote", false,
     "Enable zygote worker model (experimental, requires --max-sessions > 1 and experimental.zygote in server config)")
-cmd.Flags().Bool("ksm", false,
-    "Enable KSM memory merging in zygote workers (experimental, requires --zygote and experimental.ksm in server config)")
 
 if cmd.Flags().Changed("zygote") {
     v, _ := cmd.Flags().GetBool("zygote")
     body["zygote"] = v
 }
-if cmd.Flags().Changed("ksm") {
-    v, _ := cmd.Flags().GetBool("ksm")
-    body["ksm"] = v
-}
 ```
 
-Server-side validation rejects the combinations; the CLI
+Server-side validation rejects invalid combinations; the CLI
 surfaces the API error message verbatim.
 
-**UI** — admin-only toggles in `tab_settings.html`. Both toggles
-check the server capabilities at render time and show a disabled
-state with an explanatory tooltip when the server-wide flag is
-off:
+**UI** — admin-only toggle in `tab_settings.html`. Checks the
+server capabilities at render time and shows a disabled state
+with an explanatory tooltip when the server-wide flag is off:
 
 ```html
 {{if .IsAdmin}}
@@ -2804,35 +2135,17 @@ off:
            hx-include="[name='zygote']"
            hx-swap="none">
 </div>
-
-<div class="field-group">
-    <label for="ksm">KSM memory merging</label>
-    <p class="field-description">
-        <em>Experimental.</em> Enables kernel same-page merging for
-        zygote workers. Requires Linux 6.4+ and zygote enabled.
-        Has known cross-session side-channel risk — not
-        recommended for multi-tenant apps.
-        <a href="...ksm docs link...">Learn more</a>.
-    </p>
-    <input type="checkbox" id="ksm" name="ksm"
-           {{if .App.KSM}}checked{{end}}
-           {{if or (not .Capabilities.ExperimentalKSM) (not .App.Zygote)}}disabled
-             title="Requires experimental.ksm in server config AND zygote enabled on this app"{{end}}
-           hx-patch="/api/v1/apps/{{.App.ID}}"
-           hx-include="[name='ksm']"
-           hx-swap="none">
-</div>
 {{end}}
 ```
 
 ### Step 13: Config additions
 
 **New top-level `ExperimentalConfig` section** on `Config` in
-`internal/config/config.go`. The two flags are the server-wide
-gates from decision #18 — both default off, opt-in via config
-file. Nil when the `[experimental]` section is absent from the
-config file, which is the intended default for operators who
-aren't running the zygote model.
+`internal/config/config.go`. The flag is the server-wide gate
+from decision #15 — default off, opt-in via config file. Nil
+when the `[experimental]` section is absent from the config
+file, which is the intended default for operators who aren't
+running the zygote model.
 
 ```go
 type Config struct {
@@ -2842,17 +2155,7 @@ type Config struct {
 
 type ExperimentalConfig struct {
     Zygote bool `toml:"zygote"` // enable the zygote worker model
-    KSM    bool `toml:"ksm"`    // enable KSM memory merging in zygote workers
-}
-```
-
-Config-load validation in `loadAndValidate()`:
-
-```go
-if c.Experimental != nil {
-    if c.Experimental.KSM && !c.Experimental.Zygote {
-        return fmt.Errorf("experimental.ksm requires experimental.zygote = true")
-    }
+    // Phase 3-10 adds KSM here.
 }
 ```
 
@@ -2876,7 +2179,6 @@ Example `blockyard.toml`:
 ```toml
 [experimental]
 zygote = true
-ksm    = true
 ```
 
 Two new fields on `DockerConfig`:
@@ -2941,21 +2243,8 @@ runtime by `process.RunPreflight.checkPortRanges`, not at config
 parse time, so operators get a usable error rather than a startup
 failure when their pool is slightly under-sized.
 
-One new field on `ProxyConfig` — the cadence at which
-`zygote.Manager`'s metrics goroutine polls `STATS` (decision #15):
-
-```go
-type ProxyConfig struct {
-    // ...existing fields...
-    ZygoteMetricsInterval Duration `toml:"zygote_metrics_interval"` // default 30s
-}
-```
-
-```go
-if c.ZygoteMetricsInterval.Duration == 0 {
-    c.ZygoteMetricsInterval = Duration{30 * time.Second}
-}
-```
+Phase 3-10 adds a `ZygoteMetricsInterval` field to `ProxyConfig`
+for the KSM metrics-poll cadence.
 
 ### Step 14: Tests
 
@@ -2993,22 +2282,9 @@ func TestClient_InfoAtStartup(t *testing.T)
 
 func TestClient_InfoUnknownKeys(t *testing.T)
 // Test server includes unrecognised keys (future-compat). Client
-// parses them into Info.Unknown without erroring.
-
-func TestClient_Stats(t *testing.T)
-// Test server responds to STATS with a canned multi-line block
-// terminated by END. Client.Stats(ctx) returns a Stats value
-// with the parsed fields.
-
-func TestClient_StatsInterleavedWithChildExit(t *testing.T)
-// Test server pushes a CHILDEXIT in the middle of a STATS
-// response. Verify the CHILDEXIT is dispatched to Exits and
-// the STATS response still parses correctly once END arrives.
-// Covers the multi-line reader accumulation path.
-
-func TestClient_StatsUnknownKeys(t *testing.T)
-// STATS response includes future keys. Client ignores them
-// without erroring and populates the known keys correctly.
+// parses them into Info.Unknown without erroring. Also exercises
+// the forward-compatibility path that phase 3-10 relies on for
+// ksm_status / ksm_errno fields.
 ```
 
 **`internal/zygote/manager_test.go`** — using a mock `Forking`
@@ -3038,18 +2314,6 @@ func TestManager_SweepKillsOrphanedChildren(t *testing.T)
 func TestManager_SweepIgnoresLiveSessions(t *testing.T)
 // Manager.Fork. Tick the sweep loop. Verify KillChild was not
 // called and HasChild remains true.
-
-func TestManager_MetricsLoopPollsActiveWorkers(t *testing.T)
-// NotifyWorkerAlive twice; the mock StatsClient returns canned
-// zygotectl.Stats for each. Tick the metrics loop. Verify
-// LastStats(w) returns the expected values for both workers
-// and the Prometheus gauges were updated with matching labels.
-
-func TestManager_MetricsLoopSkipsGoneWorkers(t *testing.T)
-// NotifyWorkerAlive, tick, then NotifyWorkerGone, tick. Verify
-// the second tick does not call StatsClient for the gone worker,
-// LastStats returns the zero value, and the Prometheus gauges
-// were cleared via DeleteLabelValues.
 ```
 
 **`internal/session/store_test.go`** — extend existing tests:
@@ -3130,30 +2394,11 @@ func TestUpdateApp_ZygoteRequiresMultiSession(t *testing.T)
 // PATCH with zygote=true and max_sessions_per_worker=1 → 400.
 
 func TestUpdateApp_ZygoteRoundTrip(t *testing.T)
-// Set zygote=true, read back, verify. Also set ksm=true with
-// zygote=true already in place, read back both fields.
+// Set zygote=true, read back, verify.
 
 func TestUpdateApp_ZygoteRequiresServerFlag(t *testing.T)
 // Server config has experimental.zygote = false. PATCH with
 // zygote=true → 400 "zygote feature not enabled in server config".
-
-func TestUpdateApp_KSMRequiresZygote(t *testing.T)
-// PATCH with ksm=true on an app with zygote=false → 400
-// "ksm requires zygote to be enabled".
-
-func TestUpdateApp_KSMRequiresServerFlag(t *testing.T)
-// Server config has experimental.ksm = false but experimental.zygote
-// = true. App already has zygote=true. PATCH with ksm=true → 400
-// "ksm feature not enabled in server config".
-
-func TestUpdateApp_KSMRequiresZygoteInSameRequest(t *testing.T)
-// App has zygote=false, ksm=false. PATCH with both zygote=true
-// and ksm=true in the same request → 200 (effective end-state
-// satisfies both constraints).
-
-func TestConfigLoad_RejectsKSMWithoutZygote(t *testing.T)
-// Config file with [experimental] ksm=true and zygote=false (or
-// absent) → fatal error at config load, server does not start.
 
 func TestServerCapabilities_ReflectsExperimentalFlags(t *testing.T)
 // GET /api/v1/server/capabilities as admin returns the effective
@@ -3174,26 +2419,23 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 
 | File | Action | Summary |
 |------|--------|---------|
-| `internal/db/db.go` | **update** | `Zygote` and `KSM` on `AppRow` and `AppUpdate`, UPDATE SQL |
-| `internal/backend/backend.go` | **update** | `Forking` interface, `ChildExit` type, `WorkerSpec.Zygote`/`KSM`/`ControlSecret`/`ChildPortRange` |
+| `internal/db/db.go` | **update** | `Zygote` on `AppRow` and `AppUpdate`, UPDATE SQL |
+| `internal/backend/backend.go` | **update** | `Forking` interface, `ChildExit` type, `WorkerSpec.Zygote`/`ControlSecret`/`ChildPortRange` |
 | `internal/backend/docker/docker.go` | **update** | Spawn branch for zygote (Cmd, env vars, mount, control client connect); `Addr`/`HealthCheck` branch on `ws.fork` to use control port; `Stop` synthesises ChildExit events before container teardown; `workerState.stopping` flag + idempotent `Stop`; control-connection watcher goroutine that calls `Stop` on `client.Done()` when not stopping |
 | `internal/backend/process/process.go` | **update** | Same shape as `docker.go`: spawn branch, `Addr`/`HealthCheck` branch on `workerProc.fork`, synthesised-ChildExit on `Stop`, `workerProc.stopping` flag + idempotent `Stop`, control-connection watcher; plus `controlPorts` and `childPorts` allocators |
-| `internal/backend/process/preflight.go` | **update** | KSM preflight checks reading `/sys/kernel/mm/ksm/run` and `/sys/kernel/mm/ksm/pages_to_scan`, gated on `experimental.ksm = true` and at least one app with `ksm = true` |
-| `internal/backend/docker/preflight.go` | **update** | Same KSM preflight checks, same gating |
 | `internal/session/store.go` | **update** | `Addr` field on `Entry` |
 | `internal/session/redis.go` | **update** | Hash schema gains `addr` field |
 | `internal/proxy/proxy.go` | **update** | Pass `sessionID` to `ensureWorker`, populate `Entry.Addr`, zygote unreachable-child fallback |
 | `internal/proxy/coldstart.go` | **update** | Generate `ControlSecret`, attach to spec, call `Manager.Fork` for zygote apps, `ensureWorker` signature change |
-| `internal/api/apps.go` | **update** | `zygote` and `ksm` fields on request, effective-state validation (multi-session, backend support, server-wide `experimental.*` gates from decision #18) |
+| `internal/api/apps.go` | **update** | `zygote` field on request, effective-state validation (multi-session, backend support, server-wide `experimental.zygote` gate from decision #15) |
 | `internal/api/server.go` | **update** | New `GET /api/v1/server/capabilities` endpoint returning effective `experimental.*` flags (admin-only) |
-| `internal/api/runtime.go` | **update** | Add `zygote` and `ksm` to `appResponseV2()` |
-| `internal/api/swagger_types.go` | **update** | Add `zygote`, `ksm`, and capabilities shape to swagger response types |
-| `internal/ui/templates/tab_settings.html` | **update** | Zygote and KSM toggles, admin-gated, server-capabilities-gated; worker detail surfaces `zygotectl.Info` from `INFO` |
-| `cmd/by/scale.go` | **update** | `--zygote` and `--ksm` flags |
-| `cmd/blockyard/main.go` | **update** | Construct `zygote.Manager` when backend implements `Forking`; write embedded `HelperSO` and `ZygoteScript` to host paths at startup |
+| `internal/api/runtime.go` | **update** | Add `zygote` to `appResponseV2()` |
+| `internal/api/swagger_types.go` | **update** | Add `zygote` and capabilities shape to swagger response types |
+| `internal/ui/templates/tab_settings.html` | **update** | Zygote toggle, admin-gated, server-capabilities-gated; worker detail surfaces `zygotectl.Info` from `INFO` |
+| `cmd/by/scale.go` | **update** | `--zygote` flag |
+| `cmd/blockyard/main.go` | **update** | Construct `zygote.Manager` when backend implements `Forking` and `experimental.zygote` is set; write embedded `ZygoteScript` to host path at startup |
 | `internal/server/state.go` | **update** | `Zygotes *zygote.Manager` field on `Server` |
-| `internal/config/config.go` | **update** | New `Experimental *ExperimentalConfig` top-level section (`Zygote`, `KSM` bools, default off) with config-load validation that `ksm` requires `zygote` and the `ExperimentalFlags()` nil-safe accessor; `ZygoteChildPortRange`, `ZygoteControlPort` on `DockerConfig`; `ZygoteControlRangeStart/End`, `ZygoteChildRangeStart/End` on `ProcessConfig`; `ZygoteMetricsInterval` (default 30s) on `ProxyConfig` |
-| `internal/telemetry/metrics.go` | **update** | New gauges: `ZygoteKSMMergingPages` and `ZygoteKSMMergingPagesTotal` (labeled `app_id`, `worker_id`), and unlabeled `HostKSMPagesSharing` |
+| `internal/config/config.go` | **update** | New `Experimental *ExperimentalConfig` top-level section (`Zygote` bool, default off) with `ExperimentalFlags()` nil-safe accessor; `ZygoteChildPortRange`, `ZygoteControlPort` on `DockerConfig`; `ZygoteControlRangeStart/End`, `ZygoteChildRangeStart/End` on `ProcessConfig` |
 
 ## New files
 
@@ -3203,18 +2445,13 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | `internal/db/migrations/sqlite/003_zygote.down.sql` | Migration down (SQLite) |
 | `internal/db/migrations/postgres/003_zygote.up.sql` | Migration up (PostgreSQL) |
 | `internal/db/migrations/postgres/003_zygote.down.sql` | Migration down (PostgreSQL) |
-| `internal/zygotectl/control.go` | TCP control protocol client (`Client`, `Info`, `Stats`, `ChildExitMsg`) — shared between backends |
+| `internal/zygotectl/control.go` | TCP control protocol client (`Client`, `Info`, `ChildExitMsg`) — shared between backends |
 | `internal/zygotectl/control_test.go` | Control protocol unit tests |
 | `internal/zygotectl/secret.go` | Per-worker control secret generation |
 | `internal/zygotectl/secret_test.go` | Secret round-trip test |
 | `internal/zygotectl/zygote.R` | Embedded zygote R script |
-| `internal/zygotectl/zygote_helper.c` | Tiny C helper for `prctl(PR_SET_MEMORY_MERGE)` |
-| `internal/zygotectl/zygote_helper_linux_amd64.so` | Precompiled amd64 helper (build artifact, tracked) |
-| `internal/zygotectl/zygote_helper_linux_arm64.so` | Precompiled arm64 helper (build artifact, tracked) |
-| `internal/zygotectl/embed.go` | `//go:embed` declarations for the R script, C source, and arch-neutral metadata |
-| `internal/zygotectl/embed_linux_amd64.go` | Build-tag-guarded embed of the amd64 `.so` |
-| `internal/zygotectl/embed_linux_arm64.go` | Build-tag-guarded embed of the arm64 `.so` |
-| `internal/zygote/manager.go` | `Manager` type, session ↔ child bookkeeping, exit handler, sweep loop, metrics-poll loop |
+| `internal/zygotectl/embed.go` | `//go:embed` declaration for the R script |
+| `internal/zygote/manager.go` | `Manager` type, session ↔ child bookkeeping, exit handler, sweep loop |
 | `internal/zygote/manager_test.go` | Manager unit tests with mock `Forking` |
 | `internal/backend/docker/forking.go` | Docker `Forking` implementation |
 | `internal/backend/docker/forking_integration_test.go` | Docker zygote integration tests (`docker_test`) |
@@ -3252,7 +2489,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    shared-R multiplexing remains the default for multi-session
    apps. The zygote model is an experimental alternative gated by
    the per-app `zygote` flag AND a server-wide
-   `experimental.zygote` config flag — see decision #18 for the
+   `experimental.zygote` config flag — see decision #15 for the
    rationale behind two-level gating. This keeps the surface area
    of the experiment contained and easy to back out.
 
@@ -3298,27 +2535,28 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    client of this protocol exists.
 
 5. **Shared `zygotectl.Client` and `zygote.Manager`, split across
-   two packages to break an import cycle.** The wire protocol
-   and session-bookkeeping logic are identical across backends.
-   They live in `internal/zygotectl/` (the control protocol
-   surface — `Client`, `Info`, `Stats`, `ChildExitMsg`, secret
-   helpers, embedded R script and C helper; no dependency on
-   `backend`) and `internal/zygote/` (the `Manager` type;
-   imports both `backend` and `zygotectl`). Both backend
-   `Forking` implementations import `zygotectl` directly and
-   store `*zygotectl.Client` in their per-worker state. Only
-   the dial address and the per-worker spawn details differ
-   between backends.
+   two packages to keep `backend` free of control-client
+   dependencies.** The wire protocol and session-bookkeeping
+   logic are identical across backends. They live in
+   `internal/zygotectl/` (the control protocol surface —
+   `Client`, `Info`, `ChildExitMsg`, secret helpers, embedded R
+   script; no dependency on `backend`) and `internal/zygote/`
+   (the `Manager` type; imports both `backend` and `zygotectl`).
+   Both backend `Forking` implementations import `zygotectl`
+   directly and store `*zygotectl.Client` in their per-worker
+   state. Only the dial address and the per-worker spawn details
+   differ between backends.
 
-   **Why the split:** without it, `backend` cannot expose
-   `StatsClient(workerID) *zygotectl.Client` on the `Forking`
-   interface, because `backend` would need to import a package
-   containing the control client while that same package would
-   need to import `backend` (for `Forking` and `ChildExit`).
-   Splitting the control-protocol types into a leaf package
-   (no blockyard dependencies) breaks the cycle: `backend`
-   imports `zygotectl`, `zygote.Manager` imports both `backend`
-   and `zygotectl`, and nothing forms a cycle.
+   **Why the split matters beyond phase 3-9.** Phase 3-10 will
+   add a `StatsClient(workerID) *zygotectl.Client` method to
+   the `Forking` interface for KSM metrics polling. Without the
+   split, `backend` would need to import a package containing
+   the control client while that same package would need to
+   import `backend` (for `Forking` and `ChildExit`) — an import
+   cycle. Splitting now means the 3-10 addition is purely
+   additive: `backend` already imports `zygotectl` (implicitly
+   through existing code paths), `zygote.Manager` imports both
+   `backend` and `zygotectl`, and nothing cycles.
 
 6. **Resource limit semantics unchanged.** `memory_limit` and
    `cpu_limit` keep their current meaning per backend: Docker
@@ -3353,7 +2591,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    prefix in the reader goroutine. Alternative: a second
    connection for events. The single-connection model is simpler
    (one goroutine, one death-detection signal via `Done()` — see
-   decision #14) and the volume is low (a few events per minute
+   decision #13) and the volume is low (a few events per minute
    at most). Risks of starvation are addressed by the bounded
    `Exits` channel.
 
@@ -3389,170 +2627,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     for the same user", which the existing `Manager.Fork` flow
     handles cleanly.
 
-13. **KSM via `prctl(PR_SET_MEMORY_MERGE)`, called from R itself
-    through a tiny embedded C helper, gated behind an
-    independent opt-in.** R's generational GC writes mark bits
-    to SEXP headers during level-2 collections, which dirties
-    every page containing a live SEXP and breaks copy-on-write
-    sharing between forked children. Without a recovery
-    mechanism, the zygote model's memory-sharing story decays
-    to "eventually equivalent to PSOCK workers" after children
-    have done a few GC cycles.
-
-    KSM is an **independent opt-in** from the zygote model
-    itself — see decision #18. Operators must set both
-    `experimental.ksm = true` at the server level and
-    `apps.ksm = true` on the individual app before any
-    KSM-related behaviour activates. The zygote model's
-    startup-latency and isolation benefits do not depend on
-    KSM, so operators who don't want KSM (pre-6.4 kernels,
-    multi-tenant apps with side-channel concerns — see
-    Deferred #9, hosts they don't control) can still use the
-    zygote model fully.
-
-    Linux 6.4 added `PR_SET_MEMORY_MERGE`, a process-level KSM
-    opt-in whose effect is that the kernel's `ksmd` daemon scans
-    the process's anonymous memory for pages matching other
-    processes' pages and merges them into shared physical frames.
-    The intuition is that after R's GC dirties pages in child A
-    and child B, the two children end up in *substantially
-    similar* states — same packages loaded, same live objects,
-    same heap layout inherited from the zygote — so `ksmd` finds
-    pages that aren't touched by per-child mutation (REFCNT bumps,
-    attribute writes, ALTREP materialization) and re-merges
-    them. KSM recovers some, but not all, of the sharing that
-    GC breaks. The exact recovery rate is workload-dependent
-    and currently unmeasured for R workloads — Meta reports
-    ~6GB saved per 64GB machine on Instagram (CPython controller
-    + ~32 workers), but Python's object model is structurally
-    different (refcount in header, no mark bits, no JIT in
-    CPython), so that number is an upper-bound anchor, not a
-    prediction. Phase 3-9 ships the KSM opt-in plus
-    observability (decision #15) so operators can measure actual
-    recovery in their own deployments; the design does not
-    commit to a specific memory-savings figure.
-
-    **KSM effectiveness depends on decision #17.** R's JIT
-    compiles closure bodies in-place on first call, mutating
-    closure SEXP headers and thereby dirtying every page that
-    holds user code. Without decision #17's up-front bundle
-    compilation, the JIT path alone would be enough to keep
-    KSM merge rates near zero for bundle code. The two
-    decisions are effectively a package: KSM provides the
-    merge mechanism, up-front compilation ensures there are
-    mergeable pages for it to find.
-
-    **Why the helper has to live on the R side:** `prctl` is
-    self-directed, and `PR_SET_MEMORY_MERGE` is stored in the
-    process's `mm_struct`. The kernel replaces `mm_struct` on
-    every `exec()` and only preserves dump-filter bits plus
-    `MMF_HAS_PINNED` (per `mmf_init_legacy_flags` in
-    `include/linux/sched/coredump.h`) — `MMF_VM_MERGE_ANY` is
-    dropped on the floor. A wrapper process that calls `prctl`
-    and then `exec`s R would set the flag on itself and lose it
-    immediately; R would start with KSM disabled. The only way
-    to get the flag set on R's mm_struct is for R itself to
-    call `prctl` after its own exec. Hence the helper: a tiny
-    C shared library, loaded into R's address space via
-    `dyn.load` from `zygote.R`, called via the `.C` interface.
-
-    **Why the C helper is dependency-free.** Using `.C` instead
-    of `.Call` means the helper needs no R headers — just
-    `sys/prctl.h` and `errno.h`. Compiled with a stock C compiler
-    at blockyard build time. Blockyard embeds one precompiled
-    `.so` per supported architecture via build-tag-guarded
-    `//go:embed`. No R package, no runtime compilation, no
-    LD_PRELOAD, no cgo.
-
-    **Why LD_PRELOAD was rejected.** Would also work, but the
-    constructor runs before `main()` with no way to surface
-    success/failure information to the rest of the program in a
-    structured form. The explicit `dyn.load` + `.C` approach
-    lets `zygote.R` capture the prctl return value, update
-    `zygote_info$ksm_status` with one of eight concrete states
-    (`enabled`, `disabled`, `unsupported`, `denied`, `failed`,
-    `helper_missing`, `dlopen_failed`, `unknown`), log it in a
-    structured format, and serve it via the `INFO` control
-    command. Ops can query `INFO` and see immediately whether
-    KSM is active without parsing log lines.
-
-    **Required operator action.** KSM is host-side; blockyard
-    can opt a process in but can't force the kernel to scan.
-    Operators must:
-
-    1. Enable ksmd: `echo 1 > /sys/kernel/mm/ksm/run`.
-    2. Tune the scan rate. The kernel default
-       (`pages_to_scan=100`, `sleep_millisecs=20`) is ~20MB/sec
-       scanned, which is desktop-tuned and far too slow for a
-       server with multi-GB R bundles. Recommended starting
-       point: `echo 2000 > /sys/kernel/mm/ksm/pages_to_scan`,
-       which scans a 1GB working set in roughly 2 minutes.
-       Workloads with larger bundles or higher session churn
-       may need 5000–10000.
-
-    Phase 3-9's preflight check warns if either `run=0` or
-    `pages_to_scan` is at the default 100, but only when both
-    `experimental.ksm = true` in server config AND at least one
-    app has `ksm = true` (decision #18) — operators who have not
-    opted into KSM see no preflight noise. Both warnings are
-    non-fatal but the `pages_to_scan` warning is the
-    operationally important one — see "RSS spike during recovery"
-    below. Phase 3-10's seccomp profile must allow
-    `PR_SET_MEMORY_MERGE` (verified by the
-    `TestZygoteHelper_PrctlAllowedBySeccomp` integration test).
-
-    **RSS spike during recovery (and how decision #16 contains
-    it).** When N children all hit a level-2 GC at roughly the
-    same time (request burst, coordinated work), each one
-    dirties most of its inherited package pages, breaking COW
-    in lockstep. Peak RSS spikes from `~1 × bundle + N ×
-    per-session-delta` to `~N × bundle + N × per-session-delta`
-    until ksmd catches up. For a 1GB bundle × 8 children that's
-    ~7GB of transient growth. With default `pages_to_scan=100`,
-    recovery takes minutes — long enough to OOM a host that was
-    sized for the steady-state. Tuning `pages_to_scan` (above)
-    shrinks the recovery window. Decision #16 makes the spike
-    survivable by pinning forked children at
-    `oom_score_adj=1000` so the OOM killer reaps a child (one
-    session lost, recoverable via the existing 307 fallback)
-    instead of the zygote (entire family lost, full preload
-    cost on every affected session). The deferred capacity-model
-    guidance (Deferred #2, tracking cynkra/blockyard#160) is
-    where the worst-case headroom math will land.
-
-    **Fallback behaviour.** Every failure path is non-fatal.
-    Opt-in absent (`BLOCKYARD_KSM_ENABLED` not set, which is the
-    default whenever `experimental.ksm = false` or `apps.ksm =
-    false`) → `ksm_status=disabled`, prctl is never called, zygote
-    starts normally without joining the kernel merge pool. This
-    is the **most common** path by design. When the opt-in *is*
-    active: pre-6.4 kernel → `EINVAL` → `ksm_status=unsupported`,
-    zygote starts normally, memory model decays to PSOCK over
-    time. No ksmd running → helper succeeds but nothing happens,
-    same result. Seccomp blocks the syscall → `EPERM` →
-    `ksm_status=denied`. Helper `.so` missing or can't load →
-    logged, zygote starts anyway. The zygote model never refuses
-    to run because KSM is unavailable.
-
-    **Threat model caveat.** KSM has a documented side-channel
-    history (Suzaki et al. 2011; Bosman et al. 2016): bit-identical
-    pages merged across processes expose timing-based information
-    leakage via Flush+Reload and similar cache attacks.
-    `PR_SET_MEMORY_MERGE` opts a process into a *global* kernel
-    merge pool, so children within a zygote family, and zygotes
-    across apps on the same host, all participate in one
-    merging domain — phase 3-10's sandboxing does not address
-    this because it operates above the physical-frame layer. The
-    **primary mitigation in phase 3-9 is the independent KSM
-    opt-in from decision #18**: operators who don't want KSM
-    exposure leave `experimental.ksm = false` (the default) or
-    `apps.ksm = false` for affected apps, and those apps use
-    the zygote model with no KSM activation at all. The zygote
-    and KSM toggles in the UI are both admin-gated. See Deferred
-    #1 and Deferred #9 for the full multi-tenant story and the
-    further hardening tracked as follow-up work.
-
-14. **No control-connection reconnect; lost connection triggers
+13. **No control-connection reconnect; lost connection triggers
     worker eviction.** When a zygote's control connection dies,
     the natural instinct is to reconnect — retry the dial, re-auth,
     resume. Phase 3-9 explicitly does not do this. Three reasons:
@@ -3595,205 +2670,36 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     a murky "the reconnect loop ran for 30 seconds and it
     eventually came back".
 
-15. **KSM observability via a separate `STATS` control command,
-    not by extending `INFO`.** Decision #13 provides the KSM
-    opt-in but the actual recovery rate for R workloads is
-    unmeasured and workload-dependent (REFCNT bumps, attribute
-    mutation, residual JIT activity on code not caught by
-    decision #17, and mark-bit skew all reduce the merge rate
-    from the theoretical maximum). Operators need to see the
-    real number for their bundle, not the design's estimate.
-    Three decisions shape how that data flows:
-
-    - **`STATS` is a new command, not a field on `INFO`.** `INFO`
-      is queried once at `NewClient` time and cached read-only
-      — that's correct for static facts (R version,
-      KSM enablement status, preload time) but wrong for
-      continuously-changing metrics. Mixing the two would force
-      either re-querying `INFO` on every metrics tick (and
-      invalidating the cached startup state) or racing the
-      reader goroutine. A separate `STATS` command is requested
-      on a tick by a dedicated metrics goroutine using the
-      normal `request()` path; the existing `reqMu` serialises
-      it against `FORK`/`KILL` traffic.
-
-    - **Source of truth is `/proc/<pid>/ksm_stat` (Linux 6.1+).**
-      The zygote knows its own PID and tracks each child's PID
-      in the `children` env. On `STATS`, `zygote.R` reads
-      `/proc/self/ksm_stat` plus `/proc/<childpid>/ksm_stat` for
-      each tracked child, parses the `ksm_merging_pages` line,
-      and returns `ksm_merging_pages_zygote`,
-      `ksm_merging_pages_children` (sum), and
-      `ksm_merging_pages_total`. Per-process granularity lets the
-      worker detail page attribute savings to specific apps; the
-      zygote+children sum is the headline number. If
-      `/proc/<pid>/ksm_stat` doesn't exist (kernel < 6.1), the
-      values are zero and `STATS` returns `ksm_stat_supported=0`
-      so the metrics goroutine can record the failure mode
-      without flooding logs.
-
-    - **Two metric scopes: per-zygote and host-global.**
-      `blockyard_zygote_ksm_merging_pages{app_id, worker_id}`
-      and `blockyard_zygote_ksm_merging_pages_total{app_id,
-      worker_id}` come from `STATS` polling. A separate
-      server-level scraper reads `/sys/kernel/mm/ksm/pages_sharing`
-      every metrics-interval and updates an unlabeled
-      `blockyard_host_ksm_pages_sharing` gauge. Host-global is
-      what operators budget against (whole-host RAM); per-zygote
-      is what they need for app-level capacity planning. Both
-      ship in phase 3-9. Metrics live in
-      `internal/telemetry/metrics.go` alongside the existing
-      gauges (`WorkersActive`, `SessionsActive`).
-
-    The `metrics_interval` defaults to 30s. Lower values give
-    fresher graphs at the cost of slightly more `STATS` round-trips
-    on the control channel; given that round-trips serialise on
-    `reqMu` against `FORK`/`KILL`, an aggressive value would
-    contend with cold starts under load. 30s is a comfortable
-    floor; operators can tune via app config if needed.
-
-    **Integration test as the regression net.** A KSM regression
-    (kernel change, seccomp tightening, ksmd disabled by another
-    process, helper bug) currently has no signal — the zygote
-    starts cleanly, sessions work, memory just slowly grows. The
-    integration test forks two children, forces `gc(full=TRUE)`
-    in each, polls `STATS` until `ksm_merging_pages_total > 0`,
-    fails on literal zero with the captured value logged, and
-    skips itself if `/sys/kernel/mm/ksm/run == 0`. This catches
-    "KSM stopped working entirely" without flaking on the noisy
-    "what's the exact merge count" question.
-
-16. **Children pin themselves at `oom_score_adj=1000`; zygote
-    stays at default.** When KSM-broken pages spike RSS during a
-    coordinated GC burst (decision #13's "RSS spike during
-    recovery"), the kernel's OOM killer picks the process with
-    the highest `oom_score`. Without intervention that's the
-    zygote — it has the largest RSS and the same default
-    `oom_score_adj=0` as everything else in the cgroup. Killing
-    the zygote loses the entire family: the preload investment,
-    every active session, and forces a full cold start on the
-    next request. Killing a single child loses one session, which
-    the existing 307-redirect fallback recovers transparently.
-
-    Linux exposes `/proc/<pid>/oom_score_adj` precisely for
-    biasing this decision. The value is added to the badness
-    score (max effective score: 1000), and crucially **raising
-    your own `oom_score_adj` is unprivileged** —
-    `CAP_SYS_RESOURCE` is only required to *lower* it. So each
-    forked child writes `1000` to `/proc/self/oom_score_adj` as
-    the very first thing it does post-fork, before opening the
-    listening socket or running any user code. The zygote stays
-    at the default `0`. Under memory pressure the kernel will
-    always reap a child first, regardless of the RSS ratio
-    between zygote and children.
-
-    Three properties of this approach matter:
-
-    - **No privilege coupling.** Phase 3-10 will drop most
-      capabilities; if we relied on `CAP_SYS_RESOURCE` to lower
-      the zygote's adj, we'd have to coordinate with 3-10's cap
-      story or special-case the zygote. Raising the child's adj
-      sidesteps the issue entirely — works in any environment,
-      including the most locked-down phase 3-10 sandbox.
-    - **Bounded blast radius.** In both backends the only OOM
-      candidates within the affected cgroup or namespace are the
-      zygote and its children. Setting children to the maximum
-      `1000` doesn't risk reaping unrelated host processes.
-    - **Failure mode is observable.** If the `writeLines` to
-      `/proc/self/oom_score_adj` fails (extremely unlikely —
-      this is a self-write to a procfs file always present on
-      Linux), the child logs
-      `blockyard_zygote_child event=oom_adj_failed` and
-      continues. The child still serves correctly; only the OOM
-      bias is missing. Operators can grep for the event in
-      structured logs to confirm whether the bias is in place.
-
-    Alternatives considered:
-
-    - **Lower the zygote to `-800` or `-1000` instead.** Cleaner
-      symbolically (it's "the system process") but requires
-      `CAP_SYS_RESOURCE`, which Phase 3-10 will need to grant
-      explicitly. Also risks edge cases where `-1000` makes the
-      zygote OOM-immune and the kernel panics instead of killing
-      anything. Rejected.
-    - **Use cgroup memory limits to bound children individually.**
-      Solves a related problem (per-session memory cap) but
-      doesn't change the OOM-kill order when the *group* is
-      under pressure. Also requires rootless cgroup delegation
-      which isn't available in all supported deployments
-      (deferred item #3). Orthogonal, not a substitute.
-    - **Have the zygote `madvise(MADV_DONTNEED)` package pages
-      on the children's behalf when memory pressure is high.**
-      Theoretically attractive (proactive recovery) but R has
-      no idea which pages are "package pages" vs. session
-      pages, and getting this wrong corrupts the heap. Way
-      out of scope.
-
-17. **Bundle code is byte-compiled up front in the zygote via
-    `compiler::cmpfile()`; packages are left alone.** R's JIT
-    compiles closure bodies on first call via an in-place
-    `SET_BODY` write that mutates the closure SEXP header in
-    shared COW pages. Every forked child hitting a first-time
-    call ends up dirtying those pages and allocating its own
-    BCODESXPs in child-local heap — even when two children
-    compile the same function, the resulting bytecode objects
-    live at different addresses, so the BODY pointers in the
-    now-private closure headers differ and KSM cannot merge them.
-    Left unaddressed, post-fork JIT is the dominant source of
-    page divergence for user code.
-
-    The fix has to upgrade those closures to bytecode *before*
-    the fork, not after. But the fix has to be scoped carefully:
-
-    - **Packages are left alone on purpose.** Most CRAN packages
-      arrive byte-compiled at install time (`R_COMPILE_PKGS=1` is
-      the R 4.0+ default). Packages that ship with
-      `ByteCompile: no` in DESCRIPTION opted out, usually because
-      the compiler chokes on something they do (complex
-      `NextMethod` chains, unusual `<<-` patterns, etc.). A
-      namespace-walk that mass-recompiles every closure across
-      the entire dependency tree would second-guess package
-      authors' decisions, risk breaking their `ByteCompile: no`
-      opt-outs, and require metaprogramming gymnastics
-      (`unlockBinding` / `lockBinding`) to mutate locked
-      namespace bindings. None of that is worth it: the package
-      decision is already made, we should respect it, and the
-      residual post-fork JIT cost for those few packages is
-      bounded.
-    - **Bundle code is compiled via `cmpfile` + `loadcmp`.** The
-      zygote parses `global.R` and `app.R` with
-      `compiler::cmpfile(src, out)`, which walks the expression
-      tree and compiles function literals as a side effect of
-      compiling the enclosing assignment. `compiler::loadcmp(out,
-      envir = env)` then evaluates the compiled expressions,
-      producing closures whose bodies are `BCODESXP` from birth.
-      No post-fork `R_cmpfun1` path, no `SET_BODY` writes, no
-      child-local bytecode allocations for bundle code.
-    - **The shinyApp object is captured, not re-sourced.** The
-      current preload stubs `shinyApp(...)` as a no-op; the
-      updated version captures the arguments into
-      `captured_app <<- shiny::shinyApp(ui, server, ...)`. The
-      FORK handler then calls `runApp(captured_app, port = ...)`
-      in the child instead of `runApp(bundle_path, ...)`. This
-      matters for two reasons: (1) it keeps `bundle_env` alive
-      at top level so the compiled closures aren't GC'd after
-      preload, and (2) it eliminates the re-parse/re-source
-      cost of `app.R` on every child start (100–500ms saved per
-      cold start for typical bundles, on top of the KSM
-      benefit).
+14. **The `shinyApp` object is captured during preload, not
+    re-sourced per child.** The preload stubs `shinyApp(...)`
+    as a capturing closure that stores the arguments into
+    `captured_app <<- shiny::shinyApp(ui, server, ...)`. The
+    FORK handler then calls `runApp(captured_app, port = ...)`
+    in the child instead of `runApp(bundle_path, port = ...)`.
+    This means `app.R` is parsed and evaluated exactly once, in
+    the zygote, which saves 100–500ms per cold start for typical
+    bundles (the re-parse / re-source cost of `app.R` in every
+    child otherwise).
 
     **Fallback for unusual bundle structures.** Bundles that
     split `ui.R` and `server.R` without a top-level `shinyApp()`
     call, or that call `shinyApp()` conditionally, will leave
     `captured_app == NULL` after preload. The FORK handler
     detects this and falls back to `runApp(bundle_path, ...)`
-    in the child — identical to the pre-precompile behaviour.
+    in the child — identical to the pre-capture behaviour.
     The zygote logs `preload ... warning=no_shinyapp_captured`
     so operators can see the fallback is active. Bundle
     packages themselves still benefit from being pre-loaded,
-    so startup latency is still improved; only the KSM
-    memory-sharing story degrades for bundle closures in this
-    case.
+    so startup latency is still improved.
+
+    **Phase 3-10 layers up-front byte-compilation on top of
+    this.** The same preload path will switch from `sys.source`
+    to `compiler::cmpfile()` + `compiler::loadcmp()` so bundle
+    closures are born as `BCODESXP` — a prerequisite for KSM
+    finding stable pages to merge (see
+    `phase-3-10-draft.md` decision K3). Phase 3-9 ships the
+    simpler `sys.source` path since it captures the shinyApp
+    object correctly and delivers the latency win unchanged.
 
     **What this does not catch (residuals):**
 
@@ -3816,70 +2722,42 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     reduction in page divergence. Revisit if measurements show
     otherwise.
 
-18. **Two-level opt-in for zygote and KSM: server-wide config
-    flag AND per-app flag, with KSM as an independent gate from
-    zygote.** The zygote model is new territory in the R
+15. **Two-level opt-in for zygote: server-wide config flag AND
+    per-app flag.** The zygote model is new territory in the R
     ecosystem — nothing like it exists in Shiny Server, Posit
     Connect, or any other R deployment tool. Operators have no
     institutional knowledge of the failure modes, no runbooks,
-    no tuning intuition. KSM adds a separate layer of novelty
-    and risk (kernel-version requirements, operator tuning,
-    documented side-channel history). Forcing either feature
-    on by default would mean operators who upgrade blockyard
-    start running unfamiliar code paths on their production
-    traffic without asking for it. That's a bad default for
-    anything experimental, and an especially bad default for
-    something with KSM's threat-model baggage.
+    no tuning intuition. Forcing the feature on by default
+    would mean operators who upgrade blockyard start running
+    unfamiliar code paths on their production traffic without
+    asking for it. That's a bad default for anything
+    experimental.
 
-    **The design therefore has four independent gates, all
+    **The design therefore has two independent gates, both
     default off, that must be opened together before any
     behaviour changes:**
 
-    | Gate                     | Location   | Controls                          |
-    |--------------------------|------------|-----------------------------------|
-    | `experimental.zygote`    | server toml | Whether the zygote code path runs at all |
-    | `experimental.ksm`       | server toml | Whether `PR_SET_MEMORY_MERGE` is ever called |
-    | `apps.zygote`            | db column  | Whether a specific app uses the zygote model |
-    | `apps.ksm`               | db column  | Whether a specific app's zygote enables KSM |
+    | Gate                  | Location   | Controls                              |
+    |-----------------------|------------|---------------------------------------|
+    | `experimental.zygote` | server toml | Whether the zygote code path runs at all |
+    | `apps.zygote`         | db column  | Whether a specific app uses the zygote model |
 
-    **Why server-wide AND per-app for both flags, not just
-    per-app:** the server-wide gate protects operators who
-    upgrade blockyard without reading the release notes —
-    they get identical behaviour to the prior version until
-    they explicitly opt into the new subsystem. The per-app
-    gate lets operators who *have* opted in enable the
-    experiment surgically, on one low-stakes app first,
-    before rolling it to the rest of their fleet. Removing
-    either gate would force operators into an all-or-nothing
-    decision, which is exactly the wrong shape for experimental
-    infrastructure.
-
-    **Why KSM is its own gate independent of zygote:** the
-    zygote model's two unconditional benefits (startup latency
-    and per-session isolation) are *not* coupled to KSM at all
-    — decisions #13 and #17 are explicit that those benefits
-    land regardless of whether KSM activates. Only the
-    opportunistic memory-sharing benefit depends on KSM.
-    Operators who want startup + isolation but don't want the
-    KSM side-channel exposure (Deferred #9) should be able to
-    get that configuration without forking the design. Two
-    flags is the simplest way to express it.
+    **Why server-wide AND per-app, not just per-app:** the
+    server-wide gate protects operators who upgrade blockyard
+    without reading the release notes — they get identical
+    behaviour to the prior version until they explicitly opt
+    into the new subsystem. The per-app gate lets operators
+    who *have* opted in enable the experiment surgically, on
+    one low-stakes app first, before rolling it to the rest of
+    their fleet. Removing either gate would force operators
+    into an all-or-nothing decision, which is exactly the
+    wrong shape for experimental infrastructure.
 
     **Validation rules at the API layer (enforced in
-    `UpdateApp` and `CreateApp`):**
-
-    - Setting `apps.zygote = true` requires
-      `experimental.zygote = true` in server config → otherwise
-      400 with `"zygote feature not enabled in server config"`
-    - Setting `apps.ksm = true` requires `apps.zygote = true`
-      on the same effective end-state → otherwise 400 with
-      `"ksm requires zygote to be enabled"`
-    - Setting `apps.ksm = true` requires
-      `experimental.ksm = true` in server config → otherwise
-      400 with `"ksm feature not enabled in server config"`
-    - `experimental.ksm = true` in server config requires
-      `experimental.zygote = true` → config load rejects the
-      combination with a fatal error at startup
+    `UpdateApp` and `CreateApp`):** Setting `apps.zygote = true`
+    requires `experimental.zygote = true` in server config →
+    otherwise 400 with `"zygote feature not enabled in server
+    config"`.
 
     **Runtime gating (orthogonal to validation):** Even if an
     app row has `apps.zygote = true` from an older config state,
@@ -3888,23 +2766,24 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     **kill switch**: flipping `experimental.zygote` to `false`
     in config and restarting the server instantly disables the
     feature for every app, without requiring database updates
-    or API calls. Same shape for `experimental.ksm` → zygote
-    workers spawn without `BLOCKYARD_KSM_ENABLED`, and
-    `zygote.R`'s `enable_ksm()` skips the prctl call and
-    reports `ksm_status=disabled`.
+    or API calls.
 
     **UI gating:** The settings tab reads the effective server
-    config and disables/hides the zygote and ksm toggles when
-    the corresponding `experimental.*` flag is off. Tooltip on
-    the disabled toggle explains "set `experimental.zygote =
+    config via the capabilities endpoint and disables the
+    zygote toggle when `experimental.zygote` is off. Tooltip
+    on the disabled toggle explains "set `experimental.zygote =
     true` in the server config to enable this feature."
+
+    **Phase 3-10 layers the same shape on top for KSM** — a
+    second `experimental.ksm` server flag and a per-app `ksm`
+    column, both default off, both gated against the existing
+    zygote flags. The two-level opt-in pattern is the
+    structural primitive; phase 3-10 applies it twice rather
+    than inventing a different shape. See
+    `phase-3-10-draft.md` decision K4.
 
     **Alternatives considered:**
 
-    - **Single `experimental` flag for both.** Simpler but
-      couples the two decisions — operators who want zygote
-      without KSM exposure would have no clean way to express
-      it. Rejected.
     - **Per-app only, no server-wide gate.** Operators who
       upgrade would inherit the new subsystem without opting
       in. Acceptable if the feature were mature, but for a
@@ -3912,15 +2791,6 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     - **Server-wide only, no per-app gate.** Forces an
       all-or-nothing rollout, defeats the point of the
       per-app toggle. Rejected.
-    - **A single `trust_level` enum on each app**
-      (`single_tenant` / `multi_tenant`) that implicitly
-      disables KSM for `multi_tenant`. Higher-level but
-      overfits to one axis of variation — there are tenants
-      who want multi-user but accept KSM risk, and tenants who
-      want single-user but still don't want KSM for unrelated
-      reasons (e.g., pre-6.4 kernel). Two explicit flags
-      compose more cleanly. Rejected for phase 3-9; remains
-      an option for future consolidation.
 
 ## Deferred
 
@@ -3932,20 +2802,6 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    between phase 3-9 and phase 3-10.** The phase doc and the UI
    toggle warn about this explicitly. The two phases are intended
    to land back-to-back.
-
-   **Phase 3-10 does NOT address KSM side channels** — that's a
-   separate, independent concern. The primary mitigation in
-   phase 3-9 is the independent KSM opt-in from decision #18:
-   operators who are concerned about cross-session side channels
-   leave `experimental.ksm = false` in server config (the
-   default) or `apps.ksm = false` on the affected apps, and
-   those apps get zygote-model benefits (startup latency,
-   per-session isolation) with no KSM exposure at all. Further
-   hardening beyond the opt-in gate is tracked in deferred item
-   #9. Post-3-10 + KSM-off, the zygote is safe for multi-tenant;
-   post-3-10 + KSM-on, it is safe only to the extent that
-   operators have audited their bundles for sensitive
-   singletons and accepted the risk.
 
 2. **Capacity-model guidance for zygote deployments.** Tracked in
    cynkra/blockyard#160. The `max_sessions_per_worker` and
@@ -3964,17 +2820,15 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    feedback drive its shape.
 
    **Worst-case headroom math** is a sub-question in scope for
-   the same tracking issue. Decisions #13 and #16 cap the
-   blast radius (children get OOM-killed first; the zygote
-   survives), but operators still need a concrete formula for
-   how much memory headroom to budget for the transient RSS
-   spike when N children GC concurrently. The rough shape is
-   `peak_RSS ≈ N × bundle_resident_size + N × per_session_delta`
-   versus the steady-state
-   `~1 × bundle + N × per_session_delta`. Whether to expose this
-   as a documented formula, a sizing helper in `by`, or a
-   server-side estimate based on observed RSS history is the
-   open question.
+   the same tracking issue, but really becomes concrete only
+   once KSM lands in phase 3-10: that's when the transient RSS
+   spike during coordinated GC recovery becomes the
+   load-bearing concern. Phase 3-9 does not produce the spike
+   (no KSM means no mass page dirtying to recover from), so the
+   capacity math stays simple: `peak_RSS ≈ N × bundle + N ×
+   per_session_delta` after R's generational GC has done its
+   work in each child. Revisit once phase 3-10 ships and KSM is
+   the dominant variable.
 
 3. **Per-child cgroups in Docker.** Would let `memory_limit` mean
    "per session" in Docker the way it does in the process backend.
@@ -4028,75 +2882,15 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    by the existing worker token signing key. Not needed for
    phase 3-9.
 
-9. **KSM side-channel documentation and future hardening.**
-   KSM has a well-documented side-channel history — Suzaki et
-   al., *"Memory deduplication as a threat to the guest OS"*
-   (EuroSec 2011) first described the vector, and Bosman et al.,
-   *"Dedup Est Machina"* (IEEE S&P 2016) weaponized it. When
-   two processes have bit-identical pages merged into one
-   physical frame, either process can detect access patterns on
-   the other via cache-timing measurement (Flush+Reload and
-   variants). In phase 3-9's model this matters in two places:
-
-   - **Cross-session within a zygote family.** All children
-     inherit `MMF_VM_MERGE_ANY` from the zygote, so they
-     participate in the same merge domain. A malicious session
-     on app X can measure timing patterns against other
-     sessions on app X and leak data held in bit-identical
-     pages — code, constants, cached auth tokens, shared
-     lookup tables with sensitive values.
-   - **Cross-zygote across apps on the same host.** Worse:
-     `PR_SET_MEMORY_MERGE` puts a process into a *global*
-     kernel-level merge pool, not a per-cgroup or per-namespace
-     one. If app A's zygote and app B's zygote both opt in,
-     any bit-identical pages between them get merged by the
-     same ksmd. A malicious session on app A can Flush+Reload
-     against app B's memory via the shared physical frames.
-     Mount namespaces, seccomp, capability dropping, and
-     cgroups do not address this — KSM operates below all of
-     those isolation primitives.
-
-   **Phase 3-10's sandboxing does not fix this.** The
-   sandboxing phase addresses `/tmp` leakage, capability
-   excess, and syscall surface — all above the physical-frame
-   layer where KSM operates. Treat the two concerns as
-   independent prerequisites for multi-tenant deployment.
-
-   **Phase 3-9 already ships the primary mitigation: the
-   per-app `ksm` flag and the server-wide `experimental.ksm`
-   flag from decision #18.** Operators who are concerned about
-   side channels leave `experimental.ksm = false` (the default)
-   and/or leave `apps.ksm = false` for affected apps. Those
-   apps get the zygote model's unconditional benefits (startup
-   latency, per-session isolation) without any KSM exposure —
-   `prctl(PR_SET_MEMORY_MERGE)` is never called, the process
-   never joins the kernel merge pool, and the memory model
-   degrades to the PSOCK-equivalent steady state that phase
-   3-9's fallback path already supports. This is the "kill
-   switch" path that decision #18 describes.
-
-   **What remains deferred for multi-tenant hardening beyond
-   the opt-in:**
-
-   - **Threat-model documentation.** A dedicated operator-facing
-     doc explaining when KSM is safe to enable, what data a
-     malicious session can plausibly leak, and how to audit a
-     bundle for sensitive singletons. Phase 3-9 ships only the
-     inline warnings in the UI and a reference to Suzaki/Bosman
-     in this design doc.
-   - **Per-app fine-grained controls beyond the boolean.** For
-     example, disabling KSM only for apps tagged as
-     `access_type=public` (already a column in the apps table),
-     or auto-disabling when OIDC user count exceeds a threshold,
-     or a host-level deny list. These are all ergonomic
-     refinements on top of the opt-in that phase 3-9 ships.
-   - **Active side-channel mitigations** — scrubbing sensitive
-     memory regions, using `MADV_UNMERGEABLE` on specific
-     allocations, or kernel patches that scope the merge pool
-     by cgroup. All of these are substantial R&D work and
-     don't belong in a phase focused on landing the mechanism.
-
-   The phase 3-9 opt-in gate is the structural fix; the
-   deferred items here are refinements that make the opt-in
-   more ergonomic and better documented for operators who need
-   to make the call.
+9. **KSM memory sharing and its full observability, preflight,
+   threat-model, and capacity story.** Originally folded into
+   this phase; carved out to phase 3-10 to keep the zygote
+   mechanism and the KSM opt-in landable as separate units.
+   See `phase-3-10-draft.md` — that document covers the C
+   helper, the `STATS` control command, the Prometheus
+   metrics, the preflight checks, the `oom_score_adj` pinning,
+   the up-front byte-compilation, the two-level opt-in for
+   `ksm`, and the multi-tenant side-channel story (Suzaki
+   2011 / Bosman 2016). Nothing in phase 3-9 blocks phase 3-10
+   from layering KSM on; the two-package split (decision #5)
+   specifically exists to make the additive surface clean.
