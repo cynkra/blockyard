@@ -123,9 +123,10 @@ jobs:
           # Without this the action unsets TRIVY_SEVERITY when format=sarif
           # and every severity gets uploaded to the Security tab.
           limit-severities-for-sarif: true
-          # Suppresses kernel-header CVEs that don't apply to container
-          # workloads; see the file itself for rationale.
-          trivyignores: .trivyignore.yaml
+          # OPA/Rego policy that filters by package name instead of by
+          # CVE ID, so future kernel-header CVEs are silenced
+          # automatically. See the file itself for rationale.
+          ignore-policy: .trivyignore.rego
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
