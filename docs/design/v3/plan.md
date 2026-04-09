@@ -883,63 +883,107 @@ mechanism: **post-fork sandboxing** (isolation) and **opt-in kernel
 same-page merging** (memory sharing). They land together because
 KSM's RSS-spike failure mode needs sandbox-level containment and
 KSM's threat model shares the multi-tenant audit story with
-sandboxing. See `phase-3-10-draft.md` for the full design, KSM
-rationale, and observability.
+sandboxing. See `phase-3-10.md` for the full design, KSM rationale,
+and observability.
 
 **Post-fork sandboxing deliverables:**
 
-1. **Per-child isolation** — each child applies isolation before
-   starting Shiny:
-   - `unshare(CLONE_NEWUSER | CLONE_NEWNS)` — private mount namespace
-   - Private tmpfs at `/tmp`
-   - seccomp-bpf filter (must allow `PR_SET_MEMORY_MERGE` for KSM)
-   - `capset()` — drop all capabilities
-   - `setrlimit()` — `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_NPROC`
+1. **Consolidated C helper** `internal/zygotectl/zygote_helper.c`
+   exporting exactly two functions: `enable_ksm` (pre-fork, parent
+   zygote) and `apply_post_fork_sandbox` (post-fork, child, atomic).
+   Single entry point for the whole sandbox chain so R-visible
+   surface is minimal — user R code cannot cherry-pick primitives.
+   Loaded via `dyn.load` from `zygote.R` after `preload_bundle()`
+   finishes; file is `unlink`ed immediately after load.
 
-2. **Docker security options** — container create call adds
-   `--security-opt seccomp=blockyard-seccomp.json` (same profile as
-   process backend, phase 3-8) and `--security-opt apparmor=unconfined`
-   (Ubuntu 23.10+ only) when the zygote model is enabled.
+2. **Per-child isolation** — `apply_post_fork_sandbox` performs
+   the entire setup in C, in order:
+   `oom_score_adj=1000` → `PR_SET_NO_NEW_PRIVS` →
+   `unshare(CLONE_NEWUSER|CLONE_NEWNS)` → mount tmpfs at `/tmp` →
+   `setrlimit(RLIMIT_NPROC, 64)` → `capset()` drop all →
+   post-fork seccomp filter. Static guard makes the function
+   call-once; seccomp filter defangs any subsequent calls.
 
-3. **Environment variable hardening** — `OMP_NUM_THREADS=1` and
-   `MKL_NUM_THREADS=1` in the template process before forking.
+3. **Post-fork seccomp profile** — new JSON profile
+   `docker/blockyard-post-fork-seccomp.json` compiled via the
+   phase-3-8 seccomp pipeline to a BPF blob embedded in the helper
+   at build time. Denies `unshare`, `mount`, `setns`, `capset`,
+   `prctl(PR_SET_MEMORY_MERGE)`, etc. — children never need these
+   once the sandbox is in place.
 
-4. **Package compatibility documentation** — document the three
-   categories: safe to pre-load (shiny, ggplot2, dplyr), dangerous to
-   pre-load (arrow, torch, rJava — load in each child), and safe if
-   not used before fork (DBI, RPostgres).
+4. **Zygote-variant bwrap profile** for the process backend —
+   `docker/blockyard-bwrap-zygote-seccomp.json` permits the narrow
+   `CLONE_NEWUSER|CLONE_NEWNS` unshare so the post-fork hook can
+   run inside bwrap. Phase 3-8's non-zygote profile stays unchanged.
+   Process backend picks the profile at spawn time based on
+   `spec.Zygote` and `spec.KSM`.
+
+5. **Outer-container seccomp extension** — `prctl(PR_SET_MEMORY_MERGE)`
+   is allowed via a separate profile variant
+   (`docker/blockyard-seccomp-ksm.json`) shipped only in image
+   variants where KSM is supported. Trust chain is "which file did
+   the image ship?", not a runtime toggle.
+
+6. **Docker security options** — container create call for zygote
+   workers adds `--security-opt seccomp={outer-profile-path}` (base
+   or KSM variant) and, on hosts where apparmor is active,
+   `--security-opt apparmor=unconfined` (Ubuntu 23.10+ needs this
+   to permit unprivileged user-namespace creation).
+
+7. **Environment variable hardening** — `OMP_NUM_THREADS=1` and
+   `MKL_NUM_THREADS=1` exported in the zygote env, inherited by
+   every child.
+
+8. **Only `RLIMIT_NPROC` is applied post-fork.** `RLIMIT_AS` and
+   `RLIMIT_CPU` are deliberately skipped: R's allocator fights
+   `AS` caps, Shiny sessions legitimately run for hours so
+   `CPU` caps have the wrong shape. `NPROC=64` is a fork-bomb
+   guard, not a resource budget. Per-session memory/CPU bounds
+   remain at the worker-level cgroup (Docker) or unbounded
+   (process, per phase 3-7). Per-child cgroup delegation is
+   deferred to a future phase.
+
+9. **Package compatibility documentation** — document the three
+   categories: safe to pre-load (shiny, ggplot2, dplyr), dangerous
+   to pre-load (arrow, torch, rJava — load in each child), and
+   safe if not used before fork (DBI, RPostgres).
 
 **KSM opt-in deliverables:**
 
-5. **`ksm` column + `experimental.ksm` server flag** — second
-   two-level opt-in, independent of `experimental.zygote`. API
-   rejects `apps.ksm = true` without `apps.zygote = true` on the
-   same app and without `experimental.ksm = true` in server config.
-6. **`zygote_helper.c` + per-arch precompiled `.so`** — tiny
-   dependency-free C helper loaded via `dyn.load` from `zygote.R`
-   to call `prctl(PR_SET_MEMORY_MERGE)`. Embedded per-architecture
-   via build-tag-guarded `//go:embed`.
-7. **`STATS` control command + observability** — new command on the
-   control protocol returning dynamic KSM merge counts from
-   `/proc/<pid>/ksm_stat`. `zygote.Manager` gains a metrics-poll
-   goroutine that updates labeled Prometheus gauges
-   (`blockyard_zygote_ksm_merging_pages{app_id, worker_id}`) plus a
-   host-global `blockyard_host_ksm_pages_sharing` scraper.
-8. **KSM preflight checks** — each backend's `Preflight()` reads
-   `/sys/kernel/mm/ksm/run` and `/sys/kernel/mm/ksm/pages_to_scan`,
-   warns when ksmd is off or scanning at the desktop default. Gated
-   on both server and per-app opt-in so operators who haven't opted
-   into KSM see no preflight noise.
-9. **Up-front bundle byte-compilation** — `zygote.R` compiles
-   `global.R` / `app.R` via `compiler::cmpfile` before the fork so
-   bundle closures are `BCODESXP` from birth. Prevents the JIT from
-   dirtying shared closure pages post-fork (the dominant source of
-   page divergence for user code).
-10. **Children pin themselves at `oom_score_adj=1000`** — the kernel
-    OOM killer reaps a child (one session, recoverable via the 307
-    fallback) instead of the zygote (entire family) under the RSS
-    spike that a coordinated GC burst can produce before ksmd
-    catches up. Self-write, unprivileged, no capability coupling.
+10. **`ksm` column + `experimental.ksm` server flag** — second
+    two-level opt-in, independent of `experimental.zygote`. API
+    rejects `apps.ksm = true` without `apps.zygote = true` on the
+    same effective end-state and without `experimental.ksm = true`
+    in server config. Config load rejects `experimental.ksm`
+    without `experimental.zygote`.
+11. **`enable_ksm` in the consolidated helper** — second function
+    in `zygote_helper.c` alongside `apply_post_fork_sandbox`.
+    Called at zygote startup (after `preload_bundle` finishes),
+    gated on `BLOCKYARD_KSM_ENABLED=1`. Graceful fallback on older
+    kernels (EINVAL → `ksm_status=unsupported`) and
+    seccomp-restricted environments (EPERM → `ksm_status=denied`).
+12. **`STATS` control command + observability** — new command on
+    the control protocol returning dynamic KSM merge counts from
+    `/proc/<pid>/ksm_stat`. `zygote.Manager` gains a metrics-poll
+    goroutine that updates labeled Prometheus gauges
+    (`blockyard_zygote_ksm_merging_pages{app_id, worker_id}`) plus
+    a host-global `blockyard_host_ksm_pages_sharing` scraper.
+13. **KSM preflight checks** — each backend's `Preflight()` reads
+    `/sys/kernel/mm/ksm/run` and `/sys/kernel/mm/ksm/pages_to_scan`,
+    warns when ksmd is off or scanning at the desktop default.
+    Gated on both server and per-app opt-in so operators who
+    haven't opted into KSM see no preflight noise.
+14. **Up-front bundle byte-compilation** — `zygote.R` compiles
+    `global.R` / `app.R` via `compiler::cmpfile` before the fork
+    so bundle closures are `BCODESXP` from birth. Prevents the
+    JIT from dirtying shared closure pages post-fork (the
+    dominant source of page divergence for user code).
+15. **Children pin themselves at `oom_score_adj=1000`** — handled
+    as step 1 of `apply_post_fork_sandbox`. The kernel OOM killer
+    reaps a child (one session, recoverable via the 307 fallback)
+    instead of the zygote (entire family) under the RSS spike
+    that a coordinated GC burst can produce before ksmd catches
+    up. Self-write, unprivileged, no capability coupling.
 
 **Tests** — `/tmp` isolation between children, seccomp profile
 active, `CLONE_NEWUSER` works inside the container, `prctl(PR_SET_MEMORY_MERGE)`
