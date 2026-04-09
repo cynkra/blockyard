@@ -1,0 +1,4 @@
+{
+  "description": "Blockyard overlay for the bwrap inner-sandbox seccomp profile. Compiled to BPF by cmd/seccomp-compile and loaded by bwrap via --seccomp <fd>. Workers should NOT be creating further namespaces once inside the sandbox (the outer profile already allowed it, but that's for bwrap itself — not for the R child). The bwrap profile is the upstream moby default with no additional relaxations; the OCI JSON's cap-gated rules are flattened to unconditional allow at compile time because the build environment always has the cap, so the merged rule is equivalent.",
+  "prependRules": []
+}

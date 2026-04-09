@@ -63,6 +63,14 @@ func (m *MemoryWorkerMap) All() []string {
 	return ids
 }
 
+// WorkersForServer returns all worker IDs. In the memory
+// implementation every worker belongs to "this" server — single-node
+// deployments have one process — so the serverID filter is a no-op.
+// The Redis variant does the real filtering.
+func (m *MemoryWorkerMap) WorkersForServer(_ string) []string {
+	return m.All()
+}
+
 // ForApp returns all worker IDs for a given app (including draining).
 func (m *MemoryWorkerMap) ForApp(appID string) []string {
 	m.mu.Lock()

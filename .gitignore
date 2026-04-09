@@ -1,6 +1,7 @@
 # Go binary output
 /blockyard
 /by-builder
+/bin/
 
 # Test coverage
 coverage.out

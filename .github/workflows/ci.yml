@@ -154,6 +154,26 @@ jobs:
           name: coverage-unit
           path: coverage-unit.out
           retention-days: 1
+      # Phase 3-8 variant build verification. Each minimal variant
+      # compiles cmd/blockyard with a distinct tag set and runs the
+      # registered-factory assertion (cmd/blockyard/build_tags_*_test.go)
+      # to prove the backend map matches the variant. The dep-graph
+      # test at internal/build/deps_test.go is already covered by the
+      # default `go test ./...` above.
+      - name: Verify minimal,docker_backend variant
+        run: |
+          go build -tags "minimal,docker_backend" -o /tmp/blockyard-docker ./cmd/blockyard
+          go test -tags "minimal,docker_backend" ./cmd/blockyard
+      - name: Verify minimal,process_backend variant
+        run: |
+          go build -tags "minimal,process_backend" -o /tmp/blockyard-process ./cmd/blockyard
+          go test -tags "minimal,process_backend" ./cmd/blockyard
+
+      # Seccomp profile drift: if moby's default.json has been
+      # bumped but blockyard-outer.json wasn't regenerated, fail
+      # noisily so the reviewer runs `make regen-seccomp`.
+      - name: Verify seccomp profile sync
+        run: make regen-seccomp-check
 
   cli:
     runs-on: ubuntu-24.04

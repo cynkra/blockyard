@@ -5,11 +5,13 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cynkra/blockyard/internal/apiclient"
+	"github.com/cynkra/blockyard/internal/seccomp"
 )
 
 func adminCmd() *cobra.Command {
@@ -22,8 +24,53 @@ func adminCmd() *cobra.Command {
 		adminUpdateCmd(),
 		adminRollbackCmd(),
 		adminStatusCmd(),
+		adminInstallSeccompCmd(),
 	)
 	return cmd
+}
+
+func adminInstallSeccompCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "install-seccomp",
+		Short: "Write the blockyard outer-container seccomp profile to disk",
+		Long: `Write the embedded outer-container seccomp profile to a
+target path so operators running the blockyard-process image can pass
+it to their container runtime via --security-opt seccomp=<path>.
+
+The profile is Docker's default seccomp profile with an unconditional
+allow for clone/clone3/unshare/setns so bwrap can --unshare-user
+inside the container without CAP_SYS_ADMIN. No other isolation
+properties are relaxed.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			target, _ := cmd.Flags().GetString("target")
+			if target == "" {
+				target = "/etc/blockyard/seccomp.json"
+			}
+			if err := installSeccompProfile(target); err != nil {
+				return err
+			}
+			fmt.Printf("Wrote seccomp profile to %s\n", target)
+			fmt.Println("Apply with: docker run --security-opt seccomp=" + target + " ...")
+			return nil
+		},
+	}
+	cmd.Flags().String("target", "",
+		`output path (default: /etc/blockyard/seccomp.json)`)
+	return cmd
+}
+
+// installSeccompProfile writes the embedded outer profile to the
+// target path, creating parent directories as needed. Extracted for
+// testability.
+func installSeccompProfile(target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // G301: non-secret config dir
+		return fmt.Errorf("create parent directory: %w", err)
+	}
+	if err := os.WriteFile(target, seccomp.Outer, 0o644); err != nil { //nolint:gosec // G306: non-secret config file
+		return fmt.Errorf("write profile: %w", err)
+	}
+	return nil
 }
 
 func adminUpdateCmd() *cobra.Command {

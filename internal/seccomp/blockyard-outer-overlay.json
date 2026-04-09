@@ -1,0 +1,18 @@
+{
+  "description": "Blockyard overlay for the outer-container seccomp profile. Applied to upstream-default.json by cmd/seccomp-merge. The only change from Docker's default is a relaxation of the user-namespace-creation syscalls so bwrap can --unshare-user inside the container without CAP_SYS_ADMIN. No other capability gates are relaxed and no syscalls are added.",
+  "prependRules": [
+    {
+      "names": [
+        "clone",
+        "clone3",
+        "unshare",
+        "setns"
+      ],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [],
+      "comment": "Blockyard: allow bwrap --unshare-user inside the container without CAP_SYS_ADMIN. Placed before the cap-gated entries so the unconditional allow wins rule-order evaluation.",
+      "includes": {},
+      "excludes": {}
+    }
+  ]
+}

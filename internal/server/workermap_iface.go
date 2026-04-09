@@ -23,4 +23,14 @@ type WorkerMap interface {
 	AppIDs() []string
 	IsDraining(appID string) bool
 	ClearDraining(workerID string)
+
+	// WorkersForServer returns the worker IDs owned by the given
+	// server_id. Used by Drainer.waitForIdle during a same-host
+	// rolling update so the old server waits for its own sessions
+	// to end, not the new server's fresh sessions. In the memory
+	// implementation this is equivalent to All() — single-node
+	// deployments have one server, so every worker belongs to it.
+	// The Redis implementation filters by the server_id hash field
+	// phase 3-3 already writes.
+	WorkersForServer(serverID string) []string
 }

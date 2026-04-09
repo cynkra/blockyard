@@ -6,7 +6,7 @@ import (
 )
 
 func TestUIDAllocator(t *testing.T) {
-	u := newUIDAllocator(60000, 60002)
+	u := newMemoryUIDAllocator(60000, 60002)
 
 	u1, err := u.Alloc()
 	if err != nil {
@@ -40,7 +40,7 @@ func TestUIDAllocator(t *testing.T) {
 }
 
 func TestUIDAllocatorConcurrent(t *testing.T) {
-	u := newUIDAllocator(60100, 60199)
+	u := newMemoryUIDAllocator(60100, 60199)
 	var wg sync.WaitGroup
 	uids := make(chan int, 100)
 
@@ -70,7 +70,7 @@ func TestUIDAllocatorConcurrent(t *testing.T) {
 }
 
 func TestUIDAllocatorReleaseOutOfRange(t *testing.T) {
-	u := newUIDAllocator(60000, 60010)
+	u := newMemoryUIDAllocator(60000, 60010)
 	// Out-of-range release is a no-op.
 	u.Release(0)
 	u.Release(99999)
@@ -83,7 +83,7 @@ func TestUIDAllocatorReleaseOutOfRange(t *testing.T) {
 // clamps end < start to an empty pool instead of allocating a huge
 // slice with a negative length (which would panic in make).
 func TestNewUIDAllocatorDefensiveNegativeRange(t *testing.T) {
-	u := newUIDAllocator(100, 5)
+	u := newMemoryUIDAllocator(100, 5)
 	if len(u.used) != 0 {
 		t.Errorf("expected empty used slice, got len=%d", len(u.used))
 	}

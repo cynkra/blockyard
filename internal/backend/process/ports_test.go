@@ -8,7 +8,7 @@ import (
 )
 
 func TestPortAllocator(t *testing.T) {
-	p := newPortAllocator(40000, 40002)
+	p := newMemoryPortAllocator(40000, 40002)
 
 	// Reserve all three ports.
 	p1, ln1, err := p.Reserve()
@@ -52,7 +52,7 @@ func TestPortAllocator(t *testing.T) {
 }
 
 func TestPortAllocatorConcurrent(t *testing.T) {
-	p := newPortAllocator(40100, 40199)
+	p := newMemoryPortAllocator(40100, 40199)
 	var wg sync.WaitGroup
 	type result struct {
 		port int
@@ -90,7 +90,7 @@ func TestPortAllocatorConcurrent(t *testing.T) {
 }
 
 func TestPortAllocatorInUse(t *testing.T) {
-	p := newPortAllocator(40300, 40302)
+	p := newMemoryPortAllocator(40300, 40302)
 	if p.InUse() != 0 {
 		t.Errorf("expected 0 in use, got %d", p.InUse())
 	}
@@ -120,7 +120,7 @@ func TestPortAllocatorSkipsExternallyBoundPort(t *testing.T) {
 	defer ln.Close()
 	boundPort := ln.Addr().(*net.TCPAddr).Port
 
-	p := newPortAllocator(boundPort, boundPort+2)
+	p := newMemoryPortAllocator(boundPort, boundPort+2)
 	got, gotLn, err := p.Reserve()
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
@@ -138,7 +138,7 @@ func TestPortAllocatorSkipsExternallyBoundPort(t *testing.T) {
 // the new API exists for: a Reserve'd port cannot be bound by another
 // process until the caller closes the returned listener.
 func TestPortAllocatorReserveHoldsListener(t *testing.T) {
-	p := newPortAllocator(40500, 40502)
+	p := newMemoryPortAllocator(40500, 40502)
 	port, ln, err := p.Reserve()
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestPortAllocatorReserveHoldsListener(t *testing.T) {
 // panicking `make([]bool, -N)`. The defensive clamp produces an
 // empty pool whose Reserve always errors.
 func TestNewPortAllocatorDefensiveNegativeRange(t *testing.T) {
-	p := newPortAllocator(10, 5)
+	p := newMemoryPortAllocator(10, 5)
 	if len(p.used) != 0 {
 		t.Errorf("expected empty used slice, got len=%d", len(p.used))
 	}
@@ -176,7 +176,7 @@ func TestNewPortAllocatorDefensiveNegativeRange(t *testing.T) {
 }
 
 func TestPortAllocatorReleaseOutOfRange(t *testing.T) {
-	p := newPortAllocator(40400, 40402)
+	p := newMemoryPortAllocator(40400, 40402)
 	p.Release(0)     // below range
 	p.Release(99999) // above range
 	if p.InUse() != 0 {

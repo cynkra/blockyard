@@ -433,6 +433,46 @@ func (m *RedisWorkerMap) IsDraining(appID string) bool {
 	return n == 1
 }
 
+// WorkersForServer returns worker IDs whose server_id hash field
+// matches the given serverID. Pattern lifted from ForApp — scan the
+// worker key namespace, pipeline-HGET the server_id field, filter.
+// Same shape as the other server-scoped filters, just on a
+// different hash field.
+func (m *RedisWorkerMap) WorkersForServer(serverID string) []string {
+	ctx := context.Background()
+	prefix := m.client.Prefix()
+	pattern := prefix + "worker:*"
+	prefixLen := len(prefix) + len("worker:")
+
+	var ids []string
+	var cursor uint64
+	for {
+		keys, next, err := m.client.Redis().Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			slog.Error("redis worker for server scan", "server_id", serverID, "error", err)
+			return ids
+		}
+		if len(keys) > 0 {
+			pipe := m.client.Redis().Pipeline()
+			cmds := make([]*redis.StringCmd, len(keys))
+			for i, key := range keys {
+				cmds[i] = pipe.HGet(ctx, key, "server_id")
+			}
+			pipe.Exec(ctx) //nolint:errcheck
+			for i, cmd := range cmds {
+				if v, err := cmd.Result(); err == nil && v == serverID {
+					ids = append(ids, keys[i][prefixLen:])
+				}
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return ids
+}
+
 // parseWorkerHash converts a Redis hash map to an ActiveWorker.
 func parseWorkerHash(vals map[string]string) ActiveWorker {
 	var w ActiveWorker

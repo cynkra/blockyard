@@ -25,7 +25,15 @@ COPY --from=css-builder /src/internal/ui/static/style.css internal/ui/static/sty
 
 ARG COVER=""
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build ${COVER:+-cover} -ldflags "-X main.version=${VERSION}" -o /blockyard ./cmd/blockyard
+# Docker-only variant: phase 3-8 build-tag split. The minimal mode
+# switch flips default-include-all off, and docker_backend opts the
+# Docker implementation back in. The resulting binary does not
+# import internal/backend/process and cannot speak to a process
+# backend config.
+RUN CGO_ENABLED=0 go build ${COVER:+-cover} \
+    -tags "minimal,docker_backend" \
+    -ldflags "-X main.version=${VERSION}" \
+    -o /blockyard ./cmd/blockyard
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
 FROM alpine:3.23

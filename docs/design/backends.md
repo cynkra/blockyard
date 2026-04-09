@@ -312,6 +312,38 @@ validated this pattern at scale for sandboxing AI agent code execution.
 See [containers/bubblewrap#505](https://github.com/containers/bubblewrap/issues/505)
 and [openai/codex#13624](https://github.com/openai/codex/pull/13624).
 
+### Rolling updates on the process backend
+
+The process backend supports zero-interruption rolling updates in
+**native mode** via `by admin update`, with the same single-entry-point
+CLI as the Docker variant. The implementation differs from the Docker
+path in one step: instead of cloning a sibling container, the
+orchestrator fork+execs the same blockyard binary with
+`BLOCKYARD_PASSIVE=1` and an alternate bind port, then runs the same
+cutover/watchdog/scheduled flow. Both servers share state via Redis
+and coordinate port/UID allocation via Redis-backed allocators so
+worker resources never collide during the overlap window.
+
+**Containerized mode** returns `501 Not Implemented` from
+`/api/v1/admin/update` — killing PID 1 stops the container regardless
+of child-process tricks, so there is no place for the orchestrator to
+live. Operators use their container runtime's update mechanism
+(`docker compose up -d`, `kubectl set image`, etc.) instead.
+
+**Rollback** is also native-only (and not currently supported on the
+process backend at all — the previous version's binary is not tracked
+across upgrades). Operators restore manually by swapping the binary
+and restarting.
+
+See the operator guides for the detailed setup:
+
+- [Process Backend (Native)]({{< relref "process-backend.md" >}}) —
+  bare-metal install, systemd unit, reverse proxy, rolling update
+  walkthrough.
+- [Process Backend (Containerized)]({{< relref "process-backend-container.md" >}}) —
+  Docker Compose example, seccomp profile extraction, runtime-
+  specific update recipes.
+
 ### Kernel primitives reference
 
 The Linux kernel provides the same isolation primitives that containers

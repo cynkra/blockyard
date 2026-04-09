@@ -35,14 +35,14 @@ func newFakeBackend(t *testing.T) *ProcessBackend {
 	return &ProcessBackend{
 		cfg:     cfg,
 		fullCfg: full,
-		ports:   newPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd),
-		uids:    newUIDAllocator(cfg.WorkerUIDStart, cfg.WorkerUIDEnd),
+		ports:   newMemoryPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd),
+		uids:    newMemoryUIDAllocator(cfg.WorkerUIDStart, cfg.WorkerUIDEnd),
 		workers: make(map[string]*workerProc),
 	}
 }
 
 func TestNewRequiresProcessSection(t *testing.T) {
-	_, err := New(&config.Config{})
+	_, err := New(&config.Config{}, nil)
 	if err == nil {
 		t.Fatal("expected error when Process config is nil")
 	}
@@ -63,7 +63,7 @@ func TestNewRejectsMissingBwrap(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	_, err := New(cfg)
+	_, err := New(cfg, nil)
 	if err == nil {
 		t.Fatal("expected error when bwrap path does not exist")
 	}
@@ -87,7 +87,7 @@ func TestNewSuccessPath(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	b, err := New(cfg)
+	b, err := New(cfg, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestNewRejectsUnreachableBundleMountPoint(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	if _, err := New(cfg); err == nil {
+	if _, err := New(cfg, nil); err == nil {
 		t.Fatal("expected error from unreachable bundle mount point")
 	}
 }

@@ -1,3 +1,5 @@
+//go:build !minimal || docker_backend
+
 package orchestrator
 
 import (
@@ -136,6 +138,11 @@ func defaultInspectResult() client.ContainerInspectResult {
 	}
 }
 
+// newTestOrchestrator builds an Orchestrator wired to a Docker
+// factory backed by the given mock client. The factory is the new
+// phase 3-8 ServerFactory interface; the mock Docker client lives
+// behind a dockerServerFactory (via newDockerFactoryForTest) so the
+// old test cases continue to exercise the real clone flow.
 func newTestOrchestrator(t *testing.T, docker *mockDocker, checker updateAPI) (*Orchestrator, *callTracker) {
 	t.Helper()
 	dir := t.TempDir()
@@ -154,9 +161,12 @@ func newTestOrchestrator(t *testing.T, docker *mockDocker, checker updateAPI) (*
 		Proxy:    config.ProxyConfig{WorkerStartTimeout: config.Duration{Duration: 5 * time.Second}},
 	}
 
+	factory := newDockerFactoryForTest(docker, "self-container-id", func() string {
+		return listenPortFromBindForTest(cfg.Server.Bind)
+	})
+
 	o := &Orchestrator{
-		docker:    docker,
-		serverID:  "self-container-id",
+		factory:   factory,
 		db:        database,
 		cfg:       cfg,
 		version:   "1.0.0",
@@ -170,6 +180,84 @@ func newTestOrchestrator(t *testing.T, docker *mockDocker, checker updateAPI) (*
 	o.state.Store("idle")
 	return o, tracker
 }
+
+// listenPortFromBindForTest is a local copy of
+// cmd/blockyard/orchestrator_docker.listenPortFromBind so the test
+// file doesn't have to import a main package.
+func listenPortFromBindForTest(bind string) string {
+	for i := len(bind) - 1; i >= 0; i-- {
+		if bind[i] == ':' {
+			return bind[i+1:]
+		}
+	}
+	return "8080"
+}
+
+// dockerFactoryFromOrchestrator is a test helper that exposes the
+// factory the orchestrator is using so tests can call its internal
+// methods (cloneConfig, containerAddr, killAndRemove) directly.
+func dockerFactoryFromOrchestrator(o *Orchestrator) *dockerServerFactory {
+	return o.factory.(*dockerServerFactory)
+}
+
+// Shim methods on *Orchestrator that delegate to the Docker factory.
+// These exist only in the docker-tagged test file so the legacy test
+// bodies keep working with the old `o.foo(ctx, ...)` call shape. No
+// production code calls these — they're named with the same method
+// names and unexported to stay out of the interface area of the
+// orchestrator package.
+
+func (o *Orchestrator) cloneConfig(ctx context.Context, image string, extraEnv []string) (client.ContainerCreateOptions, error) {
+	return dockerFactoryFromOrchestrator(o).cloneConfig(ctx, image, extraEnv)
+}
+
+func (o *Orchestrator) startClone(ctx context.Context, image string) (string, error) {
+	o.activationToken = generateActivationToken()
+	sender := task.NewStore().Create("test-clone", "test")
+	inst, err := dockerFactoryFromOrchestrator(o).CreateInstance(ctx, image, []string{
+		"BLOCKYARD_ACTIVATION_TOKEN=" + o.activationToken,
+	}, sender)
+	if err != nil {
+		return "", err
+	}
+	return inst.ID(), nil
+}
+
+func (o *Orchestrator) currentImageBase(ctx context.Context) string {
+	return dockerFactoryFromOrchestrator(o).CurrentImageBase(ctx)
+}
+
+func (o *Orchestrator) currentImageTag(ctx context.Context) string {
+	return dockerFactoryFromOrchestrator(o).CurrentImageTag(ctx)
+}
+
+func (o *Orchestrator) containerAddr(ctx context.Context, id string) (string, error) {
+	return dockerFactoryFromOrchestrator(o).containerAddr(ctx, id)
+}
+
+func (o *Orchestrator) killAndRemove(ctx context.Context, id string) {
+	dockerFactoryFromOrchestrator(o).killAndRemove(ctx, id)
+}
+
+func (o *Orchestrator) pullImage(ctx context.Context, ref string) error {
+	return dockerFactoryFromOrchestrator(o).pullImage(ctx, ref)
+}
+
+// setActiveDockerInstanceForTest lets a test stash a fake Docker
+// instance on o.activeInstance so the collapsed Watchdog(ctx,
+// watchPeriod, sender) call can read its address and kill closure.
+// The legacy (pre-phase-3-8) tests passed newID+newAddr directly to
+// Watchdog; this helper is the shim that preserves their shape.
+func setActiveDockerInstanceForTest(o *Orchestrator, id, addr string) {
+	f := dockerFactoryFromOrchestrator(o)
+	o.activeInstance = &dockerInstance{
+		id:     id,
+		addr:   addr,
+		docker: f.docker,
+		log:    f.log,
+	}
+}
+
 
 type callTracker struct {
 	drained   atomic.Int32
@@ -196,12 +284,12 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 	o, tracker := newTestOrchestrator(t, &mockDocker{}, checker)
 	sender := newSender(t)
 
-	result, err := o.Update(context.Background(), "stable", sender)
+	updated, err := o.Update(context.Background(), "stable", sender)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != nil {
-		t.Error("expected nil result for up-to-date")
+	if updated {
+		t.Error("expected updated=false for up-to-date")
 	}
 	if tracker.drained.Load() != 0 {
 		t.Error("drain should not be called when up to date")
@@ -311,15 +399,15 @@ func TestUpdateHappyPath(t *testing.T) {
 	o.cfg.Server.Bind = "0.0.0.0:" + port
 	sender := newSender(t)
 
-	result, err := o.Update(context.Background(), "stable", sender)
+	updated, err := o.Update(context.Background(), "stable", sender)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	if !updated {
+		t.Fatal("expected updated=true")
 	}
-	if result.ContainerID != "new-container-123" {
-		t.Errorf("container ID = %q, want new-container-123", result.ContainerID)
+	if o.activeInstance == nil || o.activeInstance.ID() != "new-container-123" {
+		t.Errorf("activeInstance = %v, want new-container-123", o.activeInstance)
 	}
 	if tracker.drained.Load() != 1 {
 		t.Error("drain should be called exactly once")
@@ -361,9 +449,9 @@ func TestWatchdogHealthy(t *testing.T) {
 
 	o, tracker := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
 	sender := newSender(t)
+	setActiveDockerInstanceForTest(o, "new-id", readyzServer.Listener.Addr().String())
 
-	err := o.Watchdog(context.Background(), "new-id", readyzServer.Listener.Addr().String(),
-		100*time.Millisecond, sender)
+	err := o.Watchdog(context.Background(), 100*time.Millisecond, sender)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -393,9 +481,9 @@ func TestWatchdogUnhealthy(t *testing.T) {
 	}
 	o, tracker := newTestOrchestrator(t, docker, &mockChecker{})
 	sender := newSender(t)
+	setActiveDockerInstanceForTest(o, "new-id", readyzServer.Listener.Addr().String())
 
-	err := o.Watchdog(context.Background(), "new-id", readyzServer.Listener.Addr().String(),
-		30*time.Second, sender)
+	err := o.Watchdog(context.Background(), 30*time.Second, sender)
 	if err == nil {
 		t.Fatal("expected error from unhealthy watchdog")
 	}
@@ -590,14 +678,6 @@ func TestStateTransitions(t *testing.T) {
 	}
 }
 
-func TestImageRef(t *testing.T) {
-	result := &update.Result{LatestVersion: "2.0.0"}
-	ref := imageRef("self", result, "ghcr.io/cynkra/blockyard")
-	if ref != "ghcr.io/cynkra/blockyard:2.0.0" {
-		t.Errorf("imageRef = %q", ref)
-	}
-}
-
 func TestImageWithTag(t *testing.T) {
 	ref := imageWithTag("ghcr.io/cynkra/blockyard", "1.2.3")
 	if ref != "ghcr.io/cynkra/blockyard:1.2.3" {
@@ -651,9 +731,9 @@ func TestNewConstructor(t *testing.T) {
 	}
 
 	var exitCalled bool
+	factory := newDockerFactoryForTest(&mockDocker{}, "server-id", func() string { return "8080" })
 	o := New(
-		nil, // docker client (unused in this test)
-		"server-id",
+		factory,
 		database,
 		cfg,
 		"1.0.0",
@@ -1366,10 +1446,10 @@ func TestWatchdogStateTransitions(t *testing.T) {
 	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
 	o.state.Store("updating") // pre-watchdog state
 	sender := newSender(t)
+	setActiveDockerInstanceForTest(o, "id", srv.Listener.Addr().String())
 
 	// Very short watch period.
-	err := o.Watchdog(context.Background(), "id", srv.Listener.Addr().String(),
-		100*time.Millisecond, sender)
+	err := o.Watchdog(context.Background(), 100*time.Millisecond, sender)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1387,11 +1467,12 @@ func TestWatchdogContextCancelled(t *testing.T) {
 
 	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
 	sender := newSender(t)
+	setActiveDockerInstanceForTest(o, "id", srv.Listener.Addr().String())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	err := o.Watchdog(ctx, "id", srv.Listener.Addr().String(), time.Minute, sender)
+	err := o.Watchdog(ctx, time.Minute, sender)
 	if err == nil {
 		t.Error("expected context error")
 	}
@@ -1405,9 +1486,10 @@ func TestWatchdogZeroPeriod(t *testing.T) {
 
 	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
 	sender := newSender(t)
+	setActiveDockerInstanceForTest(o, "id", srv.Listener.Addr().String())
 
 	// Zero period = deadline already passed = immediate success.
-	err := o.Watchdog(context.Background(), "id", srv.Listener.Addr().String(), 0, sender)
+	err := o.Watchdog(context.Background(), 0, sender)
 	if err != nil {
 		t.Fatalf("expected immediate success with zero period, got: %v", err)
 	}

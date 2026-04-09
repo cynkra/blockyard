@@ -28,7 +28,8 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCt
 
 		if orch == nil {
 			writeError(w, http.StatusNotImplemented, "not_implemented",
-				"rolling updates require Docker container mode")
+				"rolling updates are not available in this deployment mode "+
+					"(containerized process backend: use your container runtime's update mechanism)")
 			return
 		}
 
@@ -58,14 +59,14 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCt
 		sender := srv.Tasks.Create(taskID, "admin-update")
 
 		go func() {
-			ur, err := orch.Update(bgCtx, channel, sender)
+			updated, err := orch.Update(bgCtx, channel, sender)
 			if err != nil {
 				sender.Write(err.Error())
 				sender.Complete(task.Failed)
 				orch.SetState("idle")
 				return
 			}
-			if ur == nil {
+			if !updated {
 				sender.Complete(task.Completed) // already up to date
 				orch.SetState("idle")
 				return
@@ -76,7 +77,7 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCt
 			if srv.Config.Update != nil && srv.Config.Update.WatchPeriod.Duration > 0 {
 				watchPeriod = srv.Config.Update.WatchPeriod.Duration
 			}
-			if err := orch.Watchdog(bgCtx, ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
+			if err := orch.Watchdog(bgCtx, watchPeriod, sender); err != nil {
 				sender.Write(err.Error())
 				sender.Complete(task.Failed)
 				return // rollback happened, server is still running
@@ -106,7 +107,15 @@ func handleAdminRollback(srv *server.Server, orch *orchestrator.Orchestrator, bg
 
 		if orch == nil {
 			writeError(w, http.StatusNotImplemented, "not_implemented",
-				"rolling updates require Docker container mode")
+				"rolling updates are not available in this deployment mode "+
+					"(containerized process backend: use your container runtime's update mechanism)")
+			return
+		}
+		if !orch.SupportsRollback() {
+			writeError(w, http.StatusNotImplemented, "not_implemented",
+				"rollback is not supported for the active backend. "+
+					"Restore manually: restore the database backup, swap the "+
+					"binary to the previous version, and restart.")
 			return
 		}
 
