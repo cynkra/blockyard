@@ -22,9 +22,9 @@ Returns `200 OK` with body `ok`. No authentication required.
 
 ### `GET /readyz`
 
-Readiness probe that checks backend dependencies (database, Docker socket, and
-optionally IdP and OpenBao). No authentication required, but the response
-detail varies based on the caller.
+Readiness probe. Checks the database and the configured worker backend,
+plus — when configured — the IdP, Redis, and OpenBao. No authentication
+required, but the response detail varies based on the caller.
 
 **Response:** `200 OK` when all checks pass, `503 Service Unavailable` otherwise.
 
@@ -41,6 +41,10 @@ results:
 }
 ```
 
+The backend check key is `docker` regardless of whether the
+`[server] backend` is `docker` or `process` — it reports the result
+of the shared `Backend.ListManaged()` call.
+
 **Unauthenticated callers** see only the aggregate status:
 
 ```json
@@ -51,10 +55,11 @@ results:
 
 When not all checks pass, `status` is `"not_ready"` and the HTTP status is `503`.
 
-When OIDC and/or OpenBao are configured, their health is included in the checks
-(as `"idp"` and `"openbao"` respectively). When AppRole auth is used
-(`openbao.role_id`), a `"vault_token"` check reports whether the token renewal
-goroutine is healthy.
+When OIDC, Redis, and/or OpenBao are configured, their health is
+included in the checks (as `"idp"`, `"redis"`, and `"openbao"`
+respectively). When AppRole auth is used (`openbao.role_id`), a
+`"vault_token"` check reports whether the token renewal goroutine is
+healthy.
 
 When served on the [management listener](/docs/guides/observability/#management-listener),
 `/readyz` always returns full per-component check details regardless of
@@ -540,6 +545,83 @@ If the task is still running, the response streams buffered output followed
 by live lines. If the task is complete, the full log is returned.
 
 **Response:** `200 OK` — chunked `text/plain`.
+
+---
+
+## Server administration
+
+Rolling-update orchestration. The CLI equivalents are
+[`by admin update`](/docs/reference/cli/#by-admin-update),
+[`by admin rollback`](/docs/reference/cli/#by-admin-rollback), and
+[`by admin status`](/docs/reference/cli/#by-admin-status). All endpoints
+except `/admin/activate` require admin role.
+
+### `POST /api/v1/admin/update`
+
+Trigger a rolling update of the server. Returns immediately with a task
+ID; use `GET /api/v1/tasks/{task_id}/logs` to stream progress.
+
+**Request body** (all fields optional):
+
+```json
+{ "channel": "stable" }
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `channel` | `string` | server config | Release channel: `"stable"` or `"main"`. |
+
+**Response:** `202 Accepted`
+
+```json
+{ "task_id": "t5678..." }
+```
+
+Returns `409 Conflict` when an update is already in progress, or
+`503 Service Unavailable` when rolling updates are not supported for
+the current backend (e.g. the containerized process backend — see
+[Rolling updates in containerized mode](/docs/guides/process-backend-container/#rolling-updates-in-containerized-mode)).
+
+### `POST /api/v1/admin/rollback`
+
+Roll the server back to the previous version using the stored backup
+metadata. Supported on the Docker backend only — returns
+`501 Not Implemented` on the process backend.
+
+**Response:** `202 Accepted`
+
+```json
+{ "task_id": "t5678..." }
+```
+
+### `GET /api/v1/admin/update/status`
+
+Get the current rolling-update state.
+
+**Response:** `200 OK`
+
+```json
+{
+  "state": "idle",
+  "task_id": "",
+  "version": "",
+  "message": ""
+}
+```
+
+`state` is one of `"idle"`, `"updating"`, `"watching"`, `"rolling_back"`,
+or `"failed"`. When a task is active, `task_id` points to its log
+endpoint.
+
+### `POST /api/v1/admin/activate`
+
+Activate a freshly-started blockyard instance as the live server. Used
+internally by the rolling-update orchestrator to hand over from the
+old server to the new one.
+
+Authenticates via an activation token set as an env var on the new
+process (not a PAT), so this endpoint is reachable without a PAT.
+Operators do not call it directly.
 
 ---
 

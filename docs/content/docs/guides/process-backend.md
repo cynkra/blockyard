@@ -70,25 +70,22 @@ sudo sysctl --system
 
 ### bwrap setuid requirement (Debian 12+/Ubuntu 24.04+)
 
-Debian 12 and Ubuntu 24.04 ship `bwrap` as a regular (non-setuid) binary.
-With user namespaces enabled, bwrap *can* still enter a new namespace,
-but `--uid <N>` / `--gid <N>` no longer produce a host-visible UID —
-the kernel silently writes a namespace-local mapping that the host's
-iptables `--uid-owner` rules cannot match. Workers then appear as
-regular unprivileged processes from the init namespace, and the
-per-worker egress firewall breaks.
-
-Blockyard's preflight detects this with `checkBwrapHostUIDMapping` and
-refuses to start with a clear error. The fix on those distros is:
+Debian 12 and Ubuntu 24.04 ship `bwrap` as a regular (non-setuid)
+binary. With user namespaces enabled, bwrap *can* still enter a new
+namespace, but `--uid`/`--gid` no longer produce a host-visible UID —
+and the egress firewall relies on host-side UIDs to work. Blockyard's
+preflight detects this and refuses to start; the fix is:
 
 ```bash
 sudo chmod u+s /usr/bin/bwrap
 ```
 
-This is the same configuration Fedora/RHEL ship by default. An
-alternative is to run blockyard as root, which inherits `CAP_SYS_ADMIN`
-and bypasses the restriction; see the containerized guide for that
-path.
+This is the same configuration Fedora/RHEL ship by default. The other
+option is to run blockyard as root, which inherits `CAP_SYS_ADMIN` and
+bypasses the restriction — the containerized image does this.
+
+See [Host UID mapping is load-bearing](/docs/guides/backend-security/#host-uid-mapping-is-load-bearing)
+in the backend security guide for the full explanation.
 
 ## Install blockyard
 
@@ -166,36 +163,35 @@ omit both.
 
 ## Egress firewall
 
-Workers in the process backend run under a shared host GID
-(`[process] worker_gid`). Use `iptables` owner-match rules to block
-workers from reaching internal services:
+Workers run under the shared host GID configured in
+`[process] worker_gid` (default `65534`). Use `iptables` owner-match
+rules to block them from reaching specific internal destinations:
 
 ```bash
-# Block workers from reaching Redis (match by destination IP,
-# not the entire internal subnet).
-sudo iptables -A OUTPUT -m owner --gid-owner 65534 \
-    -d 10.0.0.5 -j REJECT
-
-# Block workers from reaching OpenBao.
-sudo iptables -A OUTPUT -m owner --gid-owner 65534 \
-    -d 10.0.0.6 -j REJECT
-
 # Block cloud metadata.
 sudo iptables -A OUTPUT -m owner --gid-owner 65534 \
     -d 169.254.169.254 -j REJECT
-```
 
-**Do not use a blanket `REJECT`** — workers legitimately need internet
-access (CRAN mirrors, package downloads, `httr` calls from user code).
-Scope each rule to a specific destination.
+# Block workers from reaching Redis, OpenBao, and the database.
+sudo iptables -A OUTPUT -m owner --gid-owner 65534 -d 10.0.0.5 -j REJECT
+sudo iptables -A OUTPUT -m owner --gid-owner 65534 -d 10.0.0.6 -j REJECT
+sudo iptables -A OUTPUT -m owner --gid-owner 65534 -d 10.0.0.7 -j REJECT
+```
 
 Persist the rules across reboots with `iptables-save` /
 `iptables-restore` or your distro's equivalent.
 
-Blockyard's preflight runs a probe binary inside a bwrap sandbox to
-verify the rules are effective. If a worker can reach cloud metadata,
-Redis, OpenBao, or the database at startup, the preflight logs a
-warning or error.
+Blockyard's preflight spawns a probe under the worker UID/GID and
+attempts TCP connections to the same internal endpoints at startup.
+A reachable metadata endpoint is reported as an error; reachable
+Redis/OpenBao/database endpoints are reported as warnings.
+
+> [!IMPORTANT]
+> Rules must be **destination-scoped**, not blanket `REJECT` — workers
+> legitimately need the open internet (CRAN, package downloads, user
+> `httr` calls). For the rationale and the host-UID-mapping requirement
+> that makes `-m owner` actually match, see
+> [Backend Security](/docs/guides/backend-security/#2-install-a-destination-scoped-egress-firewall).
 
 ## systemd unit
 
@@ -283,24 +279,30 @@ health checks pick the live one.
 
 ## Rolling update walkthrough
 
-```bash
-# Trigger the update — blockyard downloads the new version, forks a
-# new process on an alt bind, drains the old server, and exits the
-# old process once sessions have ended.
-by admin update --yes --channel stable
+Use [`by admin update`](/docs/reference/cli/#by-admin-update) to trigger
+a rolling update. Blockyard forks a new process on an alternate bind,
+drains the old server, and exits the old process once sessions have
+ended:
 
-# Watch the update progress (task log streams by default).
+```bash
+by admin update --yes --channel stable
 ```
+
+The command streams the orchestrator task log; `by admin status` shows
+the current state out-of-band.
 
 **Prerequisites:**
 
-- Redis must be configured and reachable.
+- Redis must be configured and reachable (`[redis]` section — see
+  [Configuration reference](/docs/reference/config/#redis-optional)).
 - The reverse proxy must be configured with every port in the
-  `[update] alt_bind_range` as an upstream.
-- The new blockyard binary must be present in the same location
-  (`os.Executable()` resolves the running binary; operators upgrade
-  by replacing `/usr/local/bin/blockyard` *before* running
-  `by admin update`).
+  `[update] alt_bind_range` (see
+  [`[update]`](/docs/reference/config/#update-optional) in the
+  configuration reference) as an upstream.
+- The new blockyard binary must be present in the same location as
+  the running one. Operators upgrade by replacing
+  `/usr/local/bin/blockyard` *before* running `by admin update`;
+  `os.Executable()` resolves the running binary path.
 
 **Failure modes:**
 

@@ -7,14 +7,18 @@ A containerized hosting platform for [Shiny](https://shiny.posit.co/) applicatio
 
 ## Overview
 
-Blockyard acts as a container-orchestrated reverse proxy and application server. Each Shiny app runs in its own Docker container with resource limits, health checks, and automatic lifecycle management.
+Blockyard acts as a reverse proxy and application server that spawns an isolated worker per user session. Workers run in one of two backends:
+
+- **Docker/Podman** (default) — each worker is a container with a private bridge network and cgroup resource limits.
+- **Process (bubblewrap)** — each worker is a `bwrap`-sandboxed child process with PID/mount/user namespaces and capability dropping, no container runtime required.
+
+The server is generic over a `Backend` interface, so the two runtimes are interchangeable. See [Backend Security](docs/content/docs/guides/backend-security.md) for the trade-offs.
 
 **Key design choices:**
 
-- One content type: Shiny apps only (not Plumber APIs, static sites, or scheduled tasks)
-- Single R version configured server-wide
-- Docker/Podman required — no bare-metal processes
-- Per-container session isolation by default
+- One content type: Shiny / [blockr](https://github.com/blockr-org/blockr) apps (not Plumber APIs, static sites, or scheduled tasks)
+- Linux host required (bubblewrap is Linux-only; Docker/Podman usable on macOS via Docker Desktop)
+- Per-session worker isolation by default
 
 ## Architecture
 
@@ -23,19 +27,19 @@ graph LR
     Client[Client Request] --> Router[Chi Router]
     Router --> Auth["Auth (OIDC)"]
     Auth --> Proxy[Reverse Proxy]
-    Proxy --> Shiny["Shiny Container<br>(per session)"]
+    Proxy --> Worker["Worker<br>(Docker container or<br>bwrap process)"]
     Router --> DB["SQLite/Postgres<br>(app & bundle metadata)"]
-    Shiny --> Bao["OpenBao<br>(credentials)"]
+    Worker --> Bao["OpenBao<br>(credentials)"]
 ```
-
-The server is generic over a `Backend` interface, allowing the Docker runtime to be swapped for a mock backend during testing.
 
 ## Tech Stack
 
 - **Go** 1.25 with standard library `net/http`
 - **Chi** — HTTP router with middleware support
-- **Docker SDK** — Docker API client (`github.com/docker/docker`)
+- **Docker SDK** — Docker API client (`github.com/docker/docker`), used by the Docker backend
+- **bubblewrap** — `bwrap` sandbox helper, used by the process backend
 - **modernc.org/sqlite** — pure-Go SQLite driver
+- **Redis** — optional shared state for rolling updates and multi-server coordination (`redis/go-redis`)
 - **OIDC** — OpenID Connect authentication (`coreos/go-oidc/v3`)
 - **OpenBao** — credential management (Vault-compatible)
 - **Prometheus** — metrics (`prometheus/client_golang`)
@@ -47,8 +51,11 @@ The server is generic over a `Backend` interface, allowing the Docker runtime to
 ### Prerequisites
 
 - Go 1.25+
-- Docker or Podman
-- SQLite 3
+- A Linux host (Windows and macOS supported for the Docker backend via Docker Desktop)
+- Either:
+  - **Docker backend:** Docker or Podman with a Docker-compatible socket, or
+  - **Process backend:** `bubblewrap` and `R` on the host. See [Process Backend (Native)](docs/content/docs/guides/process-backend.md).
+- SQLite 3 (bundled in-binary via `modernc.org/sqlite`)
 
 ### Configuration
 
@@ -90,84 +97,47 @@ container (e.g. the devcontainer) instead.
 
 ## Project Layout
 
-- `cmd/blockyard/` — Entry point.
+- `cmd/blockyard/` — Server entry point.
+- `cmd/by/` — CLI client (`by`) for deploying apps, managing access, and server administration.
+- `cmd/by-builder/` — Helper binary mounted into build containers to run dependency restores.
+- `cmd/seccomp-compile/` — Build-time tool that compiles JSON seccomp profiles to the BPF blob shipped inside the `blockyard-process` image.
+- `docker/` — Dockerfiles for the three image variants (`server.Dockerfile`, `server-process.Dockerfile`, `server-everything.Dockerfile`).
 - `internal/` — All application code, organized by domain:
-  - `api/` — HTTP handlers for the management API (apps, bundles, users, tags, etc.)
+  - `api/` — HTTP handlers for the management API (apps, bundles, users, tags, admin update, etc.)
   - `auth/`, `authz/` — OIDC authentication, session management, RBAC, and per-app ACLs.
   - `proxy/` — Reverse proxy, WebSocket forwarding, cold-start, session routing, autoscaling.
-  - `backend/` — Container runtime abstraction (`docker/` for Docker/Podman, `mock/` for tests).
+  - `backend/` — Worker runtime abstraction:
+    - `docker/` — Docker/Podman backend.
+    - `process/` — bubblewrap process backend.
+    - `mock/` — in-memory backend for tests.
   - `bundle/` — Bundle archive storage, unpacking, and R dependency restoration.
   - `db/` — SQLite/PostgreSQL database layer, migrations, and CRUD queries.
+  - `drain/` — Graceful drain mode used by the rolling-update orchestrator.
   - `integration/` — OpenBao (Vault) client, bootstrapping, and credential enrollment.
+  - `orchestrator/` — Rolling-update state machine with Docker (container clone) and process (fork+exec) variants.
+  - `preflight/` — Shared startup-check plumbing; backend-specific checks live under each backend.
+  - `redisstate/` — Redis-backed implementations of session/worker/resource stores.
+  - `seccomp/` — Embedded seccomp profiles (outer-container and bwrap-inner) and the merge tool.
   - `config/`, `server/` — TOML/env configuration and shared server state.
   - `ops/` — Health polling, log capture, orphan cleanup.
   - `audit/`, `telemetry/` — Audit logging, Prometheus metrics, OpenTelemetry tracing.
 - `migrations/` — SQL migration files.
 
-## Configuration Reference
+## Documentation
 
-```toml
-[server]
-bind             = "0.0.0.0:8080"
-shutdown_timeout = "30s"
-# management_bind = "127.0.0.1:9100"  # separate listener for /healthz, /readyz, /metrics
-# log_level      = "info"   # trace, debug, info, warn, error
-# session_secret = "random-secret"   # required when [oidc] is set without [openbao]
-# external_url   = "https://blockyard.example.com"
+Operator and user documentation lives under [`docs/content/docs/`](docs/content/docs/) and is rendered with Hugo. Highlights:
 
-[docker]
-socket     = "/var/run/docker.sock"
-image      = "ghcr.io/rocker-org/r-ver:4.4.3"
-shiny_port = 3838
-pak_version = "stable"
+- [Installation](docs/content/docs/getting-started/installation.md), [Quick Start](docs/content/docs/getting-started/quickstart.md)
+- [Deploying an app](docs/content/docs/guides/deploying.md)
+- [Authorization](docs/content/docs/guides/authorization.md), [Credential management](docs/content/docs/guides/credentials.md)
+- [Backend Security](docs/content/docs/guides/backend-security.md) — Docker vs. process backend trade-offs
+- [Process Backend (Native)](docs/content/docs/guides/process-backend.md) / [(Containerized)](docs/content/docs/guides/process-backend-container.md)
+- [Observability](docs/content/docs/guides/observability.md)
+- Reference: [configuration](docs/content/docs/reference/config.md), [CLI](docs/content/docs/reference/cli.md), [REST API](docs/content/docs/reference/api.md)
 
-[storage]
-bundle_server_path = "/data/bundles"
-bundle_worker_path = "/app"
-bundle_retention   = 50
-max_bundle_size    = 104857600
-
-[database]
-driver = "sqlite"
-path   = "/data/db/blockyard.db"
-
-[proxy]
-ws_cache_ttl         = "60s"
-health_interval      = "15s"
-worker_start_timeout = "60s"
-max_workers          = 100
-log_retention        = "1h"
-# session_idle_ttl   = "0"
-idle_worker_timeout  = "5m"
-
-# Optional: OIDC authentication
-# When enabled, server.session_secret is required unless [openbao] is also
-# configured (in which case it is auto-generated and stored in vault).
-# [oidc]
-# issuer_url           = "https://idp.example.com/realms/myapp"
-# issuer_discovery_url = ""      # optional: internal URL for OIDC discovery (e.g. Docker DNS)
-# client_id            = "blockyard"
-# client_secret        = "oidc-client-secret"
-# cookie_max_age       = "24h"   # default: "24h"
-# initial_admin        = "google-oauth2|abc123"
-
-# Optional: OpenBao credential management (requires [oidc])
-# [openbao]
-# address       = "http://openbao:8200"
-# role_id       = "blockyard-server"       # AppRole role identifier (recommended)
-# # admin_token = "vault-admin-token"      # deprecated: use role_id instead
-# token_ttl     = "1h"             # default: "1h"
-# jwt_auth_path = "jwt"            # default: "jwt"
-
-# Optional: Audit logging
-# [audit]
-# path = "/data/audit/blockyard.jsonl"
-
-# Optional: Telemetry
-# [telemetry]
-# metrics_enabled = true
-# otlp_endpoint   = "http://otel-collector:4317"
-```
+See [`blockyard.toml`](blockyard.toml) for a commented example
+configuration and [Configuration File](docs/content/docs/reference/config.md)
+for the full field-by-field reference.
 
 ## Status
 

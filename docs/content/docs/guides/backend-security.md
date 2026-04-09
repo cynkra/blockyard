@@ -50,7 +50,7 @@ are blocked on both backends. The open questions are *network*,
 |---|---|---|
 | **Per-worker network** | Each worker gets a private bridge network. Inter-worker traffic is impossible at the kernel level; cloud metadata (`169.254.169.254`) is blocked via iptables per network. | Workers share the host network stack. Worker A can TCP-connect to worker B's loopback Shiny port, reach services on the host network, and (without operator firewall rules) hit cloud metadata. |
 | **Per-worker resource limits** | Memory and CPU limits are enforced by the kernel via cgroups. PID limits prevent fork bombs. | No cgroup delegation. The outer container's (or systemd slice's) limits act as a shared ceiling — one runaway worker can starve its siblings. |
-| **Syscall filtering** | Docker's default seccomp profile is applied automatically. | `process.seccomp_profile` accepts a pre-compiled BPF profile and `bwrap` applies it via `--seccomp`. No default profile is shipped yet — set the field explicitly, or rely on the other isolation layers (namespaces and capability dropping) in the meantime. |
+| **Syscall filtering** | Docker's default seccomp profile is applied automatically. | The `blockyard` and `blockyard-process` images ship a compiled BPF profile at `/etc/blockyard/seccomp.bpf` and point `process.seccomp_profile` at it by default; `bwrap` applies it via `--seccomp`. Native deployments can install the same profile from the release tarball or extract it from the image. |
 | **Server privilege model** | Server needs `/var/run/docker.sock`, which grants root-equivalent access to the host. | Server needs only a `bwrap` binary. In containerized mode, the outer container needs a custom seccomp profile that allows `CLONE_NEWUSER`, but no capabilities, no socket, and no daemon dependency. |
 
 The first three rows are strengths of the Docker backend. The last row is
@@ -94,7 +94,7 @@ Picking the process backend is the start of the work, not the end. The
 backend provides the per-worker sandbox; the operator provides the
 network and resource boundaries around it. Three controls matter.
 
-### 1. Run blockyard in a container
+### 1. Prefer containerized mode
 
 Native (bare-host) mode is supported for dedicated single-purpose VMs,
 but containerized mode is the default recommendation:
@@ -105,17 +105,11 @@ but containerized mode is the default recommendation:
 - Portability is better — the same image runs on Linux, macOS via Docker
   Desktop, or any OCI runtime.
 
-Run with a custom seccomp profile that allows `CLONE_NEWUSER` (Docker's
-default profile blocks it without `CAP_SYS_ADMIN`):
-
-```bash
-docker run \
-  --security-opt seccomp=blockyard-seccomp.json \
-  --read-only \
-  ghcr.io/cynkra/blockyard:latest
-```
-
-No `--privileged`, no `--cap-add SYS_ADMIN`, no Docker socket mount.
+See [Process Backend (Containerized)](/docs/guides/process-backend-container/)
+for the image layout, the custom seccomp profile Docker needs to allow
+`CLONE_NEWUSER`, and the Docker Compose recipe. The containerized
+deployment runs with no `--privileged`, no `--cap-add SYS_ADMIN`, and
+no Docker socket mount.
 
 ### 2. Install a destination-scoped egress firewall
 
@@ -213,6 +207,12 @@ Two classes of risk remain regardless of backend choice:
 
 ## Further reading
 
+- [Process Backend (Native)](/docs/guides/process-backend/) — operator
+  walkthrough for bare-Linux deployments: prerequisites, firewall
+  rules, systemd unit, rolling updates.
+- [Process Backend (Containerized)](/docs/guides/process-backend-container/)
+  — operator walkthrough for the `blockyard-process` image: seccomp
+  profile extraction, Docker Compose recipe, network segmentation.
 - [Docker worker hardening in the deploying guide](/docs/guides/deploying/#docker-worker-hardening)
   — the Docker backend's baseline hardening.
 - [Configuration reference](/docs/reference/config/) — `[server] backend`,

@@ -44,6 +44,21 @@ log_retention        = "1h"
 idle_worker_timeout  = "5m"
 # session_max_lifetime = "0"  # hard cap on session duration; 0 = unlimited
 
+# Optional: Redis-backed shared state. Required for rolling updates
+# (by admin update) — old and new server processes coordinate via Redis.
+# Single-node deployments without rolling updates can omit this section.
+# [redis]
+# url        = "redis://localhost:6379"
+# key_prefix = "blockyard:"
+
+# Optional: Rolling update orchestrator. Uses [redis] for coordination.
+# [update]
+# schedule        = ""          # cron expression; empty = no scheduled updates
+# channel         = "stable"    # "stable" or "main"
+# watch_period    = "15m"
+# alt_bind_range  = "8090-8099"  # process backend: alternate bind pool
+# drain_idle_wait = "5m"         # process backend: max session drain wait
+
 # Optional: OIDC authentication
 # When enabled, server.session_secret is required unless [openbao] is also
 # configured (in which case it is auto-generated and stored in vault).
