@@ -15,7 +15,6 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/server"
-	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // UploadBundle uploads a new bundle archive for an app.
@@ -133,10 +132,11 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			Store:            srv.PkgStore,
 			AuditLog:         srv.AuditLog,
 			AuditActor:       actorSub,
+			Metrics:          srv.Metrics,
 			WG:               srv.RestoreWG,
 		})
 
-		telemetry.BundlesUploaded.Inc()
+		srv.Metrics.BundlesUploaded.Inc()
 		if srv.AuditLog != nil {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionBundleUpload, app.ID,
 				map[string]any{"bundle_id": bundleID}))

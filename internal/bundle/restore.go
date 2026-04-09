@@ -42,7 +42,8 @@ type RestoreParams struct {
 	Store            *pkgstore.Store
 	AuditLog         *audit.Log
 	AuditActor       string // sub of the user who triggered the upload
-	WG               *sync.WaitGroup // if non-nil, Add(1) before goroutine, Done() on exit
+	Metrics          *telemetry.Metrics // records restore duration + outcome
+	WG               *sync.WaitGroup    // if non-nil, Add(1) before goroutine, Done() on exit
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
@@ -67,7 +68,9 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 					"panic", r)
 				params.Sender.Write("FATAL: an unexpected error occurred during build.")
 				params.Sender.Complete(task.Failed)
-				telemetry.BundleRestoresFailed.Inc()
+				if params.Metrics != nil {
+					params.Metrics.BundleRestoresFailed.Inc()
+				}
 				if params.AuditLog != nil {
 					params.AuditLog.Emit(audit.Entry{
 						Action: audit.ActionBundleRestoreFail,
@@ -91,7 +94,9 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 				"error", err)
 			params.Sender.Write(fmt.Sprintf("ERROR: %s", err))
 			params.Sender.Complete(task.Failed)
-			telemetry.BundleRestoresFailed.Inc()
+			if params.Metrics != nil {
+				params.Metrics.BundleRestoresFailed.Inc()
+			}
 			if params.AuditLog != nil {
 				params.AuditLog.Emit(audit.Entry{
 					Action: audit.ActionBundleRestoreFail,
@@ -110,8 +115,10 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 		slog.Info("bundle restore succeeded",
 			"app_id", params.AppID, "bundle_id", params.BundleID,
 			"elapsed", elapsed.Round(time.Millisecond))
-		telemetry.BuildDuration.Observe(elapsed.Seconds())
-		telemetry.BundleRestoresSucceeded.Inc()
+		if params.Metrics != nil {
+			params.Metrics.BuildDuration.Observe(elapsed.Seconds())
+			params.Metrics.BundleRestoresSucceeded.Inc()
+		}
 		if params.AuditLog != nil {
 			params.AuditLog.Emit(audit.Entry{
 				Action: audit.ActionBundleRestoreOK,

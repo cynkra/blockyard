@@ -17,11 +17,16 @@ import (
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
-	"github.com/cynkra/blockyard/internal/telemetry"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
 // --- metric snapshot helpers ---
+//
+// All of these read from a per-server *telemetry.Metrics that
+// testProxyServer wires up with a fresh prometheus.Registry, so
+// before/after delta assertions are scoped to one test and do not
+// contend with cumulative state accumulated by other tests in the
+// same package binary (see issue #178).
 
 func gaugeValue(g prometheus.Gauge) float64 {
 	var m io_prometheus_client.Metric
@@ -47,11 +52,11 @@ func histogramCount(h prometheus.Histogram) uint64 {
 // increments blockyard_proxy_requests_total and records a duration
 // observation in blockyard_proxy_request_seconds.
 func TestMetricsProxyRequestCounter(t *testing.T) {
-	_, ts := testProxyServer(t)
+	srv, ts := testProxyServer(t)
 	createAndStartApp(t, ts, "metrics-app")
 
-	beforeCount := counterValue(telemetry.ProxyRequests)
-	beforeHist := histogramCount(telemetry.ProxyRequestDuration)
+	beforeCount := counterValue(srv.Metrics.ProxyRequests)
+	beforeHist := histogramCount(srv.Metrics.ProxyRequestDuration)
 
 	// Two requests
 	resp, err := http.Get(ts.URL + "/app/metrics-app/")
@@ -70,8 +75,8 @@ func TestMetricsProxyRequestCounter(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	afterCount := counterValue(telemetry.ProxyRequests)
-	afterHist := histogramCount(telemetry.ProxyRequestDuration)
+	afterCount := counterValue(srv.Metrics.ProxyRequests)
+	afterHist := histogramCount(srv.Metrics.ProxyRequestDuration)
 
 	if delta := afterCount - beforeCount; delta != 2 {
 		t.Errorf("expected proxy_requests_total to increase by 2, got %v", delta)
@@ -104,9 +109,9 @@ func TestMetricsColdStartSpawn(t *testing.T) {
 	http.DefaultClient.Do(req)
 	time.Sleep(200 * time.Millisecond)
 
-	beforeSpawned := counterValue(telemetry.WorkersSpawned)
-	beforeActive := gaugeValue(telemetry.WorkersActive)
-	beforeColdStart := histogramCount(telemetry.ColdStartDuration)
+	beforeSpawned := counterValue(srv.Metrics.WorkersSpawned)
+	beforeActive := gaugeValue(srv.Metrics.WorkersActive)
+	beforeColdStart := histogramCount(srv.Metrics.ColdStartDuration)
 
 	if srv.Workers.Count() != 0 {
 		t.Fatalf("expected 0 workers before proxy hit, got %d", srv.Workers.Count())
@@ -120,13 +125,13 @@ func TestMetricsColdStartSpawn(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	if delta := counterValue(telemetry.WorkersSpawned) - beforeSpawned; delta != 1 {
+	if delta := counterValue(srv.Metrics.WorkersSpawned) - beforeSpawned; delta != 1 {
 		t.Errorf("expected workers_spawned_total +1, got %v", delta)
 	}
-	if delta := gaugeValue(telemetry.WorkersActive) - beforeActive; delta != 1 {
+	if delta := gaugeValue(srv.Metrics.WorkersActive) - beforeActive; delta != 1 {
 		t.Errorf("expected workers_active +1, got %v", delta)
 	}
-	if delta := histogramCount(telemetry.ColdStartDuration) - beforeColdStart; delta != 1 {
+	if delta := histogramCount(srv.Metrics.ColdStartDuration) - beforeColdStart; delta != 1 {
 		t.Errorf("expected cold_start_seconds observation count +1, got %v", delta)
 	}
 }
@@ -138,7 +143,7 @@ func TestMetricsSessionActive(t *testing.T) {
 	srv, ts := testProxyServer(t)
 	createAndStartApp(t, ts, "sess-metrics")
 
-	beforeSessions := gaugeValue(telemetry.SessionsActive)
+	beforeSessions := gaugeValue(srv.Metrics.SessionsActive)
 
 	// First request creates a new session
 	resp, err := http.Get(ts.URL + "/app/sess-metrics/")
@@ -149,7 +154,7 @@ func TestMetricsSessionActive(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	afterSessions := gaugeValue(telemetry.SessionsActive)
+	afterSessions := gaugeValue(srv.Metrics.SessionsActive)
 	if delta := afterSessions - beforeSessions; delta != 1 {
 		t.Errorf("expected sessions_active +1 after new session, got %v", delta)
 	}
@@ -159,14 +164,14 @@ func TestMetricsSessionActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	afterSessions2 := gaugeValue(telemetry.SessionsActive)
+	afterSessions2 := gaugeValue(srv.Metrics.SessionsActive)
 	if delta := afterSessions2 - beforeSessions; delta != 2 {
 		t.Errorf("expected sessions_active +2 after two new sessions, got %v", delta)
 	}
 
 	// Evict the worker directly — sessions_active should drop
-	beforeEvict := gaugeValue(telemetry.SessionsActive)
-	beforeStopped := counterValue(telemetry.WorkersStopped)
+	beforeEvict := gaugeValue(srv.Metrics.SessionsActive)
+	beforeStopped := counterValue(srv.Metrics.WorkersStopped)
 
 	workerIDs := srv.Workers.All()
 	if len(workerIDs) == 0 {
@@ -176,13 +181,13 @@ func TestMetricsSessionActive(t *testing.T) {
 		ops.EvictWorker(context.Background(), srv, wid)
 	}
 
-	afterEvict := gaugeValue(telemetry.SessionsActive)
+	afterEvict := gaugeValue(srv.Metrics.SessionsActive)
 	if afterEvict >= beforeEvict {
 		t.Errorf("expected sessions_active to decrease after eviction, before=%v after=%v",
 			beforeEvict, afterEvict)
 	}
 
-	afterStopped := counterValue(telemetry.WorkersStopped)
+	afterStopped := counterValue(srv.Metrics.WorkersStopped)
 	if delta := afterStopped - beforeStopped; delta < 1 {
 		t.Errorf("expected workers_stopped_total +1 after eviction, got %v", delta)
 	}
@@ -191,7 +196,7 @@ func TestMetricsSessionActive(t *testing.T) {
 // TestMetricsBundleUploaded verifies that uploading a bundle increments
 // blockyard_bundles_uploaded_total.
 func TestMetricsBundleUploaded(t *testing.T) {
-	_, ts := testProxyServer(t)
+	srv, ts := testProxyServer(t)
 
 	// Create app
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
@@ -203,7 +208,7 @@ func TestMetricsBundleUploaded(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&created)
 	id := created["id"].(string)
 
-	before := counterValue(telemetry.BundlesUploaded)
+	before := counterValue(srv.Metrics.BundlesUploaded)
 
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/bundles",
@@ -217,7 +222,7 @@ func TestMetricsBundleUploaded(t *testing.T) {
 		t.Fatalf("expected 202, got %d", resp.StatusCode)
 	}
 
-	after := counterValue(telemetry.BundlesUploaded)
+	after := counterValue(srv.Metrics.BundlesUploaded)
 	if delta := after - before; delta != 1 {
 		t.Errorf("expected bundles_uploaded_total +1, got %v", delta)
 	}
@@ -230,7 +235,7 @@ func TestMetricsWebSocketRequest(t *testing.T) {
 	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
 	createAndStartApp(t, ts, "ws-metrics")
 
-	beforeCount := counterValue(telemetry.ProxyRequests)
+	beforeCount := counterValue(srv.Metrics.ProxyRequests)
 
 	ctx := context.Background()
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
@@ -254,7 +259,7 @@ func TestMetricsWebSocketRequest(t *testing.T) {
 
 	conn.Close(websocket.StatusNormalClosure, "done")
 
-	afterCount := counterValue(telemetry.ProxyRequests)
+	afterCount := counterValue(srv.Metrics.ProxyRequests)
 	if delta := afterCount - beforeCount; delta < 1 {
 		t.Errorf("expected proxy_requests_total to increase for WebSocket, got %v", delta)
 	}
@@ -264,9 +269,9 @@ func TestMetricsWebSocketRequest(t *testing.T) {
 // non-existent apps still increment proxy_requests_total (the counter
 // fires at the top of the handler) but the request returns 404.
 func TestMetricsNotFoundStillCounts(t *testing.T) {
-	_, ts := testProxyServer(t)
+	srv, ts := testProxyServer(t)
 
-	before := counterValue(telemetry.ProxyRequests)
+	before := counterValue(srv.Metrics.ProxyRequests)
 
 	resp, err := http.Get(ts.URL + "/app/no-such-app/")
 	if err != nil {
@@ -276,7 +281,7 @@ func TestMetricsNotFoundStillCounts(t *testing.T) {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 
-	after := counterValue(telemetry.ProxyRequests)
+	after := counterValue(srv.Metrics.ProxyRequests)
 	if delta := after - before; delta != 1 {
 		t.Errorf("expected proxy_requests_total +1 even for 404, got %v", delta)
 	}
@@ -308,7 +313,7 @@ func TestMetricsCapacityDoesNotSpawn(t *testing.T) {
 		)
 	}
 
-	beforeSpawned := counterValue(telemetry.WorkersSpawned)
+	beforeSpawned := counterValue(srv.Metrics.WorkersSpawned)
 
 	resp, err := http.Get(ts.URL + "/app/cap-metrics/")
 	if err != nil {
@@ -318,9 +323,8 @@ func TestMetricsCapacityDoesNotSpawn(t *testing.T) {
 		t.Fatalf("expected 503, got %d", resp.StatusCode)
 	}
 
-	afterSpawned := counterValue(telemetry.WorkersSpawned)
+	afterSpawned := counterValue(srv.Metrics.WorkersSpawned)
 	if delta := afterSpawned - beforeSpawned; delta != 0 {
 		t.Errorf("expected no change to workers_spawned_total at capacity, got %v", delta)
 	}
 }
-

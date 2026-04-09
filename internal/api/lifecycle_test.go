@@ -659,7 +659,7 @@ func TestStartAppAuditLog(t *testing.T) {
 	srv.DB.ActivateBundle(appID, "bun-audit")
 
 	// Enable audit logging.
-	srv.AuditLog = audit.New(t.TempDir() + "/audit.log")
+	srv.AuditLog = audit.New(t.TempDir() + "/audit.log", srv.Metrics)
 
 	req := authReq("POST", ts.URL+"/apps/"+appID+"/start", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -682,7 +682,7 @@ func TestStopAppAuditLog(t *testing.T) {
 
 	srv.Workers.Set("audit-w1", server.ActiveWorker{AppID: appID, StartedAt: time.Now()})
 
-	srv.AuditLog = audit.New(t.TempDir() + "/audit.log")
+	srv.AuditLog = audit.New(t.TempDir() + "/audit.log", srv.Metrics)
 
 	req := authReq("POST", ts.URL+"/apps/"+appID+"/stop", nil)
 	resp, err := http.DefaultClient.Do(req)

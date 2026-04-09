@@ -25,7 +25,6 @@ import (
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
-	"github.com/cynkra/blockyard/internal/telemetry"
 	"github.com/cynkra/blockyard/internal/units"
 )
 
@@ -957,8 +956,8 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		telemetry.WorkersSpawned.Inc()
-		telemetry.WorkersActive.Inc()
+		srv.Metrics.WorkersSpawned.Inc()
+		srv.Metrics.WorkersActive.Inc()
 
 		if srv.AuditLog != nil {
 			srv.AuditLog.Emit(auditEntry(r, audit.ActionAppStart, app.ID, nil))

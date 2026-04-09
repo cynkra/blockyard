@@ -19,7 +19,6 @@ import (
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
-	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 var (
@@ -316,9 +315,9 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		return "", "", err
 	}
 	coldStartElapsed := time.Since(coldStartBegin)
-	telemetry.ColdStartDuration.Observe(coldStartElapsed.Seconds())
-	telemetry.WorkersSpawned.Inc()
-	telemetry.WorkersActive.Inc()
+	srv.Metrics.ColdStartDuration.Observe(coldStartElapsed.Seconds())
+	srv.Metrics.WorkersSpawned.Inc()
+	srv.Metrics.WorkersActive.Inc()
 
 	slog.Info("worker ready", //nolint:gosec // G706: slog structured logging handles this
 		"worker_id", wid, "app_id", app.ID, "addr", a,

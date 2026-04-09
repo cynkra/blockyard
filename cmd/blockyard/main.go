@@ -161,8 +161,10 @@ func main() {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
-	// Build shared state and router
-	srv := server.NewServer(cfg, be, database)
+	// Build shared state and router. Use NewServerWithDefaultMetrics so
+	// prometheus counters are registered with DefaultRegisterer and the
+	// /metrics HTTP endpoint (served by promhttp.Handler) can scrape them.
+	srv := server.NewServerWithDefaultMetrics(cfg, be, database)
 	srv.Version = version
 
 	// Initialize package store.
@@ -343,7 +345,7 @@ func main() {
 
 	// Initialize audit log if configured.
 	if cfg.Audit != nil {
-		srv.AuditLog = audit.New(cfg.Audit.Path)
+		srv.AuditLog = audit.New(cfg.Audit.Path, srv.Metrics)
 	}
 
 	// Initialize OpenTelemetry tracing if configured.

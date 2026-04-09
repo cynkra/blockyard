@@ -19,35 +19,52 @@ func getCounterValue(c prometheus.Counter) float64 {
 	return m.GetCounter().GetValue()
 }
 
+func newTestMetrics(t *testing.T) *Metrics {
+	t.Helper()
+	return NewMetrics(prometheus.NewRegistry())
+}
+
 func TestWorkersActiveGauge(t *testing.T) {
-	initial := getGaugeValue(WorkersActive)
-	WorkersActive.Inc()
-	WorkersActive.Inc()
-	after := getGaugeValue(WorkersActive)
-	if after-initial != 2 {
-		t.Errorf("expected +2, got %v", after-initial)
+	m := newTestMetrics(t)
+	m.WorkersActive.Inc()
+	m.WorkersActive.Inc()
+	if got := getGaugeValue(m.WorkersActive); got != 2 {
+		t.Errorf("expected 2, got %v", got)
 	}
-	WorkersActive.Dec()
-	final := getGaugeValue(WorkersActive)
-	if final-initial != 1 {
-		t.Errorf("expected +1, got %v", final-initial)
+	m.WorkersActive.Dec()
+	if got := getGaugeValue(m.WorkersActive); got != 1 {
+		t.Errorf("expected 1, got %v", got)
 	}
-	// Clean up
-	WorkersActive.Dec()
 }
 
 func TestCounterIncrements(t *testing.T) {
-	before := getCounterValue(WorkersSpawned)
-	WorkersSpawned.Inc()
-	after := getCounterValue(WorkersSpawned)
-	if after-before != 1 {
-		t.Errorf("expected +1, got %v", after-before)
+	m := newTestMetrics(t)
+	m.WorkersSpawned.Inc()
+	if got := getCounterValue(m.WorkersSpawned); got != 1 {
+		t.Errorf("expected 1, got %v", got)
 	}
 }
 
 func TestHistogramObservation(t *testing.T) {
+	m := newTestMetrics(t)
 	// Just verify it doesn't panic
-	ColdStartDuration.Observe(1.5)
-	ProxyRequestDuration.Observe(0.05)
-	BuildDuration.Observe(30.0)
+	m.ColdStartDuration.Observe(1.5)
+	m.ProxyRequestDuration.Observe(0.05)
+	m.BuildDuration.Observe(30.0)
+}
+
+func TestNewMetricsIsolation(t *testing.T) {
+	// Two Metrics instances with different registries must not share state.
+	a := NewMetrics(prometheus.NewRegistry())
+	b := NewMetrics(prometheus.NewRegistry())
+
+	a.WorkersSpawned.Inc()
+	a.WorkersSpawned.Inc()
+
+	if got := getCounterValue(a.WorkersSpawned); got != 2 {
+		t.Errorf("a.WorkersSpawned: expected 2, got %v", got)
+	}
+	if got := getCounterValue(b.WorkersSpawned); got != 0 {
+		t.Errorf("b.WorkersSpawned: expected 0 (isolated), got %v", got)
+	}
 }

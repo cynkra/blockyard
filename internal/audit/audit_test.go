@@ -14,7 +14,7 @@ func TestEmitWritesEntry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 
-	l := New(path)
+	l := New(path, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -73,7 +73,7 @@ func TestRunDrainsOnCancel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 
-	l := New(path)
+	l := New(path, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -115,7 +115,7 @@ func TestBufferFullDropsEntry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 
-	l := New(path)
+	l := New(path, nil)
 	// Don't start Run — buffer will fill up
 
 	for i := 0; i < bufferSize+10; i++ {
@@ -129,7 +129,7 @@ func TestBufferFullDropsEntry(t *testing.T) {
 }
 
 func TestNewEmptyPathReturnsNil(t *testing.T) {
-	l := New("")
+	l := New("", nil)
 	if l != nil {
 		t.Error("expected nil for empty path")
 	}
@@ -148,7 +148,7 @@ func TestRunNilLogBlocksUntilCancel(t *testing.T) {
 }
 
 func TestRunInvalidPath(t *testing.T) {
-	l := New("/tmp/audit-test-path")
+	l := New("/tmp/audit-test-path", nil)
 	// Use a path under a non-existent directory to trigger OpenFile error.
 	done := make(chan struct{})
 	go func() {
@@ -163,7 +163,7 @@ func TestJSONLinesFormat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 
-	l := New(path)
+	l := New(path, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

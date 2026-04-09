@@ -21,7 +21,6 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/server"
-	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // uploadMode describes how uploaded files should be packaged for the bundle pipeline.
@@ -321,10 +320,11 @@ func (ui *UI) createApp(srv *server.Server) http.HandlerFunc {
 			Store:            srv.PkgStore,
 			AuditLog:         srv.AuditLog,
 			AuditActor:       caller.Sub,
+			Metrics:          srv.Metrics,
 			WG:               srv.RestoreWG,
 		})
 
-		telemetry.BundlesUploaded.Inc()
+		srv.Metrics.BundlesUploaded.Inc()
 		if srv.AuditLog != nil {
 			srv.AuditLog.Emit(audit.Entry{
 				Action:   audit.ActionBundleUpload,
