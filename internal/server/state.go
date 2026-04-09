@@ -21,6 +21,9 @@ import (
 	"github.com/cynkra/blockyard/internal/registry"
 	"github.com/cynkra/blockyard/internal/session"
 	"github.com/cynkra/blockyard/internal/task"
+	"github.com/cynkra/blockyard/internal/telemetry"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Server holds all shared state for the running server.
@@ -34,6 +37,7 @@ type Server struct {
 	Registry registry.WorkerRegistry
 	Tasks    *task.Store
 	LogStore *logstore.Store
+	Metrics  *telemetry.Metrics
 
 	// Auth fields — nil when [oidc] is not configured (v0 compat).
 	OIDCClient   *auth.OIDCClient
@@ -188,6 +192,12 @@ func (srv *Server) InternalAPIURL() string {
 }
 
 // NewServer creates a Server with all in-memory stores initialized.
+// The returned Server owns a fresh per-instance [telemetry.Metrics]
+// registered against a private prometheus registry, so tests that
+// construct a Server never contend on a shared counter state. Production
+// callers should replace [Server.Metrics] with one registered against
+// [prometheus.DefaultRegisterer] so the /metrics HTTP handler can scrape
+// it — see [NewServerWithDefaultMetrics].
 func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server {
 	return &Server{
 		Config:   cfg,
@@ -198,7 +208,17 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 		Registry: registry.NewMemoryRegistry(),
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
+		Metrics:  telemetry.NewMetrics(prometheus.NewRegistry()),
 	}
+}
+
+// NewServerWithDefaultMetrics is the production constructor. It creates
+// a Server whose metrics are registered with [prometheus.DefaultRegisterer]
+// so the promhttp /metrics endpoint can scrape them.
+func NewServerWithDefaultMetrics(cfg *config.Config, be backend.Backend, database *db.DB) *Server {
+	srv := NewServer(cfg, be, database)
+	srv.Metrics = telemetry.NewMetrics(prometheus.DefaultRegisterer)
+	return srv
 }
 
 // AuthDeps returns an auth.Deps populated from this server's fields.

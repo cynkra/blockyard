@@ -1255,7 +1255,7 @@ func testServerWithAudit(t *testing.T) (*server.Server, *httptest.Server, string
 	srv.RestoreWG = &wg
 
 	// Create and start audit log.
-	auditLog := audit.New(auditPath)
+	auditLog := audit.New(auditPath, srv.Metrics)
 	srv.AuditLog = auditLog
 	ctx, cancel := context.WithCancel(context.Background())
 	go auditLog.Run(ctx, auditPath)
@@ -2798,7 +2798,7 @@ func testServerWithSoftDeleteAndAudit(t *testing.T) (*server.Server, *httptest.S
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
-	auditLog := audit.New(auditPath)
+	auditLog := audit.New(auditPath, srv.Metrics)
 	srv.AuditLog = auditLog
 	ctx, cancel := context.WithCancel(context.Background())
 	go auditLog.Run(ctx, auditPath)

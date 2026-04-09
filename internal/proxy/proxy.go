@@ -15,7 +15,6 @@ import (
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
-	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // Handler returns an http.Handler that proxies requests to Shiny app
@@ -44,7 +43,7 @@ func Handler(srv *server.Server) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		telemetry.ProxyRequests.Inc()
+		srv.Metrics.ProxyRequests.Inc()
 		appName := chi.URLParam(r, "name")
 
 		// 1. Look up app by ID (UUID) first, then by name.
@@ -215,7 +214,7 @@ func Handler(srv *server.Server) http.Handler {
 				UserSub:    callerSub,
 				LastAccess: time.Now(),
 			})
-			telemetry.SessionsActive.Inc()
+			srv.Metrics.SessionsActive.Inc()
 
 			// Track session in the database for activity metrics.
 			if err := srv.DB.CreateSession(sessionID, app.ID, workerID, callerSub); err != nil {
@@ -275,7 +274,7 @@ func Handler(srv *server.Server) http.Handler {
 		} else {
 			forwardHTTP(w, r, addr, appName, srv.Config.Server.ExternalURL, transport, srv.Config.Proxy.HTTPForwardTimeout.Duration)
 		}
-		telemetry.ProxyRequestDuration.Observe(time.Since(forwardStart).Seconds())
+		srv.Metrics.ProxyRequestDuration.Observe(time.Since(forwardStart).Seconds())
 	})
 }
 

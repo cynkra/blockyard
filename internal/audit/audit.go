@@ -50,18 +50,22 @@ type Entry struct {
 // Writes are buffered via a channel and flushed by a background goroutine.
 type Log struct {
 	entries chan Entry
+	metrics *telemetry.Metrics
 }
 
 const bufferSize = 1000
 
 // New creates an audit log. The background writer must be started with
-// Run(). If path is empty, returns nil.
-func New(path string) *Log {
+// Run(). If path is empty, returns nil. metrics may be nil in tests that
+// do not care about observability; production callers should always pass
+// the server's [telemetry.Metrics] instance.
+func New(path string, metrics *telemetry.Metrics) *Log {
 	if path == "" {
 		return nil
 	}
 	return &Log{
 		entries: make(chan Entry, bufferSize),
+		metrics: metrics,
 	}
 }
 
@@ -76,7 +80,9 @@ func (l *Log) Emit(entry Entry) {
 	select {
 	case l.entries <- entry:
 	case <-time.After(500 * time.Millisecond):
-		telemetry.AuditEntriesDropped.Inc()
+		if l.metrics != nil {
+			l.metrics.AuditEntriesDropped.Inc()
+		}
 		slog.Warn("audit log buffer full, dropping entry",
 			"action", entry.Action, "actor", entry.Actor)
 	}

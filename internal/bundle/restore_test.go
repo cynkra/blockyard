@@ -171,7 +171,7 @@ func TestSpawnRestore_SuccessWithAuditLog(t *testing.T) {
 
 	// Set up audit logging.
 	auditPath := t.TempDir() + "/audit.jsonl"
-	auditLog := audit.New(auditPath)
+	auditLog := audit.New(auditPath, nil)
 	params.AuditLog = auditLog
 	params.AuditActor = "test-user"
 
@@ -198,7 +198,7 @@ func TestSpawnRestore_FailureWithAuditLog(t *testing.T) {
 
 	// Set up audit logging.
 	auditPath := t.TempDir() + "/audit.jsonl"
-	auditLog := audit.New(auditPath)
+	auditLog := audit.New(auditPath, nil)
 	params.AuditLog = auditLog
 	params.AuditActor = "test-user"
 
