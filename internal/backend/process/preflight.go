@@ -31,9 +31,68 @@ func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config) *preflight.
 	r.Add(checkUserNamespaces())
 	r.Add(checkPortRange(cfg))
 	r.Add(checkResourceLimits(&fullCfg.Server))
+	r.Add(checkSeccompProfile(cfg))
 	r.Add(checkBwrapHostUIDMapping(cfg))
 	r.Add(checkWorkerEgress(cfg, fullCfg))
 	return r
+}
+
+// checkSeccompProfile verifies the configured seccomp profile path
+// exists and is a readable regular file. Empty path is valid —
+// seccomp is optional in native mode, phase 3-7 treats it as
+// such, and phase 3-8's containerized image sets a sensible
+// default via BLOCKYARD_PROCESS_SECCOMP_PROFILE, so operators on
+// bare-metal are free to omit it.
+//
+// Catches the "operator set the path but the file is missing or
+// unreadable" footgun at startup instead of at first worker spawn.
+func checkSeccompProfile(cfg *config.ProcessConfig) preflight.Result {
+	const name = "seccomp_profile"
+	if cfg.SeccompProfile == "" {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityOK,
+			Message:  "no seccomp profile configured (optional)",
+			Category: "process",
+		}
+	}
+	info, err := os.Stat(cfg.SeccompProfile)
+	if err != nil {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityError,
+			Message: fmt.Sprintf(
+				"seccomp profile %q: %v. "+
+					"Run `by admin install-seccomp` or extract from the process-backend image.",
+				cfg.SeccompProfile, err),
+			Category: "process",
+		}
+	}
+	if !info.Mode().IsRegular() {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityError,
+			Message:  fmt.Sprintf("seccomp profile %q is not a regular file", cfg.SeccompProfile),
+			Category: "process",
+		}
+	}
+	if info.Size() == 0 {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityError,
+			Message:  fmt.Sprintf("seccomp profile %q is empty", cfg.SeccompProfile),
+			Category: "process",
+		}
+	}
+	// Deeper BPF validity is checked by libseccomp when bwrap loads
+	// the blob; preflight just confirms the file exists and is
+	// readable.
+	return preflight.Result{
+		Name:     name,
+		Severity: preflight.SeverityOK,
+		Message:  fmt.Sprintf("seccomp profile readable (%d bytes)", info.Size()),
+		Category: "process",
+	}
 }
 
 func checkBwrap(cfg *config.ProcessConfig) preflight.Result {

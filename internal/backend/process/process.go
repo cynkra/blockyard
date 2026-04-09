@@ -20,6 +20,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/preflight"
+	"github.com/cynkra/blockyard/internal/redisstate"
 )
 
 // Compile-time interface check.
@@ -47,8 +48,8 @@ type workerProc struct {
 type ProcessBackend struct {
 	cfg     *config.ProcessConfig // shortcut for fullCfg.Process; used in hot paths
 	fullCfg *config.Config        // held for Preflight() — needs Redis/OpenBao/DB addrs and Server.DefaultMemoryLimit/CPULimit
-	ports   *portAllocator
-	uids    *uidAllocator
+	ports   portAllocator
+	uids    uidAllocator
 
 	mu      sync.Mutex
 	workers map[string]*workerProc // keyed by worker ID
@@ -60,7 +61,14 @@ type ProcessBackend struct {
 // Preflight() can read the addresses of Redis/OpenBao/database for
 // the egress probe and the server-level resource-limit fields for
 // the warning check.
-func New(fullCfg *config.Config) (*ProcessBackend, error) {
+//
+// When rc is non-nil the backend uses Redis-backed port and UID
+// allocators to coordinate with concurrent peers during rolling-
+// update overlap. When rc is nil (single-node deployment without
+// [redis]) it falls back to in-memory bitset allocators, which are
+// correct because without the cutover window there are no cross-
+// server collisions.
+func New(fullCfg *config.Config, rc *redisstate.Client) (*ProcessBackend, error) {
 	cfg := fullCfg.Process
 	if cfg == nil {
 		return nil, fmt.Errorf("process backend: [process] config section is required")
@@ -72,11 +80,25 @@ func New(fullCfg *config.Config) (*ProcessBackend, error) {
 	if err := ensureBundleMountPoint(fullCfg.Storage.BundleWorkerPath); err != nil {
 		return nil, err
 	}
+
+	var (
+		ports portAllocator
+		uids  uidAllocator
+	)
+	if rc != nil {
+		hostname, _ := os.Hostname()
+		ports = newRedisPortAllocator(rc, cfg.PortRangeStart, cfg.PortRangeEnd, hostname)
+		uids = newRedisUIDAllocator(rc, cfg.WorkerUIDStart, cfg.WorkerUIDEnd, hostname)
+	} else {
+		ports = newMemoryPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
+		uids = newMemoryUIDAllocator(cfg.WorkerUIDStart, cfg.WorkerUIDEnd)
+	}
+
 	return &ProcessBackend{
 		cfg:     cfg,
 		fullCfg: fullCfg,
-		ports:   newPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd),
-		uids:    newUIDAllocator(cfg.WorkerUIDStart, cfg.WorkerUIDEnd),
+		ports:   ports,
+		uids:    uids,
 		workers: make(map[string]*workerProc),
 	}, nil
 }
@@ -137,11 +159,26 @@ func (b *ProcessBackend) Preflight(_ context.Context) (*preflight.Report, error)
 	return RunPreflight(b.cfg, b.fullCfg), nil
 }
 
-// CleanupOrphanResources implements backend.Backend. The process
-// backend tracks workers in memory only — Pdeathsig + --die-with-parent
-// ensure no orphans survive a server restart, so there is nothing to
-// clean up.
-func (b *ProcessBackend) CleanupOrphanResources(_ context.Context) error {
+// CleanupOrphanResources implements backend.Backend. Workers from a
+// previous run are already dead (Pdeathsig killed them with the
+// server), so the in-memory variants have nothing to clean up. The
+// Redis variants, however, carry owned claims across server restarts
+// and need a scan-and-delete at startup to return crashed-session
+// ports and UIDs to the pool.
+func (b *ProcessBackend) CleanupOrphanResources(ctx context.Context) error {
+	type orphanCleaner interface {
+		CleanupOwnedOrphans(ctx context.Context) error
+	}
+	if c, ok := b.uids.(orphanCleaner); ok {
+		if err := c.CleanupOwnedOrphans(ctx); err != nil {
+			return fmt.Errorf("uid cleanup: %w", err)
+		}
+	}
+	if c, ok := b.ports.(orphanCleaner); ok {
+		if err := c.CleanupOwnedOrphans(ctx); err != nil {
+			return fmt.Errorf("port cleanup: %w", err)
+		}
+	}
 	return nil
 }
 

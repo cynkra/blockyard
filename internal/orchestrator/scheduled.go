@@ -78,14 +78,14 @@ func (o *Orchestrator) runScheduledOnce(ctx context.Context, channel string) boo
 		"latest", result.LatestVersion)
 
 	sender := o.tasks.Create(uuid.New().String(), "scheduled-update")
-	ur, err := o.Update(ctx, channel, sender)
+	updated, err := o.Update(ctx, channel, sender)
 	if err != nil {
 		slog.Error("update scheduler: update failed", "error", err)
 		sender.Complete(task.Failed)
 		o.state.Store("idle")
 		return false
 	}
-	if ur == nil {
+	if !updated {
 		sender.Complete(task.Completed)
 		o.state.Store("idle")
 		return false
@@ -95,7 +95,7 @@ func (o *Orchestrator) runScheduledOnce(ctx context.Context, channel string) boo
 	if o.cfg.Update != nil && o.cfg.Update.WatchPeriod.Duration > 0 {
 		watchPeriod = o.cfg.Update.WatchPeriod.Duration
 	}
-	if err := o.Watchdog(ctx, ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
+	if err := o.Watchdog(ctx, watchPeriod, sender); err != nil {
 		slog.Error("update scheduler: watchdog rollback", "error", err)
 		sender.Complete(task.Failed)
 		return false

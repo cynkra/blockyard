@@ -29,6 +29,12 @@ type Config struct {
 	Audit        *AuditConfig        `toml:"audit"`         // nil when not configured
 	Telemetry    *TelemetryConfig    `toml:"telemetry"`     // nil when not configured
 	Update       *UpdateConfig       `toml:"update"`        // nil when not configured
+
+	// ConfigPath is the filesystem path to the config file this
+	// Config was loaded from. Populated by main.go after Load so the
+	// process orchestrator can re-exec the new blockyard with the
+	// same --config flag. Not a TOML field — no struct tag.
+	ConfigPath string `toml:"-"`
 }
 
 type RedisConfig struct {
@@ -53,6 +59,21 @@ type UpdateConfig struct {
 	Schedule    string   `toml:"schedule"`      // cron expression; empty = disabled
 	Channel     string   `toml:"channel"`       // "stable" (default) or "main"
 	WatchPeriod Duration `toml:"watch_period"`  // health monitoring after update completes
+
+	// AltBindRange is the port range the process orchestrator picks
+	// an alternate bind from when spawning the new server during a
+	// rolling update. Operator-configured, separate from
+	// [process] port_range (worker pool). Default: "8090-8099".
+	// Ignored by the Docker variant.
+	AltBindRange string `toml:"alt_bind_range"`
+
+	// DrainIdleWait is the maximum time Finish will wait for the
+	// local server's session count to reach zero before tearing
+	// down. Used by the process orchestrator to let active sessions
+	// finish naturally during a rolling-update drain. Default: 5m.
+	// Ignored by the Docker variant, which cuts over hard and
+	// relies on the reverse proxy to drain in-flight requests.
+	DrainIdleWait Duration `toml:"drain_idle_wait"`
 }
 
 type ServerConfig struct {
@@ -316,6 +337,12 @@ func updateDefaults(c *UpdateConfig) {
 	}
 	if c.WatchPeriod.Duration == 0 {
 		c.WatchPeriod.Duration = 5 * time.Minute
+	}
+	if c.AltBindRange == "" {
+		c.AltBindRange = "8090-8099"
+	}
+	if c.DrainIdleWait.Duration == 0 {
+		c.DrainIdleWait.Duration = 5 * time.Minute
 	}
 }
 

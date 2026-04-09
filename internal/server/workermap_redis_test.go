@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sort"
 	"testing"
 	"time"
 
@@ -273,5 +274,54 @@ func TestRedisWorkerMapRoundTrip(t *testing.T) {
 	}
 	if !got.StartedAt.Equal(now) {
 		t.Errorf("StartedAt = %v, want %v", got.StartedAt, now)
+	}
+}
+
+// TestRedisWorkerMapWorkersForServerFiltersByServerID is the real
+// exercise of the phase 3-8 filter: two RedisWorkerMaps with
+// different server IDs share a miniredis, each registers workers,
+// and WorkersForServer must return only the caller's own.
+//
+// This is the load-bearing invariant for drain.waitForIdle — during
+// a same-host rolling update the old server must not count the new
+// server's fresh sessions when deciding whether it is safe to tear
+// down.
+func TestRedisWorkerMapWorkersForServerFiltersByServerID(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redisstate.TestClient(t, mr.Addr())
+	old := NewRedisWorkerMap(client, "old-server")
+	new := NewRedisWorkerMap(client, "new-server")
+
+	// Old server registers two workers.
+	old.Set("old-w1", ActiveWorker{AppID: "app1"})
+	old.Set("old-w2", ActiveWorker{AppID: "app1"})
+	// New server registers one worker on the same app — simulates
+	// the overlap window during cutover.
+	new.Set("new-w1", ActiveWorker{AppID: "app1"})
+
+	// Each side queries through its own handle and must see only
+	// its own workers.
+	oldIDs := old.WorkersForServer("old-server")
+	sort.Strings(oldIDs)
+	if len(oldIDs) != 2 || oldIDs[0] != "old-w1" || oldIDs[1] != "old-w2" {
+		t.Errorf("old server WorkersForServer = %v, want [old-w1 old-w2]", oldIDs)
+	}
+
+	newIDs := new.WorkersForServer("new-server")
+	if len(newIDs) != 1 || newIDs[0] != "new-w1" {
+		t.Errorf("new server WorkersForServer = %v, want [new-w1]", newIDs)
+	}
+
+	// Cross-queries (asking one side for the other side's server ID)
+	// must also filter correctly — the query is parameterized, not
+	// hardcoded to the struct field.
+	cross := old.WorkersForServer("new-server")
+	if len(cross) != 1 || cross[0] != "new-w1" {
+		t.Errorf("cross-query WorkersForServer(new-server) via old handle = %v, want [new-w1]", cross)
+	}
+
+	// Unknown server ID returns empty (not all workers).
+	if ids := old.WorkersForServer("ghost"); len(ids) != 0 {
+		t.Errorf("WorkersForServer(ghost) = %v, want empty", ids)
 	}
 }

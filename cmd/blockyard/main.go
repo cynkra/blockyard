@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,8 +23,6 @@ import (
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
-	"github.com/cynkra/blockyard/internal/backend/docker"
-	"github.com/cynkra/blockyard/internal/backend/process"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/drain"
@@ -93,6 +93,11 @@ func main() {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	// Process orchestrator re-execs blockyard with the same config file
+	// during rolling updates; store the path so clone_process.go can
+	// reach it without threading a second argument through the
+	// orchestrator factory.
+	cfg.ConfigPath = *configPath
 
 	// Reconfigure log level from config (server.log_level / BLOCKYARD_SERVER_LOG_LEVEL).
 	logLevel := config.ParseLogLevel(cfg.Server.LogLevel)
@@ -113,23 +118,41 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize backend
-	var be backend.Backend
-	switch cfg.Server.Backend {
-	case "process":
-		pb, perr := process.New(cfg)
-		if perr != nil {
-			slog.Error("failed to create process backend", "error", perr)
+	// ── Redis shared state (optional) ──
+	//
+	// Redis init happens BEFORE backend construction so the process
+	// backend can share main.go's redisstate.Client for its Redis-
+	// backed port and UID allocators. The Docker backend ignores the
+	// client (it only reads cfg.Redis.URL as a string for its
+	// preflight check), so the reorder is safe for both variants.
+	//
+	// A single connection pool also means one `defer rc.Close()` on
+	// shutdown covers both the server's and the backend's usage, so
+	// no additional Close() is needed on the Backend interface.
+	var rc *redisstate.Client
+	if cfg.Redis != nil {
+		var err error
+		rc, err = redisstate.New(context.Background(), cfg.Redis)
+		if err != nil {
+			slog.Error("failed to connect to redis", "error", err)
 			os.Exit(1)
 		}
-		be = pb
-	default: // "docker"
-		dockerBE, derr := docker.New(context.Background(), cfg, cfg.Storage.BundleServerPath, version)
-		if derr != nil {
-			slog.Error("failed to create docker backend", "error", derr)
-			os.Exit(1)
-		}
-		be = dockerBE
+		defer rc.Close()
+	}
+
+	// Initialize backend via the tag-gated factory map.
+	factory, ok := backendFactories[cfg.Server.Backend]
+	if !ok {
+		slog.Error("backend not available in this build",
+			"backend", cfg.Server.Backend,
+			"available", availableBackends())
+		os.Exit(1)
+	}
+	be, err := factory(context.Background(), cfg, rc, version)
+	if err != nil {
+		slog.Error("failed to create backend",
+			"backend", cfg.Server.Backend, "error", err)
+		os.Exit(1)
 	}
 
 	// Initialize database
@@ -244,24 +267,32 @@ func main() {
 	}
 	srv.WorkerTokenKey = workerKey
 
-	// ── Redis shared state (optional) ──
-	if cfg.Redis != nil {
-		rc, err := redisstate.New(context.Background(), cfg.Redis)
-		if err != nil {
-			slog.Error("failed to connect to redis", "error", err)
-			os.Exit(1)
-		}
-		defer rc.Close()
+	// Per-process server ID. Phase 3-3 used bare hostname, which
+	// breaks the process-backend rolling update: old and new blockyard
+	// processes on the same host share a hostname, so the workermap
+	// cannot distinguish their workers. A per-process 8-byte nonce
+	// disambiguates concurrent peers; Docker rolling updates (where
+	// each container already has a distinct hostname) keep working.
+	//
+	// The port/UID allocators use plain hostname as their crash-
+	// recovery owner identifier — "distinguish concurrent peers" and
+	// "recover my own crashed state" need different identifiers.
+	hostname, _ := os.Hostname()
+	serverID := hostname + "-" + randomNonceHex(8)
 
+	// Wire Redis-backed shared state into the server if Redis is
+	// configured. The rc client was constructed above, before the
+	// backend, so the process backend's allocators share it.
+	if rc != nil {
 		srv.RedisClient = rc
 		srv.Sessions = session.NewRedisStore(rc, cfg.Proxy.SessionIdleTTL.Duration)
 		registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
 		srv.Registry = registry.NewRedisRegistry(rc, registryTTL)
-		hostname, _ := os.Hostname()
-		srv.Workers = server.NewRedisWorkerMap(rc, hostname)
+		srv.Workers = server.NewRedisWorkerMap(rc, serverID)
 		slog.Info("using redis for shared state",
 			"url", maskRedisPassword(cfg.Redis.URL),
-			"prefix", cfg.Redis.KeyPrefix)
+			"prefix", cfg.Redis.KeyPrefix,
+			"server_id", serverID)
 	}
 
 	// Deferred validation: session_secret must be present if OIDC is configured.
@@ -489,11 +520,14 @@ func main() {
 		}
 	}
 
-	// Orchestrator (nil in native mode / process backend → 501 from API).
+	// Orchestrator — resolved via the tag-gated factory candidates.
+	// Returns nil in containerized mode (PID 1) or when no candidate
+	// matches the active backend, in which case /api/v1/admin/update
+	// and /rollback return 501.
 	var orch *orchestrator.Orchestrator
-	if be, ok := srv.Backend.(*docker.DockerBackend); ok && be.ServerID() != "" {
+	if fac := newServerFactory(srv, cfg, be); fac != nil {
 		orch = orchestrator.New(
-			be.Client(), be.ServerID(), srv.DB, cfg, srv.Version,
+			fac, srv.DB, cfg, srv.Version,
 			srv.Tasks, &orchestrator.DefaultChecker{}, slog.Default(),
 			drainFn, undrainFn, exitFn,
 		)
@@ -525,6 +559,11 @@ func main() {
 	}
 
 	// Now assign the drainer — closures become safe to call.
+	// FinishIdleWait is set to cfg.Update.DrainIdleWait for the
+	// process backend (so Finish waits for local sessions to end
+	// before tearing down workers), zero for Docker (which cuts over
+	// hard and relies on the reverse proxy to drain the last
+	// requests).
 	drainer = &drain.Drainer{
 		Srv:             srv,
 		MainServer:      httpServer,
@@ -532,6 +571,8 @@ func main() {
 		BGCancel:        bgCancel,
 		BGWait:          &bgWg,
 		TracingShutdown: tracingShutdown,
+		FinishIdleWait:  finishIdleWaitForBackend(be, cfg),
+		ServerID:        serverID,
 	}
 
 	// Scheduled auto-updates (not in passive mode — prevents the
@@ -593,6 +634,18 @@ func main() {
 	}
 }
 
+// randomNonceHex returns n random bytes as a hex string. Used for the
+// per-process server ID suffix. Falls back to a deterministic value
+// on crypto/rand failure; collision risk on fallback is accepted
+// because rand.Read failure is effectively impossible on Linux.
+func randomNonceHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "fallback"
+	}
+	return hex.EncodeToString(b)
+}
+
 // maskRedisPassword replaces the password in a Redis URL with "***".
 func maskRedisPassword(rawURL string) string {
 	u, err := url.Parse(rawURL)
@@ -605,3 +658,25 @@ func maskRedisPassword(rawURL string) string {
 	return u.String()
 }
 
+// finishIdleWaitForBackend returns the Drainer.FinishIdleWait value
+// for the given resolved backend and config. The process backend
+// needs a non-zero idle-wait because its workers are killed by
+// Pdeathsig when the old server exits, and sessions on those workers
+// end abruptly unless the idle-wait lets them finish first. Docker
+// returns zero — it cuts over hard and relies on the reverse proxy
+// to drain in-flight requests.
+//
+// This is the one place in main.go that branches on the concrete
+// backend type; pushing the choice down into Drainer call sites
+// would scatter variant-awareness across the codebase, and pushing
+// it up into the orchestrator factory would create an orchestrator→
+// drain cross-package dependency that otherwise doesn't exist.
+func finishIdleWaitForBackend(be backend.Backend, cfg *config.Config) time.Duration {
+	// Type assertion lives in backend_process.go (tag-gated) so this
+	// file stays compilable in the docker-only variant. Variant that
+	// doesn't include process_backend returns zero unconditionally.
+	if dur, ok := finishIdleWaitForProcess(be, cfg); ok {
+		return dur
+	}
+	return 0
+}

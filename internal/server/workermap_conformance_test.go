@@ -403,6 +403,51 @@ func TestWorkerMapConformance_AppIDsDedup(t *testing.T) {
 	}
 }
 
+// TestWorkerMapConformance_WorkersForServerReturnsOwnWorkers checks
+// that WorkersForServer returns this map's workers when queried with
+// its own server ID. The Memory variant ignores the server ID (single-
+// node semantics, documented on WorkerMap interface); the Redis
+// variant filters by the server_id hash field. Both must surface the
+// workers the caller just Set, so this conformance test uses the
+// same server ID each factory hardcodes in its setup ("test-host").
+func TestWorkerMapConformance_WorkersForServerReturnsOwnWorkers(t *testing.T) {
+	for name, factory := range workerMapImplementations(t) {
+		t.Run(name, func(t *testing.T) {
+			m := factory(t)
+			m.Set("w1", ActiveWorker{AppID: "app1"})
+			m.Set("w2", ActiveWorker{AppID: "app1"})
+			m.Set("w3", ActiveWorker{AppID: "app2"})
+
+			ids := m.WorkersForServer("test-host")
+			sort.Strings(ids)
+			if len(ids) != 3 {
+				t.Fatalf("WorkersForServer = %v, want 3 entries", ids)
+			}
+			want := []string{"w1", "w2", "w3"}
+			for i, id := range ids {
+				if id != want[i] {
+					t.Errorf("WorkersForServer[%d] = %q, want %q", i, id, want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestWorkerMapConformance_WorkersForServerEmpty ensures an empty map
+// returns empty, not nil-panic. Both implementations must tolerate
+// the "drain called at startup before any worker was ever
+// registered" path.
+func TestWorkerMapConformance_WorkersForServerEmpty(t *testing.T) {
+	for name, factory := range workerMapImplementations(t) {
+		t.Run(name, func(t *testing.T) {
+			m := factory(t)
+			if ids := m.WorkersForServer("test-host"); len(ids) != 0 {
+				t.Errorf("WorkersForServer on empty map = %v, want empty", ids)
+			}
+		})
+	}
+}
+
 func TestWorkerMapConformance_RoundTrip(t *testing.T) {
 	for name, factory := range workerMapImplementations(t) {
 		t.Run(name, func(t *testing.T) {

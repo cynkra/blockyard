@@ -29,19 +29,33 @@ jobs:
   scan-image:
     needs: server-image
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       packages: read
       security-events: write
+    strategy:
+      # Scan amd64 only — arch-specific CVE delta is typically zero
+      # and doubling the matrix doubles CI cost. Trivy per variant
+      # (docker / process / everything) catches variant-specific
+      # base-image issues.
+      fail-fast: false
+      matrix:
+        include:
+          - variant: docker
+            suffix: -docker
+          - variant: process
+            suffix: -process
+          - variant: everything
+            suffix: ""
     steps:
       - uses: actions/checkout@v6
 
-      - name: Run Trivy vulnerability scanner
+      - name: Run Trivy vulnerability scanner (${{ matrix.variant }})
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref: ${{ env.SERVER_IMAGE }}:build-linux-amd64
+          image-ref: ${{ env.SERVER_IMAGE }}${{ matrix.suffix }}:build-linux-amd64
           format: sarif
-          output: trivy-results.sarif
+          output: trivy-results-${{ matrix.variant }}.sarif
           severity: CRITICAL,HIGH
           exit-code: "1"
         env:
@@ -52,12 +66,23 @@ jobs:
         if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: trivy-results.sarif
+          sarif_file: trivy-results-${{ matrix.variant }}.sarif
+          category: trivy-${{ matrix.variant }}
 
   server-manifest:
     needs: scan-image
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: docker
+            suffix: -docker
+          - variant: process
+            suffix: -process
+          - variant: everything
+            suffix: ""
     steps:
       - uses: docker/login-action@v4
         with:
@@ -68,22 +93,105 @@ jobs:
       - uses: docker/metadata-action@v6
         id: meta
         with:
-          images: ${{ env.SERVER_IMAGE }}
+          images: ${{ env.SERVER_IMAGE }}${{ matrix.suffix }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
-      - name: Create and push multi-arch manifest
+      - name: Create and push multi-arch manifest (${{ matrix.variant }})
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             docker buildx imagetools create -t "$tag" \
-              "${{ env.SERVER_IMAGE }}:build-linux-amd64" \
-              "${{ env.SERVER_IMAGE }}:build-linux-arm64"
+              "${{ env.SERVER_IMAGE }}${{ matrix.suffix }}:build-linux-amd64" \
+              "${{ env.SERVER_IMAGE }}${{ matrix.suffix }}:build-linux-arm64"
           done <<< "$TAGS"
+
+  # server-smoke pulls each variant's amd64 image and checks
+  # /healthz responds. Catches packaging regressions (bad Dockerfile,
+  # broken entrypoint, incompatible seccomp profile path) against
+  # the actual published artifact — the dep-graph test in CI catches
+  # source-level regressions, this job catches runtime ones.
+  server-smoke:
+    needs: server-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: docker
+            suffix: -docker
+          - variant: process
+            suffix: -process
+          - variant: everything
+            suffix: ""
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull and smoke-test (${{ matrix.variant }})
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.SERVER_IMAGE }}${{ matrix.suffix }}:build-linux-amd64"
+          docker pull "$IMAGE"
+          SECCOMP=""
+          if [ "${{ matrix.variant }}" != "docker" ]; then
+            # Override the entrypoint — the image's default entrypoint
+            # is ["blockyard", "--config", ...], so without
+            # --entrypoint the `cat` ends up as an arg to blockyard.
+            docker run --rm --entrypoint cat "$IMAGE" /etc/blockyard/seccomp.json > /tmp/seccomp.json
+            SECCOMP="--security-opt seccomp=/tmp/seccomp.json"
+          fi
+          docker run -d --name smoke ${SECCOMP} -p 18080:8080 "$IMAGE" || true
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:18080/healthz >/dev/null; then
+              docker rm -f smoke
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs smoke
+          docker rm -f smoke
+          exit 1
+
+  # seccomp-blob publishes the two seccomp release assets native-mode
+  # operators consume: the compiled bwrap BPF profile and the outer-
+  # container JSON profile. The BPF goes through
+  # cmd/seccomp-compile (same libseccomp-dev + CGO invocation the
+  # variant Dockerfiles run); the JSON ships as-is from the repo so
+  # operators can apply it via `--security-opt seccomp=<path>`
+  # without pulling an image or installing the `by` CLI.
+  seccomp-blob:
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install libseccomp-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libseccomp-dev
+      - name: Build seccomp-compile (CGO)
+        run: CGO_ENABLED=1 go build -o /tmp/seccomp-compile ./cmd/seccomp-compile
+      - name: Compile bwrap BPF profile
+        run: /tmp/seccomp-compile -in internal/seccomp/blockyard-bwrap.json -out /tmp/blockyard-bwrap-seccomp.bpf
+      - uses: actions/upload-artifact@v7
+        with:
+          name: seccomp-bwrap-bpf
+          path: /tmp/blockyard-bwrap-seccomp.bpf
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: seccomp-outer-json
+          path: internal/seccomp/blockyard-outer.json
+          retention-days: 1
 
   binaries:
     needs: tests
@@ -149,7 +257,7 @@ jobs:
           retention-days: 1
 
   github-release:
-    needs: [server-manifest, binaries]
+    needs: [server-manifest, binaries, seccomp-blob]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -157,6 +265,14 @@ jobs:
         with:
           pattern: binary-*
           merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: seccomp-bwrap-bpf
+          path: .
+      - uses: actions/download-artifact@v8
+        with:
+          name: seccomp-outer-json
+          path: .
 
       # TODO: bump to v3 once released with node24 support
       - uses: softprops/action-gh-release@v2
@@ -165,3 +281,5 @@ jobs:
           files: |
             blockyard-*
             by-*
+            blockyard-bwrap-seccomp.bpf
+            blockyard-outer.json

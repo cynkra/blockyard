@@ -75,6 +75,41 @@ func TestAdminRollbackNativeMode(t *testing.T) {
 	}
 }
 
+// TestAdminRollbackUnsupportedBackend covers the phase 3-8 branch:
+// the orchestrator is wired (not nil), but the active factory does
+// not support rollback — process backend's expected response. The
+// handler must return 501 with the "not supported for the active
+// backend" message (distinct from the native-mode path, which uses
+// the "not available in this deployment mode" message), and must
+// NOT enter the rolling_back state.
+func TestAdminRollbackUnsupportedBackend(t *testing.T) {
+	srv := testServerForReadyz(t)
+	orch := orchestrator.NewForTestNoRollback()
+	handler := handleAdminRollback(srv, orch, context.Background())
+
+	adminCtx := auth.ContextWithCaller(context.Background(), &auth.CallerIdentity{
+		Role: auth.RoleAdmin,
+	})
+	r := httptest.NewRequest("POST", "/api/v1/admin/rollback", nil).WithContext(adminCtx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("expected 501, got %d: %s", w.Code, w.Body.String())
+	}
+	// Body should carry the backend-specific guidance so operators
+	// know what to do next — distinct from the native-mode message.
+	if body := w.Body.String(); !strings.Contains(body, "not supported") ||
+		!strings.Contains(body, "previous version") {
+		t.Errorf("expected backend-specific rollback guidance, got: %s", body)
+	}
+	// The state machine must remain idle — nothing kicked off in the
+	// background since the pre-dispatch check short-circuited.
+	if s := orch.State(); s != "idle" {
+		t.Errorf("orchestrator state = %q, want idle (handler must not enter rolling_back)", s)
+	}
+}
+
 func TestAdminStatusIdle(t *testing.T) {
 	// nil orchestrator → idle state.
 	handler := handleAdminUpdateStatus(nil)

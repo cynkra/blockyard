@@ -373,6 +373,7 @@ func TestRunPreflightPopulatesReport(t *testing.T) {
 		"user_namespaces":        false,
 		"port_range":             false,
 		"resource_limits":        false,
+		"seccomp_profile":        false,
 		"bwrap_host_uid_mapping": false,
 		"worker_egress":          false,
 	}
@@ -385,5 +386,86 @@ func TestRunPreflightPopulatesReport(t *testing.T) {
 		if !present {
 			t.Errorf("report missing check %q", name)
 		}
+	}
+}
+
+// TestCheckSeccompProfile covers every branch of checkSeccompProfile.
+// The check is new in phase 3-8 — it catches the "operator set the
+// path but the file is missing or unreadable" footgun at startup
+// instead of at first worker spawn. Each case maps to a distinct
+// failure mode the check must surface.
+func TestCheckSeccompProfile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Valid: a regular file with non-zero content. The check does not
+	// validate BPF content — libseccomp handles that at bwrap time.
+	validPath := filepath.Join(dir, "valid.bpf")
+	if err := os.WriteFile(validPath, []byte("not-real-bpf-but-non-empty"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Empty file — must be flagged; operators sometimes `touch` the
+	// path and move on without running seccomp-compile.
+	emptyPath := filepath.Join(dir, "empty.bpf")
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Not a regular file — use the temp dir itself, which is a
+	// directory. Stat succeeds but Mode().IsRegular() is false.
+	notRegularPath := dir
+
+	cases := []struct {
+		name         string
+		path         string
+		wantSeverity preflight.Severity
+		wantContains string
+	}{
+		{
+			name:         "empty_path_is_ok",
+			path:         "",
+			wantSeverity: preflight.SeverityOK,
+			wantContains: "no seccomp profile",
+		},
+		{
+			name:         "missing_file",
+			path:         filepath.Join(dir, "nope.bpf"),
+			wantSeverity: preflight.SeverityError,
+			wantContains: "install-seccomp",
+		},
+		{
+			name:         "not_regular_file",
+			path:         notRegularPath,
+			wantSeverity: preflight.SeverityError,
+			wantContains: "not a regular file",
+		},
+		{
+			name:         "empty_file",
+			path:         emptyPath,
+			wantSeverity: preflight.SeverityError,
+			wantContains: "is empty",
+		},
+		{
+			name:         "valid_file",
+			path:         validPath,
+			wantSeverity: preflight.SeverityOK,
+			wantContains: "readable",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := checkSeccompProfile(&config.ProcessConfig{SeccompProfile: tc.path})
+			if res.Name != "seccomp_profile" {
+				t.Errorf("name = %q, want seccomp_profile", res.Name)
+			}
+			if res.Category != "process" {
+				t.Errorf("category = %q, want process", res.Category)
+			}
+			if res.Severity != tc.wantSeverity {
+				t.Errorf("severity = %v, want %v; message: %q",
+					res.Severity, tc.wantSeverity, res.Message)
+			}
+			if !strings.Contains(res.Message, tc.wantContains) {
+				t.Errorf("message should contain %q: %q", tc.wantContains, res.Message)
+			}
+		})
 	}
 }

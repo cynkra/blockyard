@@ -794,15 +794,25 @@ Deployment artifacts and documentation for the process backend.
 
 **Deliverables:**
 
-1. **Custom seccomp profile** — JSON file based on Docker's default,
-   adding `CLONE_NEWUSER` to the allowlist. Shipped at
-   `docker/blockyard-seccomp.json`. Shared with the zygote model
-   (phase 3-10).
+1. **Custom seccomp profiles** — two JSON files based on Docker's
+   default. An outer-container profile at
+   `internal/seccomp/blockyard-outer.json` relaxes `clone`/`clone3`/
+   `unshare`/`setns` so bwrap's `--unshare-user` works under Docker's
+   seccomp default without `CAP_SYS_ADMIN`. A bwrap-internal profile
+   at `internal/seccomp/blockyard-bwrap.json` is compiled to BPF at
+   build time and loaded by bwrap via `--seccomp <fd>` to sandbox
+   the worker R process itself. Both are generated from
+   vendored-upstream + overlay via `make regen-seccomp`. The outer
+   profile is shared with the zygote model (phase 3-10).
 
-2. **Containerized deployment mode** — Dockerfile shipping blockyard, R,
-   bwrap, and system libraries. Custom seccomp profile. No Docker
-   socket, no `CAP_SYS_ADMIN`. Published alongside the Docker backend
-   image.
+2. **Variant Docker images (three, not one)** — `blockyard-docker`
+   (slim, docker backend only), `blockyard-process` (R + bwrap +
+   compiled BPF, process backend only), and `blockyard` (everything:
+   R + bwrap + iptables, both backends). The process and everything
+   variants apply the outer seccomp profile at deploy time via
+   `--security-opt seccomp=...`. No Docker socket, no
+   `CAP_SYS_ADMIN`. Published alongside each other; `:latest`
+   points at the everything variant.
 
 3. **Native deployment mode** — documentation for bare Linux hosts.
    Prerequisites checklist: R, bwrap, system libraries. Resource limit

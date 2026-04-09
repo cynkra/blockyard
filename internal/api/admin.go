@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,7 +29,8 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCt
 
 		if orch == nil {
 			writeError(w, http.StatusNotImplemented, "not_implemented",
-				"rolling updates require Docker container mode")
+				"rolling updates are not available in this deployment mode "+
+					"(containerized process backend: use your container runtime's update mechanism)")
 			return
 		}
 
@@ -58,14 +60,14 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCt
 		sender := srv.Tasks.Create(taskID, "admin-update")
 
 		go func() {
-			ur, err := orch.Update(bgCtx, channel, sender)
+			updated, err := orch.Update(bgCtx, channel, sender)
 			if err != nil {
 				sender.Write(err.Error())
 				sender.Complete(task.Failed)
 				orch.SetState("idle")
 				return
 			}
-			if ur == nil {
+			if !updated {
 				sender.Complete(task.Completed) // already up to date
 				orch.SetState("idle")
 				return
@@ -76,7 +78,7 @@ func handleAdminUpdate(srv *server.Server, orch *orchestrator.Orchestrator, bgCt
 			if srv.Config.Update != nil && srv.Config.Update.WatchPeriod.Duration > 0 {
 				watchPeriod = srv.Config.Update.WatchPeriod.Duration
 			}
-			if err := orch.Watchdog(bgCtx, ur.ContainerID, ur.Addr, watchPeriod, sender); err != nil {
+			if err := orch.Watchdog(bgCtx, watchPeriod, sender); err != nil {
 				sender.Write(err.Error())
 				sender.Complete(task.Failed)
 				return // rollback happened, server is still running
@@ -106,7 +108,15 @@ func handleAdminRollback(srv *server.Server, orch *orchestrator.Orchestrator, bg
 
 		if orch == nil {
 			writeError(w, http.StatusNotImplemented, "not_implemented",
-				"rolling updates require Docker container mode")
+				"rolling updates are not available in this deployment mode "+
+					"(containerized process backend: use your container runtime's update mechanism)")
+			return
+		}
+		if !orch.SupportsRollback() {
+			writeError(w, http.StatusNotImplemented, "not_implemented",
+				"rollback is not supported for the active backend. "+
+					"Restore manually: restore the database backup, swap the "+
+					"binary to the previous version, and restart.")
 			return
 		}
 
@@ -152,11 +162,14 @@ func handleAdminUpdateStatus(orch *orchestrator.Orchestrator) http.HandlerFunc {
 	}
 }
 
-// activationAuth checks if the request carries a valid activation token.
-// Used by the activate endpoint for internal orchestrator→new-server calls.
-// Falls back to normal admin auth if no activation token is configured.
+// activationAuth checks if the request carries a valid activation token
+// or a valid admin PAT. Used by the activate endpoint, which is mounted
+// OUTSIDE the APIAuth middleware so the orchestrator can reach it with
+// a non-PAT bearer token (the activation token) during a rolling
+// update. Because APIAuth doesn't run for this route, the function has
+// to do its own PAT lookup for the manual-admin fallback path.
 func activationAuth(srv *server.Server, r *http.Request) bool {
-	// Check activation token (set by orchestrator on cloned containers).
+	// 1. Orchestrator path: activation token env var matches bearer.
 	activationToken := os.Getenv("BLOCKYARD_ACTIVATION_TOKEN")
 	if activationToken != "" {
 		bearer := extractBearerToken(r)
@@ -166,7 +179,17 @@ func activationAuth(srv *server.Server, r *http.Request) bool {
 		}
 	}
 
-	// Fall back to normal admin auth.
-	caller := auth.CallerFromContext(r.Context())
-	return caller != nil && caller.Role.CanManageRoles()
+	// 2. Manual admin path: a caller already in context (populated
+	//    by a wrapping middleware during unit tests that bypass the
+	//    router) OR a PAT bearer token that authenticates as admin.
+	if caller := auth.CallerFromContext(r.Context()); caller != nil {
+		return caller.Role.CanManageRoles()
+	}
+	token := extractBearerToken(r)
+	if token != "" && strings.HasPrefix(token, "by_") {
+		if caller := authenticateFromPAT(srv, r, token); caller != nil {
+			return caller.Role.CanManageRoles()
+		}
+	}
+	return false
 }

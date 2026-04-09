@@ -270,15 +270,29 @@ func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrat
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(120, time.Minute))
 		r.Use(apiCSP)
-		r.Use(APIAuth(srv))
 
-		// Admin endpoints — no request body, registered before limitBody.
-		r.Route("/admin", func(r chi.Router) {
-			r.Post("/activate", activateHandler(srv, startBG))
-			r.Post("/update", handleAdminUpdate(srv, orch, bgCtx))
-			r.Post("/rollback", handleAdminRollback(srv, orch, bgCtx))
-			r.Get("/update/status", handleAdminUpdateStatus(orch))
-		})
+		// /admin/activate uses an activation token set by the
+		// orchestrator in the new server's env var, not a PAT. The
+		// handler does its own auth via activationAuth (token or
+		// fallback PAT), so this route does NOT go through APIAuth.
+		// Putting it under APIAuth would reject the non-PAT
+		// activation token with a blanket 401 before the handler
+		// ever runs.
+		r.Post("/admin/activate", activateHandler(srv, startBG))
+
+		// Everything else under /api/v1 requires APIAuth. Chi
+		// requires middleware before routes on the same mux, so
+		// wrap the remaining routes in a Group.
+		r.Group(func(r chi.Router) {
+			r.Use(APIAuth(srv))
+
+			// Other admin endpoints — require a PAT, go through
+			// the normal APIAuth middleware chain.
+			r.Route("/admin", func(r chi.Router) {
+				r.Post("/update", handleAdminUpdate(srv, orch, bgCtx))
+				r.Post("/rollback", handleAdminRollback(srv, orch, bgCtx))
+				r.Get("/update/status", handleAdminUpdateStatus(orch))
+			})
 
 		// Bundle upload has its own body size limit (MaxBundleSize),
 		// so it is registered before the limitBody middleware below.
@@ -343,7 +357,8 @@ func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrat
 		r.Post("/apps/{id}/refresh", PostRefresh(srv))
 		r.Post("/apps/{id}/refresh/rollback", PostRefreshRollback(srv))
 
-		}) // end limitBody group
+			}) // end limitBody group
+		}) // end APIAuth group
 	})
 
 	return r

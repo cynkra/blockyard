@@ -13,23 +13,32 @@ import (
 //
 //  1. Read latest backup metadata
 //  2. Check for irreversible migrations
-//  3. Pull old image
+//  3. Variant-specific prep (Docker: pull old image; process: returns 501 upstream)
 //  4. Run down migrations to the recorded version
-//  5. Start old container (passive mode)
-//  6. Poll /readyz on old container
+//  5. Create old instance (passive mode)
+//  6. Poll /readyz on old instance
 //  7. Drain current server
-//  8. Activate old container
+//  8. Activate old instance
 //
 // Steps 1–3 are side-effect-free. Step 4 (down-migration) is the
 // point of no return: if any subsequent step fails, the running
 // server's code no longer matches the database schema. Rather than
 // serve broken requests, the server shuts itself down and logs the
 // backup path for manual recovery.
+//
+// Rollback requires a factory that SupportsRollback(). The admin
+// handler returns 501 for factories that don't.
 func (o *Orchestrator) Rollback(
 	ctx context.Context,
 	sender task.Sender,
 	shutdownFn func(),
 ) error {
+	defer func() { o.activeInstance = nil }()
+
+	if !o.factory.SupportsRollback() {
+		return fmt.Errorf("rollback is not supported by the active backend")
+	}
+
 	// 1. Find backup metadata.
 	dbPath := o.cfg.Database.Path
 	if o.cfg.Database.Driver == "postgres" {
@@ -58,12 +67,11 @@ func (o *Orchestrator) Rollback(
 		}
 	}
 
-	// 3. Pull old image.
-	oldImage := imageWithTag(o.currentImageBase(ctx), meta.ImageTag)
-	sender.Write("Pulling " + oldImage + " ...")
-	if err := o.pullImage(ctx, oldImage); err != nil {
+	// 3. Variant-specific prep: Docker pulls the old image.
+	if err := o.factory.PreUpdate(ctx, meta.ImageTag, sender); err != nil {
 		return fmt.Errorf("pull old image: %w", err)
 	}
+	oldRef := imageWithTag(o.factory.CurrentImageBase(ctx), meta.ImageTag)
 
 	// 4. Run down migrations — point of no return.
 	migrated := false
@@ -92,18 +100,23 @@ func (o *Orchestrator) Rollback(
 		return fmt.Errorf("rollback failed after migration: %s", msg)
 	}
 
-	// 5-6. Start clone and wait for it to become healthy.
-	newID, err := o.startClone(ctx, oldImage)
+	// 5-6. Create old instance and wait for it to become healthy.
+	o.activationToken = generateActivationToken()
+	startCtx, cancel := context.WithTimeout(ctx, o.cfg.Proxy.WorkerStartTimeout.Duration)
+	defer cancel()
+	inst, err := o.factory.CreateInstance(startCtx, oldRef, []string{
+		"BLOCKYARD_ACTIVATION_TOKEN=" + o.activationToken,
+	}, sender)
 	if err != nil {
 		if migrated {
 			return fatal(fmt.Sprintf("start old container: %v", err))
 		}
 		return fmt.Errorf("start old container: %w", err)
 	}
+	o.activeInstance = inst
 
-	newAddr, err := o.waitReady(ctx, newID)
-	if err != nil {
-		o.killAndRemove(ctx, newID)
+	if err := o.waitReady(startCtx, inst.Addr()); err != nil {
+		inst.Kill(ctx)
 		if migrated {
 			return fatal(fmt.Sprintf(
 				"old container never became ready: %v", err))
@@ -115,8 +128,8 @@ func (o *Orchestrator) Rollback(
 	o.drainFn()
 
 	// 8. Activate old container.
-	if err := o.activate(ctx, newAddr); err != nil {
-		o.killAndRemove(ctx, newID)
+	if err := o.activate(ctx, inst.Addr()); err != nil {
+		inst.Kill(ctx)
 		// Schema is wrong — cannot undrain and resume.
 		if migrated {
 			return fatal(fmt.Sprintf("activate old container: %v", err))

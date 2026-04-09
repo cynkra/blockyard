@@ -21,10 +21,25 @@ import (
 type Drainer struct {
 	Srv             *server.Server
 	MainServer      *http.Server
-	MgmtServer      *http.Server       // may be nil
+	MgmtServer      *http.Server               // may be nil
 	BGCancel        context.CancelFunc
 	BGWait          *sync.WaitGroup
 	TracingShutdown func(context.Context) error // may be nil
+
+	// FinishIdleWait, if non-zero, makes Finish wait up to this
+	// duration for the local server's session count to reach zero
+	// before tearing down. Set by main.go for the process backend;
+	// zero for docker (which cuts over hard and relies on the
+	// reverse proxy to drain the last requests).
+	FinishIdleWait time.Duration
+
+	// ServerID identifies this server process uniquely among peers
+	// sharing a Redis. Used by waitForIdle to filter the workermap
+	// so the old server waits for its *own* sessions to finish, not
+	// the new server's fresh sessions. Set by main.go to the same
+	// value passed to NewRedisWorkerMap. Safe to leave empty in the
+	// memory-store path (single-node = all workers are ours).
+	ServerID string
 }
 
 // Drain sets the draining flag. Health endpoints start returning 503,
@@ -47,10 +62,19 @@ func (d *Drainer) Undrain() {
 // cancels background goroutines, closes the database, and flushes
 // tracing. Workers survive — the new server manages them via Redis.
 //
-// Called after a successful drain in the rolling update path.
+// Called after a successful drain in the rolling update path. On the
+// process backend, Finish preludes with an idle-wait that polls the
+// local server's session count until it reaches zero or
+// FinishIdleWait elapses. The prelude is skipped when
+// FinishIdleWait is zero (Docker variant) so Finish's behavior is
+// backwards-compatible with phase 3-4.
+//
 // In phase 3-4 (without the phase 3-5 watchdog), SIGUSR1 calls
 // Drain() followed by Finish().
 func (d *Drainer) Finish(timeout time.Duration) {
+	if d.FinishIdleWait > 0 {
+		d.waitForIdle(d.FinishIdleWait)
+	}
 	slog.Info("finish: shutting down (workers survive)")
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -85,6 +109,48 @@ func (d *Drainer) Finish(timeout time.Duration) {
 	}
 
 	slog.Info("finish: complete, exiting")
+}
+
+// idleWaitPollInterval is the poll cadence waitForIdle uses between
+// WorkersForServer/CountForWorkers checks. 5 seconds is short enough
+// for a snappy cutover and long enough that the Redis SCAN runs at
+// most 12 times per minute, which is negligible compared to the
+// sustained traffic the server already pushes through Redis.
+// A package-level var so internal tests can shorten it without
+// stretching the test runtime.
+var idleWaitPollInterval = 5 * time.Second
+
+// waitForIdle polls the local server's session count until it
+// reaches zero or maxWait elapses. Only workers owned by this server
+// (matched via d.ServerID against the workermap) contribute — a new
+// peer's workers would otherwise keep the count above zero
+// indefinitely during a same-host rolling update.
+//
+// Unexported — only Finish calls it.
+func (d *Drainer) waitForIdle(maxWait time.Duration) {
+	deadline := time.Now().Add(maxWait)
+	ticker := time.NewTicker(idleWaitPollInterval)
+	defer ticker.Stop()
+
+	for {
+		own := d.Srv.Workers.WorkersForServer(d.ServerID)
+		sessions := d.Srv.Sessions.CountForWorkers(own)
+		if sessions == 0 {
+			slog.Info("finish: session count reached zero",
+				"server_id", d.ServerID)
+			return
+		}
+		if time.Now().After(deadline) {
+			slog.Warn("finish: idle wait elapsed, proceeding with teardown",
+				"remaining_sessions", sessions,
+				"server_id", d.ServerID)
+			return
+		}
+		slog.Info("finish: waiting for sessions to end",
+			"remaining_sessions", sessions,
+			"server_id", d.ServerID)
+		<-ticker.C
+	}
 }
 
 // Shutdown performs full teardown including worker eviction. Called
