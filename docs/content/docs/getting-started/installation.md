@@ -8,13 +8,30 @@ weight: 2
 
 ### Prerequisites
 
-- **Docker** (or Podman with a Docker-compatible socket)
 - A Linux host (Blockyard runs as a container or native binary)
+- One of:
+  - **Docker backend:** Docker or Podman with a Docker-compatible socket, or
+  - **Process backend:** `bubblewrap` (`bwrap`) and `R` installed on the host. Linux only.
 
-### Running with Docker (recommended)
+See [Backend Security](/docs/guides/backend-security/) for the
+trade-offs between the two backends and guidance on which to pick.
 
-The easiest way to run Blockyard is as a Docker container with access to the
-host's Docker socket:
+### Image variants
+
+Three pre-built images are published to `ghcr.io/cynkra/`:
+
+| Image | Backends compiled in | When to use |
+|---|---|---|
+| `blockyard:<version>` | Docker + process | Default. The "everything" image; switch backends via `[server] backend` in TOML. |
+| `blockyard-docker:<version>` | Docker only | Slim image for Docker-only deployments — the Docker SDK is the only backend dependency. |
+| `blockyard-process:<version>` | Process only | For containerized process-backend deployments. Ships `bubblewrap`, R, and the compiled bwrap seccomp profile. No Docker SDK. |
+
+`:latest` tracks the most recent release on each variant.
+
+### Running with Docker (Docker backend)
+
+The easiest way to run the Docker-backend variant is as a container with
+access to the host's Docker socket:
 
 ```bash
 docker run -d \
@@ -23,11 +40,26 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v blockyard-data:/data \
   -e BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.3 \
-  ghcr.io/cynkra/blockyard:latest
+  ghcr.io/cynkra/blockyard-docker:latest
 ```
 
 This gives Blockyard access to Docker for spawning worker containers, and
 persists application data (bundles, database) in a named volume.
+
+### Running with the process backend
+
+The process backend avoids the Docker socket mount entirely by
+sandboxing workers with `bubblewrap` instead. It has two deployment
+modes:
+
+- [Process Backend (Native)](/docs/guides/process-backend/) — run
+  `blockyard` directly on a Linux host with `bwrap` and `R` installed.
+- [Process Backend (Containerized)](/docs/guides/process-backend-container/) —
+  run the `blockyard-process` image with a custom seccomp profile. No
+  Docker socket, no `CAP_SYS_ADMIN`.
+
+The containerized variant is the recommended choice for deployments
+that cannot bind-mount the Docker socket.
 
 API authentication requires OIDC configuration and
 [Personal Access Tokens](/docs/guides/authorization/#personal-access-tokens).

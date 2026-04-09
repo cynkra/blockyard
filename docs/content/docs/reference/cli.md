@@ -416,6 +416,89 @@ recently ended worker is used.
 
 ---
 
+## Server administration
+
+The `by admin` subcommand group manages the blockyard server itself.
+Most commands require the `admin` system role.
+
+### `by admin update`
+
+Trigger a rolling update of the server to the latest release on the
+configured channel. On the Docker backend this clones the blockyard
+container next to the old one; on the process backend it forks a new
+blockyard process on an alternate bind port. The command streams the
+orchestrator task log until the update completes or fails.
+
+```bash
+by admin update
+by admin update --yes --channel stable
+```
+
+| Flag             | Description                                               |
+| ---------------- | --------------------------------------------------------- |
+| `--channel <ch>` | Release channel: `stable` or `main` (default: server config) |
+| `-y, --yes`      | Skip the confirmation prompt                              |
+| `--json`         | Output as JSON                                            |
+
+Prerequisites and failure modes differ per backend — see
+[Process Backend rolling update walkthrough](/docs/guides/process-backend/#rolling-update-walkthrough)
+and the [admin update API](/docs/reference/api/#post-apiv1adminupdate).
+
+### `by admin rollback`
+
+Roll the server back to the previous version. Supported on the Docker
+backend; returns `501 Not Implemented` on the process backend (the
+operator's install scheme owns the binary path).
+
+```bash
+by admin rollback
+by admin rollback --yes
+```
+
+| Flag        | Description                  |
+| ----------- | ---------------------------- |
+| `-y, --yes` | Skip the confirmation prompt |
+| `--json`    | Output as JSON               |
+
+### `by admin status`
+
+Show the current rolling-update state (`idle`, `updating`, `watching`,
+etc.) and the target version if one is in progress.
+
+```bash
+by admin status
+by admin status --json
+```
+
+| Flag     | Description     |
+| -------- | --------------- |
+| `--json` | Output as JSON  |
+
+### `by admin install-seccomp`
+
+Write the embedded outer-container seccomp profile to disk. Used when
+deploying the process backend via the `blockyard-process` Docker image —
+the operator needs a copy of the profile on the host before the
+container starts, because Docker reads `--security-opt seccomp=<path>`
+from the host filesystem. The profile is embedded in the `by` binary,
+so no network access is required.
+
+```bash
+sudo by admin install-seccomp
+sudo by admin install-seccomp --target /etc/blockyard/seccomp.json
+```
+
+| Flag              | Description                                             |
+| ----------------- | ------------------------------------------------------- |
+| `--target <path>` | Output path (default: `/etc/blockyard/seccomp.json`)   |
+
+This command does not talk to a running blockyard server — it only
+writes the profile to disk. No authentication required. See
+[Process Backend (Containerized)](/docs/guides/process-backend-container/)
+for the full extraction workflow.
+
+---
+
 ## User administration
 
 These commands require the `admin` system role.

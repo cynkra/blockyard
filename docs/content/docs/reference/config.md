@@ -31,23 +31,37 @@ Environment variables take precedence over values in the TOML file.
 [server]
 bind             = "127.0.0.1:8080"
 shutdown_timeout = "30s"
-# management_bind = "127.0.0.1:9100"
-# log_level      = "info"
-# session_secret = "random-secret"   # required when [oidc] is configured
-# external_url   = "https://blockyard.example.com"
-# trusted_proxies = ["10.0.0.0/8"]
+# backend              = "docker"       # "docker" (default) or "process"
+# skip_preflight       = false
+# default_memory_limit = "2g"           # fallback per worker; empty = unlimited
+# default_cpu_limit    = 4.0            # fallback per worker; 0 = unlimited
+# management_bind      = "127.0.0.1:9100"
+# log_level            = "info"
+# session_secret       = "random-secret"   # required when [oidc] is configured
+# external_url         = "https://blockyard.example.com"
+# trusted_proxies      = ["10.0.0.0/8"]
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `bind` | `string` | `127.0.0.1:8080` | No | Socket address to listen on |
+| `backend` | `string` | `docker` | No | Worker backend: `docker` or `process`. See [Backend Security](/docs/guides/backend-security/) for the trade-offs. `process` requires a `[process]` section. |
+| `skip_preflight` | `boolean` | `false` | No | Skip backend-specific preflight checks at startup. Use for development or when you are certain the environment is correctly configured. |
+| `default_memory_limit` | `string` | — | No | Fallback memory limit for workers when no per-app limit is set (e.g. `"2g"`). Empty means unlimited. Enforced by the Docker backend via cgroups; the process backend emits a warning and does not enforce. |
+| `default_cpu_limit` | `float` | `0` | No | Fallback CPU limit for workers when no per-app limit is set (e.g. `4.0`). `0` means unlimited. Enforced by the Docker backend via cgroups; the process backend emits a warning and does not enforce. |
 | `management_bind` | `string` | — | No | Separate listener for `/healthz`, `/readyz`, `/metrics`. See [Management listener](/docs/guides/observability/#management-listener). |
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
+| `drain_timeout` | `duration` | — | No | Maximum time the old server will wait for sessions to end during a rolling update drain. See the [process backend rolling update walkthrough](/docs/guides/process-backend/#rolling-update-walkthrough). |
 | `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn` (or `warning`), `error`. |
 | `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[openbao]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 | `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Each entry must be a valid CIDR. Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
 | `bootstrap_token` | `string` | — | No | One-time token that can be exchanged for a real PAT via `POST /api/v1/bootstrap`. Requires `oidc.initial_admin` to be set. Intended for dev/CI bootstrapping — do not use in production. See [Bootstrap tokens](/docs/reference/api/#post-apiv1bootstrap). |
+
+> [!NOTE]
+> `server.skip_docker_preflight` is deprecated and has been renamed to
+> `skip_preflight`. The old name is still accepted for one release with a
+> deprecation warning.
 
 > [!NOTE]
 > API authentication uses [Personal Access Tokens](/docs/guides/authorization/#personal-access-tokens)
@@ -56,16 +70,17 @@ shutdown_timeout = "30s"
 
 ## `[docker]`
 
+Required when `[server] backend = "docker"` (the default). Configures the
+Docker/Podman runtime used for worker and build containers.
+
 ```toml
 [docker]
 socket          = "/var/run/docker.sock"
 image           = "ghcr.io/rocker-org/r-ver:4.4.3"
 shiny_port      = 3838
 pak_version     = "stable"
-# service_network      = ""
-# store_retention      = "0"
-# default_memory_limit = "2g"   # fallback per worker; omit = unlimited
-# default_cpu_limit    = 4.0    # fallback per worker; 0 = unlimited
+# service_network  = ""
+# runtime          = ""          # OCI runtime; empty = Docker daemon default
 ```
 
 | Field | Type | Default | Required | Description |
@@ -75,9 +90,54 @@ pak_version     = "stable"
 | `shiny_port` | `integer` | `3838` | No | Port Shiny listens on inside containers |
 | `pak_version` | `string` | `stable` | No | [pak](https://pak.r-lib.org/) release channel (`stable`, `rc`, or `devel`) |
 | `service_network` | `string` | — | No | Docker network whose containers are made reachable from workers. Used when apps need access to sidecar services (e.g. PocketBase, PostgREST). |
-| `store_retention` | `duration` | `0` | No | How long to keep unused entries in the shared package store. `0` (default) disables eviction — the store grows indefinitely. |
-| `default_memory_limit` | `string` | — | No | Fallback memory limit for workers when no per-app limit is set (e.g. `"2g"`). Empty or omitted means unlimited. |
-| `default_cpu_limit` | `float` | `0` | No | Fallback CPU limit for workers when no per-app limit is set (e.g. `4.0`). `0` means unlimited. |
+| `runtime` | `string` | — | No | Default OCI runtime for worker containers (e.g. `kata-runtime` for stronger isolation). Empty means the Docker daemon's default. |
+| `runtime_defaults` | `map` | — | No | Per-access-type runtime defaults (e.g. `{ public = "kata-runtime" }`). Overrides `runtime` for apps matching the access type. |
+
+> [!NOTE]
+> In earlier releases `default_memory_limit`, `default_cpu_limit`, and
+> `store_retention` lived in `[docker]`. They have moved to `[server]` and
+> `[storage]` respectively because they are backend-neutral. The old
+> names are still parsed for one release with a deprecation warning.
+
+## `[process]`
+
+Required when `[server] backend = "process"`. Configures the
+bubblewrap-based worker sandbox. See the
+[Process Backend (Native)](/docs/guides/process-backend/) and
+[Process Backend (Containerized)](/docs/guides/process-backend-container/)
+guides for deployment walkthroughs, and
+[Backend Security](/docs/guides/backend-security/) for the trade-offs
+compared to the Docker backend.
+
+```toml
+[process]
+bwrap_path             = "/usr/bin/bwrap"
+r_path                 = "/usr/bin/R"
+# seccomp_profile        = "/etc/blockyard/seccomp.bpf"  # empty = no seccomp
+port_range_start       = 10000
+port_range_end         = 10999
+worker_uid_range_start = 60000
+worker_uid_range_end   = 60999
+worker_gid             = 65534
+```
+
+| Field | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `bwrap_path` | `path` | `/usr/bin/bwrap` | No | Path to the `bubblewrap` binary on the host. |
+| `r_path` | `path` | `/usr/bin/R` | No | Path to the R binary. |
+| `seccomp_profile` | `path` | — | No | Path to a compiled BPF seccomp profile applied to the worker R process via `bwrap --seccomp`. The `blockyard` and `blockyard-process` images ship a profile at `/etc/blockyard/seccomp.bpf` and set this via `BLOCKYARD_PROCESS_SECCOMP_PROFILE`. Empty disables in-sandbox seccomp filtering (the outer namespace and capability drops still apply). |
+| `port_range_start` | `integer` | `10000` | No | First localhost port allocated to workers (inclusive). |
+| `port_range_end` | `integer` | `10999` | No | Last localhost port allocated to workers (inclusive). |
+| `worker_uid_range_start` | `integer` | `60000` | No | First host UID assigned to worker sandboxes (inclusive). Must be sized to at least the port range. |
+| `worker_uid_range_end` | `integer` | `60999` | No | Last host UID assigned to worker sandboxes (inclusive). |
+| `worker_gid` | `integer` | `65534` | No | Shared host GID for all workers. Used as the match key for iptables owner-match egress rules. |
+
+> [!WARNING]
+> Per-worker resource limits (`server.default_memory_limit`,
+> `server.default_cpu_limit`, per-app overrides) are **not enforced** by
+> the process backend. Setting them produces a preflight warning. Use
+> systemd `MemoryMax=` / `CPUQuota=` or the outer container's cgroups
+> for a shared ceiling.
 
 ## `[storage]`
 
@@ -88,6 +148,11 @@ bundle_worker_path    = "/app"
 bundle_retention      = 50
 max_bundle_size       = 104857600
 # soft_delete_retention = "720h"   # 30 days; omit or 0 = immediate hard delete
+# store_retention       = "0"      # R library cache eviction; 0 = disabled
+
+# [[storage.data_mounts]]
+# name = "datasets"
+# path = "/srv/shared/datasets"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -97,6 +162,8 @@ max_bundle_size       = 104857600
 | `bundle_retention` | `integer` | `50` | No | Max bundles kept per app (oldest pruned first) |
 | `max_bundle_size` | `integer` | `104857600` | No | Maximum bundle upload size in bytes (default 100 MB) |
 | `soft_delete_retention` | `duration` | `0` | No | How long to keep soft-deleted apps before permanent removal. When `0` (default), `DELETE` is an immediate hard delete. When set (e.g. `"720h"` for 30 days), deleted apps are recoverable during the retention window and purged automatically afterwards. |
+| `store_retention` | `duration` | `0` | No | How long to keep unused entries in the shared R package store. `0` (default) disables eviction — the store grows indefinitely. Moved from `[docker]` in a recent release; the old location is still parsed with a deprecation warning. |
+| `data_mounts` | `array` | — | No | Admin-approved host directories that apps can mount read-only or read-write. Each entry has `name` (referenced by apps) and `path` (host-side location). |
 
 ## `[database]`
 
@@ -143,6 +210,58 @@ idle_worker_timeout  = "5m"
 | `max_cpu_limit` | `float` | `16.0` | No | Maximum CPU limit that can be set per app (caps the `cpu_limit` field on `PATCH /api/v1/apps/{id}`) |
 | `transfer_timeout` | `duration` | `60s` | No | Timeout for transferring bundle files to worker containers |
 | `session_max_lifetime` | `duration` | `0` | No | Hard cap on session duration regardless of activity. `0` (default) means unlimited — sessions only end via idle timeout or worker shutdown. |
+
+## `[redis]` *(optional)*
+
+Enables Redis-backed shared state for the session store, worker
+registry, and the process backend's port/UID allocators. Required for
+rolling updates via `by admin update` — the old and new server
+processes use Redis as the cross-process coordination layer. Single-node
+deployments without rolling updates can omit this section and the
+in-memory implementation is used.
+
+```toml
+[redis]
+url        = "redis://localhost:6379"
+# key_prefix = "blockyard:"
+```
+
+| Field | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `url` | `string` | — | **Yes** (when section is present) | Redis connection URL, e.g. `redis://[:password@]host:port[/db]`. |
+| `key_prefix` | `string` | `blockyard:` | No | Key prefix for every Redis operation. Useful when multiple blockyard deployments share a Redis instance. |
+
+## `[update]` *(optional)*
+
+Configures the rolling-update orchestrator driven by `by admin update`.
+The orchestrator has two variants, picked automatically based on the
+configured backend:
+
+- **Docker variant** — clones the blockyard container next to the old
+  one. Uses only `schedule`, `channel`, and `watch_period`.
+- **Process variant** — forks a new blockyard process on an alternate
+  bind port. Uses `schedule`, `channel`, `watch_period`, plus
+  `alt_bind_range` and `drain_idle_wait`. Requires `[redis]`.
+
+See the [process backend rolling update walkthrough](/docs/guides/process-backend/#rolling-update-walkthrough)
+for the containerized vs. native rules.
+
+```toml
+[update]
+# schedule        = "0 3 * * 0"     # cron; empty = no scheduled updates
+# channel         = "stable"        # "stable" or "main"
+# watch_period    = "15m"           # post-update health monitoring
+# alt_bind_range  = "8090-8099"     # process variant: alternate bind pool
+# drain_idle_wait = "5m"            # process variant: session drain timeout
+```
+
+| Field | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `schedule` | `string` | — | No | Cron expression (5 fields) for automatic rolling updates. Empty disables the scheduler. |
+| `channel` | `string` | `stable` | No | Release channel to pull from: `stable` or `main`. |
+| `watch_period` | `duration` | — | No | Time the orchestrator monitors the new server's health after activation. An unhealthy signal triggers automatic rollback (Docker variant only). |
+| `alt_bind_range` | `string` | `8090-8099` | No | Port range the process orchestrator picks an alternate bind from when spawning the new server. Must not overlap `[process] port_range_start..end`. Ignored by the Docker variant. |
+| `drain_idle_wait` | `duration` | `5m` | No | Maximum time the old server waits for active sessions to end during a rolling drain. Ignored by the Docker variant, which relies on the reverse proxy to drain in-flight requests. |
 
 ## `[oidc]` *(optional)*
 

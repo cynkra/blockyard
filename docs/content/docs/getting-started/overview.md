@@ -8,8 +8,9 @@ Blockyard is a self-hosted platform for running
 [blockr](https://github.com/blockr-org/blockr) applications in production.
 blockr apps evaluate user-supplied R expressions inside every session,
 which is a security model no general-purpose
-[Shiny](https://shiny.posit.co/) host was designed for. Blockyard provides
-hardened container-per-session isolation, per-user credential management
+[Shiny](https://shiny.posit.co/) host was designed for. Blockyard
+provides hardened per-session worker isolation (as a Docker container
+or a `bubblewrap`-sandboxed process), per-user credential management
 via [OpenBao](https://openbao.org/), server-side dependency resolution,
 and built-in board storage — the full blockr stack as a single binary.
 
@@ -23,17 +24,25 @@ and built-in board storage — the full blockr stack as a single binary.
    container and uses [pak](https://pak.r-lib.org/) to install packages.
    Unpinned bundles can be refreshed in place later without a redeploy.
 3. **Users visit the app** — when a request hits `/app/<name>/`, Blockyard
-   spawns a worker container on demand and reverse-proxies HTTP and
-   WebSocket traffic to it. Each session gets its own container.
+   spawns a worker on demand and reverse-proxies HTTP and WebSocket
+   traffic to it. Each session gets its own isolated worker.
 
-Workers are isolated from each other via per-container bridge networks.
-Containers run with a read-only filesystem, all Linux capabilities dropped,
-`no-new-privileges` set, and cloud metadata endpoint access blocked
-(`169.254.169.254`). For high-security deployments, workers can run under
-the [Kata](https://katacontainers.io/) runtime, which gives each session
-its own lightweight VM. See
-[Deploying an App](/docs/guides/deploying/#container-security)
-for the full list of security settings.
+Workers run in one of two backends:
+
+- **Docker backend** (default). Each worker is a container with a
+  private bridge network, read-only filesystem, all Linux capabilities
+  dropped, `no-new-privileges` set, and cloud metadata endpoint access
+  blocked. High-security deployments can run workers under the
+  [Kata](https://katacontainers.io/) runtime for per-session VMs.
+- **Process backend.** Each worker is a `bubblewrap`-sandboxed child
+  process with PID/mount/user namespaces, capability dropping, and
+  seccomp filtering. No container runtime required. Suitable for
+  hosts where the Docker socket is unacceptable or where cold-start
+  latency matters.
+
+See [Backend Security](/docs/guides/backend-security/) for the full
+comparison and [Docker worker hardening](/docs/guides/deploying/#docker-worker-hardening)
+for the Docker backend's baseline settings.
 
 ## Authentication & Authorization
 
@@ -60,8 +69,10 @@ and object storage.
     through a build step (dependency restore) before becoming ready to serve.
 
 **Worker**
-:   A running container serving a Shiny app. Workers are spawned on-demand
-    and pinned to user sessions via cookies.
+:   A running process serving a Shiny app. Implemented as a Docker
+    container or a bubblewrap-sandboxed child process depending on the
+    configured backend. Workers are spawned on-demand and pinned to
+    user sessions via cookies.
 
 **Session**
 :   A user's connection to a running worker. Sessions are tracked

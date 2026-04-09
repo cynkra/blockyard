@@ -14,7 +14,9 @@ don't want to expose `/var/run/docker.sock` and don't need Docker's
 per-worker bridge networks.
 
 For the native (bare-metal) variant, see
-[Process Backend (Native)]({{< relref "process-backend.md" >}}).
+[Process Backend (Native)]({{< relref "process-backend.md" >}}). For
+the security trade-offs between the Docker and process backends, see
+[Backend Security]({{< relref "backend-security.md" >}}).
 
 ## The image
 
@@ -64,15 +66,15 @@ The `--entrypoint cat` override is required because the image's
 default entrypoint is `blockyard --config ...`; without it the `cat`
 would end up as an argument to blockyard.
 
-**Option 2 — `by admin install-seccomp`** (if you have the `by`
-CLI installed):
+**Option 2 — [`by admin install-seccomp`](/docs/reference/cli/#by-admin-install-seccomp)**
+(if you have the `by` CLI installed):
 
 ```bash
 sudo by admin install-seccomp --target /etc/blockyard/seccomp.json
 ```
 
 The profile is embedded in the `by` binary via `//go:embed`, so no
-network access is required.
+network access or running blockyard server is required.
 
 **Option 3 — download from GitHub Releases:**
 
@@ -144,25 +146,26 @@ additional host privileges.
 
 ## Egress firewall (containerized mode)
 
-The iptables owner-match pattern from the native guide works
-differently here: the outer container has its own UID namespace, and
-worker processes appear as the container's own UID (typically root)
-from the host's perspective. Host-side iptables rules matching
-`--gid-owner 65534` will not fire.
+The iptables owner-match pattern from
+[Backend Security]({{< relref "backend-security.md#2-install-a-destination-scoped-egress-firewall" >}})
+does not work unchanged here: the outer container has its own UID
+namespace, and worker processes appear as the container's own UID
+(typically root) from the host's perspective, so host-side
+`--gid-owner 65534` rules will not fire.
 
-Two approaches:
+Two options:
 
-1. **Run iptables rules inside the container.** The
-   blockyard-process image does not ship `iptables`, so this is not
-   a drop-in option. Use the everything image
-   (`ghcr.io/cynkra/blockyard:<v>`) if you need this.
+1. **Run iptables rules inside the container.** The `blockyard-process`
+   image does not ship `iptables`, so this is not a drop-in option.
+   Use the everything image (`ghcr.io/cynkra/blockyard:<v>`) if you
+   need this.
 
-2. **Use Docker network segmentation.** Put Redis, OpenBao, and the
-   database on an `internal: true` network that the blockyard
-   container joins, and put worker-egress-sensitive services on a
-   separate network that workers cannot reach. This is cleaner than
-   iptables but requires the operator to be deliberate about
-   service topology.
+2. **Use Docker network segmentation** (recommended). Put Redis,
+   OpenBao, and the database on an `internal: true` network that the
+   blockyard container joins, and put worker-egress-sensitive services
+   on a separate network workers cannot reach. Cleaner than iptables
+   but requires deliberate service topology — the Docker Compose
+   example above shows the pattern.
 
 Blockyard's preflight runs the same worker-egress probe in
 containerized mode. Review the startup logs for warnings about
