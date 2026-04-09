@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -161,11 +162,14 @@ func handleAdminUpdateStatus(orch *orchestrator.Orchestrator) http.HandlerFunc {
 	}
 }
 
-// activationAuth checks if the request carries a valid activation token.
-// Used by the activate endpoint for internal orchestrator→new-server calls.
-// Falls back to normal admin auth if no activation token is configured.
+// activationAuth checks if the request carries a valid activation token
+// or a valid admin PAT. Used by the activate endpoint, which is mounted
+// OUTSIDE the APIAuth middleware so the orchestrator can reach it with
+// a non-PAT bearer token (the activation token) during a rolling
+// update. Because APIAuth doesn't run for this route, the function has
+// to do its own PAT lookup for the manual-admin fallback path.
 func activationAuth(srv *server.Server, r *http.Request) bool {
-	// Check activation token (set by orchestrator on cloned containers).
+	// 1. Orchestrator path: activation token env var matches bearer.
 	activationToken := os.Getenv("BLOCKYARD_ACTIVATION_TOKEN")
 	if activationToken != "" {
 		bearer := extractBearerToken(r)
@@ -175,7 +179,17 @@ func activationAuth(srv *server.Server, r *http.Request) bool {
 		}
 	}
 
-	// Fall back to normal admin auth.
-	caller := auth.CallerFromContext(r.Context())
-	return caller != nil && caller.Role.CanManageRoles()
+	// 2. Manual admin path: a caller already in context (populated
+	//    by a wrapping middleware during unit tests that bypass the
+	//    router) OR a PAT bearer token that authenticates as admin.
+	if caller := auth.CallerFromContext(r.Context()); caller != nil {
+		return caller.Role.CanManageRoles()
+	}
+	token := extractBearerToken(r)
+	if token != "" && strings.HasPrefix(token, "by_") {
+		if caller := authenticateFromPAT(srv, r, token); caller != nil {
+			return caller.Role.CanManageRoles()
+		}
+	}
+	return false
 }

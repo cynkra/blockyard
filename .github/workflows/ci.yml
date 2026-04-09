@@ -133,11 +133,21 @@ jobs:
       - name: Verify Go version consistency
         run: |
           GO_MINOR=$(awk '/^go /{print $2}' go.mod | grep -oP '^\d+\.\d+')
-          for f in docker/server.Dockerfile .devcontainer/Dockerfile; do
+          for f in docker/server.Dockerfile \
+                   docker/server-process.Dockerfile \
+                   docker/server-everything.Dockerfile \
+                   .devcontainer/Dockerfile; do
             if ! grep -qP "golang:${GO_MINOR}|GO_VERSION=${GO_MINOR}" "$f"; then
               echo "::error file=$f::Go version mismatch — expected $GO_MINOR (from go.mod)" && exit 1
             fi
           done
+      # libseccomp-dev is required by cmd/seccomp-compile (CGO via
+      # libseccomp-golang). Without it both golangci-lint's typecheck
+      # pass and `go test ./cmd/seccomp-compile/...` fail to compile.
+      # The runtime blockyard binary stays CGO-disabled — only this
+      # one tool needs the system library.
+      - name: Install libseccomp-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libseccomp-dev
       - uses: golangci/golangci-lint-action@v9
       - name: Check for known vulnerabilities
         run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
@@ -435,7 +445,8 @@ jobs:
               go test -count=1 -tags process_test \
                 -coverprofile=coverage-process-${{ matrix.mode }}.out \
                 -coverpkg=./internal/... \
-                ./internal/backend/process/...
+                ./internal/backend/process/... \
+                ./internal/orchestrator/...
               ;;
             *)
               # Run as the non-root user. chown the workspace + cache
@@ -449,7 +460,8 @@ jobs:
                 go test -count=1 -tags process_test \
                 -coverprofile=coverage-process-${{ matrix.mode }}.out \
                 -coverpkg=./internal/... \
-                ./internal/backend/process/...
+                ./internal/backend/process/... \
+                ./internal/orchestrator/...
               ;;
           esac
       - uses: actions/upload-artifact@v7
