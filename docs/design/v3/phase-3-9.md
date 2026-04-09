@@ -158,8 +158,14 @@ designed for exactly that trade-off.
    non-zygote sessions. Round-trips through both `MemoryStore`
    and `RedisStore`.
 3. **`Forking` capability sub-interface** in `internal/backend/` —
-   optional capability that backends may implement. Three methods:
-   `Fork`, `KillChild`, `ChildExits`. Plus a `ChildExit` value type.
+   optional capability that backends may implement. Four methods:
+   `Fork`, `KillChild`, `ChildExits`, `WorkerLost`. Plus a
+   `ChildExit` value type. `WorkerLost` returns a `<-chan string`
+   that emits a workerID whenever a zygote's control connection
+   dies unexpectedly, so the ops layer can run the full
+   `ops.EvictWorker` decommission path — see decision #13 for
+   why this indirection exists rather than having the backend
+   call `Backend.Stop` directly.
 4. **`internal/zygotectl/` and `internal/zygote/` packages** —
    the zygote support is split across two packages to break an
    import cycle (decision #5). `internal/zygotectl/` holds the
@@ -173,28 +179,38 @@ designed for exactly that trade-off.
    of the server, and runs a periodic sweep that
    cross-references its bookkeeping against the session store
    and kills children whose session has vanished.
-5. **`internal/zygotectl/zygote.R`** — embedded R script. Loads
-   the bundle's packages, sources `app.R` to capture the
-   `shinyApp()` arguments for child `runApp`, listens on the
-   control TCP port, handles `FORK`/`KILL`/`STATUS`/`INFO`/`AUTH`,
+5. **`internal/zygotectl/zygote.R`** — embedded R script. Sources
+   `global.R` (if present) and `app.R` during preload, captures
+   the returned `shiny.appobj` via `source()$value`, checks that
+   no background threads were started (`/proc/self/status`
+   Threads field), listens on the control TCP port, handles
+   `FORK`/`KILL`/`STATUS`/`INFO`/`AUTH`, forks children via
+   `parallel::mcparallel(..., detached = TRUE)`, observes exits
+   via `tools::pskill(pid, 0L)` and classifies them as
+   `"killed"` or `"unknown"` based on the `killing` intent set,
    pushes `CHILDEXIT` from a `socketSelect`-driven 100ms poll
    loop. Single-threaded throughout — no `httpuv`/`later` (see
-   decision #4 for why). Embedded into the server binary via
-   `//go:embed`, written to a host path at startup, bind-mounted
-   into the worker container or bwrap sandbox. Phase 3-10 will
-   extend this script with up-front byte-compilation, KSM
-   helper loading, a `STATS` handler, and child `oom_score_adj`
-   pinning — see `phase-3-10-draft.md` Step K6.
+   decision #4 for why). Bundles must have an `app.R` whose
+   last expression evaluates to a `shiny.appobj`; `server.R` +
+   `ui.R` bundles are rejected with a clear error. Embedded
+   into the server binary via `//go:embed`, written to a host
+   path at startup, bind-mounted into the worker container or
+   bwrap sandbox. Phase 3-10 will extend this script with
+   up-front byte-compilation, KSM helper loading, a `STATS`
+   handler, child `oom_score_adj` pinning, and proper
+   exit-reason classification via a C helper — see
+   `phase-3-10-draft.md` Step K6.
 6. **Docker `Forking` implementation** — adds zygote-mode container
    spawn, control port `3837` on the per-worker bridge, child port
    range allocation, control client wired to the shared protocol,
-   control-connection watcher goroutine that evicts the worker on
-   unexpected disconnect, and idempotent `Stop` hardening.
+   control-connection watcher goroutine that fires the shared
+   `workerLost` channel on unexpected disconnect, and idempotent
+   `Stop` hardening.
 7. **Process `Forking` implementation** — adds zygote-mode bwrap
    spawn, control port allocation from a host-wide range, control
-   client, same control-connection watcher / idempotent-Stop
-   hardening as the Docker impl. Requires phase 3-7's port
-   allocator.
+   client, same control-connection watcher / `workerLost` fire /
+   idempotent-`Stop` hardening as the Docker impl. Requires phase
+   3-7's port allocator.
 8. **Per-worker control secret** — a 32-byte random secret written
    to the per-worker token dir at spawn (alongside the existing
    `token` file). Server holds the secret in memory; zygote reads
@@ -207,9 +223,11 @@ designed for exactly that trade-off.
     also cover "session addr unreachable", deleting the stale
     session and falling through to cold-start. Pairs with the
     control-connection watcher in deliverables #6 and #7: when
-    a zygote dies unexpectedly, the watcher evicts the worker
-    and this fallback catches the sessions that were still
-    routed there.
+    a zygote dies unexpectedly, the watcher fires `workerLost`
+    → the `main.go` consumer calls `ops.EvictWorker` → the worker
+    is removed from `srv.Workers` and `srv.Registry`. This
+    fallback catches the sessions that were still routed there
+    in the brief window before `ops.EvictWorker` completes.
 11. **Manager child sweep** — `zygote.Manager` runs its own
     periodic tick that cross-references its `bySession` map against
     `session.Store.Get` and kills children whose session has
@@ -433,15 +451,60 @@ type Forking interface {
     // that produces events. The channel is closed when the backend
     // shuts down.
     ChildExits() <-chan ChildExit
+
+    // WorkerLost returns a long-lived channel that emits a workerID
+    // every time a zygote worker's control connection dies
+    // unexpectedly — zygote crashed, was OOM-killed, bwrap sandbox
+    // fault, container exit without going through Stop. Consumers
+    // are expected to call ops.EvictWorker on the workerID to run
+    // the full decommission path.
+    //
+    // The backend does not call ops.EvictWorker itself because
+    // `internal/ops` imports `internal/backend`, so the reverse
+    // import is not allowed. Backend.Stop alone is not sufficient:
+    // it tears down backend-level state (container, bwrap process,
+    // allocator entries) but leaves server-level state behind —
+    // srv.Workers, srv.Registry, the token-refresher goroutine,
+    // log capture, DB session rows, per-worker package library,
+    // transfer dir, install mutex. All of those are cleaned up
+    // only by ops.EvictWorker (see internal/ops/ops.go:18).
+    //
+    // A small goroutine in cmd/blockyard/main.go drains this
+    // channel and forwards each event to ops.EvictWorker. See
+    // Step 9.
+    //
+    // The channel is closed when the backend shuts down.
+    WorkerLost() <-chan string
 }
 
 // ChildExit is the event emitted by Forking.ChildExits when a
 // child process terminates.
+//
+// Reason values in phase 3-9 are limited to:
+//   - "killed":  child was intentionally terminated, either via
+//                the KILL control command (reap_children sees the
+//                child in the zygote's `killing` set) or via
+//                Backend.Stop's synthesized teardown event.
+//   - "unknown": child exited for any other reason — clean return
+//                from runApp, crash, OOM kill, external SIGKILL.
+//                Pure R cannot see the waitpid status word, so
+//                these cases are indistinguishable without a C
+//                helper.
+//
+// Phase 3-10's C helper adds "crashed" / "oom" / "normal"
+// classification by decoding waitpid status bits and checking
+// /proc/<pid>/oom_score. The Go-side parser treats Reason as an
+// opaque string, so 3-10 can add values without a schema bump.
+// Consumers should warn on "unknown" in 3-9 and on
+// "crashed"/"oom" in 3-10.
+//
+// ExitCode is always 0 in phase 3-9 (see the "unknown" note
+// above). Phase 3-10's helper populates the real exit code.
 type ChildExit struct {
     WorkerID string
     ChildID  string
     ExitCode int
-    Reason   string // "killed" / "crashed" / "oom" / "normal"
+    Reason   string
 }
 ```
 
@@ -504,6 +567,14 @@ server → client: <key>=<value>\n... END\n
                  # and ksm_errno. Parser ignores unknown keys
                  # (forward-compatible), so the 3-10 additions land
                  # without a protocol bump.
+                 #
+                 # Value encoding: <value> is single-line printable
+                 # text. No CR, LF, NUL, or tab. Writers MUST strip
+                 # or replace control characters before emitting —
+                 # see zygote.R's info_line() helper. The parser
+                 # caps the number of lines it will read before
+                 # seeing END as defense in depth against a
+                 # desynced sender.
 
 server → client (push, async): CHILDEXIT <childID> <exitCode> <reason>\n
 ```
@@ -672,17 +743,33 @@ type Info struct {
 // once during NewClient before the reader goroutine starts.
 func (c *Client) Info() Info { return c.info }
 
+// maxInfoLines bounds the number of lines fetchInfo will read
+// before abandoning. Defense in depth against a sender that
+// either forgot to write END or corrupted the stream. INFO is
+// a small, bounded response: the two current fields plus a
+// handful of phase-3-10 additions, so anything above ~100 is
+// pathological. 1024 is a wide safety margin that still protects
+// against an unbounded-read attack or a buggy zygote.
+const maxInfoLines = 1024
+
 // fetchInfo is called synchronously during NewClient after
 // authentication but before the readLoop goroutine starts. It owns
 // the connection exclusively at this point, so it can read the
 // multi-line INFO response directly without coordinating with the
 // reader.
+//
+// Protocol: key=value lines, terminated by a line containing
+// only "END". Values are single-line printable text per the
+// wire-format spec above; the zygote's info_line() helper
+// strips control characters before emitting, so a well-behaved
+// sender cannot desync this parser. The maxInfoLines cap
+// bounds the damage from a broken sender.
 func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
     if _, err := c.conn.Write([]byte("INFO\n")); err != nil {
         return Info{}, fmt.Errorf("control: info write: %w", err)
     }
     info := Info{Unknown: map[string]string{}}
-    for {
+    for n := 0; n < maxInfoLines; n++ {
         line, err := rd.ReadString('\n')
         if err != nil {
             return Info{}, fmt.Errorf("control: info read: %w", err)
@@ -704,6 +791,7 @@ func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
             info.Unknown[key] = val
         }
     }
+    return Info{}, fmt.Errorf("control: info response exceeded %d lines without END", maxInfoLines)
 }
 
 // request serialises one single-line request/response pair on the
@@ -949,6 +1037,17 @@ func (m *Manager) sweepOnce() {
     }
     m.mu.Unlock()
 
+    // Scaling note: this is one Get per tracked child per
+    // sweepInterval. On memory-backed session stores that's a
+    // handful of microseconds. On Redis it's N HGET round-trips
+    // per interval — at N=1000 sessions and interval=30s, about
+    // 33 ops/sec against a store that handles 100k+/sec per
+    // core, so it's a rounding error at realistic blockyard
+    // scale. If this ever shows up in a profile (say, tens of
+    // thousands of concurrent sessions), the fix is a batch
+    // GetMany method on session.Store backed by pipelined HGETs
+    // on Redis and a trivial loop on MemoryStore. Not worth
+    // adding to the interface preemptively.
     var orphaned []string
     for sid := range snapshot {
         if _, ok := m.sessions.Get(sid); !ok {
@@ -989,7 +1088,13 @@ func (m *Manager) handleExit(ev backend.ChildExit) {
     for _, sid := range matched {
         m.sessions.Delete(sid)
     }
-    if ev.Reason == "crashed" || ev.Reason == "oom" {
+    // Warn on anything that wasn't an intentional kill. In phase
+    // 3-9 the zygote only reports "killed" | "unknown", so
+    // everything unexpected lands in "unknown". Phase 3-10's C
+    // helper subdivides "unknown" into "crashed" / "oom" /
+    // "normal"; update this branch then to warn on
+    // "crashed"/"oom" and debug on "normal".
+    if ev.Reason != "killed" {
         slog.Warn("zygote: child exited unexpectedly",
             "worker_id", ev.WorkerID, "child_id", ev.ChildID,
             "exit_code", ev.ExitCode, "reason", ev.Reason,
@@ -1048,7 +1153,11 @@ which is already mounted read-only into the worker container at
 
 The zygote R script. Embedded into the server binary via `//go:embed`.
 Loads packages, listens on the control port, handles control commands,
-forks children, reaps via `mc.waitpid` on a 100ms `socketSelect` poll.
+forks children via `parallel::mcparallel(..., detached = TRUE)`, and
+observes their exits via a `tools::pskill(pid, 0L)` liveness probe on
+a 100ms `socketSelect` poll. The parallel package's installed SIGCHLD
+handler auto-reaps detached children, so there are no zombies and no
+explicit `waitpid` on the R side.
 
 **`internal/zygotectl/zygote.R`:**
 
@@ -1073,7 +1182,34 @@ forks children, reaps via `mc.waitpid` on a 100ms `socketSelect` poll.
 #
 # Protocol: see internal/zygotectl/control.go for the wire format.
 
-POLL_SECS <- 0.1  # bounds CHILDEXIT push latency
+POLL_SECS      <- 0.1  # bounds CHILDEXIT push latency
+AUTH_DEADLINE  <- 2.0  # seconds — peer must send AUTH frame within this
+
+# Read one newline-terminated line from con, but only after
+# socketSelect confirms bytes are available within deadline_secs.
+# Returns the line (trimmed of \n) on success, NULL on timeout or
+# peer disconnect. This is the defense against "peer opens TCP
+# connection but never sends data" — without the socketSelect
+# gate, readLines(con, n = 1) would block the main loop
+# indefinitely, wedging the zygote (no reap, no flush, no new
+# FORKs) with no visible signal from the outside.
+#
+# Note: this does NOT defend against "peer sends partial line
+# and stalls" — once bytes are available, readLines still waits
+# for the newline. That case is considered out of scope given
+# the control port's existing network isolation (Docker
+# per-worker bridge or loopback TCP); see the "AUTH DoS" notes
+# below and the decision to pick Option A over Option B.
+read_line_with_deadline <- function(con, deadline_secs) {
+  ready <- tryCatch(
+    socketSelect(list(con), write = FALSE, timeout = deadline_secs),
+    error = function(e) FALSE
+  )
+  if (!isTRUE(ready[[1]])) return(NULL)
+  line <- tryCatch(readLines(con, n = 1), error = function(e) character())
+  if (length(line) == 0) return(NULL)
+  line
+}
 
 bundle_path  <- Sys.getenv("BLOCKYARD_BUNDLE_PATH",  "/shiny")
 control_port <- as.integer(Sys.getenv("BLOCKYARD_CONTROL_PORT", "3837"))
@@ -1096,52 +1232,172 @@ zygote_info <- list(
   preload_ms = NA_integer_
 )
 
-# Pre-load the bundle. We source app.R under a stubbed shinyApp()
-# so packages are loaded and the shinyApp arguments are captured
-# without starting the shiny server. Children then call
-# runApp(captured_app, ...) on the captured object, which means
-# app.R is parsed and evaluated exactly once, in the zygote.
+# Pre-load the bundle. The zygote sources `global.R` (if
+# present) for its side effects — package attaches, data loading,
+# options() — and then sources `app.R` via base::source(), which
+# returns the last evaluated expression's value in $value. That
+# value must be a shiny.appobj, which the children later pass to
+# shiny::runApp() directly. Everything `app.R` does at the top
+# level runs in the zygote exactly once: library() attaches,
+# data loads, constants — all materialised on the zygote heap
+# and inherited by children via copy-on-write at fork time.
+# That COW sharing is the whole point of the zygote.
+#
+# source() does not auto-print (print.eval = FALSE by default),
+# so `print.shiny.appobj` — which internally calls `runApp()`
+# and would start an httpuv server — is never invoked here.
+# The shiny.appobj is captured as a value, not launched.
+#
+# Zygote mode has strict requirements on the bundle shape:
+#
+#  1. The bundle MUST have an `app.R` at the top level. Bundles
+#     using the classic `server.R` + `ui.R` split (or any other
+#     layout without an `app.R`) are rejected. There is no
+#     fallback that re-sources the bundle in each child, because
+#     the fallback would defeat the memory story: bundle state
+#     would live in each child's private heap instead of the
+#     zygote's shared heap.
+#  2. The last top-level expression in `app.R` MUST evaluate to
+#     a shiny.appobj. The usual idiom `shinyApp(ui, server)` at
+#     the end of the file satisfies this. A defensive stub for
+#     `runApp` in the preload env handles the less-common
+#     `runApp(shinyApp(ui, server))` idiom by capturing the
+#     shiny.appobj out of the runApp call's first argument.
+#     A bundle that calls `shiny::runApp(...)` with the fully
+#     qualified name bypasses the stub — such bundles will
+#     attempt to launch httpuv in the zygote and fail the
+#     fork-safety check below.
+#  3. No package loaded during preload may leave the process
+#     multi-threaded. Packages that start a JVM, Python
+#     interpreter, future multisession plan, OpenMP thread pool
+#     at load time, etc. produce a multi-threaded zygote, and
+#     forking from a multi-threaded process is unsafe per POSIX.
+#     The check_fork_safety() call below reads
+#     /proc/self/status and stops with a specific error if
+#     Threads != 1.
+#
+# All three failures stop the zygote process with a clear error
+# on stderr. The blockyard server observes the control port
+# never coming up and surfaces the failure as a worker-start
+# error on the API/UI.
 #
 # Phase 3-10 replaces the naive source() with compiler::cmpfile()
 # so bundle closures are born as BCODESXP before fork (see
 # phase-3-10-draft.md decision K3). That optimisation is tied to
 # the KSM track because its primary motivation is preventing the
-# JIT from mutating closure pages post-fork; it also saves 100–500ms
-# per cold start independently, but we keep the simpler source()
-# path in phase 3-9 to match the minimal mechanism scope.
-#
-# Crashes here are fatal — the zygote is unusable if its bundle
-# didn't load.
+# JIT from mutating closure pages post-fork. Phase 3-9 keeps the
+# simpler source() path.
 captured_app <- NULL  # shiny.appobj captured during app.R evaluation
 
 preload_bundle <- function() {
   env <- new.env(parent = globalenv())
-  env$shinyApp <- function(ui, server, ...) {
-    captured_app <<- shiny::shinyApp(ui, server, ...)
+
+  # Defensive runApp stub. Bundles that end with
+  # `runApp(shinyApp(ui, server))` instead of just
+  # `shinyApp(ui, server)` would otherwise (a) launch an httpuv
+  # server in the zygote and (b) bypass source()'s $value capture
+  # because the last expression evaluates to runApp's return
+  # (invisible NULL). The stub intercepts the call, captures its
+  # first argument if it looks like a shiny.appobj, and returns
+  # NULL. Only intercepts unqualified `runApp` lookups via lexical
+  # scope; `shiny::runApp` bypasses this and the fork-safety check
+  # below will catch the resulting thread-count anomaly.
+  env$runApp <- function(appDir = ".", ...) {
+    if (inherits(appDir, "shiny.appobj")) {
+      captured_app <<- appDir
+    }
     invisible(NULL)
   }
-  env$runApp <- function(appDir = ".", ...) invisible(NULL)
 
-  load_if_present <- function(src) {
-    if (file.exists(src)) sys.source(src, envir = env)
+  # Optional global.R — sourced for side effects only.
+  global_r <- file.path(bundle_path, "global.R")
+  if (file.exists(global_r)) {
+    sys.source(global_r, envir = env)
   }
-  load_if_present(file.path(bundle_path, "global.R"))
-  load_if_present(file.path(bundle_path, "app.R"))
+
+  # Required app.R. Fail fast if missing.
+  app_r <- file.path(bundle_path, "app.R")
+  if (!file.exists(app_r)) {
+    stop(sprintf(paste0(
+      "blockyard zygote: bundle has no app.R at %s. ",
+      "Zygote mode requires a single app.R entrypoint whose ",
+      "last expression evaluates to a shiny.appobj. Bundles ",
+      "using the classic server.R + ui.R split are not ",
+      "supported in zygote mode — either restructure the ",
+      "bundle to use app.R, or disable zygote for this app."),
+      bundle_path),
+      call. = FALSE)
+  }
+
+  res <- source(app_r, local = env, echo = FALSE, keep.source = FALSE)
+  if (inherits(res$value, "shiny.appobj")) {
+    captured_app <<- res$value
+  }
+
+  if (!inherits(captured_app, "shiny.appobj")) {
+    last_class <- if (is.null(res$value)) "NULL" else paste(class(res$value), collapse = "/")
+    stop(sprintf(paste0(
+      "blockyard zygote: could not capture shiny.appobj from %s ",
+      "(last expression was class '%s'). Zygote mode requires ",
+      "app.R to end with a shinyApp(ui, server) call, or an ",
+      "explicit runApp(shinyApp(ui, server)). Fix the bundle, ",
+      "or disable zygote for this app."),
+      app_r, last_class),
+      call. = FALSE)
+  }
+}
+
+# Fork-safety check: POSIX says forking from a multi-threaded
+# process leaves only the forking thread alive in the child, but
+# any mutexes the other threads held remain in the child's
+# memory as garbage. In practice this means "everything is
+# subtly broken in the child, crashes or deadlocks eventually".
+# The prior art (Android Zygote, Python's forkserver) keeps the
+# preloaded code carefully single-threaded for exactly this
+# reason; Python 3.14 is even deprecating fork-as-default on
+# Linux because fork-plus-threads is intractable in the general
+# case. We adopt the same rule by checking thread count after
+# preload and failing if it is not 1.
+#
+# This catches the largest category of fork-unsafety — anything
+# that starts background work at load time. What it does NOT
+# catch: open file descriptors to remote services (DB
+# connection pools, keep-alive HTTP sockets), process-global
+# caches keyed on PID. Those are documented as caveats and
+# cannot be robustly detected — the prior art punts on them
+# too.
+check_fork_safety <- function() {
+  status <- tryCatch(readLines("/proc/self/status"),
+                     error = function(e) character())
+  threads_line <- grep("^Threads:", status, value = TRUE)
+  if (length(threads_line) == 0L) return(invisible())  # non-Linux fallback
+  n_threads <- suppressWarnings(as.integer(sub("^Threads:\\s*", "", threads_line)))
+  if (is.na(n_threads) || n_threads == 1L) return(invisible())
+  stop(sprintf(paste0(
+    "blockyard zygote: process has %d threads after preload ",
+    "(expected 1). Forking from a multi-threaded process is ",
+    "unsafe per POSIX — only the forking thread survives in ",
+    "the child, but mutexes and state held by other threads ",
+    "remain as garbage. A package loaded by app.R probably ",
+    "started background work at load time. Known examples: ",
+    "rJava (JVM threads), reticulate (Python interpreter), ",
+    "future/furrr with multisession plans, data.table with ",
+    "threads > 1, packages linking OpenMP with greedy init ",
+    "hooks. Zygote mode cannot be used with this bundle — ",
+    "either remove the offending package, or disable zygote ",
+    "for this app."),
+    n_threads),
+    call. = FALSE)
 }
 
 preload_start <- Sys.time()
 preload_bundle()
+check_fork_safety()
 zygote_info$preload_ms <- as.integer(
   as.numeric(Sys.time() - preload_start, units = "secs") * 1000
 )
-if (is.null(captured_app)) {
-  message("blockyard_zygote event=preload status=ok ms=",
-          zygote_info$preload_ms,
-          " warning=no_shinyapp_captured")
-} else {
-  message("blockyard_zygote event=preload status=ok ms=",
-          zygote_info$preload_ms)
-}
+message("blockyard_zygote event=preload status=ok ms=",
+        zygote_info$preload_ms)
 
 # Hygiene: full GC after package preload. Puts every surviving
 # SEXP into the oldest generation with stable mark state, so
@@ -1158,10 +1414,29 @@ port_hi <- port_range_parts[2]
 # Active children: childID → list(pid, port).
 children <- new.env(parent = emptyenv())
 
+# Children that have been sent a KILL command from the blockyard
+# server, used by reap_children() to classify the subsequent exit
+# as "killed" rather than "unknown". Populated by the KILL
+# handler, drained by reap_children() when the child's exit is
+# observed. Any child whose exit is observed without an entry here
+# is classified "unknown" — could be a clean return, a crash, or
+# an OOM kill, and phase 3-9 cannot distinguish those without a
+# C helper (phase 3-10 adds one).
+killing <- new.env(parent = emptyenv())
+
 # Pending CHILDEXIT events that haven't been pushed yet — either
 # because no client is connected (rare; the server normally keeps
 # a long-lived connection) or because reap_children() ran in the
 # same poll tick and we want to drain them on the next write.
+# Hard-capped at MAX_PENDING_EVENTS: during normal operation the
+# backlog is bounded by max_sessions_per_worker (typically tens)
+# and drains promptly once the server's control connection is
+# restored. Hitting the cap means something is pathological — the
+# control connection has been down long enough for children to
+# churn past the cap. We drop oldest-first in that case; the
+# Manager's sweep loop (Step 11) is the authoritative backstop
+# for any cleanup we miss here.
+MAX_PENDING_EVENTS <- 1024L
 pending_events <- character(0)
 
 # Allocate a child ID. Monotonic counter, short hex.
@@ -1174,6 +1449,19 @@ next_child_id <- function() {
 # Active control connection. NULL when no client connected.
 con <- NULL
 
+# INFO protocol encoding helper. Values MUST be single-line
+# printable text — no CR/LF/NUL/tab — because the control
+# protocol's line framing splits on '\n' and a value with an
+# embedded newline would desync the Go-side parser. Control
+# characters in the value get replaced with a single space.
+# Writers that use this helper cannot break the protocol; see
+# internal/zygotectl/control.go for the companion parser
+# hardening that caps lines-before-END as defense in depth.
+info_line <- function(key, value) {
+  safe <- gsub("[\r\n\t\0]", " ", as.character(value), perl = TRUE)
+  sprintf("%s=%s\n", key, safe)
+}
+
 push_event <- function(line) {
   if (!is.null(con)) {
     ok <- tryCatch({
@@ -1182,11 +1470,17 @@ push_event <- function(line) {
     }, error = function(e) FALSE)
     if (ok) return(invisible())
   }
-  # Buffer for the next connection. The buffer is per-zygote and
-  # bounded by the number of children that can exit between
-  # connections — small in practice. No size cap here because
-  # children are bounded by the port allocator on the server side.
+  # Buffer for the next connection.
   pending_events <<- c(pending_events, line)
+  # Defensive cap. See the MAX_PENDING_EVENTS comment above.
+  if (length(pending_events) > MAX_PENDING_EVENTS) {
+    dropped <- length(pending_events) - MAX_PENDING_EVENTS
+    pending_events <<- tail(pending_events, MAX_PENDING_EVENTS)
+    message(sprintf(
+      "blockyard_zygote event=pending_events_overflow dropped=%d cap=%d",
+      dropped, MAX_PENDING_EVENTS
+    ))
+  }
 }
 
 flush_pending <- function() {
@@ -1201,19 +1495,54 @@ flush_pending <- function() {
   pending_events <<- character(0)
 }
 
-# Reap exited child processes via parallel::mc.waitpid (non-blocking).
-# Called every poll tick.
+# Observe exited children and emit CHILDEXIT events. Called every
+# poll tick.
+#
+# Children are forked via parallel::mcparallel(..., detached = TRUE),
+# which ends up calling mcfork(estranged = TRUE) and leaves the
+# parallel package's installed SIGCHLD handler in charge of
+# actually reaping them (see src/library/parallel/src/fork.c,
+# parent_sig_handler — it walks detached children and calls
+# waitpid(WNOHANG)). So zombies do not accumulate and we do not
+# need to call waitpid ourselves — we only need to observe the
+# liveness transition.
+#
+# tools::pskill(pid, 0L) is the POSIX "does this pid exist"
+# idiom: kill(pid, 0) returns 0 if the process exists, -1 with
+# ESRCH if not. pskill returns TRUE or FALSE accordingly. Unix
+# only; the zygote only ever runs inside a Linux container or
+# bwrap sandbox, so this is fine.
+#
+# Exit reason classification is done purely from the manager's
+# intent, tracked in the `killing` env: if we asked to kill the
+# child, we label the exit "killed"; otherwise "unknown" (could
+# be a clean return from runApp, a crash, an external SIGKILL,
+# or an OOM — indistinguishable without a C helper that decodes
+# the waitpid status word). Phase 3-10's helper refines this
+# into "crashed" / "oom" / "normal" classifications.
+#
+# PID reuse race note: between the SIGCHLD auto-reap and our
+# pskill probe, the kernel could in theory recycle the pid to a
+# new process. At the fork rate we expect (at most a few per
+# second per zygote) and the kernel's sequential pid_max cycle
+# (default 4M on 64-bit Linux), this is effectively impossible
+# inside a 100ms poll window. Documented limitation, not
+# mitigated in phase 3-9.
 reap_children <- function() {
   for (cid in ls(children)) {
     info <- get(cid, envir = children)
-    res <- tryCatch(parallel:::mc.waitpid(info$pid, FALSE),
-                    error = function(e) NULL)
-    # mc.waitpid returns 0 for "still running", a positive pid for
-    # "exited", or NA for an error. We treat anything non-zero
-    # positive as "exited".
-    if (!is.null(res) && !is.na(res) && res > 0) {
+    alive <- tryCatch(
+      isTRUE(tools::pskill(info$pid, 0L)),
+      error = function(e) FALSE
+    )
+    if (!alive) {
       rm(list = cid, envir = children)
-      reason <- "normal"  # exit code parsing not yet done; phase 3-10 refines
+      reason <- if (exists(cid, envir = killing)) {
+        rm(list = cid, envir = killing)
+        "killed"
+      } else {
+        "unknown"
+      }
       push_event(sprintf("CHILDEXIT %s %d %s\n", cid, 0L, reason))
     }
   }
@@ -1229,40 +1558,65 @@ handle_command <- function(line) {
       return()
     }
     cid <- next_child_id()
-    pid <- parallel:::mcfork()
-    if (inherits(pid, "masterProcess")) {
-      # Child: close the inherited control connection, run the app
-      # on the assigned port. runApp receives the shiny.appobj that
-      # was captured during zygote preload — no re-sourcing of
-      # app.R in the child.
-      #
-      # Phase 3-10 adds an oom_score_adj=1000 self-write here so
-      # the kernel OOM killer reaps a child before the zygote
-      # under memory pressure (see phase-3-10-draft.md decision K5).
-      tryCatch({
+    # parallel::mcparallel(..., detached = TRUE) is the exported
+    # wrapper around mcfork(estranged = TRUE): forks a child,
+    # evaluates the expression in the child, and mcexits on
+    # completion. The parent's SIGCHLD handler auto-reaps the
+    # detached child when it eventually dies. mc.set.seed = FALSE
+    # skips the PRNG stream setup we don't need (shiny sessions
+    # do not rely on reproducible seeds). Returns a parallelJob
+    # object whose $pid is the child's pid.
+    #
+    # The expression runs in the child. It closes the two sockets
+    # inherited from the zygote (the control connection and the
+    # server-listen socket) so the child doesn't hold them open,
+    # then runs shiny on the assigned port. The server function
+    # inside captured_app closes over the preload env, so bundle
+    # packages and top-level state are shared via COW rather than
+    # re-sourced in the child.
+    #
+    # Phase 3-10 will add an oom_score_adj = 1000 self-write
+    # inside the expression so the kernel OOM killer reaps a
+    # child before the zygote under memory pressure (see
+    # phase-3-10-draft.md decision K5). It will also flip the
+    # `shiny::runApp` call over to the C-helper's byte-compiled
+    # code path.
+    job <- tryCatch(
+      parallel::mcparallel({
         close(con)
+        close(srv)
         Sys.setenv(SHINY_PORT = as.character(port))
-        if (is.null(captured_app)) {
-          # Fallback: bundle did not call shinyApp() at the top
-          # level (unusual structure, e.g. ui.R + server.R split,
-          # or a conditional shinyApp() call). Re-source in the
-          # child, accepting the per-child re-parse cost.
-          shiny::runApp(bundle_path, port = port)
-        } else {
-          shiny::runApp(captured_app, port = port)
-        }
-      }, error = function(e) {
-        message("blockyard zygote child error: ", conditionMessage(e))
-      })
-      parallel:::mcexit(0L)
+        tryCatch(
+          shiny::runApp(captured_app, port = port),
+          error = function(e) {
+            message("blockyard zygote child error: ",
+                    conditionMessage(e))
+          }
+        )
+      }, detached = TRUE, mc.set.seed = FALSE),
+      error = function(e) {
+        message("blockyard zygote mcparallel error: ",
+                conditionMessage(e))
+        NULL
+      }
+    )
+    if (is.null(job)) {
+      writeLines("ERR fork failed\n", con, sep = "")
+      return()
     }
-    # Parent.
-    assign(cid, list(pid = pid$pid, port = port), envir = children)
-    writeLines(sprintf("OK %s %d\n", cid, pid$pid), con, sep = "")
+    # Parent: record the child.
+    assign(cid, list(pid = job$pid, port = port), envir = children)
+    writeLines(sprintf("OK %s %d\n", cid, job$pid), con, sep = "")
   } else if (cmd == "KILL") {
     cid <- parts[2]
     if (exists(cid, envir = children)) {
       info <- get(cid, envir = children)
+      # Mark the child as intentionally killed so reap_children
+      # classifies the subsequent exit as "killed" rather than
+      # "unknown". Setting the flag BEFORE sending the signal
+      # avoids a race where reap_children observes the exit
+      # before the KILL handler has updated `killing`.
+      assign(cid, TRUE, envir = killing)
       tools::pskill(info$pid, tools::SIGTERM)
     }
     writeLines("OK\n", con, sep = "")  # idempotent
@@ -1279,9 +1633,14 @@ handle_command <- function(line) {
     # "END". Adding new fields is backward-compatible — the Go-side
     # parser skips unknown keys. Phase 3-10 adds ksm_status and
     # ksm_errno fields here.
-    writeLines(sprintf("r_version=%s\n", zygote_info$r_version),
+    #
+    # Every value goes through info_line() for protocol-safe
+    # encoding: single-line printable text, no CR/LF/NUL/tab.
+    # New fields added by phase 3-10 (or later) MUST use
+    # info_line() to stay safe — do not emit raw sprintf output.
+    writeLines(info_line("r_version",  zygote_info$r_version),
                con, sep = "")
-    writeLines(sprintf("preload_ms=%d\n", zygote_info$preload_ms),
+    writeLines(info_line("preload_ms", zygote_info$preload_ms),
                con, sep = "")
     writeLines("END\n", con, sep = "")
   } else {
@@ -1310,19 +1669,34 @@ repeat {
   reap_children()
   flush_pending()
 
-  # Server socket has a pending connection.
+  # Server socket has a pending connection. timeout = 0 makes
+  # the accept non-blocking: socketSelect above has already
+  # confirmed the server socket is readable, so a normal accept
+  # returns immediately. The non-blocking setting only matters in
+  # two edge cases: (1) the client RSTs the connection between
+  # our socketSelect and the accept call, in which case we want
+  # an immediate error rather than a 1-second block; (2) a
+  # spurious wakeup from socketSelect (rare but possible), same
+  # story. Either way, the error path is caught by tryCatch and
+  # we proceed on the next poll tick. Note socketAccept takes
+  # timeout as an integer (see R source connections.c, do_sockconn:
+  # `timeout = asInteger(...)`), so fractional values truncate to 0.
   if (isTRUE(ready[[1]])) {
     new_con <- tryCatch(
-      socketAccept(srv, blocking = TRUE, open = "a+", timeout = 1),
+      socketAccept(srv, blocking = TRUE, open = "a+", timeout = 0),
       error = function(e) NULL
     )
     if (!is.null(new_con)) {
       # Replace any stale client connection with the new one.
       if (!is.null(con)) tryCatch(close(con), error = function(e) NULL)
       con <- new_con
-      # AUTH must be the first frame on the new connection.
-      auth <- tryCatch(readLines(con, n = 1), error = function(e) character())
-      if (length(auth) == 0 || sub("^AUTH ", "", auth) != secret_hex) {
+      # AUTH must be the first frame on the new connection, and it
+      # must arrive within AUTH_DEADLINE seconds. A peer that
+      # connects and never sends anything — or that gets
+      # context-cancelled between dial and write — must not be
+      # allowed to wedge the main loop.
+      auth <- read_line_with_deadline(con, AUTH_DEADLINE)
+      if (is.null(auth) || sub("^AUTH ", "", auth) != secret_hex) {
         tryCatch(writeLines("ERR auth\n", con, sep = ""),
                  error = function(e) NULL)
         tryCatch(close(con), error = function(e) NULL)
@@ -1334,12 +1708,15 @@ repeat {
     }
   }
 
-  # Client connection has an inbound command.
+  # Client connection has an inbound command. socketSelect already
+  # confirmed bytes are available, so the deadline here is tiny —
+  # we're mostly using read_line_with_deadline's EOF/error path,
+  # not its timeout path.
   if (!is.null(con) && length(ready) >= 2L && isTRUE(ready[[2]])) {
-    line <- tryCatch(readLines(con, n = 1), error = function(e) character())
-    if (length(line) == 0) {
-      # Connection closed cleanly or errored; drop it and wait for
-      # the next AUTH.
+    line <- read_line_with_deadline(con, POLL_SECS)
+    if (is.null(line)) {
+      # Connection closed, errored, or no complete line within
+      # the poll window; drop it and wait for the next AUTH.
       tryCatch(close(con), error = function(e) NULL)
       con <- NULL
     } else {
@@ -1360,6 +1737,32 @@ Notes on the design:
   busy-waiting. Below ~10ms the syscall overhead would start to
   matter; above ~500ms the user-visible latency on a child crash
   would be noticeable. 100ms is the comfortable middle.
+- **AUTH and command reads gated on `socketSelect` deadlines via
+  `read_line_with_deadline`.** Plain `readLines(con, n = 1)` on
+  a TCP connection blocks indefinitely waiting for a newline,
+  with no timeout parameter. A peer that opens the TCP
+  connection and never sends anything — or blockyard's own
+  control client getting context-cancelled between dial and
+  write — would wedge the main loop, stalling `reap_children`
+  and `flush_pending` with no outward signal (TCP port still
+  bound, process still alive, `client.Done()` on the Go side
+  never fires). The helper runs a `socketSelect` probe first
+  (2s deadline for AUTH, `POLL_SECS` for commands since the
+  outer loop's select already confirmed readiness) and only
+  calls `readLines` once bytes are known to be available. This
+  handles every realistic failure mode: peer never sends, peer
+  disconnects pre-AUTH, self-inflicted cancellation mid-dial.
+  It does *not* handle the pathological "peer sends partial
+  line (e.g., `AUTH `) and stalls" case, which would still hang
+  `readLines` on the missing newline. Closing that gap requires
+  raw-byte reads with manual line assembly and a per-connection
+  buffer, which was considered (Option B) and rejected as not
+  worth the complexity given the control port's existing
+  network isolation (Docker per-worker bridge or loopback TCP).
+  If the threat model ever shifts — e.g., a future deployment
+  puts untrusted peers on the same network as the control port
+  — the helper's signature stays stable while the
+  implementation can be upgraded in place.
 - **Pending event buffer.** If a child exits while no client is
   connected (rare in practice — the server keeps a long-lived
   connection per zygote), the event is held in `pending_events`
@@ -1431,11 +1834,21 @@ type forkState struct {
     portRangeLo int
     portRangeHi int
     childAddrs  map[string]string // childID → "ip:port"
-    childPort   map[string]int    // childID → port (for free-list bookkeeping)
+    childPort   map[string]int    // childID → port (release-path lookup)
+    portOwner   map[int]string    // port → childID ("" = reservation pending)
     mu          sync.Mutex
 }
 
 // Fork implements backend.Forking.
+//
+// The reservation is committed across the zygote FORK round-trip
+// under the in-memory portOwner map, not under any kernel listener
+// (Docker container-internal ports have no kernel analogue). The
+// flow is reserve → release lock → do network call → reacquire lock
+// → commit or roll back. Crucially, the reservation is recorded in
+// portOwner *before* the lock is released, so a concurrent Fork on
+// the same worker cannot pick the same port during the network
+// round-trip window.
 func (d *DockerBackend) Fork(ctx context.Context, workerID, sessionID string) (string, string, error) {
     d.mu.Lock()
     ws, ok := d.workers[workerID]
@@ -1445,7 +1858,7 @@ func (d *DockerBackend) Fork(ctx context.Context, workerID, sessionID string) (s
     }
 
     ws.fork.mu.Lock()
-    port := ws.fork.allocPortLocked()
+    port := ws.fork.reservePortLocked()
     ws.fork.mu.Unlock()
     if port == 0 {
         return "", "", fmt.Errorf("zygote: no free ports for worker %s", workerID)
@@ -1454,7 +1867,7 @@ func (d *DockerBackend) Fork(ctx context.Context, workerID, sessionID string) (s
     childID, _, err := ws.fork.client.Fork(ctx, port)
     if err != nil {
         ws.fork.mu.Lock()
-        ws.fork.releasePortLocked(port)
+        ws.fork.releaseReservedLocked(port)
         ws.fork.mu.Unlock()
         return "", "", err
     }
@@ -1464,14 +1877,13 @@ func (d *DockerBackend) Fork(ctx context.Context, workerID, sessionID string) (s
         // Best-effort kill, then bubble the error.
         _ = ws.fork.client.Kill(ctx, childID)
         ws.fork.mu.Lock()
-        ws.fork.releasePortLocked(port)
+        ws.fork.releaseReservedLocked(port)
         ws.fork.mu.Unlock()
         return "", "", err
     }
 
     ws.fork.mu.Lock()
-    ws.fork.childAddrs[childID] = addr
-    ws.fork.childPort[childID] = port
+    ws.fork.recordChildLocked(childID, port, addr)
     ws.fork.mu.Unlock()
 
     return addr, childID, nil
@@ -1487,11 +1899,7 @@ func (d *DockerBackend) KillChild(ctx context.Context, workerID, childID string)
     }
     err := ws.fork.client.Kill(ctx, childID)
     ws.fork.mu.Lock()
-    if port, hasPort := ws.fork.childPort[childID]; hasPort {
-        ws.fork.releasePortLocked(port)
-        delete(ws.fork.childPort, childID)
-    }
-    delete(ws.fork.childAddrs, childID)
+    ws.fork.releaseChildLocked(childID)
     ws.fork.mu.Unlock()
     return err
 }
@@ -1502,27 +1910,69 @@ func (d *DockerBackend) ChildExits() <-chan backend.ChildExit {
     return d.childExits
 }
 
-// allocPortLocked / releasePortLocked: simple per-container free
-// list. Container-internal ports — no kernel probe, no host-side
-// listener hold, no cross-worker collision concern (every container
-// has its own copy of the range on its own bridge network).
-func (s *forkState) allocPortLocked() int {
+// Container-internal port bookkeeping. There's no kernel probe,
+// no host-side listener hold, and no cross-worker collision
+// concern — every container has its own copy of the range on its
+// own bridge network — so the allocator is purely an in-memory
+// set of owned ports.
+//
+// The four operations are:
+//
+//   reservePortLocked      — pick a free port and mark it pending
+//   recordChildLocked      — commit a reservation to a childID
+//   releaseReservedLocked  — drop a reservation that never committed
+//   releaseChildLocked     — drop a committed child's port and addr
+//
+// Separating "reserve" from "record" is what makes the
+// lock-release-between-network-call pattern safe. An earlier
+// draft used childPort itself as the "used" set and scanned it
+// for every candidate port (O(N×M) nested loops), which had two
+// problems: (a) worse asymptotics than necessary, and (b) a
+// concurrency bug where the reservation wasn't reflected in
+// childPort until *after* the network round-trip, so two
+// concurrent Fork calls to the same worker could pick the same
+// port. portOwner fixes both: the reserve step marks the port
+// owned before the lock is released, and each candidate check
+// is a single O(1) map lookup.
+
+// reservePortLocked finds the lowest free port in the range and
+// marks it pending. Caller must either commit via
+// recordChildLocked or drop via releaseReservedLocked. Returns 0
+// when the range is exhausted.
+func (s *forkState) reservePortLocked() int {
     for p := s.portRangeLo; p <= s.portRangeHi; p++ {
-        used := false
-        for _, q := range s.childPort {
-            if q == p {
-                used = true
-                break
-            }
-        }
-        if !used {
+        if _, taken := s.portOwner[p]; !taken {
+            s.portOwner[p] = "" // pending, no owner yet
             return p
         }
     }
     return 0
 }
 
-func (s *forkState) releasePortLocked(_ int) { /* free-list lookup is the map; no extra state */ }
+// recordChildLocked commits a reserved port to a specific childID
+// after a successful FORK round-trip and addr resolution.
+func (s *forkState) recordChildLocked(childID string, port int, addr string) {
+    s.portOwner[port] = childID
+    s.childPort[childID] = port
+    s.childAddrs[childID] = addr
+}
+
+// releaseReservedLocked drops a port reservation that never got
+// committed (FORK RPC or addr resolution failed).
+func (s *forkState) releaseReservedLocked(port int) {
+    delete(s.portOwner, port)
+}
+
+// releaseChildLocked drops a committed child's bookkeeping —
+// port, portOwner, and addr. Idempotent: safe to call with an
+// unknown childID (treated as no-op).
+func (s *forkState) releaseChildLocked(childID string) {
+    if port, ok := s.childPort[childID]; ok {
+        delete(s.portOwner, port)
+        delete(s.childPort, childID)
+    }
+    delete(s.childAddrs, childID)
+}
 ```
 
 `d.childExits` is a `chan backend.ChildExit` initialised in
@@ -1546,13 +1996,48 @@ go func() {
 ```
 
 **Control-connection watcher.** A second goroutine per zygote
-worker watches `client.Done()` and evicts the worker if the
-control channel dies unexpectedly. This closes the gap where a
-zygote crash or container OOM would otherwise leave a stale
-worker sitting around until the autoscaler's minutes-scale idle
-sweep evicted it:
+worker watches `client.Done()` and signals the ops layer that
+this worker needs to be evicted if the control channel dies
+unexpectedly. This closes the gap where a zygote crash or
+container OOM would otherwise leave a stale worker sitting
+around until the autoscaler's minutes-scale idle sweep evicted
+it.
+
+The watcher writes the workerID onto the backend's `workerLost`
+channel rather than calling `Backend.Stop` directly. This
+matters: `Backend.Stop` tears down only backend-level state
+(container, network, bind mounts, allocator entries), but the
+canonical decommission path is `ops.EvictWorker` (see
+`internal/ops/ops.go:18`), which additionally drops
+`srv.Workers`, cancels the token-refresher goroutine, deletes
+`srv.Registry` entries, marks DB session rows ended, deletes
+in-memory session entries, marks the log stream ended, cleans
+up the per-worker package library, and removes transfer /
+token / install-mutex state. Calling `Backend.Stop` alone
+leaks every item on that list on every unexpected disconnect.
+
+The backend cannot call `ops.EvictWorker` directly because
+`internal/ops` imports `internal/backend`, so the reverse
+import is not allowed. The channel-based handoff keeps the
+import direction clean: the backend publishes the signal, and
+a small consumer goroutine in `cmd/blockyard/main.go`
+(wired up in Step 9) drains the channel and forwards each
+workerID to `ops.EvictWorker`.
 
 ```go
+// On DockerBackend: a single shared workerLost channel,
+// initialised in NewDockerBackend alongside childExits.
+type DockerBackend struct {
+    // ...existing fields...
+    childExits  chan backend.ChildExit
+    workerLost  chan string
+}
+
+// WorkerLost implements backend.Forking.
+func (d *DockerBackend) WorkerLost() <-chan string {
+    return d.workerLost
+}
+
 // In DockerBackend.Spawn, right after the translator goroutine:
 go func() {
     <-ws.fork.client.Done()
@@ -1565,13 +2050,14 @@ go func() {
     if stopping {
         return
     }
-    slog.Warn("zygote: control connection lost, evicting worker",
+    slog.Warn("zygote: control connection lost, signalling eviction",
         "worker_id", spec.WorkerID)
-    // Fire through the normal stop path. Stop() is idempotent and
-    // handles the race with any concurrent call.
-    if err := d.Stop(context.Background(), spec.WorkerID); err != nil {
-        slog.Error("zygote: eviction after control loss failed",
-            "worker_id", spec.WorkerID, "error", err)
+    select {
+    case d.workerLost <- spec.WorkerID:
+    case <-d.shutdown:
+        // Backend is shutting down; the consumer goroutine has
+        // already exited. Nothing to do — full teardown happens
+        // via the backend's own shutdown path.
     }
 }()
 ```
@@ -1582,10 +2068,13 @@ very beginning of the method (before closing the control client
 or calling `ContainerStop`), so the watcher sees it and exits
 cleanly when an explicit `Stop` races the disconnect signal.
 
-`DockerBackend.Stop` itself must be idempotent and safe against
-concurrent invocation. Two call sites can race: an explicit
-`Stop` from `ops.EvictWorker` / the autoscaler, and the watcher
-above. The existing `Stop` body already deletes the worker from
+`DockerBackend.Stop` itself must still be idempotent and safe
+against concurrent invocation. Two eviction call sites converge
+on `Stop` via `ops.EvictWorker`: an explicit eviction from the
+autoscaler / drain / shutdown, and the watcher-triggered
+eviction (watcher fires `workerLost` → consumer goroutine calls
+`ops.EvictWorker` → `ops.EvictWorker` calls `Backend.Stop`).
+The existing `Stop` body already deletes the worker from
 `d.workers` under the mutex at the start; we keep that pattern
 but also check whether the deletion found an entry before
 proceeding with teardown. If the entry is already gone, return
@@ -1630,7 +2119,10 @@ func (d *DockerBackend) zygoteContainerAddr(ctx context.Context, ws *workerState
 5. The connected `*zygotectl.Client` is stored in `ws.fork`,
    along with the cached `zygotectl.Info` (`ws.fork.info =
    client.Info()`) so startup info is available for API/UI
-   exposure without another network round-trip.
+   exposure without another network round-trip. `childAddrs`,
+   `childPort`, and `portOwner` are initialised to empty maps,
+   and `portRangeLo`/`portRangeHi` are parsed from
+   `spec.ChildPortRange`.
 
 **`Backend.Addr` and `HealthCheck` for zygote workers.** Both
 methods inspect `ws.fork` and branch:
@@ -1734,9 +2226,11 @@ that phase 3-7 establishes). Differences from the Docker version:
 - Child port allocation: lazy from a dedicated host-wide range,
   one port per `Forking.Fork` call (see "Port allocator extension"
   below).
-- Child reaping: the bwrapped R zygote `parallel:::mcfork`s exactly
-  as in the Docker case; `waitpid` works because the children are
-  in the zygote's PID namespace (phase 3-7 sets `--unshare-pid`).
+- Child reaping: the bwrapped R zygote uses
+  `parallel::mcparallel(..., detached = TRUE)` exactly as in the
+  Docker case; the parallel package's SIGCHLD auto-reap works
+  because the children are in the zygote's PID namespace (phase
+  3-7 sets `--unshare-pid`).
 - ChildExit translation: identical pattern to Docker — one goroutine
   per worker drains `client.Exits` onto the shared
   `childExits chan backend.ChildExit`.
@@ -1750,15 +2244,21 @@ that phase 3-7 establishes). Differences from the Docker version:
   references after worker eviction.
 - **Control-connection watcher** — same pattern as the Docker
   backend. A per-worker goroutine blocks on
-  `ws.fork.client.Done()` and calls `ProcessBackend.Stop` if the
-  channel closes unexpectedly (and `workerProc.stopping` is not
-  set). Covers zygote crashes, OOM kills, bwrap sandbox faults —
-  any path that kills the R process without going through
-  `Stop`. `Stop` is idempotent and safe against concurrent
-  invocation from the watcher and the normal eviction path.
-  `cmd.Wait()` in the existing `Spawn` cleanup goroutine is a
-  second signal for the same condition; both converge on the
-  same idempotent `Stop` call.
+  `ws.fork.client.Done()` and writes the workerID onto the
+  backend's shared `workerLost chan string` if the channel
+  closes unexpectedly (and `workerProc.stopping` is not set).
+  Covers zygote crashes, OOM kills, bwrap sandbox faults — any
+  path that kills the R process without going through `Stop`.
+  The consumer goroutine in `cmd/blockyard/main.go` drains
+  `workerLost` and forwards each workerID to `ops.EvictWorker`
+  for the full decommission path (see Step 9 and the `Forking`
+  interface doc comment for why this indirection exists —
+  `ops` cannot be imported from `backend`). `Backend.Stop` is
+  still idempotent because two eviction paths converge on it
+  via `ops.EvictWorker`: the normal autoscaler/drain path and
+  the watcher-triggered path. `cmd.Wait()` in the existing
+  `Spawn` cleanup goroutine is a second signal for the same
+  condition; both converge on the same workerLost emission.
 
 The structural similarity is large enough that the
 `forking.go` files in both backends could share helper functions
@@ -2054,6 +2554,34 @@ if flags.Zygote {
                 SweepInterval: srv.Config.Proxy.ZygoteSweepInterval.Duration,
             },
         )
+
+        // Drain Forking.WorkerLost() and forward each workerID
+        // to ops.EvictWorker. The backend publishes the signal
+        // via its workerLost channel when a zygote's control
+        // connection dies unexpectedly; this goroutine turns
+        // that signal into a full decommission via the canonical
+        // ops path (srv.Workers, Registry, token refresher, DB
+        // session rows, log capture, per-worker pkg lib, transfer
+        // dir, token dir, install mutex — see
+        // internal/ops/ops.go:18).
+        //
+        // This goroutine lives in main.go because it's the
+        // smallest package that imports both `backend` (to
+        // type-assert Forking) and `ops` (for EvictWorker).
+        // `internal/backend/*` cannot call ops.EvictWorker
+        // directly because ops imports backend, and
+        // `internal/zygote` deliberately stays ignorant of ops
+        // to keep the manager focused on session↔child
+        // bookkeeping.
+        //
+        // Exits when the backend closes workerLost on shutdown.
+        go func() {
+            for wid := range forking.WorkerLost() {
+                slog.Warn("zygote: control connection lost, evicting worker",
+                    "worker_id", wid)
+                ops.EvictWorker(context.Background(), srv, wid)
+            }
+        }()
     }
 }
 ```
@@ -2089,10 +2617,16 @@ if isZygoteSession(srv, sessionID) {
     if !addrReachable(addr) {
         slog.Debug("proxy: zygote session unreachable, re-cold-starting",
             "session_id", sessionID, "addr", addr)
+        // Delete the session store entry BEFORE issuing the
+        // redirect. The browser will follow the 307 with the
+        // same stale cookie (307 preserves cookies), but the
+        // retry handler will call Sessions.Get, see no entry,
+        // and fall through to the isNewSession path — which
+        // generates a fresh UUID and writes a new Set-Cookie
+        // that replaces the stale value. The cookie on the
+        // redirect response itself is untouched; the store-side
+        // delete is the source of truth.
         srv.Sessions.Delete(sessionID)
-        // Restart the proxy handler logic — easiest is to issue a
-        // 307 redirect to self, the client retries with no session
-        // cookie and the new-session path runs.
         http.Redirect(w, r, r.URL.RequestURI(), http.StatusTemporaryRedirect)
         return
     }
@@ -2101,13 +2635,34 @@ if isZygoteSession(srv, sessionID) {
 
 `addrReachable` is a 50ms TCP dial. The check is gated on zygote
 sessions only (cheap check via `srv.Zygotes.HasChild(sessionID)`)
-so non-zygote apps see no overhead. The 307 redirect forces the
-browser to retry without the stale session cookie — the new
-request runs the `isNewSession` path and forks a new child.
+so non-zygote apps see no overhead. The 307 forces the browser
+to retry; the server-side `Sessions.Delete` routes the retry to
+the `isNewSession` branch at `proxy.go:175`, which forks a new
+child and writes a `Set-Cookie` with a fresh UUID that replaces
+the stale cookie value in the browser.
+
+**Why 307 and not 303.** 307 preserves the HTTP method and body.
+If the user was mid-form-submit when the child died, a 303
+would demote POST to GET and lose the form data; 307 resubmits
+the form against the new child without data loss.
+
+**WebSocket caveat.** For a WebSocket upgrade request the 307
+may or may not be followed by the client library — WebSocket
+handshake semantics don't specify redirect-following, and
+shiny's JS client has its own reconnect logic that runs on
+socket errors. In practice the WebSocket path usually hits the
+reachability probe at the very first upgrade request (before
+the handshake completes), not mid-session, so the 307 lands
+on an HTTP request the browser knows how to retry. Once the
+handshake succeeds, a subsequent child death surfaces as a
+WebSocket close, and shiny's client reconnects by making a new
+HTTP request that goes through the same flow. The redirect
+fallback is aimed at the initial-dispatch path; mid-session
+recovery is handled by shiny's own reconnect logic.
 
 This is best-effort. The Manager's exit-event handler is the
-authoritative path; the redirect is a fallback for the gap between
-"child dies" and "Manager processes the exit".
+authoritative path; the redirect is a fallback for the gap
+between "child dies" and "Manager processes the exit".
 
 ### Step 11: Cleanup paths
 
@@ -2450,6 +3005,18 @@ func TestClient_InfoUnknownKeys(t *testing.T)
 // parses them into Info.Unknown without erroring. Also exercises
 // the forward-compatibility path that phase 3-10 relies on for
 // ksm_status / ksm_errno fields.
+
+func TestClient_InfoMissingEnd(t *testing.T)
+// Test server writes maxInfoLines+1 lines without ever writing
+// END. fetchInfo returns an error that mentions the line cap.
+// Defense against a desynced / malicious sender; the cap bounds
+// the damage.
+
+func TestClient_InfoMalformedLine(t *testing.T)
+// Test server writes a line with no '=' in it, then the normal
+// r_version / preload_ms / END sequence. fetchInfo skips the
+// malformed line and returns the parsed Info. Matches the
+// skip-unknown behaviour for forward compat.
 ```
 
 **`internal/zygote/manager_test.go`** — using a mock `Forking`
@@ -2515,14 +3082,21 @@ func TestDockerForking_ControlAuthRejected(t *testing.T)
 // Spawn a zygote. Connect with wrong secret. Verify the connection
 // is dropped after the AUTH frame.
 
-func TestDockerForking_ControlConnectionLossEvictsWorker(t *testing.T)
+func TestDockerForking_ControlConnectionLossFiresWorkerLost(t *testing.T)
 // Spawn a zygote. Kill the zygote R process from outside via
 // `docker exec <id> pkill R` (bypassing Backend.Stop). Verify:
-//   1. Within ~5 seconds, the worker is no longer in d.workers.
-//   2. A subsequent Fork on the same workerID returns an error
-//      (worker not found), forcing cold-start on the next request.
+//   1. Within ~5 seconds, the backend's WorkerLost() channel
+//      emits the workerID.
+//   2. The worker is still present in d.workers at this point —
+//      the backend's watcher signals eviction but does not
+//      perform it; the consumer goroutine in main.go is what
+//      eventually removes the worker via ops.EvictWorker.
 //   3. A `zygote: control connection lost` log line was emitted
 //      with the correct worker_id.
+// The end-to-end eviction path (WorkerLost → consumer goroutine
+// → ops.EvictWorker → srv.Workers cleanup) is exercised by a
+// separate higher-level test that wires up both the backend
+// and the consumer goroutine with a real *server.Server.
 // Covers the watcher goroutine path — without it, the worker
 // would hang around until the autoscaler's idle sweep noticed.
 
@@ -2531,6 +3105,32 @@ func TestDockerForking_StopIdempotentUnderRace(t *testing.T)
 // control client (simulating the watcher firing at the same
 // time). Verify both calls return nil (or a known benign error)
 // and no panic. The worker is removed from d.workers exactly once.
+
+func TestDockerForking_PreloadRejectsServerUiSplit(t *testing.T)
+// Spawn a zygote against a bundle that has only server.R + ui.R
+// (no app.R). Verify the worker-start fails within the expected
+// timeout and the zygote stderr contains "bundle has no app.R"
+// (the exact error message from preload_bundle()).
+
+func TestDockerForking_PreloadRejectsMissingShinyApp(t *testing.T)
+// Spawn a zygote against a bundle whose app.R ends with something
+// other than a shinyApp() call (e.g., `cat("hello\n")` as the last
+// expression). Verify worker-start fails and the stderr contains
+// "could not capture shiny.appobj".
+
+func TestDockerForking_PreloadRejectsMultiThreaded(t *testing.T)
+// Spawn a zygote against a bundle whose global.R calls
+// future::plan(multisession) or some other thread-spawning
+// operation. Verify worker-start fails and the stderr contains
+// "process has N threads after preload". Skipped if the future
+// package is not present in the test bundle library.
+
+func TestDockerForking_ChildExitReasonClassification(t *testing.T)
+// Fork two children. Kill one via the KILL control command;
+// SIGKILL the other externally. Verify the Manager receives a
+// ChildExit for the first with reason="killed" and for the
+// second with reason="unknown". Exercises the killing env
+// classification.
 ```
 
 **`internal/backend/process/forking_integration_test.go`** (tagged
@@ -2612,9 +3212,9 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | File | Action | Summary |
 |------|--------|---------|
 | `internal/db/db.go` | **update** | `Zygote` on `AppRow` and `AppUpdate`, UPDATE SQL |
-| `internal/backend/backend.go` | **update** | `Forking` interface, `ChildExit` type, `WorkerSpec.Zygote`/`ControlSecret`/`ChildPortRange` |
-| `internal/backend/docker/docker.go` | **update** | Spawn branch for zygote (Cmd, env vars, mount, control client connect); `Addr`/`HealthCheck` branch on `ws.fork` to use control port; `Stop` synthesises ChildExit events before container teardown; `workerState.stopping` flag + idempotent `Stop`; control-connection watcher goroutine that calls `Stop` on `client.Done()` when not stopping |
-| `internal/backend/process/process.go` | **update** | Same shape as `docker.go`: spawn branch, `Addr`/`HealthCheck` branch on `workerProc.fork`, synthesised-ChildExit on `Stop`, `workerProc.stopping` flag + idempotent `Stop`, control-connection watcher; plus `controlPorts` and `childPorts` allocators on the backend struct, constructed in `process.New` via the same `rc != nil` branch phase 3-8 already uses for `b.ports`; `CleanupOrphanResources` gets two extra `orphanCleaner` interface-assertion calls — one per new allocator — alongside the existing `b.ports` / `b.uids` blocks. Memory variants satisfy the same interface with a no-op. |
+| `internal/backend/backend.go` | **update** | `Forking` interface (four methods: `Fork`, `KillChild`, `ChildExits`, `WorkerLost`), `ChildExit` type, `WorkerSpec.Zygote`/`ControlSecret`/`ChildPortRange` |
+| `internal/backend/docker/docker.go` | **update** | Spawn branch for zygote (Cmd, env vars, mount, control client connect); `Addr`/`HealthCheck` branch on `ws.fork` to use control port; `Stop` synthesises ChildExit events before container teardown; `workerState.stopping` flag + idempotent `Stop`; `workerLost chan string` field on the backend + `WorkerLost()` accessor; control-connection watcher goroutine that fires `workerLost` on `client.Done()` when not stopping (the consumer goroutine in `main.go` forwards to `ops.EvictWorker`) |
+| `internal/backend/process/process.go` | **update** | Same shape as `docker.go`: spawn branch, `Addr`/`HealthCheck` branch on `workerProc.fork`, synthesised-ChildExit on `Stop`, `workerProc.stopping` flag + idempotent `Stop`, `workerLost chan string` field + `WorkerLost()` accessor, control-connection watcher firing `workerLost`; plus `controlPorts` and `childPorts` allocators on the backend struct, constructed in `process.New` via the same `rc != nil` branch phase 3-8 already uses for `b.ports`; `CleanupOrphanResources` gets two extra `orphanCleaner` interface-assertion calls — one per new allocator — alongside the existing `b.ports` / `b.uids` blocks. Memory variants satisfy the same interface with a no-op. |
 | `internal/backend/process/ports.go` | **update** | Interface unchanged. `memoryPortAllocator` constructor is unchanged. |
 | `internal/backend/process/ports_redis.go` | **update** | `newRedisPortAllocator` grows a fifth `keyPrefix string` parameter (appended after `hostname`) and stores it on the struct. `portClaimScript` drops the hardcoded `"port:"` literal — Go now computes `p.client.Prefix() + p.keyPrefix` and passes it as `KEYS[1]`, so the script body becomes `local key = prefix .. i`. `luaRelease`, `InUse`, and `CleanupOwnedOrphans` swap their hardcoded `"port:"` / `"port:*"` strings for `p.keyPrefix` / `p.keyPrefix + "*"`. `ownerDeleteScript` is unchanged (it already takes the full key as `KEYS[1]`). |
 | `internal/backend/process/ports_redis_test.go` | **update** | Existing `newRedisPortAllocator` calls pass `"port:"` explicitly. Add tests covering the new `controlport:` and `childport:` namespaces (concurrent Reserve, exhaustion, ownership-checked Release, three-way namespace isolation: claiming control port 11000 does not block port 11000 in the `port:` namespace). Extend the existing `TestRedisPortAllocatorCleanupOwnedOrphans` to cover per-namespace cleanup scoping (no cross-namespace deletion). |
@@ -2628,7 +3228,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | `internal/api/swagger_types.go` | **update** | Add `zygote` and capabilities shape to swagger response types |
 | `internal/ui/templates/tab_settings.html` | **update** | Zygote toggle, admin-gated, server-capabilities-gated; worker detail surfaces `zygotectl.Info` from `INFO` |
 | `cmd/by/scale.go` | **update** | `--zygote` flag |
-| `cmd/blockyard/main.go` | **update** | Construct `zygote.Manager` when backend implements `Forking` and `experimental.zygote` is set; write embedded `ZygoteScript` to host path at startup |
+| `cmd/blockyard/main.go` | **update** | Construct `zygote.Manager` when backend implements `Forking` and `experimental.zygote` is set; spawn a consumer goroutine that drains `Forking.WorkerLost()` and forwards each workerID to `ops.EvictWorker` for the full decommission path; write embedded `ZygoteScript` to host path at startup |
 | `internal/server/state.go` | **update** | `Zygotes *zygote.Manager` field on `Server` |
 | `internal/config/config.go` | **update** | New `Experimental *ExperimentalConfig` top-level section (`Zygote` bool, default off) with `ExperimentalFlags()` nil-safe accessor; `ZygoteChildPortRange`, `ZygoteControlPort` on `DockerConfig`; `ZygoteControlRangeStart/End`, `ZygoteChildRangeStart/End` on `ProcessConfig`; `ZygoteSweepInterval` Duration on `ProxyConfig` (default 30s) |
 
@@ -2846,15 +3446,34 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
       interval.
 
     Instead: each backend's `Spawn` starts a **watcher goroutine**
-    that blocks on `client.Done()` and calls `Backend.Stop` if the
-    channel closes unexpectedly. `Stop` is idempotent and
-    race-safe, so concurrent firing from the watcher and an
-    explicit eviction is benign. Sessions bound to the dead
-    zygote are cleaned up via the existing synthesised-ChildExit
-    path (decision #12 already requires this for normal eviction).
-    On the next request, the proxy's unreachable-child fallback
-    (Step 10) triggers a 307 redirect and the session lands on
-    a fresh zygote.
+    that blocks on `client.Done()` and writes the workerID onto
+    the backend's shared `workerLost chan string` if the channel
+    closes unexpectedly (and the worker is not already being
+    stopped via the normal path). A consumer goroutine in
+    `cmd/blockyard/main.go` — wired up next to the `zygote.Manager`
+    construction in Step 9 — drains `Forking.WorkerLost()` and
+    calls `ops.EvictWorker` on each workerID. That is the
+    canonical decommission path, which cleans up server-level
+    state (`srv.Workers`, `srv.Registry`, token-refresher
+    goroutine, DB session rows, log capture, per-worker package
+    library, transfer/token/install-mutex state) in addition to
+    the backend-level `Stop`. An earlier iteration of this
+    design had the watcher call `Backend.Stop` directly; that
+    only ran the backend-level half and leaked every item on
+    the list above per event, so every unexpected disconnect
+    was a state leak. The indirection through `workerLost`
+    exists because `internal/ops` imports `internal/backend`,
+    so the reverse call cannot happen from inside the backend
+    package.
+
+    `ops.EvictWorker` is idempotent and race-safe, so concurrent
+    firing from the watcher-triggered path and an explicit
+    autoscaler/drain eviction is benign. Sessions bound to the
+    dead zygote are cleaned up via the existing
+    synthesised-ChildExit path (decision #12 already requires
+    this for normal eviction). On the next request, the proxy's
+    unreachable-child fallback (Step 10) triggers a 307 redirect
+    and the session lands on a fresh zygote.
 
     **User-visible behaviour:** brief latency hit on one request
     per affected session, no errors surfaced to the browser.
@@ -2865,36 +3484,88 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     a murky "the reconnect loop ran for 30 seconds and it
     eventually came back".
 
-14. **The `shinyApp` object is captured during preload, not
-    re-sourced per child.** The preload stubs `shinyApp(...)`
-    as a capturing closure that stores the arguments into
-    `captured_app <<- shiny::shinyApp(ui, server, ...)`. The
-    FORK handler then calls `runApp(captured_app, port = ...)`
-    in the child instead of `runApp(bundle_path, port = ...)`.
-    This means `app.R` is parsed and evaluated exactly once, in
-    the zygote, which saves 100–500ms per cold start for typical
-    bundles (the re-parse / re-source cost of `app.R` in every
-    child otherwise).
+14. **The `shiny.appobj` is captured during preload via
+    `source()$value`, and the bundle must be shaped to make that
+    work.** Preload sources `app.R` with `base::source(path,
+    local = env, echo = FALSE)`, which returns the last evaluated
+    expression's value as `res$value`. When `app.R` ends with
+    `shinyApp(ui, server)` (the modern shiny convention), `res$value`
+    is the `shiny.appobj` and we capture it into the top-level
+    `captured_app`. The child's FORK handler then passes this object
+    to `shiny::runApp(captured_app, port = ...)`, which launches the
+    server without re-parsing or re-sourcing anything.
 
-    **Fallback for unusual bundle structures.** Bundles that
-    split `ui.R` and `server.R` without a top-level `shinyApp()`
-    call, or that call `shinyApp()` conditionally, will leave
-    `captured_app == NULL` after preload. The FORK handler
-    detects this and falls back to `runApp(bundle_path, ...)`
-    in the child — identical to the pre-capture behaviour.
-    The zygote logs `preload ... warning=no_shinyapp_captured`
-    so operators can see the fallback is active. Bundle
-    packages themselves still benefit from being pre-loaded,
-    so startup latency is still improved.
+    **No stubbing, no monkey-patching.** An earlier iteration of
+    this design installed a capturing closure at `env$shinyApp` to
+    intercept `shinyApp(...)` calls at source time. That approach
+    was rejected once we worked out what actually matters: (a)
+    `sys.source` / `source` do not auto-print, so `print.shiny.appobj`
+    — which is what calls `runApp()` per `shiny/R/shinyapp.R:624` —
+    is never invoked in the zygote. The `shiny.appobj` returned
+    from `shinyApp()` is just a value. (b) `source()$value` already
+    captures that value cleanly without any function-override
+    trickery. (c) The removed stub had subtle semantic side
+    effects (bindings landed in an intermediate env rather than
+    `globalenv()`, closures were affected) that the simpler
+    `source()$value` approach does not have. See the "entrypoint
+    constraints" discussion in the design review.
+
+    **A defensive `runApp` stub remains** in the preload env to
+    handle bundles that end with `runApp(shinyApp(ui, server))`
+    instead of the bare `shinyApp(ui, server)`. Without the stub,
+    such bundles would (a) start an httpuv server in the zygote
+    and (b) return `invisible(NULL)` from the last expression,
+    defeating `source()$value` capture. The stub intercepts the
+    unqualified `runApp` lookup, records the first argument if it
+    is a `shiny.appobj`, and returns. Bundles that write
+    `shiny::runApp(shinyApp(...))` with the fully-qualified name
+    bypass the stub — those will get as far as httpuv startup,
+    which starts threads, and will be rejected by the thread-count
+    fork-safety check below.
+
+    **The bundle shape is verified at runtime with a clear error.**
+    If `app.R` is missing, or the last expression isn't a
+    `shiny.appobj`, `preload_bundle()` calls `stop()` with a
+    specific diagnostic pointing at the exact file and observed
+    class. The zygote exits, the control port never comes up, and
+    the blockyard server surfaces the failure as a worker-start
+    error on the API/UI. No silent fallback — an earlier draft
+    had the FORK handler fall back to `runApp(bundle_path, ...)`
+    in the child when capture failed, but that fallback was
+    rejected because it defeats the memory story: bundle state
+    lives in each child's private heap instead of the zygote's
+    shared COW-able heap. A fallback that makes zygote mode a
+    memory regression instead of a memory win is worse than a
+    hard error.
+
+    **server.R + ui.R bundles are not supported.** The capture
+    mechanism requires `app.R`. Bundles with the classic split
+    layout get a specific error message suggesting they either
+    restructure or disable zygote for this app. The decision to
+    reject rather than fall back is the same as above.
+
+    **Bundles that start background threads at preload time are
+    also rejected.** After `preload_bundle()` returns,
+    `check_fork_safety()` reads `/proc/self/status` and stops if
+    `Threads != 1`. This catches rJava, reticulate, future with
+    multisession plans, data.table with threaded init, and any
+    OpenMP-at-load package — i.e., the largest category of
+    fork-unsafety. See the prior-art note in the design review:
+    Android Zygote and Python's forkserver keep their preloaded
+    code single-threaded for exactly this reason, and Python 3.14
+    is deprecating fork-as-default on Linux because fork + threads
+    is intractable in the general case. What the check does NOT
+    catch: file descriptors to remote services (DB connection
+    pools, keep-alive HTTP sockets), process-global caches keyed
+    on PID. Those are documented caveats — the prior art punts on
+    them too.
 
     **Phase 3-10 layers up-front byte-compilation on top of
-    this.** The same preload path will switch from `sys.source`
-    to `compiler::cmpfile()` + `compiler::loadcmp()` so bundle
+    this.** The same preload path will switch from `source()` to
+    `compiler::cmpfile()` + `compiler::loadcmp()` so bundle
     closures are born as `BCODESXP` — a prerequisite for KSM
-    finding stable pages to merge (see
-    `phase-3-10-draft.md` decision K3). Phase 3-9 ships the
-    simpler `sys.source` path since it captures the shinyApp
-    object correctly and delivers the latency win unchanged.
+    finding stable pages to merge (see `phase-3-10-draft.md`
+    decision K3). Phase 3-9 keeps the simpler `source()` path.
 
     **What this does not catch (residuals):**
 
