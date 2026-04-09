@@ -113,7 +113,12 @@ jobs:
           image-ref: ${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-amd64
           format: sarif
           output: trivy-results.sarif
-          severity: CRITICAL,HIGH
+          # Includes MEDIUM because blockyard executes arbitrary R code,
+          # and in-process library CVEs (libssl, libtiff, libcurl, ...)
+          # are trivially exploitable by a malicious R package even when
+          # they're rated medium — nothing isolates a compromised lib
+          # from the process that linked it.
+          severity: CRITICAL,HIGH,MEDIUM
           # Required for `severity` to actually filter the SARIF output.
           # Without this the action unsets TRIVY_SEVERITY when format=sarif
           # and every severity gets uploaded to the Security tab.

@@ -23,7 +23,8 @@ vulnerabilities:
   #
   # Revisit on each rocker base bump: newer kernel header versions will
   # publish new CVE IDs. Add entries below (and delete obsolete ones)
-  # when that happens.
+  # when that happens. The whole category becomes moot once #185 lands
+  # and we migrate off rocker to a minimal R base image.
   - id: CVE-2026-23411
     statement: linux-libc-dev kernel CVE; container uses host kernel, not applicable.
   - id: CVE-2026-23410
