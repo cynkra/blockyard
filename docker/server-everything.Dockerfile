@@ -56,11 +56,15 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 # egress in native mode).
 FROM ghcr.io/rocker-org/r-ver:4.4.3
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bubblewrap \
-    ca-certificates \
-    curl \
-    iptables \
+# `apt-get upgrade` pulls in Ubuntu security patches that the
+# rocker/r-ver base may have missed since its last rebuild.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        bubblewrap \
+        ca-certificates \
+        curl \
+        iptables \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /blockyard /usr/local/bin/blockyard

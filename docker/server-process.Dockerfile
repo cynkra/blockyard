@@ -68,10 +68,15 @@ FROM ghcr.io/rocker-org/r-ver:4.4.3
 # variant relies on the operator's host iptables rules (or the
 # outer container's) for worker egress isolation; shipping the
 # tool would suggest blockyard itself installs the rules.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bubblewrap \
-    ca-certificates \
-    curl \
+#
+# `apt-get upgrade` pulls in Ubuntu security patches that the
+# rocker/r-ver base may have missed since its last rebuild.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        bubblewrap \
+        ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /blockyard /usr/local/bin/blockyard

@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -9,11 +10,9 @@ import (
 
 func TestRedisPortAllocatorBasic(t *testing.T) {
 	rc := newTestRedisClient(t, "test:")
-	// Use a range that's unlikely to collide with anything on the
-	// test host. 0 asks the kernel to pick a free ephemeral port
-	// first — but we need a fixed range for the allocator, so
-	// probe one dynamically and build a range around it.
-	base := findFreePort(t)
+	// Probe a contiguous block wide enough for the allocator range
+	// so we're not flaky when the ephemeral pool is crowded.
+	base := findFreePortRange(t, 3)
 	a := newRedisPortAllocator(rc, base, base+2, "host-a")
 
 	p1, ln1, err := a.Reserve()
@@ -63,7 +62,7 @@ func TestRedisPortAllocatorBasic(t *testing.T) {
 // TestRedisPortAllocatorConcurrentDistinct — the atomicity guarantee.
 func TestRedisPortAllocatorConcurrentDistinct(t *testing.T) {
 	rc := newTestRedisClient(t, "test:")
-	base := findFreePort(t)
+	base := findFreePortRange(t, 50)
 	a := newRedisPortAllocator(rc, base, base+49, "host-a")
 
 	var wg sync.WaitGroup
@@ -131,7 +130,7 @@ func TestRedisPortAllocatorKernelProbeSkipsExternallyBound(t *testing.T) {
 
 func TestRedisPortAllocatorPeerCoexistence(t *testing.T) {
 	rc := newTestRedisClient(t, "test:")
-	base := findFreePort(t)
+	base := findFreePortRange(t, 10)
 	host1 := newRedisPortAllocator(rc, base, base+9, "host-1")
 	host2 := newRedisPortAllocator(rc, base, base+9, "host-2")
 
@@ -170,7 +169,7 @@ func TestRedisPortAllocatorPeerCoexistence(t *testing.T) {
 // test.
 func TestRedisPortAllocatorCleanupOwnedOrphans(t *testing.T) {
 	rc := newTestRedisClient(t, "test:")
-	base := findFreePort(t)
+	base := findFreePortRange(t, 6)
 	host1 := newRedisPortAllocator(rc, base, base+5, "host-1")
 	host2 := newRedisPortAllocator(rc, base, base+5, "host-2")
 
@@ -222,20 +221,50 @@ func TestRedisPortAllocatorCleanupOwnedOrphans(t *testing.T) {
 	}
 }
 
-// findFreePort asks the kernel for an ephemeral port and immediately
-// closes the listener. Used to pick a base for allocator tests so
-// CI runners don't collide with hardcoded ranges. The returned
-// port may be reclaimed before the allocator binds it, but the
-// probe loop inside the allocator handles that case via the
-// skip_from mechanism.
-func findFreePort(t *testing.T) int {
+// findFreePortRange returns the base of an n-port contiguous block
+// that is entirely free on 127.0.0.1 right now. Used by tests that
+// exercise the allocator across the whole range: those tests fail
+// with "no free ports in range" if even a single port in the window
+// is held by another process on the runner.
+//
+// Probe once per attempt: pick an ephemeral base, try to bind every
+// port in [base, base+n). If all n succeed, close them all and
+// return the base — there is still a small TOCTOU window before the
+// test's Reserve calls grab them, but it is vastly smaller than the
+// old "probe one, hope five more are free" pattern.
+//
+// The per-attempt retry loop exists because on busy CI runners the
+// first ephemeral base may land next to something noisy; a few
+// retries reliably find a clean block.
+func findFreePortRange(t *testing.T, n int) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	const maxAttempts = 20
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		probe, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := probe.Addr().(*net.TCPAddr).Port
+		probe.Close()
+
+		lns := make([]net.Listener, 0, n)
+		ok := true
+		for i := 0; i < n; i++ {
+			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", base+i))
+			if err != nil {
+				ok = false
+				break
+			}
+			lns = append(lns, ln)
+		}
+		for _, ln := range lns {
+			ln.Close()
+		}
+		if ok {
+			return base
+		}
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
+	t.Fatalf("could not find %d contiguous free ports after %d attempts", n, maxAttempts)
+	return 0
 }
 
