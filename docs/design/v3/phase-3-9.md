@@ -125,13 +125,14 @@ designed for exactly that trade-off.
   allocator. Phase 3-9 also lifts phase 3-8's hardcoded
   `"port:"` Redis key prefix to a constructor parameter so the
   three allocators can share `redisPortAllocator` against
-  disjoint key namespaces. Phase 3-8 also provides
-  `drainer.FinishIdleWait`, which gracefully waits zygote
-  sessions out during a process-backend rolling update — zygote
-  sessions have `Entry.WorkerID = zygoteWorkerID` so they're
-  counted by `Sessions.CountForWorkers(own)` unchanged, and the
-  zygote worker (with all its forked children) survives until
-  the last session ends or the timeout elapses. The seccomp
+  disjoint key namespaces. Phase 3-8 also provides the
+  `drain.Drainer.FinishIdleWait` field (package `internal/drain`),
+  which gracefully waits zygote sessions out during a
+  process-backend rolling update — zygote sessions carry the
+  zygote worker's ID on `Entry.WorkerID` so they're counted by
+  `Sessions.CountForWorkers(own)` unchanged, and the zygote
+  worker (with all its forked children) survives until the last
+  session ends or the timeout elapses. The seccomp
   profile finalised in 3-8 is what phase 3-10 will apply
   post-fork.
 
@@ -1802,20 +1803,21 @@ to validate them independently:
 
 **Both new instances mirror phase 3-8's memory-vs-Redis split.**
 Phase 3-8 added `memoryPortAllocator` and `redisPortAllocator`
-implementations selected by `process.New` based on
-`fullCfg.Redis != nil`. Phase 3-9 routes the two new ranges
-through the same branch — when Redis is configured, all three
-allocators are Redis-backed; when it isn't, all three are
-memory-backed:
+implementations selected by `process.New` based on whether the
+`rc *redisstate.Client` argument is non-nil (which mirrors
+`fullCfg.Redis != nil` upstream). Phase 3-9 routes the two new
+ranges through the same branch — when Redis is configured, all
+three allocators are Redis-backed; when it isn't, all three
+are memory-backed:
 
 ```go
 // In process.New, after the existing ports/uids construction
 // from phase 3-8:
-if fullCfg.Redis != nil {
-    b.controlPorts = newRedisPortAllocator(client,
+if rc != nil {
+    b.controlPorts = newRedisPortAllocator(rc,
         cfg.ZygoteControlRangeStart, cfg.ZygoteControlRangeEnd,
         hostname, "controlport:")
-    b.childPorts = newRedisPortAllocator(client,
+    b.childPorts = newRedisPortAllocator(rc,
         cfg.ZygoteChildRangeStart, cfg.ZygoteChildRangeEnd,
         hostname, "childport:")
 } else {
@@ -1827,23 +1829,34 @@ if fullCfg.Redis != nil {
 ```
 
 This requires one small extension to phase 3-8's
-`newRedisPortAllocator` constructor: a fourth `keyPrefix string`
-parameter so the three allocators write to disjoint key
-namespaces (`{prefix}port:<N>`, `{prefix}controlport:<N>`,
-`{prefix}childport:<N>`). Phase 3-8 hardcodes the prefix as
-`"port:"` inside the constructor; phase 3-9 lifts it to a
-parameter and updates the existing `b.ports` call site to pass
-`"port:"` explicitly. The Lua scripts (SETNX scan, ownership-
-checked DEL) take the prefix from `KEYS[1]` already, so no
-script changes — only the Go-side wiring.
+`newRedisPortAllocator` constructor: a fifth `keyPrefix string`
+parameter (appended after `hostname`) so the three allocators
+write to disjoint key namespaces
+(`{clientPrefix}port:<N>`, `{clientPrefix}controlport:<N>`,
+`{clientPrefix}childport:<N>`). Phase 3-8 hardcodes `"port:"`
+as a string literal both inside `portClaimScript` (`local key =
+prefix .. "port:" .. i`) and in the Go-side helpers (`luaRelease`,
+`InUse`, `CleanupOwnedOrphans`). Phase 3-9 lifts it by:
+(a) storing `keyPrefix` on `redisPortAllocator` and computing
+the full prefix once as `p.client.Prefix() + p.keyPrefix`;
+(b) passing that full prefix as `KEYS[1]` to `portClaimScript`
+and changing the script body to `local key = prefix .. i`
+(stripping the `"port:"` literal); (c) updating each Go-side
+helper to use `p.keyPrefix` rather than the hardcoded string;
+(d) updating the existing `b.ports` construction to pass
+`"port:"` explicitly. `ownerDeleteScript` is unchanged because
+it already takes the full key as `KEYS[1]`.
 
-`CleanupOwnedOrphans` extends symmetrically: phase 3-8's
-`ProcessBackend.CleanupOrphanResources` already type-asserts
-`b.ports.(*redisPortAllocator)` and calls cleanup on hit; phase
-3-9 adds two more parallel branches for `b.controlPorts` and
-`b.childPorts`. Each Redis allocator instance owns its own key
-namespace, so the cleanups are independent and the order is
-irrelevant.
+`CleanupOwnedOrphans` extends symmetrically. Phase 3-8's
+`ProcessBackend.CleanupOrphanResources` already calls each
+allocator through an `orphanCleaner` interface assertion, so
+the new `controlPorts` and `childPorts` allocators get picked
+up automatically as long as their Redis variant implements the
+same `CleanupOwnedOrphans(ctx)` method. Phase 3-9 therefore
+adds two more interface-assertion calls (one per new allocator)
+alongside the existing ones — no switch on concrete type. Each
+Redis allocator instance owns its own key namespace, so the
+cleanups are independent and the order is irrelevant.
 
 This closes the cross-server collision window for the new
 ranges during a process-backend rolling-update overlap, the
@@ -2029,11 +2042,16 @@ ever runs:
 flags := srv.Config.ExperimentalFlags()
 if flags.Zygote {
     if forking, ok := backend.(backend.Forking); ok {
+        // Sweep cadence is operator-tunable via
+        // Proxy.ZygoteSweepInterval (default 30s, see Step 13).
+        // Deliberately decoupled from the autoscaler tick
+        // (`Proxy.HealthInterval`) — the sweep is a cross-check
+        // against the session store, not a scaling signal.
         srv.Zygotes = zygote.NewManager(
             forking,
             srv.Sessions,
             zygote.ManagerConfig{
-                SweepInterval: srv.Config.Proxy.AutoscalerInterval.Duration,
+                SweepInterval: srv.Config.Proxy.ZygoteSweepInterval.Duration,
             },
         )
     }
@@ -2364,6 +2382,32 @@ runtime by `process.RunPreflight.checkPortRanges`, not at config
 parse time, so operators get a usable error rather than a startup
 failure when their pool is slightly under-sized.
 
+One new field on `ProxyConfig` — the Manager's sweep cadence:
+
+```go
+type ProxyConfig struct {
+    // ...existing fields...
+    ZygoteSweepInterval Duration `toml:"zygote_sweep_interval"`
+}
+```
+
+Default applied in `applyDefaults()` alongside the other
+`Proxy.*` defaults:
+
+```go
+if cfg.Proxy.ZygoteSweepInterval.Duration == 0 {
+    cfg.Proxy.ZygoteSweepInterval.Duration = 30 * time.Second
+}
+```
+
+Operators who never touch the zygote model pay nothing for this
+field — the Manager isn't constructed when `experimental.zygote`
+is off, so the sweep loop never runs. Operators who do enable
+zygote can tune the cadence if their session-store churn rate
+pushes them towards a shorter or longer interval; 30s is
+deliberately conservative and matches `ManagerConfig`'s built-in
+fallback.
+
 Phase 3-10 adds a `ZygoteMetricsInterval` field to `ProxyConfig`
 for the KSM metrics-poll cadence.
 
@@ -2570,11 +2614,10 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | `internal/db/db.go` | **update** | `Zygote` on `AppRow` and `AppUpdate`, UPDATE SQL |
 | `internal/backend/backend.go` | **update** | `Forking` interface, `ChildExit` type, `WorkerSpec.Zygote`/`ControlSecret`/`ChildPortRange` |
 | `internal/backend/docker/docker.go` | **update** | Spawn branch for zygote (Cmd, env vars, mount, control client connect); `Addr`/`HealthCheck` branch on `ws.fork` to use control port; `Stop` synthesises ChildExit events before container teardown; `workerState.stopping` flag + idempotent `Stop`; control-connection watcher goroutine that calls `Stop` on `client.Done()` when not stopping |
-| `internal/backend/process/process.go` | **update** | Same shape as `docker.go`: spawn branch, `Addr`/`HealthCheck` branch on `workerProc.fork`, synthesised-ChildExit on `Stop`, `workerProc.stopping` flag + idempotent `Stop`, control-connection watcher; plus `controlPorts` and `childPorts` allocators on the backend struct, constructed in `process.New` via the same `cfg.Redis != nil` branch phase 3-8 already uses for `b.ports`; `CleanupOrphanResources` extends to call the new allocators' `CleanupOwnedOrphans` when they're the Redis variants |
-| `internal/backend/process/ports.go` | **update** | Lift the hardcoded `"port:"` Redis key prefix into a constructor parameter (`newRedisPortAllocator(client, lo, hi, hostname, keyPrefix)`) so the existing `b.ports` and the two new `b.controlPorts` / `b.childPorts` instances write to disjoint key namespaces. Phase 3-8's existing call site updates to pass `"port:"` explicitly. The `memoryPortAllocator` constructor is unchanged. |
-| `internal/backend/process/ports_redis.go` | **update** | Constructor takes the new `keyPrefix` parameter and passes it as the `KEYS[1]` prefix in both the SETNX-scan and ownership-checked-DEL Lua scripts. Scripts themselves are unchanged (they already read the prefix from `KEYS[1]`). `CleanupOwnedOrphans` scans `{prefix}<keyPrefix><N>` instead of the hardcoded form. |
-| `internal/backend/process/ports_redis_test.go` | **update** | Existing tests pass `"port:"` explicitly. Add tests covering the new `controlport:` and `childport:` namespaces (concurrent Reserve, exhaustion, ownership-checked Release, three-way namespace isolation: claiming control port 11000 does not block port 11000 in the `port:` namespace). |
-| `internal/backend/process/ports_cleanup_test.go` | **update** | Mirror of `ports_redis_test.go` updates: cleanup scoping per namespace, no cross-namespace deletion. |
+| `internal/backend/process/process.go` | **update** | Same shape as `docker.go`: spawn branch, `Addr`/`HealthCheck` branch on `workerProc.fork`, synthesised-ChildExit on `Stop`, `workerProc.stopping` flag + idempotent `Stop`, control-connection watcher; plus `controlPorts` and `childPorts` allocators on the backend struct, constructed in `process.New` via the same `rc != nil` branch phase 3-8 already uses for `b.ports`; `CleanupOrphanResources` gets two extra `orphanCleaner` interface-assertion calls — one per new allocator — alongside the existing `b.ports` / `b.uids` blocks. Memory variants satisfy the same interface with a no-op. |
+| `internal/backend/process/ports.go` | **update** | Interface unchanged. `memoryPortAllocator` constructor is unchanged. |
+| `internal/backend/process/ports_redis.go` | **update** | `newRedisPortAllocator` grows a fifth `keyPrefix string` parameter (appended after `hostname`) and stores it on the struct. `portClaimScript` drops the hardcoded `"port:"` literal — Go now computes `p.client.Prefix() + p.keyPrefix` and passes it as `KEYS[1]`, so the script body becomes `local key = prefix .. i`. `luaRelease`, `InUse`, and `CleanupOwnedOrphans` swap their hardcoded `"port:"` / `"port:*"` strings for `p.keyPrefix` / `p.keyPrefix + "*"`. `ownerDeleteScript` is unchanged (it already takes the full key as `KEYS[1]`). |
+| `internal/backend/process/ports_redis_test.go` | **update** | Existing `newRedisPortAllocator` calls pass `"port:"` explicitly. Add tests covering the new `controlport:` and `childport:` namespaces (concurrent Reserve, exhaustion, ownership-checked Release, three-way namespace isolation: claiming control port 11000 does not block port 11000 in the `port:` namespace). Extend the existing `TestRedisPortAllocatorCleanupOwnedOrphans` to cover per-namespace cleanup scoping (no cross-namespace deletion). |
 | `internal/session/store.go` | **update** | `Addr` field on `Entry` |
 | `internal/session/redis.go` | **update** | Hash schema gains `addr` field |
 | `internal/proxy/proxy.go` | **update** | Pass `sessionID` to `ensureWorker`, populate `Entry.Addr`, zygote unreachable-child fallback |
@@ -2587,7 +2630,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 | `cmd/by/scale.go` | **update** | `--zygote` flag |
 | `cmd/blockyard/main.go` | **update** | Construct `zygote.Manager` when backend implements `Forking` and `experimental.zygote` is set; write embedded `ZygoteScript` to host path at startup |
 | `internal/server/state.go` | **update** | `Zygotes *zygote.Manager` field on `Server` |
-| `internal/config/config.go` | **update** | New `Experimental *ExperimentalConfig` top-level section (`Zygote` bool, default off) with `ExperimentalFlags()` nil-safe accessor; `ZygoteChildPortRange`, `ZygoteControlPort` on `DockerConfig`; `ZygoteControlRangeStart/End`, `ZygoteChildRangeStart/End` on `ProcessConfig` |
+| `internal/config/config.go` | **update** | New `Experimental *ExperimentalConfig` top-level section (`Zygote` bool, default off) with `ExperimentalFlags()` nil-safe accessor; `ZygoteChildPortRange`, `ZygoteControlPort` on `DockerConfig`; `ZygoteControlRangeStart/End`, `ZygoteChildRangeStart/End` on `ProcessConfig`; `ZygoteSweepInterval` Duration on `ProxyConfig` (default 30s) |
 
 ## New files
 
