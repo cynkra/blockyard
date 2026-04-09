@@ -111,20 +111,25 @@ func (d *Drainer) Finish(timeout time.Duration) {
 	slog.Info("finish: complete, exiting")
 }
 
+// idleWaitPollInterval is the poll cadence waitForIdle uses between
+// WorkersForServer/CountForWorkers checks. 5 seconds is short enough
+// for a snappy cutover and long enough that the Redis SCAN runs at
+// most 12 times per minute, which is negligible compared to the
+// sustained traffic the server already pushes through Redis.
+// A package-level var so internal tests can shorten it without
+// stretching the test runtime.
+var idleWaitPollInterval = 5 * time.Second
+
 // waitForIdle polls the local server's session count until it
 // reaches zero or maxWait elapses. Only workers owned by this server
 // (matched via d.ServerID against the workermap) contribute — a new
 // peer's workers would otherwise keep the count above zero
 // indefinitely during a same-host rolling update.
 //
-// Unexported — only Finish calls it. The 5-second poll interval is
-// short enough for snappy cutover and long enough that the Redis
-// SCAN runs at most 12 times per minute, which is negligible
-// compared to the sustained traffic the server already pushes
-// through Redis.
+// Unexported — only Finish calls it.
 func (d *Drainer) waitForIdle(maxWait time.Duration) {
 	deadline := time.Now().Add(maxWait)
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(idleWaitPollInterval)
 	defer ticker.Stop()
 
 	for {

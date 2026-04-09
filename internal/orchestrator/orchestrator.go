@@ -90,10 +90,24 @@ func New(
 // pre-dispatch check passes; the factory's CreateInstance is never
 // reached because the test exits before the goroutine runs.
 func NewForTest() *Orchestrator {
+	return newForTestWithFactory(stubFactory{supportsRollback: true})
+}
+
+// NewForTestNoRollback is NewForTest but with a factory that reports
+// SupportsRollback=false — simulates the process backend at the
+// orchestrator layer. The admin rollback handler uses this to cover
+// the phase 3-8 "backend cannot rollback" 501 branch without
+// plugging the real processServerFactory (which lives behind a
+// build tag).
+func NewForTestNoRollback() *Orchestrator {
+	return newForTestWithFactory(stubFactory{supportsRollback: false})
+}
+
+func newForTestWithFactory(f ServerFactory) *Orchestrator {
 	o := &Orchestrator{
 		exitFn:  func() {},
 		update:  noopChecker{},
-		factory: stubFactory{},
+		factory: f,
 		tasks:   task.NewStore(),
 		log:     slog.Default(),
 		cfg:     &config.Config{},
@@ -111,7 +125,9 @@ func (noopChecker) CheckLatest(_, _ string) (*update.Result, error) {
 // stubFactory is a minimal ServerFactory used by NewForTest. All
 // methods return zero values or errors; tests that exercise the
 // Update/Rollback flow use a real factory instead.
-type stubFactory struct{}
+type stubFactory struct {
+	supportsRollback bool
+}
 
 func (stubFactory) CreateInstance(_ context.Context, _ string, _ []string, _ task.Sender) (newServerInstance, error) {
 	return nil, fmt.Errorf("stub factory: not implemented")
@@ -119,7 +135,7 @@ func (stubFactory) CreateInstance(_ context.Context, _ string, _ []string, _ tas
 func (stubFactory) PreUpdate(_ context.Context, _ string, _ task.Sender) error { return nil }
 func (stubFactory) CurrentImageBase(_ context.Context) string                  { return "blockyard" }
 func (stubFactory) CurrentImageTag(_ context.Context) string                   { return "test" }
-func (stubFactory) SupportsRollback() bool                                     { return true }
+func (f stubFactory) SupportsRollback() bool                                   { return f.supportsRollback }
 
 // State returns the current orchestrator phase.
 func (o *Orchestrator) State() string {

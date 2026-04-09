@@ -502,38 +502,45 @@ func TestEnsureBundleMountPointCreationFails(t *testing.T) {
 	}
 }
 
-// startBackgroundCmd spawns a command, registers a cleanup that
-// kills and reaps it, and returns the *exec.Cmd. Skips the test if
-// the binary cannot be launched.
-func startBackgroundCmd(t *testing.T, name string, args ...string) *exec.Cmd {
+// startBackgroundCmd spawns a command, starts a single reaper
+// goroutine that calls cmd.Wait exactly once, and registers a
+// cleanup that kills the process and blocks on the reaper. Returns
+// the *exec.Cmd and a done channel that closes when Wait completes.
+// Skips the test if the binary cannot be launched.
+//
+// The reaper is the sole Wait caller: exec.Cmd documents that Wait
+// is not safe to call concurrently, so previously we had a race
+// between this helper's cleanup Wait and injectLiveWorker's own
+// goroutine. Centralizing the Wait in one place here eliminates
+// that race and gives callers a ready-to-use done channel.
+func startBackgroundCmd(t *testing.T, name string, args ...string) (*exec.Cmd, chan struct{}) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot spawn %s: %v", name, err)
 	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	})
-	return cmd
-}
-
-// injectLiveWorker spawns a long-running /bin/sleep, wires the
-// done-channel reaper goroutine (mirroring what Spawn's real wait
-// goroutine does), and registers the synthetic workerProc under id.
-// Returns the done channel so callers can assert reap ordering.
-// The injected workerProc has cmd + process populated so Stop,
-// RemoveResource, and WorkerResourceUsage all work end-to-end.
-func injectLiveWorker(t *testing.T, b *ProcessBackend, id string) chan struct{} {
-	t.Helper()
-	cmd := startBackgroundCmd(t, "/bin/sleep", "30s")
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		close(done)
 	}()
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+	})
+	return cmd, done
+}
+
+// injectLiveWorker spawns a long-running /bin/sleep, uses the reaper
+// goroutine from startBackgroundCmd as the worker's done channel,
+// and registers the synthetic workerProc under id. The injected
+// workerProc has cmd + process populated so Stop, RemoveResource,
+// and WorkerResourceUsage all work end-to-end.
+func injectLiveWorker(t *testing.T, b *ProcessBackend, id string) chan struct{} {
+	t.Helper()
+	cmd, done := startBackgroundCmd(t, "/bin/sleep", "30s")
 	b.workers[id] = &workerProc{
 		cmd:     cmd,
 		process: cmd.Process,
@@ -695,7 +702,7 @@ func TestWorkerResourceUsageLiveChild(t *testing.T) {
 // the /proc children tree; the pre-existing TestCollectDescendantsSelf
 // only checks that the call doesn't panic.
 func TestCollectDescendantsWithChild(t *testing.T) {
-	cmd := startBackgroundCmd(t, "/bin/sh", "-c", "sleep 30 & wait")
+	cmd, _ := startBackgroundCmd(t, "/bin/sh", "-c", "sleep 30 & wait")
 
 	// Poll for the forked sleep — the shell may not have exec'd it yet
 	// when we return from Start, so a fixed sleep would race under load.
@@ -730,6 +737,7 @@ func TestPreflightDelegates(t *testing.T) {
 		"user_namespaces":        false,
 		"port_range":             false,
 		"resource_limits":        false,
+		"seccomp_profile":        false,
 		"bwrap_host_uid_mapping": false,
 		"worker_egress":          false,
 	}
