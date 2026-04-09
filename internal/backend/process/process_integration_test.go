@@ -174,7 +174,7 @@ func TestSpawnAndStop(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	be, err := process.New(cfg)
+	be, err := process.New(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestWorkerResourceUsageUnknownWorker(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	be, err := process.New(cfg)
+	be, err := process.New(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	be, err := process.New(cfg)
+	be, err := process.New(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestUpdateResourcesNotSupported(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	be, err := process.New(cfg)
+	be, err := process.New(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestRSmokeBoot(t *testing.T) {
 			WorkerGID:      65534,
 		},
 	}
-	be, err := process.New(cfg)
+	be, err := process.New(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
