@@ -89,6 +89,16 @@ jobs:
 
   scan-image:
     needs: server-image
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: everything
+            image_suffix: ""
+          - variant: docker
+            image_suffix: -docker
+          - variant: process
+            image_suffix: -process
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -100,10 +110,17 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref: ${{ env.IMAGE }}:build-linux-amd64
+          image-ref: ${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-amd64
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          # Required for `severity` to actually filter the SARIF output.
+          # Without this the action unsets TRIVY_SEVERITY when format=sarif
+          # and every severity gets uploaded to the Security tab.
+          limit-severities-for-sarif: true
+          # Suppresses kernel-header CVEs that don't apply to container
+          # workloads; see the file itself for rationale.
+          trivyignores: .trivyignore.yaml
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -113,6 +130,9 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
+          # Per-variant category so the three scans don't overwrite each
+          # other's alerts in the Security tab.
+          category: trivy-${{ matrix.variant }}
 
   manifest:
     needs: [server-image, scan-image]
