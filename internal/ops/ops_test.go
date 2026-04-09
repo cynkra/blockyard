@@ -287,6 +287,41 @@ func TestStartupCleanupFailsStaleBuilds(t *testing.T) {
 	}
 }
 
+func TestStartupCleanupPassiveKeepsWorkersWithLiveContainers(t *testing.T) {
+	srv, be := testServer(t)
+
+	// Seed two workers in Redis, as if a previous server spawned them.
+	srv.Workers.Set("w-keep", server.ActiveWorker{AppID: "app1"})
+	srv.Registry.Set("w-keep", "127.0.0.1:9001")
+	srv.Workers.Set("w-stale", server.ActiveWorker{AppID: "app2"})
+	srv.Registry.Set("w-stale", "127.0.0.1:9002")
+
+	// Only w-keep still has a live container. The container ID is a
+	// Docker-style hex hash, distinct from the worker UUID — this is the
+	// mismatch that issue #156 exposed.
+	be.SetManagedResources([]backend.ManagedResource{
+		{
+			ID:     "c0ffee1234",
+			Kind:   backend.ResourceContainer,
+			Labels: map[string]string{"dev.blockyard/worker-id": "w-keep"},
+		},
+	})
+
+	if err := StartupCleanup(context.Background(), srv, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := srv.Workers.Get("w-keep"); !ok {
+		t.Error("worker with live container should be kept after passive reconciliation")
+	}
+	if _, ok := srv.Registry.Get("w-keep"); !ok {
+		t.Error("registry entry for live worker should be kept")
+	}
+	if _, ok := srv.Workers.Get("w-stale"); ok {
+		t.Error("worker without a live container should be removed")
+	}
+}
+
 func TestEvictDrainedWorkersEvictsZeroSessions(t *testing.T) {
 	srv, be := testServer(t)
 	spawnWorker(t, srv, be, "w-drain", "app1")

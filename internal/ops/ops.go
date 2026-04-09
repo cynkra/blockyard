@@ -140,7 +140,9 @@ func StartupCleanup(ctx context.Context, srv *server.Server, passive bool) error
 		remaining, _ := srv.Backend.ListManaged(ctx)
 		alive := make(map[string]bool, len(remaining))
 		for _, r := range remaining {
-			alive[r.ID] = true
+			if wid := r.Labels["dev.blockyard/worker-id"]; wid != "" {
+				alive[wid] = true
+			}
 		}
 		var stale int
 		for _, wid := range workerIDs {
