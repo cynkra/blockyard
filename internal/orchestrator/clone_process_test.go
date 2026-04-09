@@ -3,6 +3,7 @@
 package orchestrator
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -147,7 +148,7 @@ func TestProcessFactoryCurrentImageBase(t *testing.T) {
 	f := NewProcessFactory(&config.Config{})
 	// Must return a stable non-empty value — the orchestrator logs
 	// base:tag pairs during Update.
-	if f.CurrentImageBase(nil) == "" {
+	if f.CurrentImageBase(context.Background()) == "" {
 		t.Error("CurrentImageBase should return a stable placeholder")
 	}
 }

@@ -239,10 +239,6 @@ func (o *Orchestrator) killAndRemove(ctx context.Context, id string) {
 	dockerFactoryFromOrchestrator(o).killAndRemove(ctx, id)
 }
 
-func (o *Orchestrator) pullImage(ctx context.Context, ref string) error {
-	return dockerFactoryFromOrchestrator(o).pullImage(ctx, ref)
-}
-
 // setActiveDockerInstanceForTest lets a test stash a fake Docker
 // instance on o.activeInstance so the collapsed Watchdog(ctx,
 // watchPeriod, sender) call can read its address and kill closure.

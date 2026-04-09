@@ -29,15 +29,6 @@ import (
 	"os"
 )
 
-// seccompProfile is a lightweight structural representation of the
-// OCI seccomp JSON schema. Enough fields to read, merge, and write;
-// not a validator (cmd/seccomp-compile exercises the rules).
-type seccompProfile struct {
-	DefaultAction string            `json:"defaultAction"`
-	ArchMap       []json.RawMessage `json:"archMap,omitempty"`
-	Syscalls      []json.RawMessage `json:"syscalls"`
-}
-
 // overlay is the blockyard-specific patch on top of the upstream.
 // Currently a prepend-only overlay; future fields (remove lists,
 // replace lists) can be added here without breaking consumers.

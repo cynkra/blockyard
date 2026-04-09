@@ -184,13 +184,10 @@ func TestRedisUIDAllocatorCleanupOwnedOrphans(t *testing.T) {
 	// After cleanup, host1 should be able to re-alloc 3 UIDs (from
 	// the slots it previously held) but no more.
 	fresh := newRedisUIDAllocator(rc, 60000, 60005, "host-1")
-	var uids []int
 	for range 3 {
-		u, err := fresh.Alloc()
-		if err != nil {
+		if _, err := fresh.Alloc(); err != nil {
 			t.Fatal(err)
 		}
-		uids = append(uids, u)
 	}
 	if _, err := fresh.Alloc(); err == nil {
 		t.Error("expected exhaustion — host2's 3 entries should still be held")
