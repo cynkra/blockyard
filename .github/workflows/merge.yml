@@ -99,7 +99,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         if: github.event_name != 'pull_request'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           node-version: 22
@@ -224,7 +224,7 @@ jobs:
           PR_NUM=$(echo "$REF" | grep -oP 'pr-\K[0-9]+')
           echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
 
-      - uses: dawidd6/action-download-artifact@v19
+      - uses: dawidd6/action-download-artifact@v20
         with:
           workflow: ci.yml
           pr: ${{ steps.pr.outputs.number }}
