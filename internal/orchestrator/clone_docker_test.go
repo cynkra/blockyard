@@ -24,6 +24,7 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/task"
+	"github.com/cynkra/blockyard/internal/units"
 	"github.com/cynkra/blockyard/internal/update"
 )
 
@@ -162,7 +163,7 @@ func newTestOrchestrator(t *testing.T, docker *mockDocker, checker updateAPI) (*
 	}
 
 	factory := newDockerFactoryForTest(docker, "self-container-id", func() string {
-		return listenPortFromBindForTest(cfg.Server.Bind)
+		return units.ListenPort(cfg.Server.Bind)
 	})
 
 	o := &Orchestrator{
@@ -179,18 +180,6 @@ func newTestOrchestrator(t *testing.T, docker *mockDocker, checker updateAPI) (*
 	}
 	o.state.Store("idle")
 	return o, tracker
-}
-
-// listenPortFromBindForTest is a local copy of
-// cmd/blockyard/orchestrator_docker.listenPortFromBind so the test
-// file doesn't have to import a main package.
-func listenPortFromBindForTest(bind string) string {
-	for i := len(bind) - 1; i >= 0; i-- {
-		if bind[i] == ':' {
-			return bind[i+1:]
-		}
-	}
-	return "8080"
 }
 
 // dockerFactoryFromOrchestrator is a test helper that exposes the
@@ -934,20 +923,6 @@ func TestUpdateReadyTimeout(t *testing.T) {
 	}
 	if tracker.drained.Load() != 0 {
 		t.Error("drain should not be called when readyz times out")
-	}
-}
-
-func TestListenPort(t *testing.T) {
-	o, _ := newTestOrchestrator(t, &mockDocker{}, &mockChecker{})
-
-	o.cfg.Server.Bind = "0.0.0.0:9090"
-	if p := o.listenPort(); p != "9090" {
-		t.Errorf("listenPort = %q, want 9090", p)
-	}
-
-	o.cfg.Server.Bind = "8080"
-	if p := o.listenPort(); p != "8080" {
-		t.Errorf("listenPort = %q for no-colon addr, want 8080", p)
 	}
 }
 

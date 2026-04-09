@@ -4,13 +4,13 @@ package main
 
 import (
 	"os"
-	"strings"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/orchestrator"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/units"
 )
 
 func init() {
@@ -31,19 +31,7 @@ func init() {
 				dbe.Client(),
 				dbe.ServerID(),
 				srv.Version,
-				func() string { return listenPortFromBind(cfg.Server.Bind) },
+				func() string { return units.ListenPort(cfg.Server.Bind) },
 			)
 		})
-}
-
-// listenPortFromBind extracts the port from a "host:port" bind address.
-// Returns "8080" when the bind has no colon (edge case — validate
-// elsewhere). Duplicated from orchestrator.listenPort rather than
-// exporting it, since the orchestrator package intentionally does not
-// depend on config.
-func listenPortFromBind(bind string) string {
-	if idx := strings.LastIndex(bind, ":"); idx != -1 {
-		return bind[idx+1:]
-	}
-	return "8080"
 }

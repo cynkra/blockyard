@@ -180,7 +180,7 @@ func TestProcessFactoryCreatesAndActivates(t *testing.T) {
 	altRange := fmt.Sprintf("%d-%d", altStart, altStart+4)
 
 	cfg := writeChildConfig(t, mr, primaryPort, altRange)
-	factory := orchestrator.NewProcessFactory(cfg)
+	factory := orchestrator.NewProcessFactory(cfg, "1.0.0-test")
 
 	sender := task.NewStore().Create("factory-test", "test")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -283,7 +283,7 @@ func TestProcessOrchestratorFullUpdate(t *testing.T) {
 	altRange := fmt.Sprintf("%d-%d", altStart, altStart+4)
 
 	cfg := writeChildConfig(t, mr, primaryPort, altRange)
-	factory := orchestrator.NewProcessFactory(cfg)
+	factory := orchestrator.NewProcessFactory(cfg, "1.0.0")
 
 	database, err := db.Open(cfg.Database)
 	if err != nil {

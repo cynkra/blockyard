@@ -14,7 +14,7 @@ import (
 
 func init() {
 	orchestratorFactoryFns = append(orchestratorFactoryFns,
-		func(_ *server.Server, cfg *config.Config, be backend.Backend) orchestrator.ServerFactory {
+		func(srv *server.Server, cfg *config.Config, be backend.Backend) orchestrator.ServerFactory {
 			// Containerized blockyard runs as PID 1; fork+exec-ing a
 			// new blockyard inside the container is pointless (killing
 			// PID 1 stops the container regardless). Operators use
@@ -25,6 +25,6 @@ func init() {
 			if _, ok := be.(*process.ProcessBackend); !ok {
 				return nil
 			}
-			return orchestrator.NewProcessFactory(cfg)
+			return orchestrator.NewProcessFactory(cfg, srv.Version)
 		})
 }

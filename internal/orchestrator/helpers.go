@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -78,16 +77,6 @@ func (o *Orchestrator) checkReady(ctx context.Context, addr string) error {
 		return fmt.Errorf("readyz returned %d", resp.StatusCode)
 	}
 	return nil
-}
-
-// listenPort extracts the port from the server's bind address. Used by
-// the Docker factory to construct the new container's internal address.
-func (o *Orchestrator) listenPort() string {
-	bind := o.cfg.Server.Bind
-	if idx := strings.LastIndex(bind, ":"); idx != -1 {
-		return bind[idx+1:]
-	}
-	return "8080"
 }
 
 // generateActivationToken creates a cryptographically random token

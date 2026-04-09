@@ -6,6 +6,24 @@ import (
 	"strings"
 )
 
+// ListenPort extracts the port from a Go bind address like
+// "host:port" or "[::1]:port". Falls back to "8080" when the string
+// contains no colon at all — a defensive path for malformed input,
+// not a real configuration mode (operators go through config
+// validation before reaching this helper).
+//
+// Shared between cmd/blockyard (passes a closure into
+// NewDockerFactory) and internal/orchestrator tests so both sides
+// exercise the same parsing. The orchestrator package intentionally
+// does not depend on config, so this lives in internal/units where
+// both callers can reach it without introducing a cycle.
+func ListenPort(bind string) string {
+	if idx := strings.LastIndex(bind, ":"); idx != -1 {
+		return bind[idx+1:]
+	}
+	return "8080"
+}
+
 // ParsePortRange parses a "start-end" port range string into its
 // two integer endpoints. Both endpoints are inclusive. Returns an
 // error for malformed input, out-of-range values (0 or > 65535), or

@@ -2,6 +2,28 @@ package units
 
 import "testing"
 
+func TestListenPort(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "host and port", in: "0.0.0.0:9090", want: "9090"},
+		{name: "loopback", in: "127.0.0.1:8080", want: "8080"},
+		{name: "bare colon", in: ":8080", want: "8080"},
+		{name: "ipv6", in: "[::1]:9090", want: "9090"},
+		{name: "no colon falls back", in: "8080", want: "8080"},
+		{name: "malformed falls back", in: "garbage", want: "8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ListenPort(tt.in); got != tt.want {
+				t.Errorf("ListenPort(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParsePortRange(t *testing.T) {
 	tests := []struct {
 		name       string

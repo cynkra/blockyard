@@ -29,15 +29,22 @@ var executableFn = os.Executable
 // same blockyard binary with BLOCKYARD_PASSIVE=1 and an alt-bind
 // address from cfg.Update.AltBindRange.
 type processServerFactory struct {
-	cfg *config.Config
-	log *slog.Logger
+	cfg     *config.Config
+	version string // running server's version, returned from CurrentImageTag
+	log     *slog.Logger
 }
 
 // NewProcessFactory constructs the process variant of ServerFactory.
-func NewProcessFactory(cfg *config.Config) ServerFactory {
+// version is the running server's version string, used as the backup
+// metadata image tag via CurrentImageTag — mirrors the symmetric
+// Docker NewDockerFactory argument so both factories record a
+// meaningful tag even though only the Docker variant can consume it
+// during automatic rollback.
+func NewProcessFactory(cfg *config.Config, version string) ServerFactory {
 	return &processServerFactory{
-		cfg: cfg,
-		log: slog.Default(),
+		cfg:     cfg,
+		version: version,
+		log:     slog.Default(),
 	}
 }
 
@@ -107,15 +114,13 @@ func (f *processServerFactory) CurrentImageBase(_ context.Context) string {
 	return "blockyard-process"
 }
 
-// CurrentImageTag returns the current server version. Used by the
-// backup metadata so a rollback can restore the correct schema
-// version even though the process variant doesn't support rollback
-// via this orchestrator.
+// CurrentImageTag returns the running server's version, recorded in
+// backup metadata at Update time. The process variant doesn't
+// currently consume the tag during rollback (SupportsRollback is
+// false) but writing the real version still lets operators identify
+// which binary produced a backup for manual recovery.
 func (f *processServerFactory) CurrentImageTag(_ context.Context) string {
-	if f.cfg != nil && f.cfg.Server.Backend == "process" {
-		return "process"
-	}
-	return "process"
+	return f.version
 }
 
 // SupportsRollback returns false — the previous version's binary is

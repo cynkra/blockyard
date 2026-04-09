@@ -160,10 +160,13 @@ jobs:
           docker rm -f smoke
           exit 1
 
-  # seccomp-blob publishes the compiled BPF seccomp profile as a
-  # release asset so native-mode operators can download it rather
-  # than extracting from a Docker image. Same libseccomp-dev +
-  # cmd/seccomp-compile invocation the variant Dockerfiles run.
+  # seccomp-blob publishes the two seccomp release assets native-mode
+  # operators consume: the compiled bwrap BPF profile and the outer-
+  # container JSON profile. The BPF goes through
+  # cmd/seccomp-compile (same libseccomp-dev + CGO invocation the
+  # variant Dockerfiles run); the JSON ships as-is from the repo so
+  # operators can apply it via `--security-opt seccomp=<path>`
+  # without pulling an image or installing the `by` CLI.
   seccomp-blob:
     needs: tests
     runs-on: ubuntu-24.04
@@ -183,6 +186,11 @@ jobs:
         with:
           name: seccomp-bwrap-bpf
           path: /tmp/blockyard-bwrap-seccomp.bpf
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: seccomp-outer-json
+          path: internal/seccomp/blockyard-outer.json
           retention-days: 1
 
   binaries:
@@ -261,6 +269,10 @@ jobs:
         with:
           name: seccomp-bwrap-bpf
           path: .
+      - uses: actions/download-artifact@v8
+        with:
+          name: seccomp-outer-json
+          path: .
 
       # TODO: bump to v3 once released with node24 support
       - uses: softprops/action-gh-release@v2
@@ -270,3 +282,4 @@ jobs:
             blockyard-*
             by-*
             blockyard-bwrap-seccomp.bpf
+            blockyard-outer.json

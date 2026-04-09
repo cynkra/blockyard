@@ -138,17 +138,24 @@ func findEnv(env []string, key string) string {
 }
 
 func TestProcessFactorySupportsRollback(t *testing.T) {
-	f := NewProcessFactory(&config.Config{})
+	f := NewProcessFactory(&config.Config{}, "1.0.0")
 	if f.SupportsRollback() {
 		t.Error("process factory must not support rollback")
 	}
 }
 
 func TestProcessFactoryCurrentImageBase(t *testing.T) {
-	f := NewProcessFactory(&config.Config{})
+	f := NewProcessFactory(&config.Config{}, "1.0.0")
 	// Must return a stable non-empty value — the orchestrator logs
 	// base:tag pairs during Update.
 	if f.CurrentImageBase(context.Background()) == "" {
 		t.Error("CurrentImageBase should return a stable placeholder")
+	}
+}
+
+func TestProcessFactoryCurrentImageTag(t *testing.T) {
+	f := NewProcessFactory(&config.Config{}, "2.3.4")
+	if got := f.CurrentImageTag(context.Background()); got != "2.3.4" {
+		t.Errorf("CurrentImageTag = %q, want %q", got, "2.3.4")
 	}
 }
