@@ -65,7 +65,7 @@ FROM ubuntu:24.04
 
 ARG RIG_VERSION=0.7.1
 ARG R_VERSION=release
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get upgrade -y \
