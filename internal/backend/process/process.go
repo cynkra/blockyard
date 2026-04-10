@@ -274,6 +274,12 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.Env = append(cmd.Env, fmt.Sprintf("SHINY_PORT=%d", port))
+	// Process backend shares the host network (no --unshare-net), so
+	// workers must bind to loopback to avoid exposing the Shiny port
+	// on all interfaces, which would let clients bypass the proxy.
+	// Docker workers don't set this, defaulting to 0.0.0.0, which is
+	// fine because each container has its own network namespace.
+	cmd.Env = append(cmd.Env, "SHINY_HOST=127.0.0.1")
 
 	// Log capture
 	logs := newLogBuffer(10000)

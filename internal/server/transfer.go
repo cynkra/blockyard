@@ -135,9 +135,14 @@ func (srv *Server) completeTransfer(
 		return
 	}
 
-	// Spawn new worker with updated library and old worker's
-	// transfer dir (containing board.json).
-	spec := srv.buildTransferWorkerSpec(app, newWorkerID, newLibDir, transferDir, oldWorker.BundleID)
+	// Spawn new worker with updated library. board.json is copied
+	// into the new worker's own transfer dir so future transfers on
+	// this worker use the correct path.
+	spec, err := srv.buildTransferWorkerSpec(app, newWorkerID, newLibDir, transferDir, oldWorker.BundleID)
+	if err != nil {
+		slog.Error("transfer: build worker spec", "error", err)
+		return
+	}
 	if err := srv.Backend.Spawn(ctx, spec); err != nil {
 		slog.Error("transfer: spawn worker", "error", err)
 		return
@@ -184,8 +189,9 @@ func (srv *Server) completeTransfer(
 	// Reroute sessions from old worker to new worker.
 	srv.Sessions.RerouteWorker(oldWorkerID, newWorkerID)
 
-	// Evict old worker.
+	// Evict old worker and clean up its transfer directory.
 	srv.EvictWorkerFn(ctx, srv, oldWorkerID)
+	os.RemoveAll(transferDir) //nolint:errcheck
 
 	slog.Info("transfer complete",
 		"app_id", appID,
@@ -193,22 +199,34 @@ func (srv *Server) completeTransfer(
 		"new_worker", newWorkerID)
 }
 
-// buildTransferWorkerSpec creates a WorkerSpec for a transfer target worker.
-// The old worker's transfer directory is mounted read-only (contains board.json).
+// buildTransferWorkerSpec creates a WorkerSpec for a transfer target
+// worker. The new worker keeps its own transfer directory (created by
+// defaultWorkerSpec) so that future transfers on this worker write to
+// and watch the correct path. The old worker's board.json is copied
+// into the new dir so the R session can resume state.
 func (srv *Server) buildTransferWorkerSpec(
 	app *db.AppRow, workerID, libDir, oldTransferDir, bundleID string,
-) backend.WorkerSpec {
+) (backend.WorkerSpec, error) {
 	spec := srv.defaultWorkerSpec(app, workerID, libDir, bundleID)
 
 	if oldTransferDir != "" {
-		spec.TransferDir = oldTransferDir
+		// Copy board.json from the old worker's transfer dir into the
+		// new worker's own dir. This lets the R session pick up the
+		// saved board state while keeping /transfer pointed at a dir
+		// the server will watch for subsequent transfers.
+		src := filepath.Join(oldTransferDir, "board.json")
+		dst := filepath.Join(spec.TransferDir, "board.json")
+		if err := copyFile(src, dst); err != nil {
+			return backend.WorkerSpec{}, fmt.Errorf(
+				"copy board.json to new transfer dir: %w", err)
+		}
 		if spec.Env == nil {
 			spec.Env = make(map[string]string)
 		}
 		spec.Env["BLOCKYARD_TRANSFER_PATH"] = "/transfer/board.json"
 	}
 
-	return spec
+	return spec, nil
 }
 
 // defaultWorkerSpec builds a WorkerSpec with standard settings.
@@ -225,7 +243,7 @@ func (srv *Server) defaultWorkerSpec(
 		WorkerID: workerID,
 		Image:    AppImage(app, srv.Config.Docker.Image),
 		Cmd: []string{"R", "-e",
-			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
+			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')), host = Sys.getenv('SHINY_HOST', unset = '0.0.0.0'))",
 				srv.Config.Storage.BundleWorkerPath)},
 		BundlePath:  hostPaths.Unpacked,
 		LibraryPath: hostPaths.Library,
