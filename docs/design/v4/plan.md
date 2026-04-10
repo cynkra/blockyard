@@ -145,10 +145,12 @@ independently started processes?
 
 ### Phase 4-5: Experimental Zygote Model
 
-**Gated on phase 4-4 measurements.** If data shows that forking
-meaningfully improves KSM effectiveness (or that startup latency
-savings justify the complexity for specific bundle profiles), land
-the fork-based zygote model as an experimental option.
+**Informed by phase 4-4 measurements.** Phase 4-4 will show how
+well KSM works on independently started processes. If sharing is
+poor, the key question becomes whether forking recovers it — that
+would be the primary justification for the zygote model's
+complexity. Lands as experimental; promotion to production depends
+on the measured delta.
 
 **See `phase-4-5.md` for the full design and wire protocol.** Key
 deliverables:
@@ -184,12 +186,14 @@ Phase 4-4: Memory Sharing Instrumentation
   prerequisite for: phase 4-5 (data-driven go/no-go)
 
 Phase 4-5: Experimental Zygote Model
-  depends on: phase 4-4 (measurements must justify it)
+  depends on: phase 4-4 (measurements inform scope)
 
 Phase 4-6: Zygote Hardening
   depends on: phase 4-5
 ```
 
-Phases 4-5 and 4-6 are conditional — they only proceed if phase 4-4
-measurements show a meaningful advantage over independent processes
-with KSM.
+Phase 4-4 measurements inform how phases 4-5 and 4-6 proceed. If
+KSM works well on independent processes, forking may not be needed.
+If KSM sharing is poor without fork's identical starting state,
+that's the case for promoting the zygote model from experimental
+to production.
