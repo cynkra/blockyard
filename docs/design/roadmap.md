@@ -38,10 +38,15 @@ storage via PostgreSQL + PostgREST + vault Identity OIDC, cold-start
 loading page). v3 has two tracks: operations (rolling updates via Redis shared state,
 interface extraction for session/worker stores, `by admin update` and
 `by admin rollback` CLI commands with scheduled auto-updates) and
-runtime (pre-fork worker model for the Docker backend, lightweight
-process backend, per-app container configuration). The operations track
-runs first — it enables low-friction iteration on deployed v2 instances
-and front-loads the shared state layer needed for v4 clustering. v4 adds Kubernetes for multi-node scaling.
+runtime (lightweight process backend, per-app container configuration).
+The operations track runs first — it enables low-friction iteration on
+deployed v2 instances and front-loads the shared state layer needed for
+v5 clustering. v4 adds hybrid backends (per-app Docker/process
+selection), multi-process containers for per-session isolation, KSM for
+cross-process memory sharing, instrumentation to measure real-world
+sharing effectiveness, and — once measurements justify it — an
+experimental zygote (fork-based) worker model. v5 adds Kubernetes for
+multi-node scaling.
 
 **The one deliberate exception to "no premature abstraction"** is the `Backend`
 interface (Docker vs. process vs. Kubernetes). This abstraction is worth its
@@ -215,7 +220,7 @@ plane protected by a single static bearer token in config.
   maps session IDs to worker IDs; a worker registry maps worker IDs to network
   addresses. These start as concrete in-memory structs for v0. v3 extracts
   interfaces and adds Redis-backed implementations for rolling updates;
-  v4 reuses the same shared state layer for multi-node HA.
+  v5 reuses the same shared state layer for multi-node HA.
 
   On first request to `/app/{name}/`, the proxy sets a session cookie containing
   a generated session ID. Subsequent requests — including WebSocket reconnects
@@ -635,7 +640,7 @@ existing Docker deployment. No Kubernetes dependency.
 
 - **Per-content resource limit enforcement.** CPU/memory caps via Docker
   `--memory` and `--cpus` flags (fields already carried in `WorkerSpec` from
-  v0). Kubernetes enforcement comes for free in v4.
+  v0). Kubernetes enforcement comes for free in v5.
 
 - **Scale-to-zero.** When an app has no active connections for a configurable
   idle period, stop its workers to free resources. On the next request, hold
@@ -681,10 +686,9 @@ interface extraction for the in-memory stores, a drain mode for graceful
 server handoff, and the `by admin update`/`rollback` CLI commands with
 scheduled auto-updates. This work runs first: once v2 is deployed,
 low-friction updates are immediately needed, and the shared state layer
-directly serves v4 clustering. The **runtime track** adds the pre-fork
-worker model, the lightweight process backend, and per-app container
-configuration. See [v3/plan.md](v3/plan.md) for the full implementation
-plan.
+directly serves v5 clustering. The **runtime track** adds the lightweight
+process backend and per-app container configuration. See
+[v3/plan.md](v3/plan.md) for the full implementation plan.
 
 ---
 
@@ -702,7 +706,7 @@ plan.
   move behind Go interfaces with two implementations: in-memory (default,
   zero dependencies) and Redis (required for rolling updates). Redis
   enables the update overlap — both old and new servers read and write
-  the same routing state. The same shared state layer is reused in v4
+  the same routing state. The same shared state layer is reused in v5
   for multi-replica Kubernetes deployments.
 
 - **Interface extraction.** `SessionStore`, `WorkerRegistry`, and
@@ -798,10 +802,42 @@ plan.
   the API applies to running workers immediately (Docker backend:
   `ContainerUpdate()`), not just newly spawned ones.
 
-### v4: Kubernetes and Multi-Node
+### v4: Hybrid Backends, Per-Session Isolation & Memory Sharing
+
+Per-session process isolation, cross-process memory sharing via KSM,
+and — if measurements justify it — an experimental fork-based zygote
+model. The approach is measurement-first: build independent-process
+isolation and KSM, gather real-world data, then decide on forking.
+See [v4/plan.md](v4/plan.md) for the full implementation plan.
+
+---
+
+- **Hybrid backend dispatch.** Per-app backend selection — some apps
+  run in containers, others as host processes. A dispatcher routes
+  worker operations to the correct underlying backend.
+
+- **Multi-process containers.** Per-session isolation via independent
+  R processes inside a single container, managed by a lightweight
+  supervisor. No forking, no fork-safety constraints.
+
+- **KSM on independent processes.** Kernel same-page merging across
+  independently started R processes. Preflight checks, observability,
+  per-app opt-in.
+
+- **Memory sharing instrumentation.** Tooling to measure real-world
+  KSM effectiveness and compare forked vs. independent processes.
+
+- **Experimental zygote model.** Fork-based per-session children,
+  gated on measurement results. Full design in
+  [v3/phase-3-9.md](v3/phase-3-9.md).
+
+- **Zygote hardening.** Post-fork sandboxing, KSM optimization,
+  byte-compilation. Full design in [v3/phase-3-10.md](v3/phase-3-10.md).
+
+### v5: Kubernetes and Multi-Node
 
 The Kubernetes backend. Interface extraction and Redis shared state are
-already in place from v3 — v4 builds on that foundation for multi-replica
+already in place from v3 — v5 builds on that foundation for multi-replica
 deployments.
 
 ---

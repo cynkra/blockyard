@@ -11,13 +11,20 @@ v3 has two tracks. The **operations track** adds rolling updates with zero
 downtime: interface extraction for session/worker stores, Redis-backed
 shared state, worker token persistence, drain mode, and the `by admin
 update` CLI command. The **runtime track** adds the process backend
-(bubblewrap sandboxing), the zygote worker model for Docker, and
-per-app container configuration (data mounts, multiple execution images,
-dynamic resource limits, per-app OCI runtime selection).
+(bubblewrap sandboxing) and per-app container configuration (data mounts,
+multiple execution images, dynamic resource limits, per-app OCI runtime
+selection).
+
+The zygote worker model and KSM memory sharing are deferred to v4, which
+adds hybrid backends (per-app Docker/process selection), multi-process
+containers, KSM, instrumentation, and — once measurements justify it —
+an experimental fork-based zygote model. The existing `phase-3-9.md` and
+`phase-3-10.md` design documents are retained as the v4 zygote/KSM
+specifications. See `../v4/plan.md` for the v4 scope.
 
 The operations track runs first — once v2 is deployed, low-friction
 updates are immediately needed, and the shared state layer directly serves
-v4 clustering.
+v5 clustering.
 
 ## New Packages
 
@@ -32,7 +39,7 @@ cmd/
 
 internal/
 ├── backend/
-│   ├── docker/                    # (existing) — zygote worker model additions
+│   ├── docker/                    # (existing)
 │   └── process/                   # NEW: bubblewrap process backend
 │       ├── process.go             # Backend interface implementation
 │       ├── bwrap.go               # bubblewrap command construction
@@ -54,14 +61,7 @@ internal/
 │   └── redisstate.go              # Redis client setup, health check, availability detection
 ├── drain/                         # NEW: drain mode orchestration
 │   └── drain.go                   # SIGUSR1 handler, drain sequence, passive→active transition
-└── zygote/                        # NEW: zygote worker model
-    ├── control.go                 # TCP control protocol client (phase 3-9)
-    ├── manager.go                 # session↔child bookkeeping + sweep loop
-    ├── secret.go                  # per-worker control secret
-    ├── zygote.R                   # embedded R script (socketSelect polling)
-    ├── zygote_helper.c            # KSM helper (prctl wrapper)
-    ├── embed.go                   # //go:embed declarations
-    └── sandbox.go                 # NEW in phase 3-10: post-fork sandboxing
+└── zygote/                        # deferred to v4 (see ../v4/plan.md)
 ```
 
 ## New Dependencies
@@ -842,155 +842,24 @@ Deployment artifacts and documentation for the process backend.
    external supervisor — `by admin update` is the single entry point
    for both Docker and process backends.
 
-### Phase 3-9: Zygote Worker Model
+### ~~Phase 3-9: Zygote Worker Model~~ — deferred to v4
 
-Long-lived **zygote** R process (one per worker) that pre-loads a
-bundle's packages, then forks per-session children on demand via
-`parallel::mcfork`. Works on both Docker and process backends via an
-optional `backend.Forking` capability interface. Ships the two
-unconditional benefits — startup-latency elimination and per-session
-isolation. Opt-in KSM memory sharing and post-fork sandboxing land
-together in phase 3-10. **See `phase-3-9.md` for the full design and
-wire protocol.**
+The zygote worker model (fork-based per-session isolation) and the
+companion KSM memory sharing (phase 3-10) are deferred to v4. The
+decision is based on the observation that fork's primary advantages
+over independent processes — startup latency and KSM head start —
+are not yet validated with real-world measurements. v4 builds the
+measurement infrastructure first (hybrid backends, multi-process
+containers, KSM on independent processes), then adds forking as an
+experimental optimization if data justifies it.
 
-**High-level deliverables (summary only; details live in `phase-3-9.md`):**
+**The `phase-3-9.md` and `phase-3-10.md` design documents are retained
+as the v4 zygote/KSM specifications.** See `../v4/plan.md` for the
+full v4 scope and phasing.
 
-1. **`zygote` column + `backend.Forking` capability interface** — per-app
-   opt-in, validated against the backend, guarded behind a server-wide
-   `experimental.zygote` config flag.
-2. **`internal/zygotectl/` + `internal/zygote/` packages** — control
-   protocol client (`Client`, `Info`, `ChildExitMsg`, embedded
-   `zygote.R`) and backend-agnostic `Manager` with session↔child
-   bookkeeping, sweep loop, and exit-event handling. Split across two
-   packages to break a `backend` ↔ control-client import cycle.
-3. **Docker and process backend `Forking` implementations** — zygote
-   spawn with control port, control client, control-connection watcher
-   for unexpected disconnect, idempotent `Stop` with synthesised
-   `ChildExit` events.
-4. **Session-addressed routing** — `session.Entry.Addr` holds the
-   per-child shiny address; proxy reads it directly, registry path
-   unchanged for non-zygote sessions.
-5. **Cleanup convergence** — three paths (child exit, worker stop,
-   sweep loop) converge on the same manager bookkeeping cleanup.
-6. **Tests** — control protocol unit tests, `INFO` round-trip, Docker
-   and process integration tests (spawn → fork → kill → crash
-   detection → control-loss eviction).
+### ~~Phase 3-10: Zygote Hardening & KSM~~ — deferred to v4
 
-### Phase 3-10: Zygote Hardening & KSM
-
-Two companion hardening tracks layered on top of the phase 3-9
-mechanism: **post-fork sandboxing** (isolation) and **opt-in kernel
-same-page merging** (memory sharing). They land together because
-KSM's RSS-spike failure mode needs sandbox-level containment and
-KSM's threat model shares the multi-tenant audit story with
-sandboxing. See `phase-3-10.md` for the full design, KSM rationale,
-and observability.
-
-**Post-fork sandboxing deliverables:**
-
-1. **Consolidated C helper** `internal/zygotectl/zygote_helper.c`
-   exporting exactly two functions: `enable_ksm` (pre-fork, parent
-   zygote) and `apply_post_fork_sandbox` (post-fork, child, atomic).
-   Single entry point for the whole sandbox chain so R-visible
-   surface is minimal — user R code cannot cherry-pick primitives.
-   Loaded via `dyn.load` from `zygote.R` after `preload_bundle()`
-   finishes; file is `unlink`ed immediately after load.
-
-2. **Per-child isolation** — `apply_post_fork_sandbox` performs
-   the entire setup in C, in order:
-   `oom_score_adj=1000` → `PR_SET_NO_NEW_PRIVS` →
-   `unshare(CLONE_NEWUSER|CLONE_NEWNS)` → mount tmpfs at `/tmp` →
-   `setrlimit(RLIMIT_NPROC, 64)` → `capset()` drop all →
-   post-fork seccomp filter. Static guard makes the function
-   call-once; seccomp filter defangs any subsequent calls.
-
-3. **Post-fork seccomp profile** — new JSON profile
-   `docker/blockyard-post-fork-seccomp.json` compiled via the
-   phase-3-8 seccomp pipeline to a BPF blob embedded in the helper
-   at build time. Denies `unshare`, `mount`, `setns`, `capset`,
-   `prctl(PR_SET_MEMORY_MERGE)`, etc. — children never need these
-   once the sandbox is in place.
-
-4. **Zygote-variant bwrap profile** for the process backend —
-   `docker/blockyard-bwrap-zygote-seccomp.json` permits the narrow
-   `CLONE_NEWUSER|CLONE_NEWNS` unshare so the post-fork hook can
-   run inside bwrap. Phase 3-8's non-zygote profile stays unchanged.
-   Process backend picks the profile at spawn time based on
-   `spec.Zygote` and `spec.KSM`.
-
-5. **Outer-container seccomp extension** — `prctl(PR_SET_MEMORY_MERGE)`
-   is allowed via a separate profile variant
-   (`docker/blockyard-seccomp-ksm.json`) shipped only in image
-   variants where KSM is supported. Trust chain is "which file did
-   the image ship?", not a runtime toggle.
-
-6. **Docker security options** — container create call for zygote
-   workers adds `--security-opt seccomp={outer-profile-path}` (base
-   or KSM variant) and, on hosts where apparmor is active,
-   `--security-opt apparmor=unconfined` (Ubuntu 23.10+ needs this
-   to permit unprivileged user-namespace creation).
-
-7. **Environment variable hardening** — `OMP_NUM_THREADS=1` and
-   `MKL_NUM_THREADS=1` exported in the zygote env, inherited by
-   every child.
-
-8. **Only `RLIMIT_NPROC` is applied post-fork.** `RLIMIT_AS` and
-   `RLIMIT_CPU` are deliberately skipped: R's allocator fights
-   `AS` caps, Shiny sessions legitimately run for hours so
-   `CPU` caps have the wrong shape. `NPROC=64` is a fork-bomb
-   guard, not a resource budget. Per-session memory/CPU bounds
-   remain at the worker-level cgroup (Docker) or unbounded
-   (process, per phase 3-7). Per-child cgroup delegation is
-   deferred to a future phase.
-
-9. **Package compatibility documentation** — document the three
-   categories: safe to pre-load (shiny, ggplot2, dplyr), dangerous
-   to pre-load (arrow, torch, rJava — load in each child), and
-   safe if not used before fork (DBI, RPostgres).
-
-**KSM opt-in deliverables:**
-
-10. **`ksm` column + `experimental.ksm` server flag** — second
-    two-level opt-in, independent of `experimental.zygote`. API
-    rejects `apps.ksm = true` without `apps.zygote = true` on the
-    same effective end-state and without `experimental.ksm = true`
-    in server config. Config load rejects `experimental.ksm`
-    without `experimental.zygote`.
-11. **`enable_ksm` in the consolidated helper** — second function
-    in `zygote_helper.c` alongside `apply_post_fork_sandbox`.
-    Called at zygote startup (after `preload_bundle` finishes),
-    gated on `BLOCKYARD_KSM_ENABLED=1`. Graceful fallback on older
-    kernels (EINVAL → `ksm_status=unsupported`) and
-    seccomp-restricted environments (EPERM → `ksm_status=denied`).
-12. **`STATS` control command + observability** — new command on
-    the control protocol returning dynamic KSM merge counts from
-    `/proc/<pid>/ksm_stat`. `zygote.Manager` gains a metrics-poll
-    goroutine that updates labeled Prometheus gauges
-    (`blockyard_zygote_ksm_merging_pages{app_id, worker_id}`) plus
-    a host-global `blockyard_host_ksm_pages_sharing` scraper.
-13. **KSM preflight checks** — each backend's `Preflight()` reads
-    `/sys/kernel/mm/ksm/run` and `/sys/kernel/mm/ksm/pages_to_scan`,
-    warns when ksmd is off or scanning at the desktop default.
-    Gated on both server and per-app opt-in so operators who
-    haven't opted into KSM see no preflight noise.
-14. **Up-front bundle byte-compilation** — `zygote.R` compiles
-    `global.R` / `app.R` via `compiler::cmpfile` before the fork
-    so bundle closures are `BCODESXP` from birth. Prevents the
-    JIT from dirtying shared closure pages post-fork (the
-    dominant source of page divergence for user code).
-15. **Children pin themselves at `oom_score_adj=1000`** — handled
-    as step 1 of `apply_post_fork_sandbox`. The kernel OOM killer
-    reaps a child (one session, recoverable via the 307 fallback)
-    instead of the zygote (entire family) under the RSS spike
-    that a coordinated GC burst can produce before ksmd catches
-    up. Self-write, unprivileged, no capability coupling.
-
-**Tests** — `/tmp` isolation between children, seccomp profile
-active, `CLONE_NEWUSER` works inside the container, `prctl(PR_SET_MEMORY_MERGE)`
-allowed by seccomp, KSM helper fallback on mocked `prctl` failure,
-KSM-effectiveness integration test (fork two children, force
-`gc(full=TRUE)`, poll `STATS` until `ksm_merging_pages_total > 0`,
-skip on `/sys/kernel/mm/ksm/run == 0`).
+See phase 3-9 note above. Full design in `phase-3-10.md`.
 
 ## Build Order and Dependency Graph
 
@@ -1024,13 +893,7 @@ Phase 3-7: Process Backend Core
 Phase 3-8: Process Backend Packaging & Deployment
   └── depends on: phase 3-7 (needs the backend implementation)
 
-Phase 3-9: Zygote Worker Model
-  └── independent of: process backend (enhances Docker backend)
-  └── can be developed in parallel with anything after 3-1
-
-Phase 3-10: Zygote Hardening & KSM
-  └── depends on: phase 3-9 (mechanism must exist)
-  └── depends on: phase 3-8 (shares seccomp profile)
+Phases 3-9 and 3-10 (zygote worker model, KSM) are deferred to v4.
 ```
 
 **Recommended order:**
@@ -1039,9 +902,8 @@ Phase 3-10: Zygote Hardening & KSM
 2. Phase 3-2 → 3-3 → 3-4 → 3-5 (operations track, sequential)
 3. Phase 3-6 (per-app config) — in parallel with operations track
 4. Phase 3-7 → 3-8 (process backend, sequential)
-5. Phase 3-9 → 3-10 (zygote, sequential)
 
-Phases 3-6, 3-7, and 3-9 are independent of each other and of the
+Phases 3-6 and 3-7 are independent of each other and of the
 operations track. They can be developed in parallel.
 
 ## Test Strategy
@@ -1076,8 +938,6 @@ operations track. They can be developed in parallel.
   reflected in inspect.
 - **Process backend** (tagged `process_test`) — spawn, health, fs
   isolation, cleanup. Skipped without bwrap.
-- **Zygote** (tagged `docker_test`) — zygote, fork, independent
-  health checks, `/tmp` isolation, child cleanup.
 - **Redis network isolation** (tagged `docker_test`) — worker cannot
   connect to Redis.
 

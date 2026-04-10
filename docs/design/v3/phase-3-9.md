@@ -408,11 +408,18 @@ err := r.client.HSet(ctx, key,
     "last_access", entry.LastAccess.Unix(),
 ).Err()
 
-// Get: read addr via HGet, default to "" on missing field.
+// Get: update parseSessionHash to extract the new field:
+//   e.Addr = vals["addr"]
+// Missing field (old entries) → Go zero value ("") → registry fallback.
 ```
 
 Backwards compatible — old entries without `addr` read as `""`,
-which triggers the registry fallback path in the proxy.
+which triggers the registry fallback path in the proxy. The
+`RerouteWorker` Lua script does not need updating — it only
+operates on non-zygote sessions (container transfer), which have
+`addr = ""`. If a zygote session is ever rerouted (defensive
+case), the stale `addr` triggers the proxy's unreachable-child
+fallback (Step 10), which self-heals via redirect.
 
 ### Step 4: `Forking` capability interface
 
@@ -802,6 +809,14 @@ func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
 // so the queue depth is bounded by the rate of incoming Fork calls
 // and not by anything blocking on R.
 //
+// Context cancellation does NOT return immediately — once the
+// command is written, the method waits for the in-flight reply
+// (or connection close) before releasing reqMu. This prevents a
+// protocol desync where a stale reply would be delivered to the
+// next caller. The wait is bounded by the zygote's fork latency
+// (~ms), so callers see ~ms extra delay on cancellation, not an
+// unbounded block.
+//
 // Phase 3-10 adds a multi-line variant for the STATS command;
 // extending this loop to accumulate lines until "END" is a small
 // delta. See phase-3-10.md Step 9.
@@ -825,6 +840,19 @@ func (c *Client) request(ctx context.Context, line string) (string, error) {
     case r := <-ch:
         return r.line, r.err
     case <-ctx.Done():
+        // The command was already written to the wire, so a reply
+        // is in-flight. We must drain it before releasing reqMu;
+        // otherwise the stale reply can be delivered to the next
+        // caller's pending channel, causing a protocol desync
+        // (wrong childID returned to the wrong session). Waiting
+        // here blocks for at most the zygote's fork latency (~ms)
+        // — acceptable given the alternative is a correctness bug.
+        // The orphaned child from the cancelled fork is cleaned up
+        // by the Manager's sweep loop (Step 11).
+        select {
+        case <-ch:
+        case <-c.closed:
+        }
         return "", ctx.Err()
     case <-c.closed:
         return "", errors.New("control: connection closed")
@@ -1175,10 +1203,15 @@ explicit `waitpid` on the R side.
 # Reads from environment:
 #   BLOCKYARD_BUNDLE_PATH      — path to the unpacked bundle
 #   BLOCKYARD_CONTROL_PORT     — TCP port to listen on for control
-#   BLOCKYARD_CONTROL_BIND     — IP to bind ("0.0.0.0" by default)
 #   BLOCKYARD_SECRET_PATH      — path to control.secret file
 #   BLOCKYARD_PORT_RANGE       — "lo-hi" port range for forked children
 #   R_LIBS                     — set externally for the worker library
+#
+# Note: serverSocket() in R always binds to all interfaces (0.0.0.0).
+# The function does not accept a host parameter. For Docker this is
+# fine — each worker has its own bridge network. For the process
+# backend the control port is reachable from all host interfaces;
+# AUTH provides defense in depth (see design decision #4).
 #
 # Protocol: see internal/zygotectl/control.go for the wire format.
 
@@ -1767,8 +1800,13 @@ Notes on the design:
   connected (rare in practice — the server keeps a long-lived
   connection per zygote), the event is held in `pending_events`
   and flushed when the next connection authenticates. The buffer
-  is unbounded but bounded in practice by the port allocator's
-  `max_sessions_per_worker`.
+  is hard-capped at `MAX_PENDING_EVENTS` (1024) — oldest events
+  are dropped when the cap is hit. During normal operation the
+  backlog is bounded by `max_sessions_per_worker` and drains
+  promptly; the cap is defense in depth against a pathologically
+  long control-connection outage. The Manager's sweep loop
+  (Step 11) is the authoritative backstop for any events dropped
+  by the cap.
 - **Single client at a time.** A new connection replaces the
   previous one. The blockyard server maintains exactly one
   control connection per zygote, so this is the normal pattern.
@@ -2501,8 +2539,15 @@ if effectiveZygoteState(srv.Config, app) && srv.Zygotes != nil {
     }
     return wid, addr, nil
 }
-return wid, registryAddr, nil
+return wid, "", nil
 ```
+
+The non-zygote path returns an empty `addr`. `Entry.Addr` MUST
+stay empty for non-zygote sessions — `RerouteWorker` (used by
+container transfer) only updates `Entry.WorkerID`, not
+`Entry.Addr`. Populating `Addr` for non-zygote sessions would
+leave a stale address after reroute: the proxy would bypass the
+registry lookup and route to the old (dead) worker.
 
 Note: this requires `ensureWorker` to receive `sessionID` from
 `proxy.go`. Update the signature:
@@ -2524,7 +2569,7 @@ if workerID == "" {
     workerID, addr = wid, a
     srv.Sessions.Set(sessionID, session.Entry{
         WorkerID:   workerID,
-        Addr:       a, // populated for both modes — see Step 3
+        Addr:       a, // non-empty only for zygote sessions — see Step 3
         UserSub:    callerSub,
         LastAccess: time.Now(),
     })
@@ -2867,6 +2912,19 @@ func (c *Config) ExperimentalFlags() ExperimentalConfig {
     return *c.Experimental
 }
 ```
+
+**Env auto-construction** — following the pattern of other optional
+sections (`[redis]`, `[oidc]`, etc.), add to `applyEnvOverrides()`:
+
+```go
+if cfg.Experimental == nil && envPrefixExists("BLOCKYARD_EXPERIMENTAL_") {
+    cfg.Experimental = &ExperimentalConfig{}
+}
+```
+
+Without this, `BLOCKYARD_EXPERIMENTAL_ZYGOTE=true` would be silently
+ignored when the `[experimental]` section is absent from the TOML file
+— `applyEnvToStruct` skips nil pointer-to-struct fields.
 
 Example `blockyard.toml`:
 
