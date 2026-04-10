@@ -5,7 +5,7 @@ Two companion tracks layered on top of phase 3-9's zygote mechanism:
 1. **Post-fork sandboxing** — per-child isolation (private user and
    mount namespaces, private `/tmp`, seccomp-bpf, capability
    dropping, `RLIMIT_NPROC` fork-bomb guard) applied by the child
-   itself immediately after `parallel::mcfork` and before any
+   itself immediately after `parallel::mcparallel` forks and before any
    bundle runtime code executes. Unlocks multi-tenant safety for
    the zygote model.
 2. **Opt-in kernel same-page merging** — process-level KSM via
@@ -236,7 +236,7 @@ Operators who have not opted into KSM see no preflight noise.
 6. **`zygote.R` post-fork hook** — the child branch of the
    `FORK` handler calls `.C("apply_post_fork_sandbox",
    integer(1))` as its first action, then checks the result
-   code and calls `parallel:::mcexit(1L)` on any non-zero
+   code and calls `mcexit(1L)` on any non-zero
    value. Only after success does the child call
    `runApp(captured_app, port = ...)`.
 7. **Environment variable hardening** — `OMP_NUM_THREADS=1` and
@@ -300,7 +300,7 @@ Operators who have not opted into KSM see no preflight noise.
     `/sys/kernel/mm/ksm/pages_to_scan`. Non-fatal warnings
     otherwise.
 17. **Up-front bundle byte-compilation in `zygote.R`** — replaces
-    the phase-3-9 trivial `sys.source(app.R)` preload with
+    the phase-3-9 `source(app.R)` preload with
     `compiler::cmpfile(app.R, tempfile())` +
     `compiler::loadcmp()` so bundle closures are born as
     `BCODESXP` in the zygote. See decision D9.
@@ -458,18 +458,19 @@ pointer arguments, so this file works with a bare C compiler.
  * blockyard zygote helper.
  *
  * Exposes two functions to R via .C(). Both are loaded once at
- * zygote startup and inherited across parallel::mcfork.
+ * zygote startup and inherited across the fork performed by
+ * parallel::mcparallel.
  *
  *   enable_ksm(int *result)
  *     Called once in the parent zygote, gated on
  *     BLOCKYARD_KSM_ENABLED=1. Opts the zygote's mm_struct into
  *     the kernel's KSM merge pool. The flag is inherited by
- *     every mcfork child via ksm_fork in the kernel, so setting
+ *     every child forked by mcparallel via ksm_fork in the kernel, so setting
  *     it once on the zygote covers every child spawned afterward.
  *
  *   apply_post_fork_sandbox(int *result)
- *     Called once in each child branch of mcfork, as the first
- *     R statement after fork. Performs the entire post-fork
+ *     Called once in each child spawned by mcparallel, as the
+ *     first R statement after fork. Performs the entire post-fork
  *     sandbox setup in C, in the correct order, with a static
  *     guard that short-circuits subsequent calls. After this
  *     function returns successfully, every dangerous syscall it
@@ -1213,7 +1214,7 @@ runs (same as phase 3-9).
 ### Step 10: `zygote.R` changes
 
 Phase 3-9's `zygote.R` handles AUTH/FORK/KILL/STATUS/INFO with no
-sandboxing, no KSM, and a trivial `sys.source` preload. Phase
+sandboxing, no KSM, and a `source()` / `sys.source()` preload. Phase
 3-10 extends it with:
 
 1. **Helper load.** After `preload_bundle()` completes (so
@@ -1225,7 +1226,7 @@ sandboxing, no KSM, and a trivial `sys.source` preload. Phase
    record `ksm_status = "disabled"` without loading any KSM
    code path.
 3. **Up-front byte-compilation of bundle code.** Replace the
-   phase-3-9 `sys.source()` calls with `compiler::cmpfile()` +
+   phase-3-9 `source()` / `sys.source()` calls with `compiler::cmpfile()` +
    `compiler::loadcmp()` so bundle closures are born as
    `BCODESXP`. Prevents the JIT from mutating closure SEXP
    headers post-fork. See decision D9.
@@ -1253,25 +1254,68 @@ zygote_info$ksm_errno    <- 0L
 zygote_info$sandbox_status <- "ready"
 
 # NEW in 3-10: captured_app compilation. Replaces the phase-3-9
-# preload_bundle that did sys.source() — see decision D9.
+# preload_bundle that did source() / sys.source() — see decision D9.
 captured_app <- NULL
 
 preload_bundle <- function() {
   env <- new.env(parent = globalenv())
-  env$shinyApp <- function(ui, server, ...) {
-    captured_app <<- shiny::shinyApp(ui, server, ...)
+
+  # Defensive runApp stub — same rationale as phase 3-9: bundles
+  # that end with runApp(shinyApp(ui, server)) instead of bare
+  # shinyApp(ui, server) would start httpuv in the zygote and
+  # defeat the loadcmp()$value capture below. The stub intercepts
+  # the unqualified runApp lookup and captures its first arg.
+  env$runApp <- function(appDir = ".", ...) {
+    if (inherits(appDir, "shiny.appobj")) {
+      captured_app <<- appDir
+    }
     invisible(NULL)
   }
-  env$runApp <- function(appDir = ".", ...) invisible(NULL)
 
-  load_if_present <- function(src) {
+  compile_and_load <- function(src) {
     if (!file.exists(src)) return(invisible())
     out <- tempfile(fileext = ".rc")
     compiler::cmpfile(src, out, options = list(optimize = 3L))
     compiler::loadcmp(out, envir = env)
   }
-  load_if_present(file.path(bundle_path, "global.R"))
-  load_if_present(file.path(bundle_path, "app.R"))
+
+  # Optional global.R — sourced for side effects only.
+  compile_and_load(file.path(bundle_path, "global.R"))
+
+  # Required app.R. Fail fast if missing.
+  app_r <- file.path(bundle_path, "app.R")
+  if (!file.exists(app_r)) {
+    stop(sprintf(paste0(
+      "blockyard zygote: bundle has no app.R at %s. ",
+      "Zygote mode requires a single app.R entrypoint whose ",
+      "last expression evaluates to a shiny.appobj. Bundles ",
+      "using the classic server.R + ui.R split are not ",
+      "supported in zygote mode — either restructure the ",
+      "bundle to use app.R, or disable zygote for this app."),
+      bundle_path),
+      call. = FALSE)
+  }
+
+  # Primary capture: loadcmp() returns the value of the last
+  # expression, same as source()$value in phase 3-9. When app.R
+  # ends with shinyApp(ui, server) — qualified or not — this is
+  # the shiny.appobj.
+  res <- compile_and_load(app_r)
+  if (inherits(res, "shiny.appobj")) {
+    captured_app <<- res
+  }
+
+  if (!inherits(captured_app, "shiny.appobj")) {
+    last_class <- if (is.null(res)) "NULL" else paste(class(res), collapse = "/")
+    stop(sprintf(paste0(
+      "blockyard zygote: could not capture shiny.appobj from %s ",
+      "(last expression was class '%s'). Zygote mode requires ",
+      "app.R to end with a shinyApp(ui, server) call, or an ",
+      "explicit runApp(shinyApp(ui, server)). Fix the bundle, ",
+      "or disable zygote for this app."),
+      app_r, last_class),
+      call. = FALSE)
+  }
 }
 
 preload_start <- Sys.time()
@@ -1344,19 +1388,17 @@ handle_command <- function(line) {
       return()
     }
     cid <- next_child_id()
-    pid <- parallel:::mcfork()
-    if (inherits(pid, "masterProcess")) {
-      # Child branch — NEW in 3-10: post-fork sandbox hook runs
-      # FIRST, before any other child logic.
-      tryCatch({
+    job <- tryCatch(
+      parallel::mcparallel({
         close(con)
+        close(srv)
 
-        # apply_post_fork_sandbox must succeed or the child exits.
-        # The helper performs the entire sandbox setup atomically
-        # (oom_score_adj, NO_NEW_PRIVS, unshare, mount tmpfs,
-        # setrlimit, capset, seccomp) with a static guard against
-        # re-entry. Failure at any step returns a stable error code.
-        # See decision D2.
+        # NEW in 3-10: apply_post_fork_sandbox must succeed or the
+        # child exits. The helper performs the entire sandbox setup
+        # atomically (oom_score_adj, NO_NEW_PRIVS, unshare, mount
+        # tmpfs, setrlimit, capset, seccomp) with a static guard
+        # against re-entry. Failure at any step returns a stable
+        # error code. See decision D2.
         sandbox_result <- .C("apply_post_fork_sandbox",
                              result = integer(1L))$result
         if (sandbox_result != 0L) {
@@ -1366,19 +1408,21 @@ handle_command <- function(line) {
         }
 
         Sys.setenv(SHINY_PORT = as.character(port))
-        if (is.null(captured_app)) {
-          shiny::runApp(bundle_path, port = port)
-        } else {
-          shiny::runApp(captured_app, port = port)
-        }
-      }, error = function(e) {
-        message("blockyard zygote child error: ", conditionMessage(e))
-      })
-      parallel:::mcexit(0L)
+        shiny::runApp(captured_app, port = port)
+      }, detached = TRUE, mc.set.seed = FALSE),
+      error = function(e) {
+        message("blockyard zygote mcparallel error: ",
+                conditionMessage(e))
+        NULL
+      }
+    )
+    if (is.null(job)) {
+      writeLines("ERR fork failed\n", con, sep = "")
+      return()
     }
-    # Parent.
-    assign(cid, list(pid = pid$pid, port = port), envir = children)
-    writeLines(sprintf("OK %s %d\n", cid, pid$pid), con, sep = "")
+    # Parent: record the child.
+    assign(cid, list(pid = job$pid, port = port), envir = children)
+    writeLines(sprintf("OK %s %d\n", cid, job$pid), con, sep = "")
   } else if (cmd == "KILL") {
     # (unchanged from phase 3-9)
   } else if (cmd == "STATUS") {
@@ -1470,14 +1514,14 @@ handle_stats <- function(con) {
   `enable_ksm` is never called and the prctl is never issued —
   even if the helper is loaded.
 - **The post-fork sandbox call runs BEFORE any user code in the
-  child.** The child branch of `mcfork` does (1) close the
-  inherited control connection, (2) run the sandbox hook, (3)
-  call `runApp`. Steps (1) and (2) are blockyard-controlled
+  child.** The child expression in `mcparallel` does (1) close
+  the inherited control and server-listen sockets, (2) run the
+  sandbox hook, (3) call `runApp`. Steps (1) and (2) are blockyard-controlled
   code; step (3) is where bundle code executes. By that point
   the sandbox is fully installed.
 - **Failure of the sandbox hook is fatal.** The child exits
   with `mcexit(1L)` on any non-zero result. The zygote's reaper
-  observes the exit via `mc.waitpid` and pushes a
+  observes the exit via `pskill(pid, 0L)` liveness polling and pushes a
   `CHILDEXIT c<n> 1 sandbox_failed` message through the control
   protocol. The Manager's `handleExit` cleans up bookkeeping
   and the next request for that session triggers a new cold
@@ -2405,8 +2449,8 @@ defensive properties:**
   redundant no-op.
 
 - **`apply_post_fork_sandbox(int *result)`** — called once in
-  the child branch of `mcfork`, as the first R statement after
-  fork and before any user code. Performs the entire post-fork
+  the child expression of `mcparallel`, as the first R statement
+  after fork and before any user code. Performs the entire post-fork
   sandbox setup in C, in the correct order, with a static
   guard that short-circuits subsequent calls. After it returns
   successfully, every dangerous syscall it wraps is blocked by
@@ -2946,24 +2990,18 @@ The fix has to be scoped carefully:
   bodies are `BCODESXP` from birth. No post-fork `R_cmpfun1`
   path, no `SET_BODY` writes, no child-local bytecode
   allocations for bundle code.
-- **The shinyApp object is captured, not re-sourced.** The
-  phase-3-9 preload stubs `shinyApp(...)` as a capturing
-  closure; phase 3-10 keeps that mechanism unchanged but runs
-  it through the compiled-code path. The FORK handler then
-  calls `runApp(captured_app, port = ...)` in the child
-  instead of `runApp(bundle_path, port = ...)`.
-
-**Fallback for unusual bundle structures.** Bundles that split
-`ui.R` and `server.R` without a top-level `shinyApp()` call, or
-that call `shinyApp()` conditionally, will leave `captured_app
-== NULL` after preload. The FORK handler detects this and falls
-back to `runApp(bundle_path, ...)` in the child — identical to
-the pre-precompile behaviour. The zygote logs
-`preload ... warning=no_shinyapp_captured` so operators can see
-the fallback is active. Bundle packages themselves still
-benefit from being pre-loaded, so startup latency is still
-improved; only the KSM memory-sharing story degrades for bundle
-closures in this case.
+- **The shinyApp object is captured via `loadcmp()` return
+  value, not re-sourced.** Same mechanism as phase 3-9's
+  `source()$value` — `loadcmp()` returns the value of the last
+  expression in `app.R`. When that expression is
+  `shinyApp(ui, server)` (qualified or unqualified), the return
+  value is the `shiny.appobj`. A defensive `runApp` stub in the
+  preload env handles the `runApp(shinyApp(...))` edge case,
+  same as phase 3-9. The FORK handler then calls
+  `runApp(captured_app, port = ...)` in the child instead of
+  `runApp(bundle_path, port = ...)`. Bundles that fail to
+  produce a `shiny.appobj` are rejected at preload time with a
+  clear error, same as phase 3-9.
 
 **What this does not catch (residuals):**
 

@@ -199,7 +199,7 @@ designed for exactly that trade-off.
    up-front byte-compilation, KSM helper loading, a `STATS`
    handler, child `oom_score_adj` pinning, and proper
    exit-reason classification via a C helper — see
-   `phase-3-10.md` Step K6.
+   `phase-3-10.md` Step 10.
 6. **Docker `Forking` implementation** — adds zygote-mode container
    spawn, control port `3837` on the per-worker bridge, child port
    range allocation, control client wired to the shared protocol,
@@ -1578,7 +1578,7 @@ handle_command <- function(line) {
     # Phase 3-10 will add an oom_score_adj = 1000 self-write
     # inside the expression so the kernel OOM killer reaps a
     # child before the zygote under memory pressure (see
-    # phase-3-10.md decision K5). It will also flip the
+    # phase-3-10.md decision D11). It will also flip the
     # `shiny::runApp` call over to the C-helper's byte-compiled
     # code path.
     job <- tryCatch(
@@ -3565,7 +3565,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     `compiler::cmpfile()` + `compiler::loadcmp()` so bundle
     closures are born as `BCODESXP` — a prerequisite for KSM
     finding stable pages to merge (see `phase-3-10.md`
-    decision K3). Phase 3-9 keeps the simpler `source()` path.
+    decision D9). Phase 3-9 keeps the simpler `source()` path.
 
     **What this does not catch (residuals):**
 
