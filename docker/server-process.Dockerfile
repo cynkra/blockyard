@@ -75,10 +75,7 @@ FROM ubuntu:24.04
 # R versions via shims under /usr/local/bin. Operators can add or
 # remove versions at runtime via the extras.sh hook.
 ARG RIG_VERSION=0.7.1
-# Docker buildx sets TARGETARCH automatically for multi-platform
-# builds. Default to amd64 for local single-arch `docker build`
-# invocations so rig downloads the correct tarball.
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 # Runtime libraries only — no -dev headers, no compiler toolchain.
 # r-base-core-style runtime deps + common DB connectors + xml + ssl
