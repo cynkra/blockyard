@@ -159,6 +159,25 @@ func (b *ProcessBackend) Preflight(_ context.Context) (*preflight.Report, error)
 	return RunPreflight(b.cfg, b.fullCfg), nil
 }
 
+func (b *ProcessBackend) CheckRVersion(version string) error {
+	if version == "" {
+		return nil
+	}
+	_, fell := ResolveRBinary(version, "")
+	if !fell {
+		return nil
+	}
+	installed := InstalledRVersions()
+	if len(installed) == 0 {
+		return fmt.Errorf(
+			"bundle requires R %s but no rig-managed R versions are installed",
+			version)
+	}
+	return fmt.Errorf(
+		"bundle requires R %s which is not installed; available versions: %s",
+		version, strings.Join(installed, ", "))
+}
+
 // CleanupOrphanResources implements backend.Backend. Workers from a
 // previous run are already dead (Pdeathsig killed them with the
 // server), so the in-memory variants have nothing to clean up. The
@@ -188,21 +207,19 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	// the value is set — emitting it here would fire on every spawn
 	// for every app for the lifetime of the deployment.
 
-	// Resolve R version from the bundle manifest. When a specific
-	// version is requested and installed via rig, the worker runs
-	// against that binary. Otherwise fall back to the configured
-	// default (cfg.RPath / the rig shim).
+	// Resolve R version from the bundle manifest. Deploy-time
+	// validation (CheckRVersion) ensures the version is installed,
+	// so a miss here means the operator removed it after deploy.
 	if spec.RVersion != "" && len(spec.Cmd) > 0 && spec.Cmd[0] == "R" {
 		rPath, fell := ResolveRBinary(spec.RVersion, b.cfg.RPath)
 		if fell {
-			slog.Warn("requested R version not installed, using default",
-				"worker_id", spec.WorkerID, "requested", spec.RVersion,
-				"fallback", rPath)
-		} else {
-			slog.Info("resolved R version",
-				"worker_id", spec.WorkerID, "version", spec.RVersion,
-				"path", rPath)
+			return fmt.Errorf(
+				"R %s was available at deploy time but is no longer installed",
+				spec.RVersion)
 		}
+		slog.Info("resolved R version",
+			"worker_id", spec.WorkerID, "version", spec.RVersion,
+			"path", rPath)
 		cmd := make([]string, len(spec.Cmd))
 		copy(cmd, spec.Cmd)
 		cmd[0] = rPath
@@ -491,9 +508,13 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 	if spec.RVersion != "" && len(spec.Cmd) > 0 && spec.Cmd[0] == "R" {
 		rPath, fell := ResolveRBinary(spec.RVersion, b.cfg.RPath)
 		if fell {
-			slog.Warn("requested R version not installed for build, using default",
-				"app_id", spec.AppID, "bundle_id", spec.BundleID,
-				"requested", spec.RVersion, "fallback", rPath)
+			return backend.BuildResult{
+				Success:  false,
+				ExitCode: 1,
+				Logs: fmt.Sprintf(
+					"R %s was available at deploy time but is no longer installed",
+					spec.RVersion),
+			}, nil
 		}
 		cmd := make([]string, len(spec.Cmd))
 		copy(cmd, spec.Cmd)

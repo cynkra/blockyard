@@ -58,6 +58,14 @@ type Backend interface {
 	// main.go calls this through the interface so it does not have to
 	// branch on the backend type.
 	Preflight(ctx context.Context) (*preflight.Report, error)
+
+	// CheckRVersion validates that the given R version can be served
+	// by this backend. The process backend checks rig-managed
+	// installations; the Docker backend returns nil (the image tag
+	// determines the R version). Returns a user-facing error message
+	// listing available versions when the requested version is not
+	// installed.
+	CheckRVersion(version string) error
 }
 
 // ErrNotSupported is returned by backend methods that are not

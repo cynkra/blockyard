@@ -41,6 +41,7 @@ func (b *ppBackend) CleanupOrphanResources(context.Context) error { return nil }
 func (b *ppBackend) Preflight(context.Context) (*preflight.Report, error) {
 	return &preflight.Report{}, nil
 }
+func (b *ppBackend) CheckRVersion(string) error { return nil }
 
 // --- preProcess tests ---
 

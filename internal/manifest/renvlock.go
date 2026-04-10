@@ -18,6 +18,24 @@ type renvLock struct {
 	Packages map[string]Package `json:"Packages"`
 }
 
+// RVersionFromRenvLock reads only the R.Version field from an
+// renv.lock file. Returns "" if the file is missing or unparseable.
+func RVersionFromRenvLock(lockPath string) string {
+	data, err := os.ReadFile(lockPath) //nolint:gosec // G304: reads renv.lock from managed path
+	if err != nil {
+		return ""
+	}
+	var partial struct {
+		R struct {
+			Version string `json:"Version"`
+		} `json:"R"`
+	}
+	if json.Unmarshal(data, &partial) != nil {
+		return ""
+	}
+	return partial.R.Version
+}
+
 // FromRenvLock converts an renv.lock file to a pinned manifest.
 // Package identity and source fields are preserved unchanged.
 // Extra DESCRIPTION fields from v2 lockfiles are not carried.
