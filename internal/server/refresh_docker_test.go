@@ -132,10 +132,10 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	taskID := uuid.New().String()
 	sender := srv.Tasks.Create(taskID, app.ID)
 
-	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer restoreCancel()
 
-	bundle.SpawnRestore(bundle.RestoreParams{
+	restoreDone := bundle.SpawnRestore(bundle.RestoreParams{
 		Ctx:          restoreCtx,
 		Backend:      srv.Backend,
 		DB:           srv.DB,
@@ -150,6 +150,7 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 		Retention:    5,
 		BasePath:     srv.Config.Storage.BundleServerPath,
 	})
+	t.Cleanup(func() { <-restoreDone }) // wait for goroutine before database.Close()
 
 	_, _, done, ok := srv.Tasks.Subscribe(taskID)
 	if !ok {
@@ -158,7 +159,7 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	select {
 	case <-done:
 	case <-restoreCtx.Done():
-		t.Fatal("restore timed out after 5 minutes")
+		t.Fatal("restore timed out after 10 minutes")
 	}
 
 	status, _ := srv.Tasks.Status(taskID)

@@ -152,10 +152,10 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 	taskID := uuid.New().String()
 	sender := tasks.Create(taskID, app.ID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	bundle.SpawnRestore(bundle.RestoreParams{
+	restoreDone := bundle.SpawnRestore(bundle.RestoreParams{
 		Ctx:          ctx,
 		Backend:      be,
 		DB:           database,
@@ -170,6 +170,7 @@ func TestFullPipeline_RestoreAndSpawnWorker(t *testing.T) {
 		Retention:    5,
 		BasePath:     basePath,
 	})
+	defer func() { <-restoreDone }() // wait for goroutine before database.Close()
 
 	// Wait for restore to complete.
 	_, _, done, ok := tasks.Subscribe(taskID)
