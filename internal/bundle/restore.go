@@ -299,6 +299,9 @@ func runRestore(p RestoreParams) error {
 		slog.Error("build container failed",
 			"app_id", p.AppID, "bundle_id", p.BundleID,
 			"exit_code", result.ExitCode, "logs", result.Logs)
+		if result.ExitCode == -1 && ctx.Err() != nil {
+			return fmt.Errorf("dependency restore timed out: %w", ctx.Err())
+		}
 		return fmt.Errorf("dependency restore failed (exit %d)", result.ExitCode)
 	}
 
