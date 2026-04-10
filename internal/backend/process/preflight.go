@@ -233,21 +233,37 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 	// worker processes look like from the host. bwrap and its
 	// descendants all share the same host credentials set, so reading
 	// the bwrap pid is sufficient.
+	//
+	// The first successful read may catch bwrap before it has written
+	// the uid_map (the real UID still shows the caller's UID). Keep
+	// polling while the observed UID matches the caller — namespace
+	// setup is still in progress.
+	callerUID := os.Getuid()
 	var uidLine, gidLine string
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
 		if err == nil {
+			var curUID, curGID string
 			for _, line := range strings.Split(string(data), "\n") {
 				switch {
 				case strings.HasPrefix(line, "Uid:"):
-					uidLine = line
+					curUID = line
 				case strings.HasPrefix(line, "Gid:"):
-					gidLine = line
+					curGID = line
 				}
 			}
-			if uidLine != "" && gidLine != "" {
-				break
+			if curUID != "" && curGID != "" {
+				hostUID, _ := parseStatusUID(curUID)
+				if hostUID != callerUID {
+					uidLine = curUID
+					gidLine = curGID
+					break
+				}
+				// Still showing caller's UID — namespace
+				// setup in progress, keep polling.
+				uidLine = curUID
+				gidLine = curGID
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
