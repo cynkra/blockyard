@@ -190,7 +190,7 @@ enforce them.
 
 ## What neither backend mitigates
 
-Two classes of risk remain regardless of backend choice:
+Three classes of risk remain regardless of backend choice:
 
 - **Code execution within a worker's own scope.** A malicious app can
   read any file its bundle mounts give it access to, exfiltrate data
@@ -204,6 +204,15 @@ Two classes of risk remain regardless of backend choice:
   exfiltrable by the code in that session. See
   [Credential Management](/docs/guides/credentials/) for the scoping
   model.
+- **Shared kernel attack surface.** Both backends isolate workers with
+  Linux namespaces and seccomp, but they share the host kernel. A
+  kernel vulnerability that allows namespace escape compromises every
+  worker on the host. Keeping the host kernel (and Docker/bwrap)
+  patched is the primary defence. For public-internet deployments where
+  this risk is unacceptable, run worker containers under the
+  [Kata](https://katacontainers.io/) runtime (`docker.runtime` or
+  `docker.runtime_defaults` in the config) so each worker gets its own
+  guest kernel inside a lightweight VM.
 
 ## Further reading
 
