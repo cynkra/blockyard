@@ -620,19 +620,32 @@ func main() {
 	}
 
 	// Wait for signal or update-complete notification.
-	select {
-	case sig := <-sigCh:
-		forceExitOnSecondSignal()
-		switch sig {
-		case syscall.SIGUSR1:
-			drainer.Drain()
+	for {
+		select {
+		case sig := <-sigCh:
+			// SIGUSR1 during an active orchestrator operation must be
+			// ignored — the orchestrator owns the drain/exit lifecycle
+			// and Finish() would shut down the HTTP server it's using
+			// to communicate with the new instance.
+			if sig == syscall.SIGUSR1 && orch != nil && orch.State() != "idle" {
+				slog.Warn("SIGUSR1 ignored: orchestrator operation in progress",
+					"state", orch.State())
+				continue
+			}
+			forceExitOnSecondSignal()
+			switch sig {
+			case syscall.SIGUSR1:
+				drainer.Drain()
+				drainer.Finish(cfg.Server.DrainTimeout.Duration)
+			default:
+				// SIGTERM, SIGINT → full shutdown.
+				drainer.Shutdown(cfg.Server.ShutdownTimeout.Duration)
+			}
+			return
+		case <-doneCh:
 			drainer.Finish(cfg.Server.DrainTimeout.Duration)
-		default:
-			// SIGTERM, SIGINT → full shutdown.
-			drainer.Shutdown(cfg.Server.ShutdownTimeout.Duration)
+			return
 		}
-	case <-doneCh:
-		drainer.Finish(cfg.Server.DrainTimeout.Duration)
 	}
 }
 

@@ -426,6 +426,10 @@ func TestWatchdogHealthy(t *testing.T) {
 }
 
 func TestWatchdogUnhealthy(t *testing.T) {
+	// Use threshold=1 so the test doesn't need to wait for 3 ticks.
+	cleanup := SetWatchdogFailureThresholdForTest(1)
+	defer cleanup()
+
 	calls := 0
 	readyzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -457,6 +461,32 @@ func TestWatchdogUnhealthy(t *testing.T) {
 	}
 	if !killed.Load() {
 		t.Error("instance should be killed on watchdog failure")
+	}
+}
+
+func TestWatchdogTransientFailureRecovers(t *testing.T) {
+	var calls atomic.Int32
+	readyzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		// Fail on the 2nd call only; all others succeed.
+		if n == 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer readyzServer.Close()
+
+	o, tracker := newTestOrchestrator(t, &fakeServerFactory{}, &mockChecker{})
+	sender := newSender(t)
+	o.activeInstance = &fakeInstance{id: "new-id", addr: readyzServer.Listener.Addr().String()}
+
+	err := o.Watchdog(context.Background(), 100*time.Millisecond, sender)
+	if err != nil {
+		t.Fatalf("single transient failure should not trigger rollback: %v", err)
+	}
+	if tracker.undrained.Load() != 0 {
+		t.Error("undrain should not be called for a transient failure")
 	}
 }
 

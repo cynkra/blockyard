@@ -46,3 +46,12 @@ func ActiveInstanceForTest(o *Orchestrator) TestServerInstance {
 	}
 	return o.activeInstance
 }
+
+// SetWatchdogFailureThresholdForTest overrides the consecutive failure
+// count for tests and returns a cleanup function that restores the
+// original value.
+func SetWatchdogFailureThresholdForTest(n int) func() {
+	old := watchdogFailureThreshold
+	watchdogFailureThreshold = n
+	return func() { watchdogFailureThreshold = old }
+}

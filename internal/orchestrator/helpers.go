@@ -45,7 +45,8 @@ func (o *Orchestrator) activate(ctx context.Context, addr string) error {
 		req.Header.Set("Authorization", "Bearer "+o.activationToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST activate: %w", err)
 	}
