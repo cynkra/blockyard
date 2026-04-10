@@ -2386,7 +2386,7 @@ hangs off. Implementers of phase 3-7 should preserve them:
    per-child port tracking inside `forkState`) without altering
    the existing lifecycle flow.
 
-**Sketch (full design in phase-3-9.md).** The process-backend
+**Sketch (full design in ../v4/phase-4-5.md).** The process-backend
 zygote control transport is TCP on localhost with token auth, same
 wire protocol as the Docker backend: first frame from the controller
 is `AUTH <token>\n`, token read from the mounted

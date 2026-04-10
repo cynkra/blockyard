@@ -19,11 +19,9 @@ sandbox. The Docker backend multiplexes sessions onto shared workers
 (Posit Connect model). Neither offers per-session isolation with
 cross-session memory sharing.
 
-The original v3 plan included a zygote (fork-based) worker model
-(phases 3-9, 3-10) that would fork per-session children from a
-pre-loaded parent. Design review identified that the zygote model's
-two claimed advantages — startup latency elimination and KSM head
-start — rest on unvalidated assumptions:
+The zygote (fork-based) worker model claims two advantages over
+independent processes: startup latency elimination and a KSM head
+start. Both rest on unvalidated assumptions:
 
 1. **Startup latency.** For typical Shiny apps (shiny + dplyr +
    ggplot2), cold start is ~1-3s with lazy loading. Fork saves
@@ -88,15 +86,15 @@ R fresh and loads the bundle independently.
    than the zygote control protocol — no fork-safety constraints,
    no app.R shape requirements.
 2. **`session.Entry.Addr`** — per-session routing target (reuses
-   the design from `phase-3-9.md` Step 3, but for independently
+   the design from `phase-4-5.md` Step 3, but for independently
    started children rather than forked ones).
 3. **Child port allocation** — reuses the port allocator from
    phase 3-8 (process backend) or per-container ranges (Docker
    backend).
 4. **Proxy integration** — session-addressed routing, unreachable-
-   child fallback (reuses `phase-3-9.md` Step 10 design).
+   child fallback (reuses `phase-4-5.md` Step 10 design).
 5. **Cleanup paths** — child exit handling, sweep loop for orphaned
-   children (reuses `phase-3-9.md` Step 11 design).
+   children (reuses `phase-4-5.md` Step 11 design).
 6. **Tests** — supervisor start, child spawn, independent health,
    child crash detection, cleanup convergence.
 
@@ -117,7 +115,7 @@ across any registered processes.
    host-global KSM merge counts, scraped from
    `/proc/<pid>/ksm_stat` and `/sys/kernel/mm/ksm/`.
 4. **Per-app opt-in** — `ksm` column + `experimental.ksm` server
-   flag (two-level gating from `phase-3-10.md`).
+   flag (two-level gating from `phase-4-6.md`).
 5. **Seccomp profile extension** — permit `prctl(PR_SET_MEMORY_MERGE)`
    for KSM-enabled workers.
 6. **Tests** — KSM helper fallback, preflight checks, metrics
@@ -152,7 +150,7 @@ meaningfully improves KSM effectiveness (or that startup latency
 savings justify the complexity for specific bundle profiles), land
 the fork-based zygote model as an experimental option.
 
-The full design is already written in `../v3/phase-3-9.md`. Key
+**See `phase-4-5.md` for the full design and wire protocol.** Key
 deliverables:
 
 1. **`backend.Forking` capability interface**
@@ -166,7 +164,7 @@ deliverables:
 **Depends on phase 4-5.** Post-fork sandboxing, byte-compilation,
 OOM score pinning.
 
-The full design is in `../v3/phase-3-10.md`.
+**See `phase-4-6.md` for the full design.**
 
 ## Build Order
 
@@ -187,11 +185,9 @@ Phase 4-4: Memory Sharing Instrumentation
 
 Phase 4-5: Experimental Zygote Model
   depends on: phase 4-4 (measurements must justify it)
-  design: ../v3/phase-3-9.md
 
 Phase 4-6: Zygote Hardening
   depends on: phase 4-5
-  design: ../v3/phase-3-10.md
 ```
 
 Phases 4-5 and 4-6 are conditional — they only proceed if phase 4-4

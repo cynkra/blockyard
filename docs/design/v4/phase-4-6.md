@@ -1,6 +1,6 @@
-# Phase 3-10: Zygote Hardening & KSM
+# Phase 4-6: Zygote Hardening & KSM
 
-Two companion tracks layered on top of phase 3-9's zygote mechanism:
+Two companion tracks layered on top of phase 4-5's zygote mechanism:
 
 1. **Post-fork sandboxing** — per-child isolation (private user and
    mount namespaces, private `/tmp`, seccomp-bpf, capability
@@ -31,24 +31,24 @@ These land in the same phase because:
 Nothing outside `internal/zygote{,ctl}/`, the backend `forking.go`
 files, `zygote.R`, the seccomp JSON profiles, and the API/UI
 surface for the `ksm` column changes. The zygote mechanism from
-phase 3-9 stays intact — phase 3-10 extends it, doesn't
+phase 4-5 stays intact — phase 4-6 extends it, doesn't
 restructure it.
 
-> **Multi-tenant gate.** Phase 3-9 explicitly documented
+> **Multi-tenant gate.** Phase 4-5 explicitly documented
 > (Deferred #1) that the zygote model must not be enabled on
-> multi-tenant production apps between phase 3-9 and this phase.
-> Phase 3-10 closes that gate — post-fork sandboxing provides the
+> multi-tenant production apps between phase 4-5 and this phase.
+> Phase 4-6 closes that gate — post-fork sandboxing provides the
 > per-session isolation that makes multi-tenant zygote safe, and
 > the opt-in KSM gate keeps operators with side-channel concerns
 > firmly in non-KSM territory. Both the UI toggle and the phase
 > doc stop warning against multi-tenant zygote once this phase
 > lands.
 
-## What phase 3-10 actually adds
+## What phase 4-6 actually adds
 
 ### Post-fork sandboxing
 
-Phase 3-9 ships the zygote mechanism with **no per-child
+Phase 4-5 ships the zygote mechanism with **no per-child
 isolation**. Children fork the zygote, inherit its entire address
 space (including loaded packages), and run `runApp()` on their
 assigned port. They share the worker-level sandbox — the Docker
@@ -70,7 +70,7 @@ separates one child from its siblings. Specifically:
   runaway session that `parallel::mclapply`s itself into
   oblivion can consume the whole worker's nproc budget.
 
-**Phase 3-10's post-fork sandboxing adds a second, per-child
+**Phase 4-6's post-fork sandboxing adds a second, per-child
 isolation layer applied from inside the child immediately after
 fork.** The layers compose — the worker-level sandbox is the
 first wall, the post-fork child sandbox is the second. Defense in
@@ -123,7 +123,7 @@ currently unmeasured for R. Meta reports ~6GB saved per 64GB
 machine on Instagram (CPython controller + ~32 workers), but
 Python's object model is structurally different from R's
 (refcount in header, no mark bits, no JIT in CPython), so that
-figure is a directional anchor at best. Phase 3-10 ships the
+figure is a directional anchor at best. Phase 4-6 ships the
 KSM opt-in plus observability (decisions D8, D10) so operators
 can measure actual recovery in their own deployments; the
 design does not commit to a specific memory-savings figure.
@@ -131,8 +131,8 @@ design does not commit to a specific memory-savings figure.
 **Five gates must all be open for the memory benefit to materialise:**
 
 1. **`experimental.zygote = true`** in the server config (phase
-   3-9). Default off.
-2. **`apps.zygote = true`** on the specific app (phase 3-9).
+   4-5). Default off.
+2. **`apps.zygote = true`** on the specific app (phase 4-5).
    Default off.
 3. **`experimental.ksm = true`** in the server config. Default
    off; independent of `experimental.zygote`.
@@ -155,7 +155,7 @@ design does not commit to a specific memory-savings figure.
      guidance.
 
 Gates 1–4 are the application-level opt-in; gate 5 is the host
-capability. When any fail, the zygote model from phase 3-9 still
+capability. When any fail, the zygote model from phase 4-5 still
 ships and still delivers its unconditional benefits (startup
 latency and isolation) unchanged — only the memory-sharing story
 degrades to the PSOCK-equivalent steady state. Preflight checks
@@ -174,28 +174,28 @@ Operators who have not opted into KSM see no preflight noise.
   mirrors `zygote` and the other per-app settings: DB column →
   `AppRow` → `AppUpdate` → API → CLI → UI. The two-level opt-in
   layers on top via the same `ExperimentalConfig` shape phase
-  3-9 introduced.
+  4-5 introduced.
 - **Phase 3-7** — process backend with bwrap sandboxing. Phase
-  3-10 extends the process backend's spawn path to select
+  4-6 extends the process backend's spawn path to select
   between two bwrap seccomp profiles (non-zygote and zygote) and
   to bind-mount the zygote helper `.so` into the sandbox.
 - **Phase 3-8** — outer-container seccomp profile
   (`docker/blockyard-seccomp.json`) and bwrap seccomp profile
   (`docker/blockyard-bwrap-seccomp.json`) plus the
   `cmd/seccomp-compile/` pipeline that compiles JSON to BPF.
-  Phase 3-10 adds two new JSON profiles compiled via the same
+  Phase 4-6 adds two new JSON profiles compiled via the same
   pipeline (`blockyard-bwrap-zygote-seccomp.json` for zygote
   workers on the process backend, `blockyard-post-fork-seccomp.json`
   for the in-helper filter applied inside each child) and
   extends the outer-container profile to conditionally allow
   `prctl(PR_SET_MEMORY_MERGE)` when KSM is enabled.
-- **Phase 3-9** — the zygote mechanism. The `Forking` interface,
+- **Phase 4-5** — the zygote mechanism. The `Forking` interface,
   `internal/zygotectl/` and `internal/zygote/` packages, the
   embedded `zygote.R` script, the control protocol
   (`AUTH`/`FORK`/`KILL`/`STATUS`/`INFO` + async `CHILDEXIT`),
   the cold-start integration, and the `zygote` /
-  `experimental.zygote` opt-in all exist by the time phase 3-10
-  lands. Phase 3-10 modifies several of these files rather than
+  `experimental.zygote` opt-in all exist by the time phase 4-6
+  lands. Phase 4-6 modifies several of these files rather than
   creating parallel copies — see the step list for specific
   edits.
 
@@ -257,10 +257,10 @@ Operators who have not opted into KSM see no preflight noise.
 
 9. **`ksm` column on the `apps` table** — migration `004_ksm`,
    following the same expand-only shape as migration `003_zygote`
-   from phase 3-9. Validated to require `zygote = true` on the
+   from phase 4-5. Validated to require `zygote = true` on the
    same effective end-state (see decision D3).
 10. **`experimental.ksm` server-wide flag** — second field on the
-    `ExperimentalConfig` struct introduced in phase 3-9.
+    `ExperimentalConfig` struct introduced in phase 4-5.
     Config-load validation rejects `experimental.ksm = true`
     without `experimental.zygote = true`. Runtime short-circuits
     to non-KSM behaviour whenever the flag is off — kill switch.
@@ -300,7 +300,7 @@ Operators who have not opted into KSM see no preflight noise.
     `/sys/kernel/mm/ksm/pages_to_scan`. Non-fatal warnings
     otherwise.
 17. **Up-front bundle byte-compilation in `zygote.R`** — replaces
-    the phase-3-9 `source(app.R)` preload with
+    the phase-4-5 `source(app.R)` preload with
     `compiler::cmpfile(app.R, tempfile())` +
     `compiler::loadcmp()` so bundle closures are born as
     `BCODESXP` in the zygote. See decision D9.
@@ -311,7 +311,7 @@ Operators who have not opted into KSM see no preflight noise.
     `updateAppRequest`, `--ksm` flag on `by scale`, settings
     tab toggle in the UI (admin-only, gated on the server
     capabilities endpoint). The existing server capabilities
-    endpoint from phase 3-9 gains an `experimental.ksm` field.
+    endpoint from phase 4-5 gains an `experimental.ksm` field.
 
 ---
 
@@ -319,12 +319,12 @@ Operators who have not opted into KSM see no preflight noise.
 
 ### Step 1: Migration — `ksm` column
 
-Phase 3-9's migration `003_zygote` adds the `zygote` column.
-Phase 3-10's migration `004_ksm` adds the `ksm` column. Both
+Phase 4-5's migration `003_zygote` adds the `zygote` column.
+Phase 4-6's migration `004_ksm` adds the `ksm` column. Both
 additive, nullable-equivalent (default 0), backward-compatible
 per phase 3-1 rules. Separate migrations because the features
-ship in separate phases — phase 3-9 can land, be deployed, and
-run in production before phase 3-10's migration touches the
+ship in separate phases — phase 4-5 can land, be deployed, and
+run in production before phase 4-6's migration touches the
 schema again.
 
 **`internal/db/migrations/sqlite/004_ksm.up.sql`:**
@@ -377,7 +377,7 @@ Add to `AppRow` in `internal/db/db.go`:
 
 ```go
 type AppRow struct {
-    // ...existing fields including Zygote from phase 3-9...
+    // ...existing fields including Zygote from phase 4-5...
     KSM bool `db:"ksm" json:"ksm"`
 }
 ```
@@ -386,7 +386,7 @@ Add to `AppUpdate`:
 
 ```go
 type AppUpdate struct {
-    // ...existing fields including Zygote from phase 3-9...
+    // ...existing fields including Zygote from phase 4-5...
     KSM *bool
 }
 ```
@@ -404,8 +404,8 @@ Add `ksm = ?` to the UPDATE SQL and `app.KSM` to the bind list.
 
 ### Step 3: `experimental.ksm` flag on `ExperimentalConfig`
 
-Phase 3-9 added the `ExperimentalConfig` struct with a single
-`Zygote` bool. Phase 3-10 extends it:
+Phase 4-5 added the `ExperimentalConfig` struct with a single
+`Zygote` bool. Phase 4-6 extends it:
 
 ```go
 type ExperimentalConfig struct {
@@ -424,7 +424,7 @@ if c.Experimental != nil {
 }
 ```
 
-The `ExperimentalFlags()` nil-safe accessor from phase 3-9 keeps
+The `ExperimentalFlags()` nil-safe accessor from phase 4-5 keeps
 working unchanged — an absent `[experimental]` section returns
 the zero struct, which has both fields false.
 
@@ -733,8 +733,8 @@ unreachable from user code after the first successful call.
 
 ### Step 5: `internal/zygotectl/` embed layout
 
-Phase 3-9's `internal/zygotectl/embed.go` ships `ZygoteScript`.
-Phase 3-10 extends it with the helper source (for debugging /
+Phase 4-5's `internal/zygotectl/embed.go` ships `ZygoteScript`.
+Phase 4-6 extends it with the helper source (for debugging /
 reproducibility only) and adds per-arch files for the compiled
 `.so`:
 
@@ -796,7 +796,7 @@ var HelperSO []byte // empty — zygote model is Linux-only
 
 An empty `HelperSO` byte array causes the backend's Spawn path
 to fail loudly when it tries to write the helper to disk; the
-zygote model is explicitly Linux-only per phase 3-9's design.
+zygote model is explicitly Linux-only per phase 4-5's design.
 
 ### Step 6: Post-fork seccomp profile — `docker/blockyard-post-fork-seccomp.json`
 
@@ -901,7 +901,7 @@ backend workers. That profile explicitly re-tightens
 `clone`/`unshare` so workers cannot create further namespaces
 once inside the bwrap sandbox.
 
-Phase 3-10's post-fork sandboxing requires the child to call
+Phase 4-6's post-fork sandboxing requires the child to call
 `unshare(CLONE_NEWUSER | CLONE_NEWNS)` from inside the bwrap
 sandbox. That's a direct conflict with the phase-3-8 re-tightening.
 
@@ -999,7 +999,7 @@ bwrap work. It does not currently allow
 Docker container (either a direct Docker-backend zygote or a
 process-backend container wrapping bwrap) would get EPERM.
 
-Phase 3-10 extends the overlay to add the relaxation, but
+Phase 4-6 extends the overlay to add the relaxation, but
 **gated via a separate profile variant, not a runtime toggle**.
 Two reasons:
 
@@ -1052,7 +1052,7 @@ time — see Step 11).
 ```
 
 Phase 3-8's `cmd/seccomp-merge` handles multiple overlays; phase
-3-10 invokes it twice: once for the base profile (existing
+4-6 invokes it twice: once for the base profile (existing
 phase-3-8 invocation, unchanged) and once for the KSM variant
 (new, adds the KSM overlay on top of the base).
 
@@ -1073,9 +1073,9 @@ prctl there.
 
 ### Step 9: `STATS` command on the control protocol
 
-Phase 3-9 defined the control protocol with `AUTH`, `FORK`,
+Phase 4-5 defined the control protocol with `AUTH`, `FORK`,
 `KILL`, `STATUS`, `INFO`, and asynchronous `CHILDEXIT` pushes.
-Phase 3-10 adds `STATS`:
+Phase 4-6 adds `STATS`:
 
 ```
 client → server: STATS\n
@@ -1092,7 +1092,7 @@ server → client: <key>=<value>\n... END\n
 `INFO` also gains three fields carrying startup-time KSM state:
 `ksm_status`, `ksm_errno`, and `sandbox_status`. The existing
 `r_version` and `preload_ms` fields continue to ship. Unknown
-keys are ignored on the Go side (phase-3-9's forward-compat
+keys are ignored on the Go side (phase-4-5's forward-compat
 behaviour), so the addition is a pure extension.
 
 **`internal/zygotectl/control.go` additions:**
@@ -1172,8 +1172,8 @@ type Info struct {
 `fetchInfo` adds cases for `ksm_status`, `ksm_errno`, and
 `sandbox_status`.
 
-**`requestMulti()` — multi-line response reader.** Phase 3-9's
-`request()` reads exactly one line. Phase 3-10 adds
+**`requestMulti()` — multi-line response reader.** Phase 4-5's
+`request()` reads exactly one line. Phase 4-6 adds
 `requestMulti()` for `STATS`, which accumulates lines in the read
 loop until it sees `END`. The `readLoop` goroutine gains a
 `pendingMulti` buffer on the client struct; `CHILDEXIT` pushes
@@ -1209,13 +1209,13 @@ func (c *Client) requestMulti(ctx context.Context, line string) (string, error) 
 lines are accumulated until `END\n` is seen, at which point the
 accumulated body is dispatched on the channel. If
 `c.pendingMulti` is nil, the existing single-line dispatch path
-runs (same as phase 3-9).
+runs (same as phase 4-5).
 
 ### Step 10: `zygote.R` changes
 
-Phase 3-9's `zygote.R` handles AUTH/FORK/KILL/STATUS/INFO with no
+Phase 4-5's `zygote.R` handles AUTH/FORK/KILL/STATUS/INFO with no
 sandboxing, no KSM, and a `source()` / `sys.source()` preload. Phase
-3-10 extends it with:
+4-6 extends it with:
 
 1. **Helper load.** After `preload_bundle()` completes (so
    bundle code cannot reach the helper during preload),
@@ -1226,7 +1226,7 @@ sandboxing, no KSM, and a `source()` / `sys.source()` preload. Phase
    record `ksm_status = "disabled"` without loading any KSM
    code path.
 3. **Up-front byte-compilation of bundle code.** Replace the
-   phase-3-9 `source()` / `sys.source()` calls with `compiler::cmpfile()` +
+   phase-4-5 `source()` / `sys.source()` calls with `compiler::cmpfile()` +
    `compiler::loadcmp()` so bundle closures are born as
    `BCODESXP`. Prevents the JIT from mutating closure SEXP
    headers post-fork. See decision D9.
@@ -1244,23 +1244,23 @@ Full modified `zygote.R` (the parts that change — unchanged
 lines elided for brevity):
 
 ```r
-# blockyard zygote — phase 3-10 version
+# blockyard zygote — phase 4-6 version
 # (preamble, env reads, secret reads, zygote_info initialisation
-#  unchanged from phase 3-9)
+#  unchanged from phase 4-5)
 
-# NEW in 3-10: KSM startup state, filled in after preload_bundle.
+# NEW in 4-6: KSM startup state, filled in after preload_bundle.
 zygote_info$ksm_status   <- "disabled"
 zygote_info$ksm_errno    <- 0L
 zygote_info$sandbox_status <- "ready"
 
-# NEW in 3-10: captured_app compilation. Replaces the phase-3-9
+# NEW in 4-6: captured_app compilation. Replaces the phase-4-5
 # preload_bundle that did source() / sys.source() — see decision D9.
 captured_app <- NULL
 
 preload_bundle <- function() {
   env <- new.env(parent = globalenv())
 
-  # Defensive runApp stub — same rationale as phase 3-9: bundles
+  # Defensive runApp stub — same rationale as phase 4-5: bundles
   # that end with runApp(shinyApp(ui, server)) instead of bare
   # shinyApp(ui, server) would start httpuv in the zygote and
   # defeat the loadcmp()$value capture below. The stub intercepts
@@ -1297,7 +1297,7 @@ preload_bundle <- function() {
   }
 
   # Primary capture: loadcmp() returns the value of the last
-  # expression, same as source()$value in phase 3-9. When app.R
+  # expression, same as source()$value in phase 4-5. When app.R
   # ends with shinyApp(ui, server) — qualified or not — this is
   # the shiny.appobj.
   res <- compile_and_load(app_r)
@@ -1324,7 +1324,7 @@ zygote_info$preload_ms <- as.integer(
   as.numeric(Sys.time() - preload_start, units = "secs") * 1000
 )
 
-# NEW in 3-10: Load the helper AFTER preload_bundle() finishes.
+# NEW in 4-6: Load the helper AFTER preload_bundle() finishes.
 # Bundle code running during preload cannot reach the helper
 # symbols because they are not yet loaded. See decision D1.
 helper_path <- Sys.getenv("BLOCKYARD_HELPER_PATH",
@@ -1348,7 +1348,7 @@ if (helper_loaded) {
   tryCatch(unlink(helper_path), error = function(e) NULL)
 }
 
-# NEW in 3-10: Conditional KSM opt-in. Gated on the env var set by
+# NEW in 4-6: Conditional KSM opt-in. Gated on the env var set by
 # the backend at spawn time (only when both experimental.ksm and
 # apps.ksm are true). See decision D7.
 ksm_opt_in <- identical(Sys.getenv("BLOCKYARD_KSM_ENABLED"), "1")
@@ -1375,7 +1375,7 @@ gc(full = TRUE)
 message("blockyard_zygote event=gc_hygiene status=ok")
 
 # (child tracking, pending event buffer, push_event, flush_pending,
-#  reap_children — all unchanged from phase 3-9)
+#  reap_children — all unchanged from phase 4-5)
 
 handle_command <- function(line) {
   parts <- strsplit(line, " ", fixed = TRUE)[[1]]
@@ -1393,7 +1393,7 @@ handle_command <- function(line) {
         close(con)
         close(srv)
 
-        # NEW in 3-10: apply_post_fork_sandbox must succeed or the
+        # NEW in 4-6: apply_post_fork_sandbox must succeed or the
         # child exits. The helper performs the entire sandbox setup
         # atomically (oom_score_adj, NO_NEW_PRIVS, unshare, mount
         # tmpfs, setrlimit, capset, seccomp) with a static guard
@@ -1424,11 +1424,11 @@ handle_command <- function(line) {
     assign(cid, list(pid = job$pid, port = port), envir = children)
     writeLines(sprintf("OK %s %d\n", cid, job$pid), con, sep = "")
   } else if (cmd == "KILL") {
-    # (unchanged from phase 3-9)
+    # (unchanged from phase 4-5)
   } else if (cmd == "STATUS") {
-    # (unchanged from phase 3-9)
+    # (unchanged from phase 4-5)
   } else if (cmd == "INFO") {
-    # NEW in 3-10: emit ksm_status, ksm_errno, sandbox_status.
+    # NEW in 4-6: emit ksm_status, ksm_errno, sandbox_status.
     writeLines(sprintf("r_version=%s\n", zygote_info$r_version),
                con, sep = "")
     writeLines(sprintf("preload_ms=%d\n", zygote_info$preload_ms),
@@ -1441,7 +1441,7 @@ handle_command <- function(line) {
                con, sep = "")
     writeLines("END\n", con, sep = "")
   } else if (cmd == "STATS") {
-    # NEW in 3-10. Reads /proc/<pid>/ksm_stat for the zygote and
+    # NEW in 4-6. Reads /proc/<pid>/ksm_stat for the zygote and
     # each tracked child, aggregates, emits key=value lines
     # terminated by END. See decision D8.
     handle_stats(con)
@@ -1493,7 +1493,7 @@ handle_stats <- function(con) {
   writeLines("END\n", con, sep = "")
 }
 
-# (main socketSelect loop unchanged from phase 3-9)
+# (main socketSelect loop unchanged from phase 4-5)
 ```
 
 **Notes on the R-side changes:**
@@ -1531,11 +1531,11 @@ handle_stats <- function(con) {
 
 ### Step 11: Docker backend `Spawn` changes
 
-Phase 3-9's Docker `Forking` implementation spawns a zygote
+Phase 4-5's Docker `Forking` implementation spawns a zygote
 container with the embedded `zygote.R` bind-mounted at
 `/blockyard/zygote.R` and environment variables for the bundle
 path, control port, secret path, and child port range. Phase
-3-10 extends `Spawn` with four additions:
+4-6 extends `Spawn` with four additions:
 
 1. **Apparmor and seccomp options.** When `spec.Zygote` is true,
    the container create call adds:
@@ -1572,12 +1572,12 @@ path, control port, secret path, and child port range. Phase
    the zygote attempts `enable_ksm` and records the actual
    result.
 
-**`WorkerSpec` extension** (phase 3-9 adds `Zygote` and
-`ControlSecret`; phase 3-10 adds one more field):
+**`WorkerSpec` extension** (phase 4-5 adds `Zygote` and
+`ControlSecret`; phase 4-6 adds one more field):
 
 ```go
 type WorkerSpec struct {
-    // ...existing fields including Zygote, ControlSecret from phase 3-9...
+    // ...existing fields including Zygote, ControlSecret from phase 4-5...
     KSM bool // enable KSM via PR_SET_MEMORY_MERGE in the zygote
 }
 ```
@@ -1588,7 +1588,7 @@ Populated from the effective end-state (server-wide
 
 **Server-level helper initialisation.** In
 `cmd/blockyard/main.go`, right after the zygote script is
-written to disk for phase 3-9, add the helper `.so`:
+written to disk for phase 4-5, add the helper `.so`:
 
 ```go
 // Write the embedded helper .so to disk once per server lifetime.
@@ -1614,8 +1614,8 @@ the KSM variant when the flag is on.
 
 ### Step 12: Process backend `Spawn` changes
 
-Phase 3-9's process `Forking` spawns a zygote via bwrap, using
-the phase-3-8 `blockyard-bwrap-seccomp.bpf` profile. Phase 3-10
+Phase 4-5's process `Forking` spawns a zygote via bwrap, using
+the phase-3-8 `blockyard-bwrap-seccomp.bpf` profile. Phase 4-6
 adds profile selection logic plus the helper bind mount.
 
 **Profile selection** — new config field on `ProcessConfig`:
@@ -1685,8 +1685,8 @@ environment, same as the Docker backend.
 
 ### Step 13: Backend `Forking.StatsClient` method
 
-Phase 3-9's `Forking` interface has three methods: `Fork`,
-`KillChild`, `ChildExits`. Phase 3-10 adds a fourth:
+Phase 4-5's `Forking` interface has three methods: `Fork`,
+`KillChild`, `ChildExits`. Phase 4-6 adds a fourth:
 
 ```go
 // StatsClient resolves a workerID to its live zygote control
@@ -1713,15 +1713,15 @@ func (d *DockerBackend) StatsClient(workerID string) *zygotectl.Client {
 }
 ```
 
-Phase-3-9's decision #5 split `internal/zygotectl/` from
+Phase-4-5's decision #5 split `internal/zygotectl/` from
 `internal/zygote/` specifically to enable this: `backend` can
 import `zygotectl` (for `*Client` on the `Forking` interface)
 without cycling, because `zygotectl` doesn't import `backend`.
 
 ### Step 14: `zygote.Manager` metrics-poll goroutine
 
-Phase 3-9's `zygote.Manager` owns `bySession` bookkeeping, exit
-handling, and the sweep loop. Phase 3-10 adds:
+Phase 4-5's `zygote.Manager` owns `bySession` bookkeeping, exit
+handling, and the sweep loop. Phase 4-6 adds:
 
 1. **`statsClient func(workerID string) *zygotectl.Client`** —
    set from `ManagerConfig.StatsClient` (supplied by the backend
@@ -1877,7 +1877,7 @@ return m
 ### Step 15: Prometheus metrics
 
 Three new metrics in `internal/telemetry/metrics.go` alongside
-phase 3-9's existing gauges:
+phase 4-5's existing gauges:
 
 ```go
 ZygoteKSMMergingPages = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -1929,7 +1929,7 @@ func hostKSMScraperLoop(ctx context.Context, interval time.Duration) {
 
 ### Step 16: KSM preflight checks
 
-Phase 3-7 introduced `Backend.Preflight()`. Phase 3-10 adds KSM
+Phase 3-7 introduced `Backend.Preflight()`. Phase 4-6 adds KSM
 checks to both implementations:
 
 ```go
@@ -1973,19 +1973,19 @@ steady state). See decision D7 for the operational impact of
 
 ### Step 17: API / CLI / UI for `ksm`
 
-Mirror phase 3-9's `zygote` surface.
+Mirror phase 4-5's `zygote` surface.
 
 **API** — extend `updateAppRequest` in `internal/api/apps.go`:
 
 ```go
 type updateAppRequest struct {
-    // ...existing fields including Zygote from phase 3-9...
+    // ...existing fields including Zygote from phase 4-5...
     KSM *bool `json:"ksm"`
 }
 ```
 
 Validation in `UpdateApp()` runs against the effective end-state
-(same pattern phase 3-9 introduced for `zygote`):
+(same pattern phase 4-5 introduced for `zygote`):
 
 ```go
 effectiveZygote := app.Zygote
@@ -2019,7 +2019,7 @@ flags true.
 Add `KSM` to `appResponseV2()` in `internal/api/runtime.go` and
 to `swagger_types.go`.
 
-**Server capabilities endpoint** (introduced in phase 3-9) gains
+**Server capabilities endpoint** (introduced in phase 4-5) gains
 a second field:
 
 ```json
@@ -2044,7 +2044,7 @@ if cmd.Flags().Changed("ksm") {
 ```
 
 **UI** — admin-only toggle in `tab_settings.html`, alongside the
-phase-3-9 zygote toggle:
+phase-4-5 zygote toggle:
 
 ```html
 {{if .IsAdmin}}
@@ -2091,7 +2091,7 @@ if c.ZygoteMetricsInterval.Duration == 0 {
 ```
 
 Wired into `zygote.NewManager` from `cmd/blockyard/main.go`
-(this replaces the phase-3-9 call site):
+(this replaces the phase-4-5 call site):
 
 ```go
 flags := srv.Config.ExperimentalFlags()
@@ -2120,7 +2120,7 @@ method reference resolves cleanly without a cast.
 
 #### Unit tests
 
-**`internal/zygotectl/control_test.go`** (extends phase 3-9 tests):
+**`internal/zygotectl/control_test.go`** (extends phase 4-5 tests):
 
 ```go
 func TestClient_Stats(t *testing.T)
@@ -2145,7 +2145,7 @@ func TestClient_InfoIncludesKSMAndSandboxStatus(t *testing.T)
 // expected values.
 ```
 
-**`internal/zygote/manager_test.go`** (extends phase 3-9 tests):
+**`internal/zygote/manager_test.go`** (extends phase 4-5 tests):
 
 ```go
 func TestManager_MetricsLoopPollsActiveWorkers(t *testing.T)
@@ -2331,7 +2331,7 @@ func TestApplyPostForkSandbox_FailureCodesRoundTrip(t *testing.T)
 
 #### Manual verification
 
-A phase-landing checklist in `docs/design/v3/phase-3-10-verify.md`
+A phase-landing checklist in `docs/design/v4/phase-4-6-verify.md`
 covering the cases CI cannot reach cheaply:
 
 - Ubuntu 24.04 host, KSM enabled, zygote + KSM app: verify
@@ -2398,7 +2398,7 @@ covering the cases CI cannot reach cheaply:
 | `docker/blockyard-bwrap-zygote-seccomp.json` | Zygote-variant bwrap profile (generated output, committed) |
 | `docker/blockyard-bwrap-zygote-seccomp-overlay.json` | Hand-edited overlay |
 | `docker/blockyard-seccomp-ksm-overlay.json` | KSM relaxation overlay (allows `prctl(PR_SET_MEMORY_MERGE)`) |
-| `docs/design/v3/phase-3-10-verify.md` | Phase-landing manual verification checklist |
+| `docs/design/v4/phase-4-6-verify.md` | Phase-landing manual verification checklist |
 | `internal/backend/docker/sandbox_integration_test.go` | Docker sandbox integration tests |
 | `internal/backend/process/sandbox_integration_test.go` | Process sandbox integration tests |
 
@@ -2479,7 +2479,7 @@ same `.so` does not introduce additional risk. One file is
 simpler to reason about and audit.
 
 **Additional hardening: load after preload + unlink.** Phase
-3-10's `zygote.R` calls `dyn.load(helper_path)` *after*
+4-6's `zygote.R` calls `dyn.load(helper_path)` *after*
 `preload_bundle()` finishes. At load time the bundle code has
 already run and cannot reach the helper symbols. Immediately
 after the load, the script calls `unlink(helper_path)` — the
@@ -2535,9 +2535,9 @@ verify each step ran (see Step 19's
 
 ### D3. Two-level opt-in for KSM: server-wide `experimental.ksm` AND per-app `ksm` column, independent of the zygote opt-in
 
-Phase 3-9 established the two-level opt-in shape for the zygote
+Phase 4-5 established the two-level opt-in shape for the zygote
 model (`experimental.zygote` server flag + `apps.zygote` per-app
-column). Phase 3-10 repeats the pattern for KSM with one
+column). Phase 4-6 repeats the pattern for KSM with one
 deliberate difference: the KSM gate is **independent** of the
 zygote gate, not subordinate to it at the gate level. The
 subordination happens at the validation layer (`ksm=true`
@@ -2553,14 +2553,14 @@ exposure (Deferred #1 below) should be able to get that
 configuration without forking the design. Two flags is the
 simplest way to express it.
 
-**The full gate matrix across phases 3-9 and 3-10:**
+**The full gate matrix across phases 4-5 and 4-6:**
 
 | Gate                     | Location     | Phase  | Controls                                            |
 |--------------------------|--------------|--------|-----------------------------------------------------|
-| `experimental.zygote`    | server toml  | 3-9    | Whether the zygote code path runs at all            |
-| `experimental.ksm`       | server toml  | 3-10   | Whether `PR_SET_MEMORY_MERGE` is ever called        |
-| `apps.zygote`            | db column    | 3-9    | Whether a specific app uses the zygote model        |
-| `apps.ksm`               | db column    | 3-10   | Whether a specific app's zygote enables KSM         |
+| `experimental.zygote`    | server toml  | 4-5    | Whether the zygote code path runs at all            |
+| `experimental.ksm`       | server toml  | 4-6    | Whether `PR_SET_MEMORY_MERGE` is ever called        |
+| `apps.zygote`            | db column    | 4-5    | Whether a specific app uses the zygote model        |
+| `apps.ksm`               | db column    | 4-6    | Whether a specific app's zygote enables KSM         |
 
 **Validation rules** (enforced in `UpdateApp` and `CreateApp`):
 
@@ -2585,7 +2585,7 @@ without `BLOCKYARD_KSM_ENABLED`, and `zygote.R`'s `enable_ksm()`
 never runs.
 
 **UI gating:** The settings tab reads the effective server
-config via the capabilities endpoint (phase 3-9) and disables
+config via the capabilities endpoint (phase 4-5) and disables
 the KSM toggle when `experimental.ksm` is off. Tooltip on the
 disabled toggle explains "set `experimental.ksm = true` in the
 server config to enable this feature."
@@ -2601,7 +2601,7 @@ server config to enable this feature."
   variation — there are tenants who want multi-user but accept
   KSM risk, and tenants who want single-user but still don't
   want KSM for unrelated reasons (e.g., pre-6.4 kernel). Two
-  explicit flags compose more cleanly. Rejected for phase 3-10;
+  explicit flags compose more cleanly. Rejected for phase 4-6;
   remains an option for future consolidation.
 
 ### D4. Outer-container seccomp gates `prctl(PR_SET_MEMORY_MERGE)` via profile variant, not runtime toggle
@@ -2646,7 +2646,7 @@ intent.
 
 ### D5. Only `RLIMIT_NPROC` is applied post-fork; `RLIMIT_AS` and `RLIMIT_CPU` are deliberately not
 
-Phase 3-10's post-fork hook could in principle apply three
+Phase 4-6's post-fork hook could in principle apply three
 resource limits: `RLIMIT_AS` (virtual memory address space),
 `RLIMIT_CPU` (CPU seconds), and `RLIMIT_NPROC` (processes per
 user). The draft originally listed all three. The landed
@@ -2661,7 +2661,7 @@ cgroup memory accounting but hostile to `RLIMIT_AS` because
 "2 GiB" routinely fails at arbitrary later points inside R's
 allocator, producing aborts rather than graceful SIGKILL.
 Operators also cannot know the "right value" ahead of time
-without per-app working-set measurements, which phase 3-10 does
+without per-app working-set measurements, which phase 4-6 does
 not ship. Operationally close to useless.
 
 **`RLIMIT_CPU`: wrong shape for Shiny sessions.** Sessions
@@ -2671,7 +2671,7 @@ SIGXCPU a long-running session at arbitrary times regardless
 of whether it was active. The right shape for CPU containment
 is "CPU share under contention," which is a cgroup property,
 not a per-process rlimit. Cgroup CPU shares are already
-enforced at the worker level on Docker (per phase 3-9 decision
+enforced at the worker level on Docker (per phase 4-5 decision
 #6) and unbounded on the process backend (per phase 3-7's
 "no per-worker cgroups" stance).
 
@@ -2700,7 +2700,7 @@ cgroup v2 delegation availability, tracked as Deferred #3.
 
 Phase 3-8's bwrap seccomp profile explicitly **re-tightens**
 `clone`/`unshare` because "workers should not be creating
-further namespaces once inside the sandbox." Phase 3-10's
+further namespaces once inside the sandbox." Phase 4-6's
 post-fork sandboxing requires the child to call
 `unshare(CLONE_NEWUSER | CLONE_NEWNS)` from inside that same
 bwrap sandbox. The two phases have directly conflicting
@@ -2730,7 +2730,7 @@ to zygote's needs.
 Second option considered: document that process-backend zygote
 children share `/tmp` with their siblings; multi-tenant is
 Docker-only. Rejected because the zygote model's two
-unconditional benefits advertised in phase 3-9 are "startup
+unconditional benefits advertised in phase 4-5 are "startup
 latency" and "per-session isolation" — per-session isolation is
 load-bearing, and "it works on one backend but not the other"
 would undermine the value proposition. The cost of shipping
@@ -2778,7 +2778,7 @@ for R workloads — Meta reports ~6GB saved per 64GB machine on
 Instagram (CPython controller + ~32 workers), but Python's
 object model is structurally different (refcount in header, no
 mark bits, no JIT in CPython), so that number is an upper-bound
-anchor, not a prediction. Phase 3-10 ships the KSM opt-in plus
+anchor, not a prediction. Phase 4-6 ships the KSM opt-in plus
 observability (D8) so operators can measure actual recovery in
 their own deployments; the design does not commit to a specific
 memory-savings figure.
@@ -2819,7 +2819,7 @@ must:
    a 1GB working set in roughly 2 minutes. Workloads with
    larger bundles or higher session churn may need 5000–10000.
 
-Phase 3-10's preflight check warns if either `run=0` or
+Phase 4-6's preflight check warns if either `run=0` or
 `pages_to_scan` is at the default 100, but only when both
 `experimental.ksm = true` in server config AND at least one
 app has `ksm = true` (D3) — operators who have not opted into
@@ -2867,7 +2867,7 @@ leakage via Flush+Reload and similar cache attacks.
 `PR_SET_MEMORY_MERGE` opts a process into a *global* kernel
 merge pool, so children within a zygote family, and zygotes
 across apps on the same host, all participate in one merging
-domain — phase 3-10's sandboxing does not address this because
+domain — phase 4-6's sandboxing does not address this because
 it operates above the physical-frame layer. The **primary
 mitigation is the independent KSM opt-in from D3**: operators
 who don't want KSM exposure leave `experimental.ksm = false`
@@ -2888,7 +2888,7 @@ real number for their bundle, not the design's estimate. Three
 decisions shape how that data flows:
 
 - **`STATS` is a new command, not a field on `INFO`.** `INFO`
-  is queried once at `NewClient` time (phase 3-9) and cached
+  is queried once at `NewClient` time (phase 4-5) and cached
   read-only — that's correct for static facts (R version, KSM
   enablement status, preload time, sandbox status) but wrong
   for continuously-changing metrics. Mixing the two would
@@ -2922,7 +2922,7 @@ decisions shape how that data flows:
   `blockyard_host_ksm_pages_sharing` gauge. Host-global is
   what operators budget against (whole-host RAM); per-zygote
   is what they need for app-level capacity planning. Both
-  ship in phase 3-10.
+  ship in phase 4-6.
 
 The `metrics_interval` defaults to 30s. Lower values give
 fresher graphs at the cost of slightly more `STATS` round-trips
@@ -2991,17 +2991,17 @@ The fix has to be scoped carefully:
   path, no `SET_BODY` writes, no child-local bytecode
   allocations for bundle code.
 - **The shinyApp object is captured via `loadcmp()` return
-  value, not re-sourced.** Same mechanism as phase 3-9's
+  value, not re-sourced.** Same mechanism as phase 4-5's
   `source()$value` — `loadcmp()` returns the value of the last
   expression in `app.R`. When that expression is
   `shinyApp(ui, server)` (qualified or unqualified), the return
   value is the `shiny.appobj`. A defensive `runApp` stub in the
   preload env handles the `runApp(shinyApp(...))` edge case,
-  same as phase 3-9. The FORK handler then calls
+  same as phase 4-5. The FORK handler then calls
   `runApp(captured_app, port = ...)` in the child instead of
   `runApp(bundle_path, port = ...)`. Bundles that fail to
   produce a `shiny.appobj` are rejected at preload time with a
-  clear error, same as phase 3-9.
+  clear error, same as phase 4-5.
 
 **What this does not catch (residuals):**
 
@@ -3073,7 +3073,7 @@ ratio between zygote and children.
 
 Three properties of this approach matter:
 
-- **No privilege coupling.** Phase 3-10 sandboxing drops all
+- **No privilege coupling.** Phase 4-6 sandboxing drops all
   capabilities; if we relied on `CAP_SYS_RESOURCE` to lower
   the zygote's adj, we'd have to coordinate with the
   cap-dropping story or special-case the zygote. Raising the
@@ -3095,7 +3095,7 @@ Alternatives considered:
 
 - **Lower the zygote to `-800` or `-1000` instead.** Cleaner
   symbolically (it's "the system process") but requires
-  `CAP_SYS_RESOURCE`, which phase 3-10 would need to grant
+  `CAP_SYS_RESOURCE`, which phase 4-6 would need to grant
   explicitly before dropping capabilities. Also risks edge
   cases where `-1000` makes the zygote OOM-immune and the
   kernel panics instead of killing anything. Rejected.
@@ -3140,7 +3140,7 @@ runs bwrap directly, not inside a Docker container. If bwrap
 is prevented from creating user namespaces by the host's
 apparmor profile, operators need to adjust the host profile —
 that's a deployment prerequisite documented in phase 3-8's
-operator guide. Phase 3-10 doesn't attempt to work around
+operator guide. Phase 4-6 doesn't attempt to work around
 host-level apparmor restrictions on the process backend.
 
 ---
@@ -3155,7 +3155,7 @@ host-level apparmor restrictions on the process backend.
    processes have bit-identical pages merged into one physical
    frame, either process can detect access patterns on the
    other via cache-timing measurement (Flush+Reload and
-   variants). In the phase 3-10 model this matters in two
+   variants). In the phase 4-6 model this matters in two
    places:
 
    - **Cross-session within a zygote family.** All children
@@ -3176,13 +3176,13 @@ host-level apparmor restrictions on the process backend.
      cgroups do not address this — KSM operates below all of
      those isolation primitives.
 
-   **Phase 3-10's sandboxing does not fix this.** The
+   **Phase 4-6's sandboxing does not fix this.** The
    sandboxing track addresses `/tmp` leakage, capability
    excess, and syscall surface — all above the physical-frame
    layer where KSM operates. Treat the two concerns as
    independent prerequisites for multi-tenant deployment.
 
-   **Phase 3-10 already ships the primary mitigation: the
+   **Phase 4-6 already ships the primary mitigation: the
    per-app `ksm` flag and the server-wide `experimental.ksm`
    flag from D3.** Operators who are concerned about side
    channels leave `experimental.ksm = false` (the default)
@@ -3192,7 +3192,7 @@ host-level apparmor restrictions on the process backend.
    `prctl(PR_SET_MEMORY_MERGE)` is never called, the process
    never joins the kernel merge pool, and the memory model
    degrades to the PSOCK-equivalent steady state that phase
-   3-9's fallback path already supports. This is the "kill
+   4-5's fallback path already supports. This is the "kill
    switch" path that D3 describes.
 
    **What remains deferred for multi-tenant hardening beyond
@@ -3202,7 +3202,7 @@ host-level apparmor restrictions on the process backend.
      operator-facing doc explaining when KSM is safe to
      enable, what data a malicious session can plausibly
      leak, and how to audit a bundle for sensitive
-     singletons. Phase 3-10 ships only the inline warnings in
+     singletons. Phase 4-6 ships only the inline warnings in
      the UI and a reference to Suzaki/Bosman in this design
      doc.
    - **Per-app fine-grained controls beyond the boolean.** For
@@ -3211,20 +3211,20 @@ host-level apparmor restrictions on the process backend.
      table), or auto-disabling when OIDC user count exceeds a
      threshold, or a host-level deny list. These are all
      ergonomic refinements on top of the opt-in that phase
-     3-10 ships.
+     4-6 ships.
    - **Active side-channel mitigations** — scrubbing sensitive
      memory regions, using `MADV_UNMERGEABLE` on specific
      allocations, or kernel patches that scope the merge pool
      by cgroup. All of these are substantial R&D work and
      don't belong in a phase focused on landing the mechanism.
 
-   The phase 3-10 opt-in gate is the structural fix; the
+   The phase 4-6 opt-in gate is the structural fix; the
    deferred items here are refinements that make the opt-in
    more ergonomic and better documented for operators who
    need to make the call.
 
 2. **Capacity-model guidance for KSM deployments.** Tracked as
-   a follow-up alongside the phase-3-9 capacity work
+   a follow-up alongside the phase-4-5 capacity work
    (cynkra/blockyard#160). The KSM-specific sub-question is
    the worst-case headroom math for the RSS spike during
    recovery — how much transient growth should operators plan
@@ -3232,8 +3232,8 @@ host-level apparmor restrictions on the process backend.
    arrival rate? D11's `oom_score_adj` pinning makes the spike
    survivable (the OOM killer reaps a child, not the zygote)
    but operators still need to size their hosts so that the
-   child reap isn't too frequent. Phase 3-10 ships the
-   observability (D8) to measure the spike; phase 3-10+
+   child reap isn't too frequent. Phase 4-6 ships the
+   observability (D8) to measure the spike; phase 4-6+
    capacity guidance turns those measurements into host-sizing
    recommendations.
 
@@ -3251,9 +3251,9 @@ host-level apparmor restrictions on the process backend.
 
 4. **Fork-safe package allowlist / metadata.** Some R packages
    are not safe to load before forking (rJava, arrow, anything
-   with open fds or threads at load time). Phase 3-10's
+   with open fds or threads at load time). Phase 4-6's
    documentation (deliverable #8) covers the categories. Phase
-   3-10 ships without runtime checks — a bundle that loads
+   4-6 ships without runtime checks — a bundle that loads
    fork-unsafe packages into the zygote will fail at fork time
    with an opaque error. Adding a bundle-build-time check
    (parse the package list, warn on known-unsafe) is a
@@ -3264,7 +3264,7 @@ host-level apparmor restrictions on the process backend.
    bounds beyond the `RLIMIT_NPROC=64` default, the natural
    shape is per-app config columns (`session_memory_limit`,
    `session_cpu_limit`, `session_nproc`) plus the
-   `ContainerUpdate`-based enforcement path. Phase 3-10 ships
+   `ContainerUpdate`-based enforcement path. Phase 4-6 ships
    the `STATS` infrastructure that would feed tuning decisions
    but does not ship the per-app fields themselves — see D5
    for the reasoning.

@@ -829,10 +829,10 @@ See [v4/plan.md](v4/plan.md) for the full implementation plan.
 
 - **Experimental zygote model.** Fork-based per-session children,
   gated on measurement results. Full design in
-  [v3/phase-3-9.md](v3/phase-3-9.md).
+  [v4/phase-4-5.md](v4/phase-4-5.md).
 
 - **Zygote hardening.** Post-fork sandboxing, KSM optimization,
-  byte-compilation. Full design in [v3/phase-3-10.md](v3/phase-3-10.md).
+  byte-compilation. Full design in [v4/phase-4-6.md](v4/phase-4-6.md).
 
 ### v5: Kubernetes and Multi-Node
 

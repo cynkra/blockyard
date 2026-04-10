@@ -15,13 +15,6 @@ update` CLI command. The **runtime track** adds the process backend
 multiple execution images, dynamic resource limits, per-app OCI runtime
 selection).
 
-The zygote worker model and KSM memory sharing are deferred to v4, which
-adds hybrid backends (per-app Docker/process selection), multi-process
-containers, KSM, instrumentation, and — once measurements justify it —
-an experimental fork-based zygote model. The existing `phase-3-9.md` and
-`phase-3-10.md` design documents are retained as the v4 zygote/KSM
-specifications. See `../v4/plan.md` for the v4 scope.
-
 The operations track runs first — once v2 is deployed, low-friction
 updates are immediately needed, and the shared state layer directly serves
 v5 clustering.
@@ -59,9 +52,8 @@ internal/
 │   └── workermap_redis.go         # NEW: Redis-backed WorkerMap implementation
 ├── redisstate/                    # NEW: shared Redis connection management
 │   └── redisstate.go              # Redis client setup, health check, availability detection
-├── drain/                         # NEW: drain mode orchestration
-│   └── drain.go                   # SIGUSR1 handler, drain sequence, passive→active transition
-└── zygote/                        # deferred to v4 (see ../v4/plan.md)
+└── drain/                         # NEW: drain mode orchestration
+    └── drain.go                   # SIGUSR1 handler, drain sequence, passive→active transition
 ```
 
 ## New Dependencies
@@ -803,7 +795,7 @@ Deployment artifacts and documentation for the process backend.
    build time and loaded by bwrap via `--seccomp <fd>` to sandbox
    the worker R process itself. Both are generated from
    vendored-upstream + overlay via `make regen-seccomp`. The outer
-   profile is shared with the zygote model (phase 3-10).
+   profile is shared with the zygote model (v4).
 
 2. **Variant Docker images (three, not one)** — `blockyard-docker`
    (slim, docker backend only), `blockyard-process` (R + bwrap +
@@ -842,25 +834,6 @@ Deployment artifacts and documentation for the process backend.
    external supervisor — `by admin update` is the single entry point
    for both Docker and process backends.
 
-### ~~Phase 3-9: Zygote Worker Model~~ — deferred to v4
-
-The zygote worker model (fork-based per-session isolation) and the
-companion KSM memory sharing (phase 3-10) are deferred to v4. The
-decision is based on the observation that fork's primary advantages
-over independent processes — startup latency and KSM head start —
-are not yet validated with real-world measurements. v4 builds the
-measurement infrastructure first (hybrid backends, multi-process
-containers, KSM on independent processes), then adds forking as an
-experimental optimization if data justifies it.
-
-**The `phase-3-9.md` and `phase-3-10.md` design documents are retained
-as the v4 zygote/KSM specifications.** See `../v4/plan.md` for the
-full v4 scope and phasing.
-
-### ~~Phase 3-10: Zygote Hardening & KSM~~ — deferred to v4
-
-See phase 3-9 note above. Full design in `phase-3-10.md`.
-
 ## Build Order and Dependency Graph
 
 ```
@@ -893,7 +866,6 @@ Phase 3-7: Process Backend Core
 Phase 3-8: Process Backend Packaging & Deployment
   └── depends on: phase 3-7 (needs the backend implementation)
 
-Phases 3-9 and 3-10 (zygote worker model, KSM) are deferred to v4.
 ```
 
 **Recommended order:**
@@ -983,7 +955,7 @@ operations track. They can be developed in parallel.
     Docker bridge (or process-backend loopback), line-delimited
     protocol, pre-shared secret AUTH, `base::socketSelect`-driven
     poll loop on the R side. Unix sockets and `docker exec` were both
-    rejected — see `phase-3-9.md` decision #4 for the reasoning
+    rejected — see `../v4/phase-4-5.md` decision #4 for the reasoning
     (socket file permissions conflict with per-worker UIDs; `docker
     exec` has 50-200ms overhead per fork; `httpuv` is fork-unsafe).
 

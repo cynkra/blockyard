@@ -1,4 +1,4 @@
-# Phase 3-9: Zygote Worker Model
+# Phase 4-5: Zygote Worker Model
 
 An opt-in worker model where one container (Docker) or one bwrap
 sandbox (process backend) runs a long-lived **zygote** R process that
@@ -30,16 +30,16 @@ full gating rationale. The existing shared-multiplexing mode
 (`max_sessions_per_worker > 1` without the zygote flag) is
 unchanged and remains the default for multi-session apps.
 
-Phase 3-9 lands the **mechanism** only — the two unconditional
+Phase 4-5 lands the **mechanism** only — the two unconditional
 benefits (startup-latency elimination and per-session isolation).
-Phase 3-10 adds post-fork sandboxing (private mount namespace,
+Phase 4-6 adds post-fork sandboxing (private mount namespace,
 `/tmp` isolation, seccomp, capability dropping, per-process
 rlimits) and the opt-in KSM memory-sharing story (C helper,
 `STATS` observability, preflight, byte-compilation,
-`oom_score_adj` pinning). See `phase-3-10.md` for the full
-design — it was originally folded into phase 3-9 but carved out
+`oom_score_adj` pinning). See `phase-4-6.md` for the full
+design — it was originally folded into phase 4-5 but carved out
 to keep this phase focused on the mechanism. Nothing in phase
-3-9 depends on KSM; KSM is layered on top in 3-10 without
+4-5 depends on KSM; KSM is layered on top in 4-6 without
 revisiting the protocol surface other than to add a `STATS`
 command and three fields to `INFO`.
 
@@ -65,7 +65,7 @@ Two durable benefits, both unconditional on any supported host:
    the zygote model trades that coupling for isolation.
 
 **Memory sharing via copy-on-write is an opportunistic
-third benefit that does not ship in phase 3-9.** Forked children
+third benefit that does not ship in phase 4-5.** Forked children
 start by sharing every page with the zygote via the kernel's
 COW mechanism, but R's generational GC writes mark bits to SEXP
 headers during level-2 collections, dirtying every page
@@ -75,10 +75,10 @@ needs a kernel-level merge mechanism (KSM via
 byte-compilation of bundle code so the JIT doesn't mutate closure
 headers post-fork, and `oom_score_adj` pinning so the kernel OOM
 killer reaps children first when KSM recovery lags behind a
-coordinated GC burst. That whole story lives in phase 3-10 — see
-`phase-3-10.md` decisions D7, D9, and D11. Phase 3-9 ships the
+coordinated GC burst. That whole story lives in phase 4-6 — see
+`phase-4-6.md` decisions D7, D9, and D11. Phase 4-5 ships the
 zygote mechanism alone; it delivers benefits #1 and #2 unchanged
-regardless of whether phase 3-10 ever lands.
+regardless of whether phase 4-6 ever lands.
 
 **When to enable the zygote model.** Apps where cold start is the
 user-visible bottleneck — interactive dashboards, frequent
@@ -112,17 +112,17 @@ designed for exactly that trade-off.
   `experimental.zygote` flag on top of the per-app column.
 - **Phase 3-7** — process backend core. The process backend's
   `Forking` implementation extends the bwrap spawn flow built here.
-  Phase 3-9 assumes phase 3-7 leaves the network namespace shared
+  Phase 4-5 assumes phase 3-7 leaves the network namespace shared
   (no `--unshare-net`), which makes loopback TCP a viable control
   transport.
 - **Phase 3-8** — process backend packaging. Provides the
   `portAllocator` interface (`Reserve() (port, ln net.Listener, err error)`
   + `Release`) and both the `memoryPortAllocator` and
-  `redisPortAllocator` implementations that phase 3-9's two new
-  allocators reuse — phase 3-9 instantiates each implementation
+  `redisPortAllocator` implementations that phase 4-5's two new
+  allocators reuse — phase 4-5 instantiates each implementation
   three times (one per range), branching on `cfg.Redis != nil`
   the same way phase 3-8 does for the existing `ports`
-  allocator. Phase 3-9 also lifts phase 3-8's hardcoded
+  allocator. Phase 4-5 also lifts phase 3-8's hardcoded
   `"port:"` Redis key prefix to a constructor parameter so the
   three allocators can share `redisPortAllocator` against
   disjoint key namespaces. Phase 3-8 also provides the
@@ -133,7 +133,7 @@ designed for exactly that trade-off.
   `Sessions.CountForWorkers(own)` unchanged, and the zygote
   worker (with all its forked children) survives until the last
   session ends or the timeout elapses. The seccomp
-  profile finalised in 3-8 is what phase 3-10 will apply
+  profile finalised in 3-8 is what phase 4-6 will apply
   post-fork.
 
 ## Deliverables
@@ -195,11 +195,11 @@ designed for exactly that trade-off.
    `ui.R` bundles are rejected with a clear error. Embedded
    into the server binary via `//go:embed`, written to a host
    path at startup, bind-mounted into the worker container or
-   bwrap sandbox. Phase 3-10 will extend this script with
+   bwrap sandbox. Phase 4-6 will extend this script with
    up-front byte-compilation, KSM helper loading, a `STATS`
    handler, child `oom_score_adj` pinning, and proper
    exit-reason classification via a C helper — see
-   `phase-3-10.md` Step 10.
+   `phase-4-6.md` Step 10.
 6. **Docker `Forking` implementation** — adds zygote-mode container
    spawn, control port `3837` on the per-worker bridge, child port
    range allocation, control client wired to the shared protocol,
@@ -257,7 +257,7 @@ designed for exactly that trade-off.
 Migration `003_zygote` adds one boolean column. Additive,
 nullable-equivalent (default 0), backward-compatible per phase 3-1
 rules. Phase 3-7 does not add migrations, so `003` is correct as of
-phase 3-9. Phase 3-10 will add a separate `004_ksm` migration for
+phase 4-5. Phase 4-6 will add a separate `004_ksm` migration for
 the KSM opt-in.
 
 **`internal/db/migrations/sqlite/003_zygote.up.sql`:**
@@ -437,7 +437,7 @@ and `ErrNotSupported`):
 // Code that wants to fork checks for the capability via type
 // assertion: `f, ok := srv.Backend.(backend.Forking)`.
 //
-// Phase 3-10 extends this interface with a StatsClient method
+// Phase 4-6 extends this interface with a StatsClient method
 // for KSM metrics polling. Splitting the control-protocol types
 // into `internal/zygotectl/` (decision #5) already breaks the
 // import cycle that method will need, so the addition is a pure
@@ -487,7 +487,7 @@ type Forking interface {
 // ChildExit is the event emitted by Forking.ChildExits when a
 // child process terminates.
 //
-// Reason values in phase 3-9 are limited to:
+// Reason values in phase 4-5 are limited to:
 //   - "killed":  child was intentionally terminated, either via
 //                the KILL control command (reap_children sees the
 //                child in the zygote's `killing` set) or via
@@ -498,15 +498,15 @@ type Forking interface {
 //                these cases are indistinguishable without a C
 //                helper.
 //
-// Phase 3-10's C helper adds "crashed" / "oom" / "normal"
+// Phase 4-6's C helper adds "crashed" / "oom" / "normal"
 // classification by decoding waitpid status bits and checking
 // /proc/<pid>/oom_score. The Go-side parser treats Reason as an
-// opaque string, so 3-10 can add values without a schema bump.
-// Consumers should warn on "unknown" in 3-9 and on
-// "crashed"/"oom" in 3-10.
+// opaque string, so 4-6 can add values without a schema bump.
+// Consumers should warn on "unknown" in 4-5 and on
+// "crashed"/"oom" in 4-6.
 //
-// ExitCode is always 0 in phase 3-9 (see the "unknown" note
-// above). Phase 3-10's helper populates the real exit code.
+// ExitCode is always 0 in phase 4-5 (see the "unknown" note
+// above). Phase 4-6's helper populates the real exit code.
 type ChildExit struct {
     WorkerID string
     ChildID  string
@@ -528,7 +528,7 @@ follows what depends on `backend.Forking` and what doesn't:
   `Client`, `Info`, `ChildExitMsg`, the per-worker secret
   helpers, and the embedded `zygote.R` script. This package
   imports only the standard library, so nothing forms an import
-  cycle when phase 3-10 extends `backend.Forking` with a
+  cycle when phase 4-6 extends `backend.Forking` with a
   `StatsClient(workerID) *zygotectl.Client` method.
 - **`internal/zygote/`** — the `Manager` type that owns the
   session ↔ child bookkeeping and subscribes to
@@ -570,9 +570,9 @@ server → client: <childID> <pid> <port> <state>\n... END\n
 client → server: INFO\n
 server → client: <key>=<value>\n... END\n
                  # Static, queried once at construction. Known keys:
-                 # r_version, preload_ms. Phase 3-10 adds ksm_status
+                 # r_version, preload_ms. Phase 4-6 adds ksm_status
                  # and ksm_errno. Parser ignores unknown keys
-                 # (forward-compatible), so the 3-10 additions land
+                 # (forward-compatible), so the 4-6 additions land
                  # without a protocol bump.
                  #
                  # Value encoding: <value> is single-line printable
@@ -737,7 +737,7 @@ func (c *Client) Kill(ctx context.Context, childID string) error {
 // Info is the structured view of a zygote's startup state,
 // populated from the INFO control command. Unknown keys are
 // ignored so the protocol can be extended backward-compatibly
-// — phase 3-10 adds ksm_status and ksm_errno without a schema
+// — phase 4-6 adds ksm_status and ksm_errno without a schema
 // bump via this mechanism.
 type Info struct {
     RVersion  string
@@ -754,7 +754,7 @@ func (c *Client) Info() Info { return c.info }
 // before abandoning. Defense in depth against a sender that
 // either forgot to write END or corrupted the stream. INFO is
 // a small, bounded response: the two current fields plus a
-// handful of phase-3-10 additions, so anything above ~100 is
+// handful of phase 4-6 additions, so anything above ~100 is
 // pathological. 1024 is a wide safety margin that still protects
 // against an unbounded-read attack or a buggy zygote.
 const maxInfoLines = 1024
@@ -817,9 +817,9 @@ func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
 // (~ms), so callers see ~ms extra delay on cancellation, not an
 // unbounded block.
 //
-// Phase 3-10 adds a multi-line variant for the STATS command;
+// Phase 4-6 adds a multi-line variant for the STATS command;
 // extending this loop to accumulate lines until "END" is a small
-// delta. See phase-3-10.md Step 9.
+// delta. See phase-4-6.md Step 9.
 func (c *Client) request(ctx context.Context, line string) (string, error) {
     c.reqMu.Lock()
     defer c.reqMu.Unlock()
@@ -864,7 +864,7 @@ func (c *Client) request(ctx context.Context, line string) (string, error) {
 // CHILDEXIT pushes go to Exits. Uses the same bufio.Reader that
 // auth and fetchInfo used during construction, so no buffered
 // bytes are lost across the handoff. Single-line replies only in
-// phase 3-9 (FORK/KILL); phase 3-10 extends this to accumulate
+// phase 4-5 (FORK/KILL); phase 4-6 extends this to accumulate
 // multi-line STATS responses terminated by "END".
 func (c *Client) readLoop() {
     defer close(c.closed)
@@ -943,9 +943,9 @@ import (
 
 // Manager owns the session ↔ child bookkeeping for zygote workers.
 // It is backend-agnostic — the backend-specific bits live in the
-// Forking implementation it wraps. Phase 3-10 extends this type
+// Forking implementation it wraps. Phase 4-6 extends this type
 // with a metrics-poll loop for KSM observability (see
-// phase-3-10.md Step 14); phase 3-9 ships the session
+// phase-4-6.md Step 14); phase 4-5 ships the session
 // bookkeeping and sweep loop only.
 type Manager struct {
     forking       backend.Forking
@@ -1117,8 +1117,8 @@ func (m *Manager) handleExit(ev backend.ChildExit) {
         m.sessions.Delete(sid)
     }
     // Warn on anything that wasn't an intentional kill. In phase
-    // 3-9 the zygote only reports "killed" | "unknown", so
-    // everything unexpected lands in "unknown". Phase 3-10's C
+    // 4-5 the zygote only reports "killed" | "unknown", so
+    // everything unexpected lands in "unknown". Phase 4-6's C
     // helper subdivides "unknown" into "crashed" / "oom" /
     // "normal"; update this branch then to warn on
     // "crashed"/"oom" and debug on "normal".
@@ -1258,8 +1258,8 @@ secret_hex   <- paste(format(as.hexmode(as.integer(secret_bytes)), width = 2),
 # zygote_info holds structured facts about this zygote that the
 # blockyard server can query via the control-protocol `INFO`
 # command. Filled in during startup; never mutated after that.
-# Phase 3-10 adds ksm_status / ksm_errno / sandbox_status fields
-# here when sandboxing and KSM land (see phase-3-10.md Step 10).
+# Phase 4-6 adds ksm_status / ksm_errno / sandbox_status fields
+# here when sandboxing and KSM land (see phase-4-6.md Step 10).
 zygote_info <- list(
   r_version  = R.version.string,
   preload_ms = NA_integer_
@@ -1314,11 +1314,11 @@ zygote_info <- list(
 # never coming up and surfaces the failure as a worker-start
 # error on the API/UI.
 #
-# Phase 3-10 replaces the naive source() with compiler::cmpfile()
+# Phase 4-6 replaces the naive source() with compiler::cmpfile()
 # so bundle closures are born as BCODESXP before fork (see
-# phase-3-10.md decision D9). That optimisation is tied to
+# phase-4-6.md decision D9). That optimisation is tied to
 # the KSM track because its primary motivation is preventing the
-# JIT from mutating closure pages post-fork. Phase 3-9 keeps the
+# JIT from mutating closure pages post-fork. Phase 4-5 keeps the
 # simpler source() path.
 captured_app <- NULL  # shiny.appobj captured during app.R evaluation
 
@@ -1453,8 +1453,8 @@ children <- new.env(parent = emptyenv())
 # handler, drained by reap_children() when the child's exit is
 # observed. Any child whose exit is observed without an entry here
 # is classified "unknown" — could be a clean return, a crash, or
-# an OOM kill, and phase 3-9 cannot distinguish those without a
-# C helper (phase 3-10 adds one).
+# an OOM kill, and phase 4-5 cannot distinguish those without a
+# C helper (phase 4-6 adds one).
 killing <- new.env(parent = emptyenv())
 
 # Pending CHILDEXIT events that haven't been pushed yet — either
@@ -1551,7 +1551,7 @@ flush_pending <- function() {
 # child, we label the exit "killed"; otherwise "unknown" (could
 # be a clean return from runApp, a crash, an external SIGKILL,
 # or an OOM — indistinguishable without a C helper that decodes
-# the waitpid status word). Phase 3-10's helper refines this
+# the waitpid status word). Phase 4-6's helper refines this
 # into "crashed" / "oom" / "normal" classifications.
 #
 # PID reuse race note: between the SIGCHLD auto-reap and our
@@ -1560,7 +1560,7 @@ flush_pending <- function() {
 # second per zygote) and the kernel's sequential pid_max cycle
 # (default 4M on 64-bit Linux), this is effectively impossible
 # inside a 100ms poll window. Documented limitation, not
-# mitigated in phase 3-9.
+# mitigated in phase 4-5.
 reap_children <- function() {
   for (cid in ls(children)) {
     info <- get(cid, envir = children)
@@ -1608,10 +1608,10 @@ handle_command <- function(line) {
     # packages and top-level state are shared via COW rather than
     # re-sourced in the child.
     #
-    # Phase 3-10 will add an oom_score_adj = 1000 self-write
+    # Phase 4-6 will add an oom_score_adj = 1000 self-write
     # inside the expression so the kernel OOM killer reaps a
     # child before the zygote under memory pressure (see
-    # phase-3-10.md decision D11). It will also flip the
+    # phase-4-6.md decision D11). It will also flip the
     # `shiny::runApp` call over to the C-helper's byte-compiled
     # code path.
     job <- tryCatch(
@@ -1664,12 +1664,12 @@ handle_command <- function(line) {
     # Structured zygote facts for the blockyard server to query at
     # startup and expose via API/UI. Key=value lines, terminated by
     # "END". Adding new fields is backward-compatible — the Go-side
-    # parser skips unknown keys. Phase 3-10 adds ksm_status and
+    # parser skips unknown keys. Phase 4-6 adds ksm_status and
     # ksm_errno fields here.
     #
     # Every value goes through info_line() for protocol-safe
     # encoding: single-line printable text, no CR/LF/NUL/tab.
-    # New fields added by phase 3-10 (or later) MUST use
+    # New fields added by phase 4-6 (or later) MUST use
     # info_line() to stay safe — do not emit raw sprintf output.
     writeLines(info_line("r_version",  zygote_info$r_version),
                con, sep = "")
@@ -1826,9 +1826,9 @@ import _ "embed"
 var ZygoteScript []byte
 ```
 
-Phase 3-10 extends this file with a `zygote_helper.c` source embed
+Phase 4-6 extends this file with a `zygote_helper.c` source embed
 plus per-architecture `HelperSO` embeds for the compiled
-`.so` binaries (see `phase-3-10.md` Step 5). Phase 3-9 ships only
+`.so` binaries (see `phase-4-6.md` Step 5). Phase 4-5 ships only
 the R script.
 
 ### Step 7: Docker `Forking` implementation
@@ -2146,7 +2146,7 @@ func (d *DockerBackend) zygoteContainerAddr(ctx context.Context, ws *workerState
    `BLOCKYARD_SECRET_PATH=/var/run/blockyard/control.secret`.
 3. One bind mount added under `/blockyard/` (read-only): Host
    `{BundleServerPath}/.zygote/zygote.R` → container
-   `/blockyard/zygote.R` (the embedded R script). Phase 3-10
+   `/blockyard/zygote.R` (the embedded R script). Phase 4-6
    adds a second bind mount for the KSM helper `.so` alongside
    this one.
 4. After `ContainerStart`, the server waits for the control port
@@ -2235,7 +2235,7 @@ from decision #15 — flipping `experimental.zygote` off in
 server config disables the feature for every app without
 touching the database. Apps with `apps.zygote = true` in the db
 silently fall through to the non-zygote path when the
-server-wide flag is off. Phase 3-10 adds a `KSM bool` field
+server-wide flag is off. Phase 4-6 adds a `KSM bool` field
 here when the KSM opt-in lands.
 
 `ChildPortRange` is read from a new `[docker] zygote_child_port_range`
@@ -2255,7 +2255,7 @@ that phase 3-7 establishes). Differences from the Docker version:
   `--ro-bind {bundleServerPath}/.zygote/zygote.R /blockyard/zygote.R`.
   The per-worker token dir comes in via
   `--ro-bind {tokenDir} /var/run/blockyard`. The R command is
-  `R -f /blockyard/zygote.R`. Phase 3-10 adds a second bind
+  `R -f /blockyard/zygote.R`. Phase 4-6 adds a second bind
   mount for the KSM helper.
 - Control transport: TCP on `127.0.0.1:{allocatedControlPort}`.
   The control port is allocated from a dedicated host-wide range
@@ -2303,7 +2303,7 @@ The structural similarity is large enough that the
 in `internal/zygote/` or `internal/zygotectl/`. `Manager.Fork`
 and the sweep/exit loops already live in `zygote`; the
 per-worker control state (`forkState`) could move to `zygote`
-if it doesn't reach into backend-specific types. For phase 3-9
+if it doesn't reach into backend-specific types. For phase 4-5
 I'd duplicate it in each backend and DRY in a follow-up once
 both are working — premature abstraction risk.
 
@@ -2313,7 +2313,7 @@ into an interface (`portAllocator` with
 `Reserve() (port int, ln net.Listener, err error)` and
 `Release(port int) error`) plus two implementations
 (`memoryPortAllocator` and `redisPortAllocator`) — both living in
-`internal/backend/process/`. Phase 3-9 adds two more *instances*
+`internal/backend/process/`. Phase 4-5 adds two more *instances*
 of that same interface on `ProcessBackend` — no new allocator type,
 just extra ranges — giving three independent host-wide ranges:
 
@@ -2343,7 +2343,7 @@ to validate them independently:
 Phase 3-8 added `memoryPortAllocator` and `redisPortAllocator`
 implementations selected by `process.New` based on whether the
 `rc *redisstate.Client` argument is non-nil (which mirrors
-`fullCfg.Redis != nil` upstream). Phase 3-9 routes the two new
+`fullCfg.Redis != nil` upstream). Phase 4-5 routes the two new
 ranges through the same branch — when Redis is configured, all
 three allocators are Redis-backed; when it isn't, all three
 are memory-backed:
@@ -2374,7 +2374,7 @@ write to disjoint key namespaces
 `{clientPrefix}childport:<N>`). Phase 3-8 hardcodes `"port:"`
 as a string literal both inside `portClaimScript` (`local key =
 prefix .. "port:" .. i`) and in the Go-side helpers (`luaRelease`,
-`InUse`, `CleanupOwnedOrphans`). Phase 3-9 lifts it by:
+`InUse`, `CleanupOwnedOrphans`). Phase 4-5 lifts it by:
 (a) storing `keyPrefix` on `redisPortAllocator` and computing
 the full prefix once as `p.client.Prefix() + p.keyPrefix`;
 (b) passing that full prefix as `KEYS[1]` to `portClaimScript`
@@ -2390,7 +2390,7 @@ it already takes the full key as `KEYS[1]`.
 allocator through an `orphanCleaner` interface assertion, so
 the new `controlPorts` and `childPorts` allocators get picked
 up automatically as long as their Redis variant implements the
-same `CleanupOwnedOrphans(ctx)` method. Phase 3-9 therefore
+same `CleanupOwnedOrphans(ctx)` method. Phase 4-5 therefore
 adds two more interface-assertion calls (one per new allocator)
 alongside the existing ones — no switch on concrete type. Each
 Redis allocator instance owns its own key namespace, so the
@@ -2745,7 +2745,7 @@ covering the three ways a session can disappear:
 
 The autoscaler tick continues to call `srv.Sessions.SweepIdle(...)`
 unchanged — it's the right cleanup path for memory-backed sessions
-and a no-op for Redis. Phase 3-9 does not extend `SweepIdle`'s
+and a no-op for Redis. Phase 4-5 does not extend `SweepIdle`'s
 return type. The Manager's sweep loop is the load-bearing cleanup
 path for zygote children regardless of which session store is
 configured.
@@ -2835,7 +2835,7 @@ endpoint — whichever is closer to existing patterns) that returns:
 The UI reads this at page load to decide whether to enable or
 disable the zygote toggle. Admin-only — the capability list is
 considered operational info, not exposed to non-admin users.
-Phase 3-10 adds an `experimental.ksm` field here.
+Phase 4-6 adds an `experimental.ksm` field here.
 
 **CLI** — extend `by scale` in `cmd/by/scale.go`:
 
@@ -2894,7 +2894,7 @@ type Config struct {
 
 type ExperimentalConfig struct {
     Zygote bool `toml:"zygote"` // enable the zygote worker model
-    // Phase 3-10 adds KSM here.
+    // Phase 4-6 adds KSM here.
 }
 ```
 
@@ -3021,7 +3021,7 @@ pushes them towards a shorter or longer interval; 30s is
 deliberately conservative and matches `ManagerConfig`'s built-in
 fallback.
 
-Phase 3-10 adds a `ZygoteMetricsInterval` field to `ProxyConfig`
+Phase 4-6 adds a `ZygoteMetricsInterval` field to `ProxyConfig`
 for the KSM metrics-poll cadence.
 
 ### Step 14: Tests
@@ -3061,7 +3061,7 @@ func TestClient_InfoAtStartup(t *testing.T)
 func TestClient_InfoUnknownKeys(t *testing.T)
 // Test server includes unrecognised keys (future-compat). Client
 // parses them into Info.Unknown without erroring. Also exercises
-// the forward-compatibility path that phase 3-10 relies on for
+// the forward-compatibility path that phase 4-6 relies on for
 // ksm_status / ksm_errno fields.
 
 func TestClient_InfoMissingEnd(t *testing.T)
@@ -3400,13 +3400,13 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    state. Only the dial address and the per-worker spawn details
    differ between backends.
 
-   **Why the split matters beyond phase 3-9.** Phase 3-10 will
+   **Why the split matters beyond phase 4-5.** Phase 4-6 will
    add a `StatsClient(workerID) *zygotectl.Client` method to
    the `Forking` interface for KSM metrics polling. Without the
    split, `backend` would need to import a package containing
    the control client while that same package would need to
    import `backend` (for `Forking` and `ChildExit`) — an import
-   cycle. Splitting now means the 3-10 addition is purely
+   cycle. Splitting now means the 4-6 addition is purely
    additive: `backend` already imports `zygotectl` (implicitly
    through existing code paths), `zygote.Manager` imports both
    `backend` and `zygotectl`, and nothing cycles.
@@ -3483,7 +3483,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 13. **No control-connection reconnect; lost connection triggers
     worker eviction.** When a zygote's control connection dies,
     the natural instinct is to reconnect — retry the dial, re-auth,
-    resume. Phase 3-9 explicitly does not do this. Three reasons:
+    resume. Phase 4-5 explicitly does not do this. Three reasons:
 
     - **Disconnects are not transient on our transports.** Docker
       per-worker bridges and loopback TCP don't have middleboxes,
@@ -3618,12 +3618,12 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     on PID. Those are documented caveats — the prior art punts on
     them too.
 
-    **Phase 3-10 layers up-front byte-compilation on top of
+    **Phase 4-6 layers up-front byte-compilation on top of
     this.** The same preload path will switch from `source()` to
     `compiler::cmpfile()` + `compiler::loadcmp()` so bundle
     closures are born as `BCODESXP` — a prerequisite for KSM
-    finding stable pages to merge (see `phase-3-10.md`
-    decision D9). Phase 3-9 keeps the simpler `source()` path.
+    finding stable pages to merge (see `phase-4-6.md`
+    decision D9). Phase 4-5 keeps the simpler `source()` path.
 
     **What this does not catch (residuals):**
 
@@ -3698,12 +3698,12 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     on the disabled toggle explains "set `experimental.zygote =
     true` in the server config to enable this feature."
 
-    **Phase 3-10 layers the same shape on top for KSM** — a
+    **Phase 4-6 layers the same shape on top for KSM** — a
     second `experimental.ksm` server flag and a per-app `ksm`
     column, both default off, both gated against the existing
     zygote flags. The two-level opt-in pattern is the
-    structural primitive; phase 3-10 applies it twice rather
-    than inventing a different shape. See `phase-3-10.md`
+    structural primitive; phase 4-6 applies it twice rather
+    than inventing a different shape. See `phase-4-6.md`
     decision D3.
 
     **Alternatives considered:**
@@ -3718,12 +3718,12 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 
 ## Deferred
 
-1. **Post-fork sandboxing.** Phase 3-10 lands `unshare(CLONE_NEWUSER
+1. **Post-fork sandboxing.** Phase 4-6 lands `unshare(CLONE_NEWUSER
    | CLONE_NEWNS)`, private `/tmp` per child via mount namespace,
    seccomp-bpf, capability dropping, and per-process rlimits. Until
-   3-10 lands, children share `/tmp` and other in-container resources.
+   4-6 lands, children share `/tmp` and other in-container resources.
    **The zygote model must not be enabled on multi-tenant production apps
-   between phase 3-9 and phase 3-10.** The phase doc and the UI
+   between phase 4-5 and phase 4-6.** The phase doc and the UI
    toggle warn about this explicitly. The two phases are intended
    to land back-to-back.
 
@@ -3740,18 +3740,18 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    tuning guidance (for example, recommended `pre_warmed_sessions`
    values for bundles with large package sets or long session
    lifetimes), not whether the existing fields mean the wrong
-   thing. Phase 3-9 ships without that guidance and lets operator
+   thing. Phase 4-5 ships without that guidance and lets operator
    feedback drive its shape.
 
    **Worst-case headroom math** is a sub-question in scope for
    the same tracking issue, but really becomes concrete only
-   once KSM lands in phase 3-10: that's when the transient RSS
+   once KSM lands in phase 4-6: that's when the transient RSS
    spike during coordinated GC recovery becomes the
-   load-bearing concern. Phase 3-9 does not produce the spike
+   load-bearing concern. Phase 4-5 does not produce the spike
    (no KSM means no mass page dirtying to recover from), so the
    capacity math stays simple: `peak_RSS ≈ N × bundle + N ×
    per_session_delta` after R's generational GC has done its
-   work in each child. Revisit once phase 3-10 ships and KSM is
+   work in each child. Revisit once phase 4-6 ships and KSM is
    the dominant variable.
 
 3. **Per-child cgroups in Docker.** Would let `memory_limit` mean
@@ -3762,8 +3762,8 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
 
 4. **Fork-safe package allowlist / metadata.** Some R packages are
    not safe to load before forking (rJava, arrow, anything with
-   open fds or threads at load time). Phase 3-10's documentation
-   covers the categories. Phase 3-9 ships without runtime checks
+   open fds or threads at load time). Phase 4-6's documentation
+   covers the categories. Phase 4-5 ships without runtime checks
    — a bundle that loads fork-unsafe packages into the zygote
    will fail at fork time with an opaque error. Adding a
    bundle-build-time check (parse package list, warn on known-unsafe)
@@ -3777,7 +3777,7 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    draining the old. The transfer logic is mostly orthogonal —
    it operates at the worker level — but the timing of "old
    zygote drained, new zygote ready" needs careful sequencing
-   when N > 1 children are mid-session. Phase 3-9 inherits the
+   when N > 1 children are mid-session. Phase 4-5 inherits the
    existing transfer behaviour: drain marks the old zygote, the
    autoscaler eventually evicts it once children exit, new
    sessions go to the new zygote. Document this; revisit if it
@@ -3804,18 +3804,18 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    movement from a service container to the control port becomes
    a concern, we can replace the shared secret with a JWT signed
    by the existing worker token signing key. Not needed for
-   phase 3-9.
+   phase 4-5.
 
 9. **KSM memory sharing and its full observability, preflight,
    threat-model, and capacity story.** Originally folded into
-   this phase; carved out to phase 3-10 to keep the zygote
+   this phase; carved out to phase 4-6 to keep the zygote
    mechanism and the KSM opt-in landable as separate units.
-   See `phase-3-10.md` — that document covers the consolidated
+   See `phase-4-6.md` — that document covers the consolidated
    C helper (with both `enable_ksm` and `apply_post_fork_sandbox`),
    the `STATS` control command, the Prometheus metrics, the
    preflight checks, the `oom_score_adj` pinning, the up-front
    byte-compilation, the two-level opt-in for `ksm`, and the
    multi-tenant side-channel story (Suzaki 2011 / Bosman 2016).
-   Nothing in phase 3-9 blocks phase 3-10 from layering KSM on;
+   Nothing in phase 4-5 blocks phase 4-6 from layering KSM on;
    the two-package split (decision #5) specifically exists to
    make the additive surface clean.
