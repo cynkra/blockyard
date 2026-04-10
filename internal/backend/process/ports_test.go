@@ -7,8 +7,22 @@ import (
 	"testing"
 )
 
+// freeStartPort asks the OS for a free port, closes the listener, and
+// returns that port number so it can seed a memoryPortAllocator range.
+func freeStartPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return port
+}
+
 func TestPortAllocator(t *testing.T) {
-	p := newMemoryPortAllocator(40000, 40002)
+	start := freeStartPort(t)
+	p := newMemoryPortAllocator(start, start+2)
 
 	// Reserve all three ports.
 	p1, ln1, err := p.Reserve()
@@ -27,8 +41,8 @@ func TestPortAllocator(t *testing.T) {
 	}
 	defer ln3.Close()
 
-	if p1 != 40000 || p2 != 40001 || p3 != 40002 {
-		t.Errorf("expected 40000-40002, got %d, %d, %d", p1, p2, p3)
+	if p1 != start || p2 != start+1 || p3 != start+2 {
+		t.Errorf("expected %d-%d, got %d, %d, %d", start, start+2, p1, p2, p3)
 	}
 
 	// Fourth reservation fails.
@@ -37,22 +51,23 @@ func TestPortAllocator(t *testing.T) {
 	}
 
 	// Releasing the bitset slot is not enough on its own — the listener
-	// for 40001 is still held, so the next Reserve must skip past it.
+	// for start+1 is still held, so the next Reserve must skip past it.
 	// Close the listener first, then Release, then re-Reserve.
 	ln2.Close()
-	p.Release(40001)
+	p.Release(start + 1)
 	got, ln, err := p.Reserve()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	if got != 40001 {
-		t.Errorf("expected 40001 after release, got %d", got)
+	if got != start+1 {
+		t.Errorf("expected %d after release, got %d", start+1, got)
 	}
 }
 
 func TestPortAllocatorConcurrent(t *testing.T) {
-	p := newMemoryPortAllocator(40100, 40199)
+	start := freeStartPort(t)
+	p := newMemoryPortAllocator(start, start+99)
 	var wg sync.WaitGroup
 	type result struct {
 		port int
@@ -90,7 +105,8 @@ func TestPortAllocatorConcurrent(t *testing.T) {
 }
 
 func TestPortAllocatorInUse(t *testing.T) {
-	p := newMemoryPortAllocator(40300, 40302)
+	start := freeStartPort(t)
+	p := newMemoryPortAllocator(start, start+2)
 	if p.InUse() != 0 {
 		t.Errorf("expected 0 in use, got %d", p.InUse())
 	}
@@ -138,7 +154,8 @@ func TestPortAllocatorSkipsExternallyBoundPort(t *testing.T) {
 // the new API exists for: a Reserve'd port cannot be bound by another
 // process until the caller closes the returned listener.
 func TestPortAllocatorReserveHoldsListener(t *testing.T) {
-	p := newMemoryPortAllocator(40500, 40502)
+	start := freeStartPort(t)
+	p := newMemoryPortAllocator(start, start+2)
 	port, ln, err := p.Reserve()
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +193,8 @@ func TestNewPortAllocatorDefensiveNegativeRange(t *testing.T) {
 }
 
 func TestPortAllocatorReleaseOutOfRange(t *testing.T) {
-	p := newMemoryPortAllocator(40400, 40402)
+	start := freeStartPort(t)
+	p := newMemoryPortAllocator(start, start+2)
 	p.Release(0)     // below range
 	p.Release(99999) // above range
 	if p.InUse() != 0 {
