@@ -21,7 +21,4 @@ server <- function(input, output) {
   })
 }
 
-shinyApp(ui = ui, server = server, options = list(
-  port = as.integer(Sys.getenv("SHINY_PORT", "3838")),
-  host = "0.0.0.0"
-))
+shinyApp(ui = ui, server = server)

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,9 +19,7 @@ import (
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/backend"
-	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
-	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
@@ -885,40 +882,9 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 
 		// Build WorkerSpec
 		workerID := uuid.New().String()
-		hostPaths := bundle.NewBundlePaths(
-			srv.Config.Storage.BundleServerPath, app.ID, *app.ActiveBundle,
-		)
-
-		labels := map[string]string{
-			"dev.blockyard/managed":   "true",
-			"dev.blockyard/app-id":    app.ID,
-			"dev.blockyard/worker-id": workerID,
-			"dev.blockyard/role":      "worker",
-		}
-
-		var rVersion string
-		if m, err := manifest.Read(filepath.Join(hostPaths.Unpacked, "manifest.json")); err == nil {
-			rVersion = m.RVersion
-		}
-
-		spec := backend.WorkerSpec{
-			AppID:       app.ID,
-			WorkerID:    workerID,
-			Image:       server.AppImage(app, srv.Config.Docker.Image),
-			Cmd: []string{"R", "-e",
-				fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')), host = Sys.getenv('SHINY_HOST', unset = '0.0.0.0'))",
-					srv.Config.Storage.BundleWorkerPath)},
-			BundlePath:  hostPaths.Unpacked,
-			LibraryPath: hostPaths.Library,
-			WorkerMount: srv.Config.Storage.BundleWorkerPath,
-			ShinyPort:   srv.Config.Docker.ShinyPort,
-			RVersion:    rVersion,
-			MemoryLimit: stringOrEmpty(app.MemoryLimit),
-			CPULimit:    floatOrZero(app.CPULimit),
-			Labels:      labels,
-			Env:         server.WorkerEnv(srv),
-			Runtime:     server.AppRuntime(app, srv.Config.Docker),
-		}
+		spec := server.BaseWorkerSpec(srv, app, workerID, *app.ActiveBundle)
+		spec.MemoryLimit = stringOrEmpty(app.MemoryLimit)
+		spec.CPULimit = floatOrZero(app.CPULimit)
 
 		// Resolve per-app data mounts.
 		appMounts, _ := srv.DB.ListAppDataMounts(app.ID)

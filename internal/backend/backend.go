@@ -97,9 +97,10 @@ type WorkerSpec struct {
 	MemoryLimit string            // e.g. "512m", "" if unset
 	CPULimit    float64           // fractional vCPUs, 0 if unset
 	Labels      map[string]string
-	Env         map[string]string // additional env vars (e.g. VAULT_ADDR)
-	DataMounts  []MountEntry      // data mounts from app config; resolved host paths
-	Runtime     string            // OCI runtime override; empty = default
+	Env          map[string]string // additional env vars (e.g. VAULT_ADDR)
+	RProfilePath string            // server-side path to blockyard R profile; mounted ro by backends
+	DataMounts   []MountEntry      // data mounts from app config; resolved host paths
+	Runtime      string            // OCI runtime override; empty = default
 }
 
 type BuildSpec struct {

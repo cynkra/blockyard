@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 
 	"github.com/cynkra/blockyard/internal/backend"
@@ -22,7 +23,7 @@ import (
 // For the host UID/GID to actually take effect (so iptables owner
 // match works), blockyard must run as root or bwrap must be setuid.
 // Verified at startup by checkBwrapHostUIDMapping.
-func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gid int) []string {
+func bwrapArgs(_ *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gid int) []string {
 	args := []string{
 		// Namespace isolation
 		"--unshare-pid",
@@ -106,9 +107,7 @@ func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gi
 		args = append(args, spec.Cmd...)
 	} else {
 		args = append(args,
-			cfg.RPath, "-e",
-			fmt.Sprintf("shiny::runApp('%s', port=%d, host='127.0.0.1')",
-				spec.WorkerMount, port),
+			"Rscript", filepath.Join(spec.WorkerMount, "app.R"),
 		)
 	}
 

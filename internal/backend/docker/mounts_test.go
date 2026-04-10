@@ -335,6 +335,60 @@ func TestMountConfig_WorkerMounts_LibDirOverridesLibraryPath(t *testing.T) {
 	}
 }
 
+func TestTranslateMount_RProfile_NativeMode(t *testing.T) {
+	mc := MountConfig{Mode: MountModeNative}
+	binds, mounts := mc.TranslateMount(backend.MountEntry{
+		Source: "/data/bundles/.blockyard-rprofile.R", Target: "/etc/blockyard/rprofile.R", ReadOnly: true,
+	})
+	if len(mounts) != 0 {
+		t.Fatalf("expected no volume mounts in native mode, got %d", len(mounts))
+	}
+	if len(binds) != 1 {
+		t.Fatalf("expected 1 bind, got %d", len(binds))
+	}
+	if binds[0] != "/data/bundles/.blockyard-rprofile.R:/etc/blockyard/rprofile.R:ro" {
+		t.Errorf("bind = %q", binds[0])
+	}
+}
+
+func TestTranslateMount_RProfile_BindMode(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeBind,
+		HostSource: "/host/data",
+		MountDest:  "/data",
+	}
+	binds, mounts := mc.TranslateMount(backend.MountEntry{
+		Source: "/data/bundles/.blockyard-rprofile.R", Target: "/etc/blockyard/rprofile.R", ReadOnly: true,
+	})
+	if len(mounts) != 0 {
+		t.Fatalf("expected no volume mounts in bind mode, got %d", len(mounts))
+	}
+	if len(binds) != 1 {
+		t.Fatalf("expected 1 bind, got %d", len(binds))
+	}
+	if binds[0] != "/host/data/bundles/.blockyard-rprofile.R:/etc/blockyard/rprofile.R:ro" {
+		t.Errorf("bind = %q, expected host-translated path", binds[0])
+	}
+}
+
+func TestTranslateMount_RProfile_VolumeMode(t *testing.T) {
+	mc := MountConfig{
+		Mode:       MountModeVolume,
+		VolumeName: "blockyard-data",
+		MountDest:  "/data",
+	}
+	binds, mounts := mc.TranslateMount(backend.MountEntry{
+		Source: "/data/bundles/.blockyard-rprofile.R", Target: "/etc/blockyard/rprofile.R", ReadOnly: true,
+	})
+	if len(binds) != 0 {
+		t.Fatalf("expected no binds in volume mode, got %d", len(binds))
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 volume mount, got %d", len(mounts))
+	}
+	assertVolumeMount(t, mounts[0], "blockyard-data", "/etc/blockyard/rprofile.R", true, "bundles/.blockyard-rprofile.R")
+}
+
 func assertVolumeMount(t *testing.T, m mount.Mount, source, target string, readOnly bool, subpath string) {
 	t.Helper()
 	if m.Type != mount.TypeVolume {

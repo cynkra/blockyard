@@ -277,7 +277,7 @@ func (ui *UI) createApp(srv *server.Server) http.HandlerFunc {
 
 		if err := bundle.ValidateEntrypoint(paths); err != nil {
 			cleanup()
-			renderUploadError(w, "Missing entrypoint: the upload must contain app.R or server.R.")
+			renderUploadError(w, "Missing entrypoint: the upload must contain app.R.")
 			return
 		}
 
