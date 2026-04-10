@@ -10,9 +10,10 @@
 # image ships only runtime shared libraries; operators who need
 # source builds or extra packages install them via the extras.sh
 # hook (see the bottom of this file). R itself is managed by rig
-# (r-lib/rig); the R_VERSIONS build ARG controls which versions
-# are baked in (default: "release"). Operators can also add
-# versions at runtime via `rig add 4.5` in an extras.sh override.
+# (r-lib/rig); the image ships the latest patch of the current and
+# previous 4 minor releases (e.g. 4.5.x through 4.1.x). Weekly
+# rebuilds via the Publish workflow keep the set current. Operators
+# can add or remove versions at runtime via the extras.sh hook.
 
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
@@ -71,15 +72,9 @@ FROM ubuntu:24.04
 
 # rig version pin. rig is the R installation manager from r-lib;
 # it downloads official R binaries and manages multiple installed
-# R versions via shims under /usr/local/bin. Operators can swap R
-# versions at runtime via the extras.sh hook without rebuilding
-# this image.
+# R versions via shims under /usr/local/bin. Operators can add or
+# remove versions at runtime via the extras.sh hook.
 ARG RIG_VERSION=0.7.1
-# Space-separated list of R versions to install via rig. The first
-# entry becomes the default. Use full version pins (e.g. "4.5.0")
-# for reproducible builds, or "release" for the latest stable.
-# Example: R_VERSIONS="4.5.0 4.4.3 4.3.2"
-ARG R_VERSIONS="release"
 # Docker buildx sets TARGETARCH automatically for multi-platform
 # builds. Default to amd64 for local single-arch `docker build`
 # invocations so rig downloads the correct tarball.
@@ -118,7 +113,14 @@ RUN apt-get update \
        esac \
     && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
         | tar xz -C /usr/local \
-    && for v in ${R_VERSIONS}; do rig add "$v"; done \
+    && rig add release \
+    && LATEST=$(ls /opt/R | sort -V | tail -1) \
+    && MAJOR=${LATEST%%.*} \
+    && MINOR=${LATEST#*.} && MINOR=${MINOR%%.*} \
+    && for i in 1 2 3 4; do \
+         m=$((MINOR - i)); \
+         [ "$m" -ge 0 ] && rig add "${MAJOR}.${m}" || true; \
+       done \
     && ln -sf /usr/local/bin/R /usr/bin/R \
     && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*
