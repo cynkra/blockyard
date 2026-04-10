@@ -34,28 +34,28 @@ func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName, external
 		Host:   addr,
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = transport
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		slog.Warn("proxy: backend error", "app", appName, "error", err) //nolint:gosec // G706: slog structured logging handles this
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-	}
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out.URL.Path = path.Clean(stripAppPrefix(pr.In.URL.Path, appName))
+			pr.Out.URL.RawPath = ""
+			pr.Out.Host = addr
 
-	// Rewrite the request: strip prefix, set host, add forwarded headers
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = path.Clean(stripAppPrefix(req.URL.Path, appName))
-		req.URL.RawPath = ""
-		req.Host = addr
-
-		// Preserve the original protocol so Shiny apps behind a
-		// TLS-terminating reverse proxy see the correct scheme.
-		proto := "http"
-		if strings.HasPrefix(externalURL, "https://") {
-			proto = "https"
-		}
-		req.Header.Set("X-Forwarded-Proto", proto)
+			// SetXForwarded sets X-Forwarded-For, -Host, -Proto from
+			// the inbound request. Override -Proto afterward so Shiny
+			// apps behind TLS-terminating proxies see the correct scheme.
+			pr.SetXForwarded()
+			proto := "http"
+			if strings.HasPrefix(externalURL, "https://") {
+				proto = "https"
+			}
+			pr.Out.Header.Set("X-Forwarded-Proto", proto)
+		},
+		Transport: transport,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			slog.Warn("proxy: backend error", "app", appName, "error", err) //nolint:gosec // G706: slog structured logging handles this
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+		},
 	}
 
 	proxy.ServeHTTP(w, r)
