@@ -35,8 +35,8 @@ type PreflightDeps struct {
 // preflight checks and returns a populated *preflight.Report. The full
 // list of checks lives in this file as runDockerChecks; this method is
 // the entry point that main.go calls through the Backend interface.
-// CheckRVersion is a no-op for the Docker backend — the image tag
-// determines the R version.
+// CheckRVersion always returns nil for the Docker backend — the
+// image tag determines the R version.
 func (d *DockerBackend) CheckRVersion(_ string) error { return nil }
 
 func (d *DockerBackend) Preflight(ctx context.Context) (*preflight.Report, error) {

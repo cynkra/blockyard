@@ -6,9 +6,11 @@
 # as root before the blockyard server starts and can:
 #
 #   - install additional system libraries via apt-get
-#   - pin or add R versions via rig (e.g. `rig add 4.4.3`)
 #   - add custom apt sources and GPG keys
 #   - drop .netrc / credentials files into /root
+#
+# To change the set of installed R versions, override
+# /etc/blockyard/r-versions.sh instead of this file.
 #
 # Failures propagate via `set -e` in the entrypoint shim, so a
 # non-zero exit here aborts container startup with a clear error

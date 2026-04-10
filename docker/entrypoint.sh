@@ -1,11 +1,15 @@
 #!/bin/sh
 # Entrypoint shim for the blockyard server-process and
-# server-everything images. Runs the operator's extras hook
-# (default /etc/blockyard/extras.sh is a no-op baked into the
-# image; override by bind-mounting) and then execs the command
-# passed in by the Dockerfile's ENTRYPOINT array.
+# server-everything images. Runs the R version policy script
+# and the operator's extras hook, then execs the server.
 #
-# `set -e` propagates extras failures as container startup errors
+# Hook order:
+#   1. r-versions.sh — R version installation and default
+#      (baked-in policy; override by bind-mounting)
+#   2. extras.sh     — system libraries, credentials, etc.
+#      (no-op by default; override by bind-mounting)
+#
+# `set -e` propagates hook failures as container startup errors
 # — a typo in an apt package name or a missing rig version aborts
 # the start cleanly instead of silently producing a running server
 # that fails at first dyn.load or first bwrap spawn.
@@ -16,6 +20,7 @@
 # continues to work unchanged.
 set -eu
 
+/etc/blockyard/r-versions.sh
 /etc/blockyard/extras.sh
 
 exec "$@"

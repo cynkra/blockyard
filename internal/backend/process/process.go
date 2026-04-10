@@ -214,7 +214,7 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 		rPath, fell := ResolveRBinary(spec.RVersion, b.cfg.RPath)
 		if fell {
 			return fmt.Errorf(
-				"R %s was available at deploy time but is no longer installed",
+				"r %s was available at deploy time but is no longer installed",
 				spec.RVersion)
 		}
 		slog.Info("resolved R version",

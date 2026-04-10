@@ -113,17 +113,17 @@ RUN apt-get update \
        esac \
     && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
         | tar xz -C /usr/local \
-    && rig add release \
-    && LATEST=$(ls /opt/R | sort -V | tail -1) \
-    && MAJOR=${LATEST%%.*} \
-    && MINOR=${LATEST#*.} && MINOR=${MINOR%%.*} \
-    && for i in 1 2 3 4; do \
-         m=$((MINOR - i)); \
-         [ "$m" -ge 0 ] && rig add "${MAJOR}.${m}" || true; \
-       done \
-    && ln -sf /usr/local/bin/R /usr/bin/R \
-    && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*
+
+# R version policy script. Installs the default set of R versions
+# and sets the rig default. Runs at both build time (to bake
+# versions into the image) and container start (so an operator-
+# provided override takes effect). Override by bind-mounting to
+# /etc/blockyard/r-versions.sh.
+COPY docker/r-versions.sh /etc/blockyard/r-versions.sh
+RUN /etc/blockyard/r-versions.sh \
+    && ln -sf /usr/local/bin/R /usr/bin/R \
+    && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript
 
 COPY --from=builder /blockyard /usr/local/bin/blockyard
 COPY --from=builder /by-builder /usr/local/lib/blockyard/by-builder
@@ -138,13 +138,11 @@ COPY internal/seccomp/blockyard-outer.json /etc/blockyard/seccomp.json
 
 # Extras hook. The default is a no-op; operators override by
 # bind-mounting their own script to /etc/blockyard/extras.sh to
-# install additional system libraries, pin a specific R version
-# via rig, or drop credential files. Runs as root before the
-# blockyard server starts; failures propagate (set -e in the
-# entrypoint) and abort startup with a clear error.
+# install additional system libraries or drop credential files.
+# Runs as root before the blockyard server starts; failures
+# propagate (set -e in the entrypoint) and abort startup.
 #
-# See docs/content/docs/guides/process-backend-container.md for
-# the full contract and mount patterns.
+# For R version policy, override r-versions.sh instead.
 COPY docker/extras.sh /etc/blockyard/extras.sh
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
