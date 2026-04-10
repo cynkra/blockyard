@@ -11,7 +11,7 @@ COPY internal/ui/input.css ./
 COPY internal/ui/templates/ templates/
 RUN npm run css:build
 
-FROM golang:1.25.9-alpine AS builder
+FROM golang:1.26.2-alpine AS builder
 
 ENV GOTOOLCHAIN=local
 WORKDIR /src

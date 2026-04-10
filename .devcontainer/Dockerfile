@@ -43,7 +43,7 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME
 
 # Install Go
-ARG GO_VERSION=1.25.8
+ARG GO_VERSION=1.26.2
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz \
       | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"
