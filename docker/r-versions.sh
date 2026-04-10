@@ -24,7 +24,7 @@ set -eu
 rig add release
 
 # Derive the current minor version from what rig installed.
-LATEST=$(ls /opt/R | sort -V | tail -1)
+LATEST=$(ls /opt/R | grep '^[0-9]' | sort -V | tail -1)
 MAJOR=${LATEST%%.*}
 MINOR=${LATEST#*.}; MINOR=${MINOR%%.*}
 
@@ -35,7 +35,7 @@ for i in 1 2 3 4; do
 done
 
 # Default to the previous minor for stability.
-PREV=$(ls /opt/R | sort -V | tail -2 | head -1)
+PREV=$(ls /opt/R | grep '^[0-9]' | sort -V | tail -2 | head -1)
 if [ -n "$PREV" ]; then
   rig default "$PREV"
 fi
