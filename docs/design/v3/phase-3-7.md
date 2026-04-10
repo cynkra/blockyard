@@ -15,8 +15,7 @@ preflight, and tests. Packaging and deployment artifacts (seccomp
 profile, Dockerfile, release binaries) are deferred to phase 3-8.
 
 Independent of the operations track (phases 3-2 through 3-5). Can be
-developed in parallel with phase 3-6 (data mounts) and phase 3-9
-(zygote workers).
+developed in parallel with phase 3-6 (data mounts).
 
 ---
 
@@ -2353,38 +2352,30 @@ infrequent rolling updates.
 
 ### Step 9: Phase 3-9 (zygote workers) forward compatibility
 
-Phase 3-9 adds a zygote worker model with a control channel between
-blockyard and each pooled worker (send `RunApp`, receive health,
-etc.). On the Docker backend, phase 3-9 routes that channel over
-per-worker bridge IPs on a fixed control port with token auth. For
-parity, the process backend needs an equivalent control transport.
-
-Phase 3-7 does not implement that transport — it belongs to phase 3-9
-— but it establishes three load-bearing contracts that phase 3-9
-hangs off. Implementers of phase 3-7 should preserve them:
+v4 adds multi-process containers and (conditionally) a zygote worker
+model, both of which need a control channel between blockyard and each
+worker. Phase 3-7 does not implement that transport, but it
+establishes three load-bearing contracts that v4 hangs off.
+Implementers of phase 3-7 should preserve them:
 
 1. **Token dir mount at `/var/run/blockyard`** — set up in `bwrapArgs`
-   (step 3). Phase 3-9 reads the per-worker control token from this
+   (step 3). v4 reads the per-worker control token from this
    directory to authenticate control connections. The mount path and
    read-only flag are part of the contract.
 2. **bwrap does not `--unshare-net`** — workers share the host
-   loopback. Phase 3-9 addresses pooled workers via
+   loopback. v4 addresses pooled workers via
    `127.0.0.1:<control_port>` without any veth or namespace machinery.
    This is already load-bearing for the `host='127.0.0.1'` Shiny
    binding (decision #20) and the preflight egress probe (step 7);
-   phase 3-9 adds a third dependency.
+   v4 adds a third dependency.
 3. **Port allocator is per-worker state, not per-port semantics** —
-   phase 3-9 adds two more allocators alongside the one phase 3-7
-   ships, over disjoint host-wide ranges
-   (`zygote_control_range_*` for zygote control ports,
-   `zygote_child_range_*` for forked-session shiny ports). Phase
-   3-7's allocator continues to serve non-zygote shiny ports
-   unchanged. Phase 3-7 should therefore avoid baking "one port per
-   worker" into surrounding code: `Spawn` calls `ports.Alloc()`
-   once and stores the result in `workerProc.port`, but phase 3-9
-   adds a second `controlPort` field for zygote workers (and
-   per-child port tracking inside `forkState`) without altering
-   the existing lifecycle flow.
+   v4 adds more allocators alongside the one phase 3-7 ships, over
+   disjoint host-wide ranges. Phase 3-7's allocator continues to
+   serve non-zygote shiny ports unchanged. Phase 3-7 should
+   therefore avoid baking "one port per worker" into surrounding
+   code: `Spawn` calls `ports.Alloc()` once and stores the result
+   in `workerProc.port`, but v4 adds additional port fields without
+   altering the existing lifecycle flow.
 
 **Sketch (full design in ../v4/phase-4-5.md).** The process-backend
 zygote control transport is TCP on localhost with token auth, same

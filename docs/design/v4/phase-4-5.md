@@ -254,11 +254,13 @@ designed for exactly that trade-off.
 
 ### Step 1: Migration — `zygote` column
 
-Migration `003_zygote` adds one boolean column. Additive,
+Migration `NNN_zygote` adds one boolean column. Additive,
 nullable-equivalent (default 0), backward-compatible per phase 3-1
-rules. Phase 3-7 does not add migrations, so `003` is correct as of
-phase 4-5. Phase 4-6 will add a separate `004_ksm` migration for
-the KSM opt-in.
+rules. The migration number depends on how many migrations earlier
+v4 phases (4-1 through 4-4) have added — assign the next available
+sequence number at implementation time. The `003` used in the SQL
+examples below is a placeholder. Phase 4-6 will add a separate
+migration for the KSM opt-in.
 
 **`internal/db/migrations/sqlite/003_zygote.up.sql`:**
 

@@ -19,25 +19,24 @@ sandbox. The Docker backend multiplexes sessions onto shared workers
 (Posit Connect model). Neither offers per-session isolation with
 cross-session memory sharing.
 
-The zygote (fork-based) worker model claims two advantages over
-independent processes: startup latency elimination and a KSM head
-start. Both rest on unvalidated assumptions:
+v4 builds that capability incrementally: first independent-process
+isolation with KSM, then measurements, then (if justified) fork-
+based optimization. The measurement-first approach is motivated by
+two open questions about forking:
 
-1. **Startup latency.** For typical Shiny apps (shiny + dplyr +
-   ggplot2), cold start is ~1-3s with lazy loading. Fork saves
-   ~1-2s per session. Real but modest, and already mitigated by
-   `pre_warmed_sessions`. The heavy-package cases where fork
-   saves 10-30s (rstan, arrow, torch) overlap heavily with
-   packages that fail fork-safety checks.
+1. **Startup latency savings are modest for typical apps.** With
+   lazy loading, a shiny + dplyr + ggplot2 app cold-starts in
+   ~1-3s. Fork saves ~1-2s. The heavy-package cases where fork
+   saves more (rstan, arrow, torch) overlap heavily with packages
+   that fail fork-safety checks. Pre-warming already mitigates
+   cold start without fork complexity.
 
-2. **KSM effectiveness.** Fork gives KSM a head start (all pages
-   shared at fork time), but KSM works on any identical pages
-   across any processes. Whether independently started R processes
-   produce enough byte-identical pages for KSM to be effective
-   is an empirical question we haven't answered.
-
-v4 answers these questions with measurements before committing to
-the fork-based architecture.
+2. **KSM may work well enough without forking.** KSM merges
+   identical pages across any processes, not just forked ones.
+   Whether independently started R processes produce enough
+   byte-identical pages for effective sharing is an empirical
+   question — and the answer determines whether forking earns
+   its complexity.
 
 ## Build Phases
 
