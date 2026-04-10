@@ -359,6 +359,65 @@ func TestSpawnErrorPathsReleaseSlots(t *testing.T) {
 	}
 }
 
+// TestSpawnResolvesRscriptCmd verifies that Spawn rewrites a bare
+// "Rscript" Cmd[0] using cfg.RPath — the bug that prompted #202.
+func TestSpawnResolvesRscriptCmd(t *testing.T) {
+	dir := setupRigFixture(t, "4.5.0")
+	orig := rigBase
+	defer func() { setRigBase(orig) }()
+	setRigBase(dir)
+
+	b := newFakeBackend(t)
+	// Point RPath at the fixture's default R binary.
+	b.cfg.RPath = "/usr/bin/R"
+
+	// Version that falls through to fallback → Spawn must error.
+	err := b.Spawn(context.Background(), backend.WorkerSpec{
+		WorkerID:    "w-rscript",
+		Cmd:         []string{"Rscript", "/app/app.R"},
+		RVersion:    "3.6.0", // not in fixture
+		BundlePath:  t.TempDir(),
+		WorkerMount: "/tmp/app",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no longer installed") {
+		t.Errorf("expected 'no longer installed' error for missing version, got: %v", err)
+	}
+
+	// Version that resolves → Spawn proceeds past resolution (will
+	// fail later at bwrap, which is fine — the point is it no longer
+	// silently skips the rewrite).
+	err = b.Spawn(context.Background(), backend.WorkerSpec{
+		WorkerID:    "w-rscript-ok",
+		Cmd:         []string{"Rscript", "/app/app.R"},
+		RVersion:    "4.5.0",
+		BundlePath:  t.TempDir(),
+		WorkerMount: "/tmp/app",
+	})
+	// Should fail downstream (bwrap not found), not at R resolution.
+	if err != nil && strings.Contains(err.Error(), "no longer installed") {
+		t.Errorf("unexpected resolution failure for installed version: %v", err)
+	}
+}
+
+// TestSpawnResolvesRscriptWithoutVersion verifies that Spawn rewrites
+// Cmd[0] using cfg.RPath even when no R version is specified.
+func TestSpawnResolvesRscriptWithoutVersion(t *testing.T) {
+	b := newFakeBackend(t)
+	b.cfg.RPath = "/opt/R/4.5/bin/R"
+
+	// No RVersion → should use cfg.RPath as fallback, then fail
+	// downstream (not at resolution).
+	err := b.Spawn(context.Background(), backend.WorkerSpec{
+		WorkerID:    "w-no-version",
+		Cmd:         []string{"Rscript", "/app/app.R"},
+		BundlePath:  t.TempDir(),
+		WorkerMount: "/tmp/app",
+	})
+	if err != nil && strings.Contains(err.Error(), "no longer installed") {
+		t.Errorf("empty RVersion should not trigger fallback error: %v", err)
+	}
+}
+
 // TestSpawnRefusesDuplicateLiveWorker verifies that calling Spawn
 // with a worker ID that's already running returns an error rather
 // than clobbering the live entry.
