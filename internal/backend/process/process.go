@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -215,22 +216,28 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	// the value is set — emitting it here would fire on every spawn
 	// for every app for the lifetime of the deployment.
 
-	// Resolve R version from the bundle manifest. Deploy-time
-	// validation (CheckRVersion) ensures the version is installed,
-	// so a miss here means the operator removed it after deploy.
-	if spec.RVersion != "" && len(spec.Cmd) > 0 && spec.Cmd[0] == "R" {
+	// Resolve R binary path from cfg.RPath (and optionally the bundle
+	// manifest's R version). This ensures operators' process.r_path
+	// setting is honoured — without it, bwrap would resolve a bare
+	// "Rscript" via its limited PATH, failing when R lives at a
+	// non-standard location.
+	if len(spec.Cmd) > 0 && (spec.Cmd[0] == "R" || spec.Cmd[0] == "Rscript") {
 		rPath, fell := ResolveRBinary(spec.RVersion, b.cfg.RPath)
 		if fell {
 			return fmt.Errorf(
 				"r %s was available at deploy time but is no longer installed",
 				spec.RVersion)
 		}
-		slog.Info("resolved R version",
+		resolved := rPath
+		if spec.Cmd[0] == "Rscript" {
+			resolved = filepath.Join(filepath.Dir(rPath), "Rscript")
+		}
+		slog.Info("resolved R binary",
 			"worker_id", spec.WorkerID, "version", spec.RVersion,
-			"path", rPath)
+			"path", resolved)
 		cmd := make([]string, len(spec.Cmd))
 		copy(cmd, spec.Cmd)
-		cmd[0] = rPath
+		cmd[0] = resolved
 		spec.Cmd = cmd
 	}
 
@@ -515,8 +522,8 @@ func (b *ProcessBackend) Addr(_ context.Context, id string) (string, error) {
 }
 
 func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (backend.BuildResult, error) {
-	// Resolve R version so the build uses the same R the worker will.
-	if spec.RVersion != "" && len(spec.Cmd) > 0 && spec.Cmd[0] == "R" {
+	// Resolve R binary path so the build uses the operator-configured R.
+	if len(spec.Cmd) > 0 && (spec.Cmd[0] == "R" || spec.Cmd[0] == "Rscript") {
 		rPath, fell := ResolveRBinary(spec.RVersion, b.cfg.RPath)
 		if fell {
 			return backend.BuildResult{
@@ -527,9 +534,13 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 					spec.RVersion),
 			}, nil
 		}
+		resolved := rPath
+		if spec.Cmd[0] == "Rscript" {
+			resolved = filepath.Join(filepath.Dir(rPath), "Rscript")
+		}
 		cmd := make([]string, len(spec.Cmd))
 		copy(cmd, spec.Cmd)
-		cmd[0] = rPath
+		cmd[0] = resolved
 		spec.Cmd = cmd
 	}
 
