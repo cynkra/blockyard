@@ -36,12 +36,12 @@ Phase 3-10 adds post-fork sandboxing (private mount namespace,
 `/tmp` isolation, seccomp, capability dropping, per-process
 rlimits) and the opt-in KSM memory-sharing story (C helper,
 `STATS` observability, preflight, byte-compilation,
-`oom_score_adj` pinning). See `phase-3-10-draft.md` for the
-KSM design — it was originally folded into phase 3-9 but carved
-out to keep this phase focused on the mechanism. Nothing in phase
+`oom_score_adj` pinning). See `phase-3-10.md` for the full
+design — it was originally folded into phase 3-9 but carved out
+to keep this phase focused on the mechanism. Nothing in phase
 3-9 depends on KSM; KSM is layered on top in 3-10 without
 revisiting the protocol surface other than to add a `STATS`
-command and two fields to `INFO`.
+command and three fields to `INFO`.
 
 ## What the zygote model actually optimizes
 
@@ -76,9 +76,9 @@ byte-compilation of bundle code so the JIT doesn't mutate closure
 headers post-fork, and `oom_score_adj` pinning so the kernel OOM
 killer reaps children first when KSM recovery lags behind a
 coordinated GC burst. That whole story lives in phase 3-10 — see
-`phase-3-10-draft.md` decisions K1, K3, and K5. Phase 3-9 ships
-the zygote mechanism alone; it delivers benefits #1 and #2
-unchanged regardless of whether phase 3-10 ever lands.
+`phase-3-10.md` decisions D7, D9, and D11. Phase 3-9 ships the
+zygote mechanism alone; it delivers benefits #1 and #2 unchanged
+regardless of whether phase 3-10 ever lands.
 
 **When to enable the zygote model.** Apps where cold start is the
 user-visible bottleneck — interactive dashboards, frequent
@@ -199,7 +199,7 @@ designed for exactly that trade-off.
    up-front byte-compilation, KSM helper loading, a `STATS`
    handler, child `oom_score_adj` pinning, and proper
    exit-reason classification via a C helper — see
-   `phase-3-10-draft.md` Step K6.
+   `phase-3-10.md` Step 10.
 6. **Docker `Forking` implementation** — adds zygote-mode container
    spawn, control port `3837` on the per-worker bridge, child port
    range allocation, control client wired to the shared protocol,
@@ -804,7 +804,7 @@ func (c *Client) fetchInfo(rd *bufio.Reader) (Info, error) {
 //
 // Phase 3-10 adds a multi-line variant for the STATS command;
 // extending this loop to accumulate lines until "END" is a small
-// delta. See phase-3-10-draft.md Step K5.
+// delta. See phase-3-10.md Step 9.
 func (c *Client) request(ctx context.Context, line string) (string, error) {
     c.reqMu.Lock()
     defer c.reqMu.Unlock()
@@ -917,7 +917,7 @@ import (
 // It is backend-agnostic — the backend-specific bits live in the
 // Forking implementation it wraps. Phase 3-10 extends this type
 // with a metrics-poll loop for KSM observability (see
-// phase-3-10-draft.md Step K8); phase 3-9 ships the session
+// phase-3-10.md Step 14); phase 3-9 ships the session
 // bookkeeping and sweep loop only.
 type Manager struct {
     forking       backend.Forking
@@ -1225,8 +1225,8 @@ secret_hex   <- paste(format(as.hexmode(as.integer(secret_bytes)), width = 2),
 # zygote_info holds structured facts about this zygote that the
 # blockyard server can query via the control-protocol `INFO`
 # command. Filled in during startup; never mutated after that.
-# Phase 3-10 adds ksm_status / ksm_errno fields here when KSM
-# support lands (see phase-3-10-draft.md Step K6).
+# Phase 3-10 adds ksm_status / ksm_errno / sandbox_status fields
+# here when sandboxing and KSM land (see phase-3-10.md Step 10).
 zygote_info <- list(
   r_version  = R.version.string,
   preload_ms = NA_integer_
@@ -1283,7 +1283,7 @@ zygote_info <- list(
 #
 # Phase 3-10 replaces the naive source() with compiler::cmpfile()
 # so bundle closures are born as BCODESXP before fork (see
-# phase-3-10-draft.md decision K3). That optimisation is tied to
+# phase-3-10.md decision D9). That optimisation is tied to
 # the KSM track because its primary motivation is preventing the
 # JIT from mutating closure pages post-fork. Phase 3-9 keeps the
 # simpler source() path.
@@ -1578,7 +1578,7 @@ handle_command <- function(line) {
     # Phase 3-10 will add an oom_score_adj = 1000 self-write
     # inside the expression so the kernel OOM killer reaps a
     # child before the zygote under memory pressure (see
-    # phase-3-10-draft.md decision K5). It will also flip the
+    # phase-3-10.md decision D11). It will also flip the
     # `shiny::runApp` call over to the C-helper's byte-compiled
     # code path.
     job <- tryCatch(
@@ -1790,8 +1790,8 @@ var ZygoteScript []byte
 
 Phase 3-10 extends this file with a `zygote_helper.c` source embed
 plus per-architecture `HelperSO` embeds for the compiled
-`.so` binaries (see `phase-3-10-draft.md` Step K4). Phase 3-9
-ships only the R script.
+`.so` binaries (see `phase-3-10.md` Step 5). Phase 3-9 ships only
+the R script.
 
 ### Step 7: Docker `Forking` implementation
 
@@ -3564,8 +3564,8 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     this.** The same preload path will switch from `source()` to
     `compiler::cmpfile()` + `compiler::loadcmp()` so bundle
     closures are born as `BCODESXP` — a prerequisite for KSM
-    finding stable pages to merge (see `phase-3-10-draft.md`
-    decision K3). Phase 3-9 keeps the simpler `source()` path.
+    finding stable pages to merge (see `phase-3-10.md`
+    decision D9). Phase 3-9 keeps the simpler `source()` path.
 
     **What this does not catch (residuals):**
 
@@ -3645,8 +3645,8 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
     column, both default off, both gated against the existing
     zygote flags. The two-level opt-in pattern is the
     structural primitive; phase 3-10 applies it twice rather
-    than inventing a different shape. See
-    `phase-3-10-draft.md` decision K4.
+    than inventing a different shape. See `phase-3-10.md`
+    decision D3.
 
     **Alternatives considered:**
 
@@ -3752,11 +3752,12 @@ func TestRuntimeKillSwitch_ZygoteDisabledFallsBackToNonZygote(t *testing.T)
    threat-model, and capacity story.** Originally folded into
    this phase; carved out to phase 3-10 to keep the zygote
    mechanism and the KSM opt-in landable as separate units.
-   See `phase-3-10-draft.md` — that document covers the C
-   helper, the `STATS` control command, the Prometheus
-   metrics, the preflight checks, the `oom_score_adj` pinning,
-   the up-front byte-compilation, the two-level opt-in for
-   `ksm`, and the multi-tenant side-channel story (Suzaki
-   2011 / Bosman 2016). Nothing in phase 3-9 blocks phase 3-10
-   from layering KSM on; the two-package split (decision #5)
-   specifically exists to make the additive surface clean.
+   See `phase-3-10.md` — that document covers the consolidated
+   C helper (with both `enable_ksm` and `apply_post_fork_sandbox`),
+   the `STATS` control command, the Prometheus metrics, the
+   preflight checks, the `oom_score_adj` pinning, the up-front
+   byte-compilation, the two-level opt-in for `ksm`, and the
+   multi-tenant side-channel story (Suzaki 2011 / Bosman 2016).
+   Nothing in phase 3-9 blocks phase 3-10 from layering KSM on;
+   the two-package split (decision #5) specifically exists to
+   make the additive surface clean.
