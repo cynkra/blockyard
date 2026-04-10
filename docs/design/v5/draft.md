@@ -1,7 +1,7 @@
-# blockyard v4 — Draft Notes
+# blockyard v5 — Draft Notes
 
-v4 adds the Kubernetes backend and the architectural refactors it triggers.
-Everything in v4 is either the k8s implementation itself or a prerequisite
+v5 adds the Kubernetes backend and the architectural refactors it triggers.
+Everything in v5 is either the k8s implementation itself or a prerequisite
 for multi-node deployments.
 
 ## Features
