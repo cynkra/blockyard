@@ -1,9 +1,16 @@
 # Everything variant image. Ships the blockyard binary built with
 # both backends compiled in (default `go build` — no `minimal` tag)
-# plus R, bubblewrap, iptables, and the compiled BPF seccomp
-# profile. This is the default `ghcr.io/cynkra/blockyard:<v>` image
-# under phase 3-8; operators who want slim Docker-only pull
+# plus R (via rig), bubblewrap, iptables, and the compiled BPF
+# seccomp profile. This is the default `ghcr.io/cynkra/blockyard:<v>`
+# image under phase 3-8; operators who want slim Docker-only pull
 # `-docker` instead.
+#
+# Base: ubuntu:24.04 + rig (issue #185). Shares the rationale and
+# runtime-lib list with server-process.Dockerfile; the only
+# additions here are iptables (for the Docker backend's native
+# egress firewall path) and the broader set of build tags on the
+# Go compile step above. R_VERSION build ARG controls which R
+# version is baked in (default: "release").
 
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
@@ -50,14 +57,16 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} \
     -o /blockyard ./cmd/blockyard
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
-# Final stage: rocker/r-ver, same rationale as server-process.
-# iptables is added here because the everything variant also
-# supports the Docker backend (which uses iptables for worker
-# egress in native mode).
-FROM ghcr.io/rocker-org/r-ver:4.4.3
+# Final stage: ubuntu:24.04 + rig + R release. See the header
+# comment and issue #185 for the rationale. iptables is the only
+# addition over the process-variant image — the Docker backend
+# uses it for worker egress in native mode.
+FROM ubuntu:24.04
 
-# `apt-get upgrade` pulls in Ubuntu security patches that the
-# rocker/r-ver base may have missed since its last rebuild.
+ARG RIG_VERSION=0.7.1
+ARG R_VERSION=release
+ARG TARGETARCH=amd64
+
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
@@ -65,6 +74,29 @@ RUN apt-get update \
         ca-certificates \
         curl \
         iptables \
+        libcairo2 \
+        libcurl4t64 \
+        libicu74 \
+        libmariadb3 \
+        liblz4-1 \
+        libodbc2 \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libpq5 \
+        libsqlite3-0 \
+        libssl3t64 \
+        libxml2 \
+        libzstd1 \
+    && case "${TARGETARCH}" in \
+        arm64) RIG_ASSET="rig-linux-arm64-${RIG_VERSION}.tar.gz" ;; \
+        amd64) RIG_ASSET="rig-linux-${RIG_VERSION}.tar.gz" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
+        | tar xz -C /usr/local \
+    && rig add "${R_VERSION}" \
+    && ln -sf /usr/local/bin/R /usr/bin/R \
+    && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /blockyard /usr/local/bin/blockyard
@@ -73,8 +105,14 @@ COPY blockyard.toml /etc/blockyard/blockyard.toml
 COPY --from=seccomp-compiler /blockyard-bwrap-seccomp.bpf /etc/blockyard/seccomp.bpf
 COPY internal/seccomp/blockyard-outer.json /etc/blockyard/seccomp.json
 
+# Extras hook. See server-process.Dockerfile for the full comment
+# and docs/content/docs/guides/process-backend-container.md for
+# the operator-facing contract.
+COPY docker/extras.sh /etc/blockyard/extras.sh
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+
 ENV BLOCKYARD_PROCESS_SECCOMP_PROFILE=/etc/blockyard/seccomp.bpf
 
 EXPOSE 8080
 
-ENTRYPOINT ["blockyard", "--config", "/etc/blockyard/blockyard.toml"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "blockyard", "--config", "/etc/blockyard/blockyard.toml"]

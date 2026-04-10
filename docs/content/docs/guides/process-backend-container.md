@@ -24,11 +24,132 @@ the security trade-offs between the Docker and process backends, see
 binary compiled with `-tags 'minimal,process_backend'` (no Docker SDK
 in the dep graph), plus:
 
-- R 4.4.3 from `rocker/r-ver`
+- `ubuntu:24.04` base
+- R (the current release at image build time), installed via
+  [`rig`](https://github.com/r-lib/rig) so operators can swap R
+  versions at deploy time via the extras hook — see below
+- Runtime shared libraries commonly needed by R packages
+  (libcurl, libssl, libxml2, libcairo, libpango, libpq, libmariadb,
+  libsqlite3, unixodbc, libzstd, …). No compiler toolchain and no
+  `-dev` headers; extra libraries are added via the extras hook.
 - `bubblewrap`
 - The compiled bwrap seccomp profile at `/etc/blockyard/seccomp.bpf`
 - The outer-container seccomp profile at `/etc/blockyard/seccomp.json`
   (for extraction to the host)
+
+## Extending the image — the extras hook
+
+The image runs `/etc/blockyard/extras.sh` as root before starting
+the blockyard server. A no-op default is baked in; operators
+override it by bind-mounting their own script.
+
+Use the hook to:
+
+- install additional system libraries for R packages your bundles
+  need (libgdal for `sf`/`terra`, libpoppler for `pdftools`, …)
+- pin or add R versions via `rig` (e.g. `rig add 4.4.3`)
+- add custom apt sources and GPG keys
+- drop `.netrc` or credentials files into `/root`
+
+Example:
+
+```sh
+#!/bin/sh
+# extras.sh
+set -e
+
+# Pin a specific R version instead of the baked-in release
+rig add 4.4.3
+rig default 4.4.3
+
+# Spatial libraries for sf / terra
+apt-get update
+apt-get install -y --no-install-recommends \
+    libgdal34t64 libgeos-c1t64 libproj25 libudunits2-0
+rm -rf /var/lib/apt/lists/*
+```
+
+See `docker/extras.example.sh` in the blockyard repository for a
+fuller example with commented blocks for common R ecosystem
+extras.
+
+### Mount patterns
+
+**Docker / docker-compose:**
+
+```yaml
+services:
+  blockyard:
+    image: ghcr.io/cynkra/blockyard-process:1.2.3
+    volumes:
+      - ./extras.sh:/etc/blockyard/extras.sh:ro
+```
+
+**Kubernetes:** create a ConfigMap from the script and mount a
+single `items` entry at the target path:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blockyard-extras
+data:
+  extras.sh: |
+    #!/bin/sh
+    set -e
+    apt-get update
+    apt-get install -y --no-install-recommends libgdal34t64
+    rm -rf /var/lib/apt/lists/*
+---
+# in the Deployment's pod spec:
+        volumeMounts:
+        - name: extras
+          mountPath: /etc/blockyard/extras.sh
+          subPath: extras.sh
+          readOnly: true
+      volumes:
+      - name: extras
+        configMap:
+          name: blockyard-extras
+          defaultMode: 0755
+```
+
+### Failure semantics
+
+The entrypoint shim runs `set -e` before executing the extras
+script. A non-zero exit aborts container startup with a clear
+error visible in `docker logs` / `kubectl logs`. Typos and missing
+packages surface immediately instead of turning into mysterious
+`dyn.load()` failures at first user session.
+
+### Scan drift caveat
+
+The Trivy scan in the blockyard CI publishes findings for the
+built image. Any packages or R versions added at startup via the
+extras hook are **not** covered by that scan — the operator owns
+the CVE picture of whatever they layer on. Operators who need the
+scan to reflect reality should bake their own image instead:
+
+```dockerfile
+FROM ghcr.io/cynkra/blockyard-process:1.2.3
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgdal34t64 \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Baked-in packages are scanned by whatever image-scanning pipeline
+the operator runs on their own registry.
+
+### Airgapped and network-restricted deploys
+
+The default extras hook is a no-op, so the out-of-the-box image
+starts with no network access required. But any extras script
+that calls `apt-get update`, `rig add`, or downloads anything
+over HTTP needs outbound connectivity at container start. For
+airgapped deploys, bake what you need into a derived image
+instead of using the runtime hook — the `FROM
+ghcr.io/cynkra/blockyard-process:<v>` pattern above is the
+airgap-friendly path.
 
 ## Why the outer seccomp profile is needed
 
