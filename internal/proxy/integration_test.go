@@ -1442,3 +1442,176 @@ func TestProxyOIDCAllowsPublicApp(t *testing.T) {
 		t.Errorf("expected 200 for public app, got %d", resp.StatusCode)
 	}
 }
+
+// TestProxyMultiplexSessions verifies that with max_sessions_per_worker > 1,
+// two WebSocket clients are routed to the same worker and each gets
+// independent per-connection state. This is the core property that makes
+// Posit-style session multiplexing work: httpuv (Shiny's HTTP server)
+// creates a separate ShinySession for each WebSocket connection, so two
+// connections to the same R process get independent reactive graphs.
+//
+// The mock backend's WS handler mimics this by keeping a per-connection
+// counter (local variable in the handler closure). If the proxy correctly
+// routes both sessions to the same worker, incrementing one client's
+// counter must not affect the other's.
+func TestProxyMultiplexSessions(t *testing.T) {
+	srv, ts := testProxyServer(t)
+
+	// Track backend WS accept count to confirm both sessions hit the
+	// same httptest.Server (= same worker process).
+	var backendAccepts int32
+	var mu sync.Mutex
+
+	srv.Backend.(*mock.MockBackend).SetWSHandler(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		backendAccepts++
+		mu.Unlock()
+
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+
+		// Per-connection counter — mirrors Shiny's per-session state.
+		counter := 0
+		for {
+			_, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			switch string(data) {
+			case "inc":
+				counter++
+				c.Write(context.Background(), websocket.MessageText,
+					[]byte(fmt.Sprintf("%d", counter)))
+			case "get":
+				c.Write(context.Background(), websocket.MessageText,
+					[]byte(fmt.Sprintf("%d", counter)))
+			}
+		}
+	})
+
+	// Create app and upload bundle.
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+		bytes.NewReader([]byte(`{"name":"mux-app"}`)))
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	var created map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&created)
+	id := created["id"].(string)
+
+	req, _ = http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/bundles",
+		bytes.NewReader(testutil.MakeBundle(t)))
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	http.DefaultClient.Do(req)
+	time.Sleep(200 * time.Millisecond)
+
+	// Allow two sessions per worker.
+	maxSessions := 2
+	srv.DB.UpdateApp(id, db.AppUpdate{
+		MaxSessionsPerWorker: &maxSessions,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/app/mux-app/"
+
+	// --- Client 1: triggers cold start, spawns a worker ---
+	conn1, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("ws dial 1: %v", err)
+	}
+	defer conn1.CloseNow()
+
+	// --- Client 2: should reuse the same worker (capacity = 2) ---
+	conn2, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("ws dial 2: %v", err)
+	}
+	defer conn2.CloseNow()
+
+	// Both sessions must share one worker.
+	if srv.Workers.Count() != 1 {
+		t.Fatalf("expected 1 worker (multiplexed), got %d", srv.Workers.Count())
+	}
+
+	// --- Verify independent per-session state ---
+	// Each round-trip also proves the backend WS is connected, so we
+	// check the accept count after these exchanges (the proxy's client
+	// Accept completes before the backend Dial, so checking immediately
+	// after websocket.Dial races).
+
+	// Increment client 1 twice.
+	if err := conn1.Write(ctx, websocket.MessageText, []byte("inc")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn1.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "1" {
+		t.Errorf("client 1 first inc: expected '1', got %q", data)
+	}
+
+	if err := conn1.Write(ctx, websocket.MessageText, []byte("inc")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err = conn1.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "2" {
+		t.Errorf("client 1 second inc: expected '2', got %q", data)
+	}
+
+	// Client 2's counter must still be 0 — independent state.
+	if err := conn2.Write(ctx, websocket.MessageText, []byte("get")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err = conn2.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "0" {
+		t.Errorf("client 2 get: expected '0' (independent state), got %q", data)
+	}
+
+	// Increment client 2 — should start from its own zero.
+	if err := conn2.Write(ctx, websocket.MessageText, []byte("inc")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err = conn2.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "1" {
+		t.Errorf("client 2 inc: expected '1', got %q", data)
+	}
+
+	// Client 1 unaffected by client 2's increment.
+	if err := conn1.Write(ctx, websocket.MessageText, []byte("get")); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err = conn1.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "2" {
+		t.Errorf("client 1 get after client 2 inc: expected '2', got %q", data)
+	}
+
+	// Now that both connections have proven round-trip connectivity,
+	// verify the backend saw exactly two WS connections (one per session,
+	// same worker).
+	mu.Lock()
+	accepts := backendAccepts
+	mu.Unlock()
+	if accepts != 2 {
+		t.Errorf("expected 2 backend WS accepts on same worker, got %d", accepts)
+	}
+}
