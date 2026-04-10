@@ -31,14 +31,13 @@ type PreflightDeps struct {
 	Version    string
 }
 
+// CheckRVersion returns nil — the Docker backend selects R via image tag.
+func (d *DockerBackend) CheckRVersion(_ string) error { return nil }
+
 // Preflight implements backend.Backend. It runs all docker-specific
 // preflight checks and returns a populated *preflight.Report. The full
 // list of checks lives in this file as runDockerChecks; this method is
 // the entry point that main.go calls through the Backend interface.
-// CheckRVersion always returns nil for the Docker backend — the
-// image tag determines the R version.
-func (d *DockerBackend) CheckRVersion(_ string) error { return nil }
-
 func (d *DockerBackend) Preflight(ctx context.Context) (*preflight.Report, error) {
 	storePath := filepath.Join(d.bundleServerPath, ".pkg-store")
 	builderBin, builderErr := buildercache.EnsureCached(

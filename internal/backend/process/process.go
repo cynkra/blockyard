@@ -163,19 +163,27 @@ func (b *ProcessBackend) CheckRVersion(version string) error {
 	if version == "" {
 		return nil
 	}
+	// ResolveRBinary accepts any patch within the same minor (e.g.
+	// bundle pins 4.4.2 but 4.4.3 is installed → OK). A miss means
+	// no matching major.minor is available at all.
 	_, fell := ResolveRBinary(version, "")
 	if !fell {
 		return nil
 	}
+	parts := strings.SplitN(version, ".", 3)
+	minor := version
+	if len(parts) >= 2 {
+		minor = parts[0] + "." + parts[1]
+	}
 	installed := InstalledRVersions()
 	if len(installed) == 0 {
 		return fmt.Errorf(
-			"bundle requires R %s but no rig-managed R versions are installed",
-			version)
+			"bundle requires R %s but no R versions are installed",
+			minor)
 	}
 	return fmt.Errorf(
-		"bundle requires R %s which is not installed; available versions: %s",
-		version, strings.Join(installed, ", "))
+		"bundle requires R %s which is not installed; available: %s",
+		minor, strings.Join(installed, ", "))
 }
 
 // CleanupOrphanResources implements backend.Backend. Workers from a
