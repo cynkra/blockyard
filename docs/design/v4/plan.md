@@ -41,6 +41,30 @@ the fork-based architecture.
 
 ## Build Phases
 
+### Cross-cutting concern: runtime × KSM interaction
+
+KSM's behaviour depends on the runtime context in ways that a flat
+per-app toggle cannot express. Key interactions to work out during
+the design of phases 4-1 through 4-3:
+
+- **runc containers** share the host kernel. KSM merges pages
+  across all runc workers on the same host. Multi-process
+  containers (phase 4-2) are optional for sharing — independent
+  containers already benefit.
+- **Kata / VM-isolated containers** each have their own kernel.
+  KSM only works *within* a single Kata VM. Multi-process
+  containers become the only way to get cross-session sharing
+  for Kata apps.
+- **Process backend** workers share the host kernel. Same story
+  as runc.
+
+The config surface must let operators express combinations like
+"KSM across runc workers, KSM within Kata containers, no KSM for
+public-facing apps." Phase 4-1's per-app backend/runtime selection
+and phase 4-3's KSM opt-in need to be designed together so the
+resulting config model handles these interactions cleanly rather
+than treating KSM as a context-free boolean.
+
 ### Phase 4-1: Hybrid Backend Dispatch
 
 Per-app backend selection. Currently `server.backend` is a global
@@ -78,6 +102,13 @@ container. A lightweight supervisor inside the container manages
 child R processes — one per session. No forking: each child starts
 R fresh and loads the bundle independently.
 
+For runc containers this is one way to get per-session isolation
+(the other being one container per session). For Kata containers
+it is additionally the only way to get KSM sharing — processes
+inside one Kata VM share a kernel, but separate Kata VMs do not.
+The config/enablement design should account for this (see the
+runtime × KSM note above).
+
 **Deliverables:**
 
 1. **In-container supervisor** — a small process (could be a Go
@@ -103,6 +134,13 @@ R fresh and loads the bundle independently.
 Kernel same-page merging across independently started R processes.
 No forking prerequisite — KSM finds and merges identical pages
 across any registered processes.
+
+Where KSM merges depends on the runtime: across all runc/process
+workers on a host (shared kernel), but only within a single Kata
+VM. The enablement mechanism (`prctl` inside the worker) is the
+same in all cases, but preflight, observability, and the config
+model need to account for the different scopes. See the
+runtime × KSM note above.
 
 **Deliverables:**
 
