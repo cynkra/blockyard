@@ -149,15 +149,13 @@ func UnpackArchive(paths Paths) error {
 	return nil
 }
 
-// ValidateEntrypoint checks that the unpacked bundle contains an app.R
-// or server.R file at the top level.
+// ValidateEntrypoint checks that the unpacked bundle contains app.R
+// at the top level.
 func ValidateEntrypoint(paths Paths) error {
-	for _, name := range []string{"app.R", "server.R"} {
-		if _, err := os.Stat(filepath.Join(paths.Unpacked, name)); err == nil {
-			return nil
-		}
+	if _, err := os.Stat(filepath.Join(paths.Unpacked, "app.R")); err == nil {
+		return nil
 	}
-	return fmt.Errorf("missing entrypoint: app.R or server.R")
+	return fmt.Errorf("missing entrypoint: app.R")
 }
 
 // CreateLibraryDir creates the output directory for dependency restoration.

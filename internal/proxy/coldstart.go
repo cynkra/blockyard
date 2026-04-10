@@ -12,10 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
-	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/pkgstore"
@@ -246,33 +244,14 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		}
 	}
 
-	// Read R version from bundle manifest for version dispatch.
-	var rVersion string
-	if m, err := manifest.Read(filepath.Join(hostPaths.Unpacked, "manifest.json")); err == nil {
-		rVersion = m.RVersion
-	}
-
-	spec := backend.WorkerSpec{
-		AppID:       app.ID,
-		WorkerID:    wid,
-		Image:       server.AppImage(app, srv.Config.Docker.Image),
-		Cmd: []string{"R", "-e",
-			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')), host = Sys.getenv('SHINY_HOST', unset = '0.0.0.0'))",
-				srv.Config.Storage.BundleWorkerPath)},
-		BundlePath:  hostPaths.Unpacked,
-		LibraryPath: hostPaths.Library,
-		LibDir:      libDir,
-		TransferDir: transferDir,
-		TokenDir:    tokDir,
-		WorkerMount: srv.Config.Storage.BundleWorkerPath,
-		ShinyPort:   srv.Config.Docker.ShinyPort,
-		RVersion:    rVersion,
-		MemoryLimit: ptrOr(app.MemoryLimit, ""),
-		CPULimit:    ptrOr(app.CPULimit, 0.0),
-		Labels:      labels,
-		Env:         extraEnv,
-		Runtime:     server.AppRuntime(app, srv.Config.Docker),
-	}
+	spec := server.BaseWorkerSpec(srv, app, wid, *app.ActiveBundle)
+	spec.LibDir = libDir
+	spec.TransferDir = transferDir
+	spec.TokenDir = tokDir
+	spec.MemoryLimit = ptrOr(app.MemoryLimit, "")
+	spec.CPULimit = ptrOr(app.CPULimit, 0.0)
+	spec.Labels = labels
+	spec.Env = extraEnv
 
 	// Resolve per-app data mounts.
 	appMounts, err := srv.DB.ListAppDataMounts(app.ID)

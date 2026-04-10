@@ -270,7 +270,7 @@ func TestCreateAppUploadMissingEntrypoint(t *testing.T) {
 	defer resp.Body.Close()
 
 	respBody := readBody(t, resp)
-	if !strings.Contains(respBody, "app.R or server.R") {
+	if !strings.Contains(respBody, "app.R") {
 		t.Errorf("expected entrypoint error, got: %s", respBody)
 	}
 

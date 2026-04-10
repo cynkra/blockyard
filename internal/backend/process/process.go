@@ -316,6 +316,9 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 		"LANG=C.UTF-8",
 		"R_LIBS=" + rLibs,
 	}
+	if spec.RProfilePath != "" {
+		cmd.Env = append(cmd.Env, "R_PROFILE_USER="+spec.RProfilePath)
+	}
 	for k, v := range spec.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}

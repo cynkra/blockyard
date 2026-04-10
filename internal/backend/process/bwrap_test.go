@@ -101,24 +101,16 @@ func TestBwrapArgs(t *testing.T) {
 	assertBindMount(t, args, "--ro-bind", "/", "/")
 	assertBindMount(t, args, "--ro-bind", spec.BundlePath, spec.WorkerMount)
 
-	// Verify the R command is after the -- separator.
+	// Verify the Rscript command is after the -- separator.
 	sepIdx := indexOf(args, "--")
 	if sepIdx < 0 {
 		t.Fatal("missing -- separator")
 	}
-	if args[sepIdx+1] != cfg.RPath {
-		t.Errorf("expected R path %q after --, got %q", cfg.RPath, args[sepIdx+1])
+	if args[sepIdx+1] != "Rscript" {
+		t.Errorf("expected Rscript after --, got %q", args[sepIdx+1])
 	}
-
-	// Workers share the host network stack (no --unshare-net), so
-	// Shiny must bind loopback — 0.0.0.0 would expose the app on the
-	// host's external interface, bypassing the proxy auth layer.
-	rest := strings.Join(args[sepIdx+1:], " ")
-	if !strings.Contains(rest, "port=10000") {
-		t.Errorf("default cmd should reference port=10000: %s", rest)
-	}
-	if !strings.Contains(rest, "host='127.0.0.1'") {
-		t.Errorf("default cmd must bind loopback, got: %s", rest)
+	if args[sepIdx+2] != spec.WorkerMount+"/app.R" {
+		t.Errorf("expected %s/app.R, got %q", spec.WorkerMount, args[sepIdx+2])
 	}
 }
 
@@ -193,6 +185,28 @@ func TestBwrapArgsCustomCmd(t *testing.T) {
 	cmd := args[sepIdx+1:]
 	if len(cmd) != 3 || cmd[0] != "/usr/bin/R" {
 		t.Errorf("expected custom command after --, got %v", cmd)
+	}
+}
+
+// TestBwrapArgsCmdPassthrough verifies that a non-nil spec.Cmd is passed
+// through to bwrap unchanged (no fallback to the default Rscript command).
+func TestBwrapArgsCmdPassthrough(t *testing.T) {
+	cfg := &config.ProcessConfig{
+		BwrapPath: "/usr/bin/bwrap",
+		RPath:     "/usr/bin/R",
+	}
+	spec := backend.WorkerSpec{
+		WorkerID:    "w-1",
+		BundlePath:  "/data/bundles/app1/v1",
+		WorkerMount: "/app",
+		Cmd:         []string{"Rscript", "/app/app.R"},
+	}
+
+	args := bwrapArgs(cfg, spec, 10002, 60002, 65534)
+	sepIdx := indexOf(args, "--")
+	cmd := args[sepIdx+1:]
+	if len(cmd) != 2 || cmd[0] != "Rscript" || cmd[1] != "/app/app.R" {
+		t.Errorf("expected [Rscript /app/app.R] after --, got %v", cmd)
 	}
 }
 

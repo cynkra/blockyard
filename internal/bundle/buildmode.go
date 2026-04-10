@@ -22,7 +22,7 @@ func resolveManifest(unpackedPath string) (*manifest.Manifest, error) {
 
 	meta := manifest.Metadata{
 		AppMode:    detectAppMode(unpackedPath),
-		Entrypoint: detectEntrypoint(unpackedPath),
+		Entrypoint: DetectEntrypoint(unpackedPath),
 	}
 	files := computeFileChecksums(unpackedPath)
 
@@ -52,15 +52,10 @@ func detectAppMode(unpackedPath string) string {
 	return "shiny" // default
 }
 
-// detectEntrypoint returns the primary entrypoint file name.
-func detectEntrypoint(unpackedPath string) string {
-	if fileExists(filepath.Join(unpackedPath, "app.R")) {
-		return "app.R"
-	}
-	if fileExists(filepath.Join(unpackedPath, "server.R")) {
-		return "server.R"
-	}
-	return "app.R" // default
+// DetectEntrypoint returns the entrypoint file name. Bundles must
+// contain app.R — this is the only supported entrypoint.
+func DetectEntrypoint(unpackedPath string) string {
+	return "app.R"
 }
 
 // computeFileChecksums walks the unpacked dir and computes SHA-256

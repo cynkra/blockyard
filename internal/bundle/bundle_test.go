@@ -162,16 +162,16 @@ func TestValidateEntrypoint_Valid(t *testing.T) {
 	}
 }
 
-func TestValidateEntrypoint_ServerR(t *testing.T) {
+func TestValidateEntrypoint_ServerR_Rejected(t *testing.T) {
 	tmp := t.TempDir()
 	paths := NewBundlePaths(tmp, "app-1", "bundle-1")
 
-	// Create unpacked dir with server.R only.
+	// server.R alone is not a valid entrypoint — must be app.R.
 	os.MkdirAll(paths.Unpacked, 0o755)
 	os.WriteFile(filepath.Join(paths.Unpacked, "server.R"), []byte("# server"), 0o644)
 
-	if err := ValidateEntrypoint(paths); err != nil {
-		t.Fatalf("expected valid entrypoint with server.R, got: %v", err)
+	if err := ValidateEntrypoint(paths); err == nil {
+		t.Fatal("expected error for server.R without app.R")
 	}
 }
 

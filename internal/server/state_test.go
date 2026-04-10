@@ -525,6 +525,42 @@ func TestWorkerEnv_BoardStorageEmptyURL(t *testing.T) {
 	}
 }
 
+func TestWorkerEnv_ShinyHostDocker(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: ":8080", Backend: "docker"},
+		},
+	}
+	env := WorkerEnv(srv)
+	if env["SHINY_HOST"] != "0.0.0.0" {
+		t.Errorf("docker backend: SHINY_HOST = %q, want 0.0.0.0", env["SHINY_HOST"])
+	}
+}
+
+func TestWorkerEnv_ShinyHostProcess(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: ":8080", Backend: "process"},
+		},
+	}
+	env := WorkerEnv(srv)
+	if env["SHINY_HOST"] != "127.0.0.1" {
+		t.Errorf("process backend: SHINY_HOST = %q, want 127.0.0.1", env["SHINY_HOST"])
+	}
+}
+
+func TestWorkerEnv_ShinyHostDefault(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: ":8080"},
+		},
+	}
+	env := WorkerEnv(srv)
+	if env["SHINY_HOST"] != "0.0.0.0" {
+		t.Errorf("default backend: SHINY_HOST = %q, want 0.0.0.0", env["SHINY_HOST"])
+	}
+}
+
 func TestMarkDraining(t *testing.T) {
 	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})

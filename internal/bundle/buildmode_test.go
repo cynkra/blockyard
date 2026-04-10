@@ -141,22 +141,8 @@ func TestResolveManifest_Priority(t *testing.T) {
 
 func TestDetectEntrypoint(t *testing.T) {
 	dir := t.TempDir()
-
-	// No files → default app.R
-	if got := detectEntrypoint(dir); got != "app.R" {
-		t.Errorf("default = %q", got)
-	}
-
-	// server.R present
-	os.WriteFile(filepath.Join(dir, "server.R"), []byte("# server"), 0o644)
-	if got := detectEntrypoint(dir); got != "server.R" {
-		t.Errorf("with server.R = %q", got)
-	}
-
-	// app.R wins
-	os.WriteFile(filepath.Join(dir, "app.R"), []byte("# app"), 0o644)
-	if got := detectEntrypoint(dir); got != "app.R" {
-		t.Errorf("with both = %q", got)
+	if got := DetectEntrypoint(dir); got != "app.R" {
+		t.Errorf("got %q, want app.R", got)
 	}
 }
 

@@ -405,6 +405,17 @@ func (d *DockerBackend) createWorkerContainer(
 		binds = append(binds, dm.Source+":"+dm.Target+flag)
 	}
 
+	// R profile — mount the blockyard R profile so R picks up
+	// SHINY_HOST / SHINY_PORT as options before the user's script runs.
+	const rProfileTarget = "/etc/blockyard/rprofile.R"
+	if spec.RProfilePath != "" {
+		pb, pm := d.mountCfg.TranslateMount(backend.MountEntry{
+			Source: spec.RProfilePath, Target: rProfileTarget, ReadOnly: true,
+		})
+		binds = append(binds, pb...)
+		mounts = append(mounts, pm...)
+	}
+
 	// R_LIBS: use /blockyard-lib-store when store-assembled library is
 	// available, else legacy /blockyard-lib. Must not use /lib as that
 	// shadows the system shared library directory on Linux.
@@ -415,6 +426,9 @@ func (d *DockerBackend) createWorkerContainer(
 	env := []string{
 		fmt.Sprintf("SHINY_PORT=%d", spec.ShinyPort),
 		"R_LIBS=" + rLibs,
+	}
+	if spec.RProfilePath != "" {
+		env = append(env, "R_PROFILE_USER="+rProfileTarget)
 	}
 	for k, v := range spec.Env {
 		env = append(env, k+"="+v)

@@ -13,7 +13,6 @@ import (
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/db"
-	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 )
@@ -235,38 +234,12 @@ func (srv *Server) buildTransferWorkerSpec(
 func (srv *Server) defaultWorkerSpec(
 	app *db.AppRow, workerID, libDir, bundleID string,
 ) backend.WorkerSpec {
-	hostPaths := srv.BundlePaths(app.ID, bundleID)
 	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", workerID)
 	_ = os.MkdirAll(transferDir, 0o755) //nolint:gosec // G301: transfer dir, not secrets
 
-	var rVersion string
-	if m, err := manifest.Read(filepath.Join(hostPaths.Unpacked, "manifest.json")); err == nil {
-		rVersion = m.RVersion
-	}
-
-	spec := backend.WorkerSpec{
-		AppID:    app.ID,
-		WorkerID: workerID,
-		Image:    AppImage(app, srv.Config.Docker.Image),
-		Cmd: []string{"R", "-e",
-			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')), host = Sys.getenv('SHINY_HOST', unset = '0.0.0.0'))",
-				srv.Config.Storage.BundleWorkerPath)},
-		BundlePath:  hostPaths.Unpacked,
-		LibraryPath: hostPaths.Library,
-		LibDir:      libDir,
-		TransferDir: transferDir,
-		WorkerMount: srv.Config.Storage.BundleWorkerPath,
-		ShinyPort:   srv.Config.Docker.ShinyPort,
-		RVersion:    rVersion,
-		Labels: map[string]string{
-			"dev.blockyard/managed":   "true",
-			"dev.blockyard/app-id":    app.ID,
-			"dev.blockyard/worker-id": workerID,
-			"dev.blockyard/role":      "worker",
-		},
-		Env:     WorkerEnv(srv),
-		Runtime: AppRuntime(app, srv.Config.Docker),
-	}
+	spec := BaseWorkerSpec(srv, app, workerID, bundleID)
+	spec.LibDir = libDir
+	spec.TransferDir = transferDir
 
 	// Resolve per-app data mounts.
 	if srv.DB != nil {
