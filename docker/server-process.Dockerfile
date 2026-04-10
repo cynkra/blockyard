@@ -4,14 +4,15 @@
 # bubblewrap, and the compiled BPF seccomp profile at
 # /etc/blockyard/seccomp.bpf.
 #
-# Base: ubuntu:24.04 + rig + r-release (issue #185). Rocker's full
-# R toolchain ships binutils, g++, gfortran, and -dev headers that
-# bloat the attack surface for a runtime that executes untrusted R
-# code. This image ships only runtime shared libraries; operators
-# who need source builds or extra packages install them via the
-# extras.sh hook (see the bottom of this file). R itself is managed
-# by rig (r-lib/rig), so operators can swap versions without
-# rebuilding the image — `rig add 4.5` in an extras.sh override.
+# Base: ubuntu:24.04 + rig (issue #185). Rocker's full R toolchain
+# ships binutils, g++, gfortran, and -dev headers that bloat the
+# attack surface for a runtime that executes untrusted R code. This
+# image ships only runtime shared libraries; operators who need
+# source builds or extra packages install them via the extras.sh
+# hook (see the bottom of this file). R itself is managed by rig
+# (r-lib/rig); the R_VERSION build ARG controls which version is
+# baked in (default: "release"). Operators can also swap versions
+# at runtime via `rig add 4.5` in an extras.sh override.
 
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
@@ -74,6 +75,10 @@ FROM ubuntu:24.04
 # versions at runtime via the extras.sh hook without rebuilding
 # this image.
 ARG RIG_VERSION=0.7.1
+# R version to install via rig. Defaults to "release" (latest
+# stable); pin to a specific version (e.g. "4.4.3") for
+# reproducible builds.
+ARG R_VERSION=release
 # Docker buildx sets TARGETARCH automatically for multi-platform
 # builds. Default to amd64 for local single-arch `docker build`
 # invocations so rig downloads the correct tarball.
@@ -112,7 +117,7 @@ RUN apt-get update \
        esac \
     && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
         | tar xz -C /usr/local \
-    && rig add release \
+    && rig add "${R_VERSION}" \
     && ln -sf /usr/local/bin/R /usr/bin/R \
     && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*

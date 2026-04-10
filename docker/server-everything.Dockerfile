@@ -5,11 +5,12 @@
 # image under phase 3-8; operators who want slim Docker-only pull
 # `-docker` instead.
 #
-# Base: ubuntu:24.04 + rig + r-release (issue #185). Shares the
-# rationale and runtime-lib list with server-process.Dockerfile;
-# the only additions here are iptables (for the Docker backend's
-# native egress firewall path) and the broader set of build tags
-# on the Go compile step above.
+# Base: ubuntu:24.04 + rig (issue #185). Shares the rationale and
+# runtime-lib list with server-process.Dockerfile; the only
+# additions here are iptables (for the Docker backend's native
+# egress firewall path) and the broader set of build tags on the
+# Go compile step above. R_VERSION build ARG controls which R
+# version is baked in (default: "release").
 
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
@@ -63,6 +64,7 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 FROM ubuntu:24.04
 
 ARG RIG_VERSION=0.7.1
+ARG R_VERSION=release
 ARG TARGETARCH=amd64
 
 RUN apt-get update \
@@ -92,7 +94,7 @@ RUN apt-get update \
        esac \
     && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
         | tar xz -C /usr/local \
-    && rig add release \
+    && rig add "${R_VERSION}" \
     && ln -sf /usr/local/bin/R /usr/bin/R \
     && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*
