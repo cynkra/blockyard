@@ -114,7 +114,7 @@ func TestManifestReadWrite(t *testing.T) {
 
 	m := &Manifest{
 		Version:  1,
-		Platform: "4.4.2",
+		RVersion: "4.4.2",
 		Metadata: Metadata{AppMode: "shiny", Entrypoint: "app.R"},
 		Repositories: []Repository{
 			{Name: "CRAN", URL: "https://p3m.dev/cran/latest"},
@@ -132,8 +132,8 @@ func TestManifestReadWrite(t *testing.T) {
 		t.Fatalf("Read: %v", err)
 	}
 
-	if got.Platform != "4.4.2" {
-		t.Errorf("Platform = %q, want %q", got.Platform, "4.4.2")
+	if got.RVersion != "4.4.2" {
+		t.Errorf("RVersion = %q, want %q", got.RVersion, "4.4.2")
 	}
 	if got.Metadata.AppMode != "shiny" {
 		t.Errorf("AppMode = %q, want %q", got.Metadata.AppMode, "shiny")
@@ -262,8 +262,8 @@ func TestFromRenvLock_BasicCRAN(t *testing.T) {
 		t.Fatalf("FromRenvLock: %v", err)
 	}
 
-	if m.Platform != "4.4.2" {
-		t.Errorf("Platform = %q", m.Platform)
+	if m.RVersion != "4.4.2" {
+		t.Errorf("RVersion = %q", m.RVersion)
 	}
 	if !m.IsPinned() {
 		t.Error("expected pinned manifest")

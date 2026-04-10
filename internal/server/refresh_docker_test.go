@@ -123,7 +123,7 @@ func deployUnpinnedBundle(t *testing.T, srv *server.Server) (*db.AppRow, string)
 	}
 
 	// Write an unpinned manifest (DESCRIPTION-based, no pinned packages).
-	manifestJSON := `{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
+	manifestJSON := `{"version":1,"r_version":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"mime"},"files":{"app.R":{"checksum":"abc"}}}`
 	os.WriteFile(filepath.Join(paths.Unpacked, "manifest.json"), []byte(manifestJSON), 0o644)
 	os.WriteFile(filepath.Join(paths.Unpacked, "DESCRIPTION"),
 		[]byte("Package: testapp\nVersion: 0.1.0\nImports:\n    mime\n"), 0o644)
@@ -380,7 +380,7 @@ func TestRefreshAndRollback_Docker(t *testing.T) {
 		os.WriteFile(filepath.Join(badPaths.Unpacked, "DESCRIPTION"),
 			[]byte("Package: badapp\nVersion: 0.1.0\nImports:\n    this.package.does.not.exist.12345\n"), 0o644)
 		os.WriteFile(filepath.Join(badPaths.Unpacked, "manifest.json"),
-			[]byte(`{"version":1,"platform":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"this.package.does.not.exist.12345"},"files":{"app.R":{"checksum":"abc"}}}`),
+			[]byte(`{"version":1,"r_version":"4.4.3","metadata":{"appmode":"shiny","entrypoint":"app.R"},"repositories":[{"Name":"CRAN","URL":"https://p3m.dev/cran/latest"}],"description":{"Imports":"this.package.does.not.exist.12345"},"files":{"app.R":{"checksum":"abc"}}}`),
 			0o644)
 
 		badApp := &db.AppRow{

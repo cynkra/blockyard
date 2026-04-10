@@ -38,7 +38,7 @@ func FromRenvLock(
 
 	m := &Manifest{
 		Version:      currentVersion,
-		Platform:     lock.R.Version,
+		RVersion:     lock.R.Version,
 		Metadata:     meta,
 		Repositories: lock.R.Repositories,
 		Packages:     lock.Packages,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
@@ -894,6 +896,11 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			"dev.blockyard/role":      "worker",
 		}
 
+		var rVersion string
+		if m, err := manifest.Read(filepath.Join(hostPaths.Unpacked, "manifest.json")); err == nil {
+			rVersion = m.RVersion
+		}
+
 		spec := backend.WorkerSpec{
 			AppID:       app.ID,
 			WorkerID:    workerID,
@@ -905,6 +912,7 @@ func StartApp(srv *server.Server) http.HandlerFunc {
 			LibraryPath: hostPaths.Library,
 			WorkerMount: srv.Config.Storage.BundleWorkerPath,
 			ShinyPort:   srv.Config.Docker.ShinyPort,
+			RVersion:    rVersion,
 			MemoryLimit: stringOrEmpty(app.MemoryLimit),
 			CPULimit:    floatOrZero(app.CPULimit),
 			Labels:      labels,

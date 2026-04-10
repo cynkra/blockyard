@@ -188,6 +188,27 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	// the value is set — emitting it here would fire on every spawn
 	// for every app for the lifetime of the deployment.
 
+	// Resolve R version from the bundle manifest. When a specific
+	// version is requested and installed via rig, the worker runs
+	// against that binary. Otherwise fall back to the configured
+	// default (cfg.RPath / the rig shim).
+	if spec.RVersion != "" && len(spec.Cmd) > 0 && spec.Cmd[0] == "R" {
+		rPath, fell := ResolveRBinary(spec.RVersion, b.cfg.RPath)
+		if fell {
+			slog.Warn("requested R version not installed, using default",
+				"worker_id", spec.WorkerID, "requested", spec.RVersion,
+				"fallback", rPath)
+		} else {
+			slog.Info("resolved R version",
+				"worker_id", spec.WorkerID, "version", spec.RVersion,
+				"path", rPath)
+		}
+		cmd := make([]string, len(spec.Cmd))
+		copy(cmd, spec.Cmd)
+		cmd[0] = rPath
+		spec.Cmd = cmd
+	}
+
 	// If an entry for this worker ID already exists, refuse to spawn
 	// over a live one. An entry that has already exited (its done
 	// channel is closed and slots have been released) is cleared so
@@ -466,6 +487,20 @@ func (b *ProcessBackend) Addr(_ context.Context, id string) (string, error) {
 }
 
 func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (backend.BuildResult, error) {
+	// Resolve R version so the build uses the same R the worker will.
+	if spec.RVersion != "" && len(spec.Cmd) > 0 && spec.Cmd[0] == "R" {
+		rPath, fell := ResolveRBinary(spec.RVersion, b.cfg.RPath)
+		if fell {
+			slog.Warn("requested R version not installed for build, using default",
+				"app_id", spec.AppID, "bundle_id", spec.BundleID,
+				"requested", spec.RVersion, "fallback", rPath)
+		}
+		cmd := make([]string, len(spec.Cmd))
+		copy(cmd, spec.Cmd)
+		cmd[0] = rPath
+		spec.Cmd = cmd
+	}
+
 	// Builds run under the same UID pool as workers — they're sandboxed
 	// R processes that share the worker firewall rules.
 	uid, err := b.uids.Alloc()

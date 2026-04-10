@@ -13,6 +13,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 )
@@ -238,6 +239,11 @@ func (srv *Server) defaultWorkerSpec(
 	transferDir := filepath.Join(srv.Config.Storage.BundleServerPath, ".transfers", workerID)
 	_ = os.MkdirAll(transferDir, 0o755) //nolint:gosec // G301: transfer dir, not secrets
 
+	var rVersion string
+	if m, err := manifest.Read(filepath.Join(hostPaths.Unpacked, "manifest.json")); err == nil {
+		rVersion = m.RVersion
+	}
+
 	spec := backend.WorkerSpec{
 		AppID:    app.ID,
 		WorkerID: workerID,
@@ -251,6 +257,7 @@ func (srv *Server) defaultWorkerSpec(
 		TransferDir: transferDir,
 		WorkerMount: srv.Config.Storage.BundleWorkerPath,
 		ShinyPort:   srv.Config.Docker.ShinyPort,
+		RVersion:    rVersion,
 		Labels: map[string]string{
 			"dev.blockyard/managed":   "true",
 			"dev.blockyard/app-id":    app.ID,

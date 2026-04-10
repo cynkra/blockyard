@@ -10,9 +10,9 @@
 # image ships only runtime shared libraries; operators who need
 # source builds or extra packages install them via the extras.sh
 # hook (see the bottom of this file). R itself is managed by rig
-# (r-lib/rig); the R_VERSION build ARG controls which version is
-# baked in (default: "release"). Operators can also swap versions
-# at runtime via `rig add 4.5` in an extras.sh override.
+# (r-lib/rig); the R_VERSIONS build ARG controls which versions
+# are baked in (default: "release"). Operators can also add
+# versions at runtime via `rig add 4.5` in an extras.sh override.
 
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
@@ -65,8 +65,8 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} \
     -o /blockyard ./cmd/blockyard
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
-# Final stage: ubuntu:24.04 + rig + R release. See the header
-# comment for the rationale and issue #185 for the full discussion.
+# Final stage: ubuntu:24.04 + rig + R. See the header comment for
+# the rationale and issue #185 for the full discussion.
 FROM ubuntu:24.04
 
 # rig version pin. rig is the R installation manager from r-lib;
@@ -75,10 +75,11 @@ FROM ubuntu:24.04
 # versions at runtime via the extras.sh hook without rebuilding
 # this image.
 ARG RIG_VERSION=0.7.1
-# R version to install via rig. Defaults to "release" (latest
-# stable); pin to a specific version (e.g. "4.4.3") for
-# reproducible builds.
-ARG R_VERSION=release
+# Space-separated list of R versions to install via rig. The first
+# entry becomes the default. Use full version pins (e.g. "4.5.0")
+# for reproducible builds, or "release" for the latest stable.
+# Example: R_VERSIONS="4.5.0 4.4.3 4.3.2"
+ARG R_VERSIONS="release"
 # Docker buildx sets TARGETARCH automatically for multi-platform
 # builds. Default to amd64 for local single-arch `docker build`
 # invocations so rig downloads the correct tarball.
@@ -117,7 +118,7 @@ RUN apt-get update \
        esac \
     && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
         | tar xz -C /usr/local \
-    && rig add "${R_VERSION}" \
+    && for v in ${R_VERSIONS}; do rig add "$v"; done \
     && ln -sf /usr/local/bin/R /usr/bin/R \
     && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*
