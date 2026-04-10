@@ -25,7 +25,7 @@ COPY internal/ui/input.css ./
 COPY internal/ui/templates/ templates/
 RUN npm run css:build
 
-FROM golang:1.25.9-alpine AS seccomp-compiler
+FROM golang:1.26.2-alpine AS seccomp-compiler
 RUN apk add --no-cache build-base libseccomp-dev
 ENV GOTOOLCHAIN=local
 WORKDIR /src
@@ -36,7 +36,7 @@ COPY internal/seccomp/blockyard-bwrap.json /tmp/bwrap-seccomp.json
 RUN CGO_ENABLED=1 go build -o /seccomp-compile ./cmd/seccomp-compile && \
     /seccomp-compile -in /tmp/bwrap-seccomp.json -out /blockyard-bwrap-seccomp.bpf
 
-FROM golang:1.25.9-alpine AS builder
+FROM golang:1.26.2-alpine AS builder
 
 ENV GOTOOLCHAIN=local
 WORKDIR /src
