@@ -10,9 +10,10 @@
 # image ships only runtime shared libraries; operators who need
 # source builds or extra packages install them via the extras.sh
 # hook (see the bottom of this file). R itself is managed by rig
-# (r-lib/rig); the R_VERSION build ARG controls which version is
-# baked in (default: "release"). Operators can also swap versions
-# at runtime via `rig add 4.5` in an extras.sh override.
+# (r-lib/rig); the image ships the latest patch of the current and
+# previous 4 minor releases (e.g. 4.5.x through 4.1.x). Weekly
+# rebuilds via the Publish workflow keep the set current. Operators
+# can add or remove versions at runtime via the extras.sh hook.
 
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
@@ -65,20 +66,15 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} \
     -o /blockyard ./cmd/blockyard
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
-# Final stage: ubuntu:24.04 + rig + R release. See the header
-# comment for the rationale and issue #185 for the full discussion.
+# Final stage: ubuntu:24.04 + rig + R. See the header comment for
+# the rationale and issue #185 for the full discussion.
 FROM ubuntu:24.04
 
 # rig version pin. rig is the R installation manager from r-lib;
 # it downloads official R binaries and manages multiple installed
-# R versions via shims under /usr/local/bin. Operators can swap R
-# versions at runtime via the extras.sh hook without rebuilding
-# this image.
+# R versions via shims under /usr/local/bin. Operators can add or
+# remove versions at runtime via the extras.sh hook.
 ARG RIG_VERSION=0.7.1
-# R version to install via rig. Defaults to "release" (latest
-# stable); pin to a specific version (e.g. "4.4.3") for
-# reproducible builds.
-ARG R_VERSION=release
 # Docker buildx sets TARGETARCH automatically for multi-platform
 # builds. Default to amd64 for local single-arch `docker build`
 # invocations so rig downloads the correct tarball.
@@ -117,10 +113,17 @@ RUN apt-get update \
        esac \
     && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
         | tar xz -C /usr/local \
-    && rig add "${R_VERSION}" \
-    && ln -sf /usr/local/bin/R /usr/bin/R \
-    && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*
+
+# R version policy script. Installs the default set of R versions
+# and sets the rig default. Runs at both build time (to bake
+# versions into the image) and container start (so an operator-
+# provided override takes effect). Override by bind-mounting to
+# /etc/blockyard/r-versions.sh.
+COPY docker/r-versions.sh /etc/blockyard/r-versions.sh
+RUN /etc/blockyard/r-versions.sh \
+    && ln -sf /usr/local/bin/R /usr/bin/R \
+    && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript
 
 COPY --from=builder /blockyard /usr/local/bin/blockyard
 COPY --from=builder /by-builder /usr/local/lib/blockyard/by-builder
@@ -135,13 +138,11 @@ COPY internal/seccomp/blockyard-outer.json /etc/blockyard/seccomp.json
 
 # Extras hook. The default is a no-op; operators override by
 # bind-mounting their own script to /etc/blockyard/extras.sh to
-# install additional system libraries, pin a specific R version
-# via rig, or drop credential files. Runs as root before the
-# blockyard server starts; failures propagate (set -e in the
-# entrypoint) and abort startup with a clear error.
+# install additional system libraries or drop credential files.
+# Runs as root before the blockyard server starts; failures
+# propagate (set -e in the entrypoint) and abort startup.
 #
-# See docs/content/docs/guides/process-backend-container.md for
-# the full contract and mount patterns.
+# For R version policy, override r-versions.sh instead.
 COPY docker/extras.sh /etc/blockyard/extras.sh
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 

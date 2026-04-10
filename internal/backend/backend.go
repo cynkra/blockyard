@@ -58,6 +58,14 @@ type Backend interface {
 	// main.go calls this through the interface so it does not have to
 	// branch on the backend type.
 	Preflight(ctx context.Context) (*preflight.Report, error)
+
+	// CheckRVersion validates that the given R version can be served
+	// by this backend. The process backend checks rig-managed
+	// installations; the Docker backend returns nil (the image tag
+	// determines the R version). Returns a user-facing error message
+	// listing available versions when the requested version is not
+	// installed.
+	CheckRVersion(version string) error
 }
 
 // ErrNotSupported is returned by backend methods that are not
@@ -85,6 +93,7 @@ type WorkerSpec struct {
 	TokenDir    string            // server-side path to worker token dir; mounted ro at /var/run/blockyard
 	WorkerMount string            // in-container mount point (BundleWorkerPath)
 	ShinyPort   int
+	RVersion    string            // pinned R version from bundle manifest (e.g. "4.5.0"); empty = default
 	MemoryLimit string            // e.g. "512m", "" if unset
 	CPULimit    float64           // fractional vCPUs, 0 if unset
 	Labels      map[string]string
@@ -102,6 +111,7 @@ type BuildSpec struct {
 	Cmd      []string        // container command (e.g. R script invocation)
 	Mounts   []MountEntry    // bind/volume mounts for the build container
 	Env      []string        // environment variables (KEY=VALUE)
+	RVersion string          // pinned R version from bundle manifest; empty = default
 }
 
 // MountEntry describes a single bind/volume mount for a build container.

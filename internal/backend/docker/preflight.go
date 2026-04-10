@@ -31,6 +31,9 @@ type PreflightDeps struct {
 	Version    string
 }
 
+// CheckRVersion returns nil — the Docker backend selects R via image tag.
+func (d *DockerBackend) CheckRVersion(_ string) error { return nil }
+
 // Preflight implements backend.Backend. It runs all docker-specific
 // preflight checks and returns a populated *preflight.Report. The full
 // list of checks lives in this file as runDockerChecks; this method is

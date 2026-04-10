@@ -42,6 +42,7 @@ func (b *stubBackend) CleanupOrphanResources(context.Context) error { return nil
 func (b *stubBackend) Preflight(context.Context) (*preflight.Report, error) {
 	return &preflight.Report{}, nil
 }
+func (b *stubBackend) CheckRVersion(string) error { return nil }
 
 // --- EnsureInstalled tests ---
 

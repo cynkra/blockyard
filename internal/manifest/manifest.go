@@ -11,10 +11,10 @@ const currentVersion = 1
 
 // Manifest is the canonical interface between CLI and server. It has two
 // shapes: pinned (with Packages) and unpinned (with Description). Both share
-// an envelope (Version, Platform, Metadata, Repositories, Files).
+// an envelope (Version, RVersion, Metadata, Repositories, Files).
 type Manifest struct {
 	Version      int                 `json:"version"`
-	Platform     string              `json:"platform"`
+	RVersion     string              `json:"r_version"`
 	Metadata     Metadata            `json:"metadata"`
 	Repositories []Repository        `json:"repositories"`
 	Packages     map[string]Package  `json:"packages,omitempty"`

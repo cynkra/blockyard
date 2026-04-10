@@ -89,12 +89,28 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// Insert bundle row (status = pending)
-		// Determine if bundle has pinned dependencies by checking the manifest.
+		// Determine if bundle has pinned dependencies and extract the
+		// pinned R version for validation.
 		bundlePinned := false
+		var rVersion string
 		manifestPath := filepath.Join(paths.Unpacked, "manifest.json")
 		if m, mErr := manifest.Read(manifestPath); mErr == nil {
 			bundlePinned = m.IsPinned()
+			rVersion = m.RVersion
+		} else {
+			// No manifest.json yet — check renv.lock directly.
+			rVersion = manifest.RVersionFromRenvLock(
+				filepath.Join(paths.Unpacked, "renv.lock"))
+		}
+
+		// Reject early if the bundle pins an R version this backend
+		// cannot serve.
+		if rVersion != "" {
+			if err := srv.Backend.CheckRVersion(rVersion); err != nil {
+				bundle.DeleteFiles(paths)
+				badRequest(w, err.Error())
+				return
+			}
 		}
 		deployedBy := ""
 		if caller != nil {

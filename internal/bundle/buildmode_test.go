@@ -21,7 +21,7 @@ func TestResolveManifest_ManifestExists(t *testing.T) {
 
 	m := manifest.Manifest{
 		Version:  1,
-		Platform: "4.4.2",
+		RVersion: "4.4.2",
 		Metadata: manifest.Metadata{AppMode: "shiny", Entrypoint: "app.R"},
 		Packages: map[string]manifest.Package{
 			"shiny": {Package: "shiny", Version: "1.9.1", Source: "Repository"},

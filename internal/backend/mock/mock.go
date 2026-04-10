@@ -214,6 +214,8 @@ func (b *MockBackend) Preflight(_ context.Context) (*preflight.Report, error) {
 	return &preflight.Report{RanAt: time.Now().UTC()}, nil
 }
 
+func (b *MockBackend) CheckRVersion(_ string) error { return nil }
+
 func (b *MockBackend) UpdateResources(_ context.Context, id string, mem int64, nanoCPUs int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

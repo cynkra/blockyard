@@ -250,6 +250,13 @@ func runRestore(p RestoreParams) error {
 	// 7. Generate build UUID for the build library path.
 	buildUUID := uuid.New().String()
 
+	// R version from the manifest for version dispatch in the process
+	// backend. Empty for bare-script bundles (no renv.lock).
+	var rVersion string
+	if m != nil {
+		rVersion = m.RVersion
+	}
+
 	// 8. Run build container.
 	var spec backend.BuildSpec
 	if p.Store != nil {
@@ -268,6 +275,7 @@ func runRestore(p RestoreParams) error {
 				"dev.blockyard/bundle-id": p.BundleID,
 			},
 			LogWriter: func(line string) { p.Sender.Write(line) },
+			RVersion:  rVersion,
 		}
 	} else {
 		// Legacy build (no store): phase 2-5 flow.
@@ -284,6 +292,7 @@ func runRestore(p RestoreParams) error {
 				"dev.blockyard/bundle-id": p.BundleID,
 			},
 			LogWriter: func(line string) { p.Sender.Write(line) },
+			RVersion:  rVersion,
 		}
 	}
 

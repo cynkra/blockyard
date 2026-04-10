@@ -28,6 +28,7 @@ func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config) *preflight.
 	r := &preflight.Report{RanAt: time.Now().UTC()}
 	r.Add(checkBwrap(cfg))
 	r.Add(checkRBinary(cfg))
+	r.Add(checkRigVersions())
 	r.Add(checkUserNamespaces())
 	r.Add(checkPortRange(cfg))
 	r.Add(checkResourceLimits(&fullCfg.Server))
@@ -134,6 +135,24 @@ func checkRBinary(cfg *config.ProcessConfig) preflight.Result {
 		Name:     "r_binary",
 		Severity: preflight.SeverityOK,
 		Message:  "R binary found",
+		Category: "process",
+	}
+}
+
+func checkRigVersions() preflight.Result {
+	versions := InstalledRVersions()
+	if len(versions) == 0 {
+		return preflight.Result{
+			Name:     "rig_versions",
+			Severity: preflight.SeverityInfo,
+			Message:  "no rig-managed R versions found in /opt/R",
+			Category: "process",
+		}
+	}
+	return preflight.Result{
+		Name:     "rig_versions",
+		Severity: preflight.SeverityOK,
+		Message:  fmt.Sprintf("rig-managed R versions: %s", strings.Join(versions, ", ")),
 		Category: "process",
 	}
 }

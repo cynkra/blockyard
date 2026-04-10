@@ -337,7 +337,7 @@ func writeBundleWithManifest(t *testing.T, paths Paths) {
 
 	m := manifest.Manifest{
 		Version:  1,
-		Platform: "4.4.2",
+		RVersion: "4.4.2",
 		Metadata: manifest.Metadata{AppMode: "shiny", Entrypoint: "app.R"},
 		Description: map[string]string{
 			"Imports": "shiny",
