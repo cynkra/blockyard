@@ -87,6 +87,15 @@ func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gi
 		args = append(args, "--bind", spec.TransferDir, "/transfer")
 	}
 
+	// Per-app data mounts (resolved host paths from app config).
+	for _, dm := range spec.DataMounts {
+		if dm.ReadOnly {
+			args = append(args, "--ro-bind", dm.Source, dm.Target)
+		} else {
+			args = append(args, "--bind", dm.Source, dm.Target)
+		}
+	}
+
 	// Capability dropping — bwrap drops all by default with --unshare-user,
 	// but we explicitly drop to be defensive in case of flag changes.
 	args = append(args, "--cap-drop", "ALL")

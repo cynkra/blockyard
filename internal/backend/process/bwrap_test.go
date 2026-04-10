@@ -214,6 +214,26 @@ func TestBwrapArgsTokenAndTransfer(t *testing.T) {
 	assertBindMount(t, args, "--bind", spec.TransferDir, "/transfer")
 }
 
+func TestBwrapArgsDataMounts(t *testing.T) {
+	cfg := &config.ProcessConfig{
+		BwrapPath: "/usr/bin/bwrap",
+		RPath:     "/usr/bin/R",
+	}
+	spec := backend.WorkerSpec{
+		WorkerID:    "w-1",
+		BundlePath:  "/data/bundles/app1/v1",
+		WorkerMount: "/app",
+		DataMounts: []backend.MountEntry{
+			{Source: "/data/models", Target: "/data/models", ReadOnly: true},
+			{Source: "/data/uploads", Target: "/data/uploads", ReadOnly: false},
+		},
+	}
+
+	args := bwrapArgs(cfg, spec, 10004, 60004, 65534)
+	assertBindMount(t, args, "--ro-bind", "/data/models", "/data/models")
+	assertBindMount(t, args, "--bind", "/data/uploads", "/data/uploads")
+}
+
 func TestBwrapBuildArgs(t *testing.T) {
 	cfg := &config.ProcessConfig{
 		BwrapPath: "/usr/bin/bwrap",

@@ -164,10 +164,25 @@ func TestDefaultWorkerSpec(t *testing.T) {
 func TestBuildTransferWorkerSpec(t *testing.T) {
 	srv, _ := testServerWithMock(t)
 
+	// Create the old transfer dir with a board.json that will be
+	// copied into the new worker's own transfer dir.
+	oldTransferDir := filepath.Join(t.TempDir(), "old-transfer")
+	os.MkdirAll(oldTransferDir, 0o755)
+	os.WriteFile(filepath.Join(oldTransferDir, "board.json"), []byte(`{}`), 0o644)
+
 	app := &db.AppRow{ID: "app-1", Name: "test-app"}
-	spec := srv.buildTransferWorkerSpec(app, "w-2", "/lib/w-2", "/transfer/w-1", "bundle-abc")
-	if spec.TransferDir != "/transfer/w-1" {
-		t.Errorf("TransferDir = %q, want %q", spec.TransferDir, "/transfer/w-1")
+	spec, err := srv.buildTransferWorkerSpec(app, "w-2", "/lib/w-2", oldTransferDir, "bundle-abc")
+	if err != nil {
+		t.Fatalf("buildTransferWorkerSpec: %v", err)
+	}
+	// The new worker must keep its own transfer dir (not the old one)
+	// so that future transfers write to the path the server watches.
+	if spec.TransferDir == oldTransferDir {
+		t.Errorf("TransferDir must not be the old worker's dir; got %q", spec.TransferDir)
+	}
+	// board.json should have been copied into the new dir.
+	if !fileExists(filepath.Join(spec.TransferDir, "board.json")) {
+		t.Error("board.json not found in new worker's transfer dir")
 	}
 	if spec.Env["BLOCKYARD_TRANSFER_PATH"] != "/transfer/board.json" {
 		t.Errorf("BLOCKYARD_TRANSFER_PATH = %q, want %q",
@@ -179,7 +194,10 @@ func TestBuildTransferWorkerSpec_EmptyTransferDir(t *testing.T) {
 	srv, _ := testServerWithMock(t)
 
 	app := &db.AppRow{ID: "app-1", Name: "test-app"}
-	spec := srv.buildTransferWorkerSpec(app, "w-2", "/lib/w-2", "", "bundle-abc")
+	spec, err := srv.buildTransferWorkerSpec(app, "w-2", "/lib/w-2", "", "bundle-abc")
+	if err != nil {
+		t.Fatalf("buildTransferWorkerSpec: %v", err)
+	}
 	if _, ok := spec.Env["BLOCKYARD_TRANSFER_PATH"]; ok {
 		t.Error("expected no BLOCKYARD_TRANSFER_PATH when transfer dir is empty")
 	}

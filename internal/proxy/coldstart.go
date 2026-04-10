@@ -250,7 +250,7 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		WorkerID:    wid,
 		Image:       server.AppImage(app, srv.Config.Docker.Image),
 		Cmd: []string{"R", "-e",
-			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')))",
+			fmt.Sprintf("shiny::runApp('%s', port = as.integer(Sys.getenv('SHINY_PORT')), host = Sys.getenv('SHINY_HOST', unset = '0.0.0.0'))",
 				srv.Config.Storage.BundleWorkerPath)},
 		BundlePath:  hostPaths.Unpacked,
 		LibraryPath: hostPaths.Library,
