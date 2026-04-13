@@ -37,16 +37,20 @@ func TestDiscoverWithSplitURL(t *testing.T) {
 	publicURL := publicServer.URL
 	publicServer.Close()
 
-	// "Internal" server — serves OIDC endpoints but reports publicURL
-	// as the issuer, mirroring how Dex behaves inside Docker.
+	// "Internal" server — serves OIDC endpoints and returns its own address
+	// in endpoint URLs, mirroring how Authentik behaves inside Docker.
+	// The issuer field must still be the public URL for token validation.
 	mux := http.NewServeMux()
+	internalServer := httptest.NewServer(mux)
+	defer internalServer.Close()
+	internalURL := internalServer.URL
 
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		doc := map[string]any{
 			"issuer":                                publicURL,
-			"authorization_endpoint":                publicURL + "/authorize",
-			"token_endpoint":                        publicURL + "/token",
-			"jwks_uri":                              publicURL + "/jwks",
+			"authorization_endpoint":                internalURL + "/authorize",
+			"token_endpoint":                        internalURL + "/token",
+			"jwks_uri":                              internalURL + "/jwks",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 			"subject_types_supported":               []string{"public"},
 			"response_types_supported":              []string{"code"},
@@ -102,10 +106,6 @@ func TestDiscoverWithSplitURL(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	})
-
-	internalServer := httptest.NewServer(mux)
-	defer internalServer.Close()
-	internalURL := internalServer.URL
 
 	// Discover with split URLs: issuer=public, discovery=internal.
 	oidcClient, err := auth.Discover(
