@@ -9,8 +9,8 @@
 # runtime-lib list with server-process.Dockerfile; the only
 # additions here are iptables (for the Docker backend's native
 # egress firewall path) and the broader set of build tags on the
-# Go compile step above. R_VERSION build ARG controls which R
-# version is baked in (default: "release").
+# Go compile step above. R versions are managed by r-versions.sh
+# (same policy as server-process.Dockerfile).
 
 FROM hugomods/hugo:exts-0.147.4 AS docs
 WORKDIR /docs
@@ -57,14 +57,13 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} \
     -o /blockyard ./cmd/blockyard
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
-# Final stage: ubuntu:24.04 + rig + R release. See the header
-# comment and issue #185 for the rationale. iptables is the only
-# addition over the process-variant image — the Docker backend
-# uses it for worker egress in native mode.
+# Final stage: ubuntu:24.04 + rig + R. See the header comment
+# and issue #185 for the rationale. iptables is the only addition
+# over the process-variant image — the Docker backend uses it for
+# worker egress in native mode.
 FROM ubuntu:24.04
 
 ARG RIG_VERSION=0.7.1
-ARG R_VERSION=release
 ARG TARGETARCH
 
 RUN apt-get update \
@@ -94,10 +93,12 @@ RUN apt-get update \
        esac \
     && curl -fsSL "https://github.com/r-lib/rig/releases/download/v${RIG_VERSION}/${RIG_ASSET}" \
         | tar xz -C /usr/local \
-    && rig add "${R_VERSION}" \
-    && ln -sf /usr/local/bin/R /usr/bin/R \
-    && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript \
     && rm -rf /var/lib/apt/lists/*
+
+COPY docker/r-versions.sh /etc/blockyard/r-versions.sh
+RUN /etc/blockyard/r-versions.sh \
+    && ln -sf /usr/local/bin/R /usr/bin/R \
+    && ln -sf /usr/local/bin/Rscript /usr/bin/Rscript
 
 COPY --from=builder /blockyard /usr/local/bin/blockyard
 COPY --from=builder /by-builder /usr/local/lib/blockyard/by-builder
