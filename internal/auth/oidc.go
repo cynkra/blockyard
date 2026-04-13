@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -21,6 +22,11 @@ type OIDCClient struct {
 	// ensuring all server-side requests (token exchange, JWKS, refresh) use
 	// the internal address.
 	httpClient *http.Client
+	// internalOrigin and publicOrigin are set when discoveryURL is provided,
+	// enabling rewriting of discovery-document URLs from internal → public
+	// for browser-facing redirects.
+	internalOrigin string
+	publicOrigin   string
 }
 
 // Discover performs OIDC discovery against the issuer URL and returns
@@ -55,10 +61,24 @@ func Discover(ctx context.Context, issuerURL, discoveryURL, clientID, clientSecr
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
 
+	// When discovery was performed against an internal URL, the IdP may
+	// return internal addresses in its endpoint URLs (e.g. Authentik uses
+	// its own request origin). Rewrite them to the public issuer origin so
+	// browser-facing redirects go to the right place. The rewriteTransport
+	// handles the reverse mapping for server-side HTTP requests.
+	var intOrigin, pubOrigin string
+	endpoint := provider.Endpoint()
+	if discoveryURL != "" {
+		intOrigin = urlOrigin(discoveryURL)
+		pubOrigin = urlOrigin(issuerURL)
+		endpoint.AuthURL = rewriteURLOrigin(endpoint.AuthURL, intOrigin, pubOrigin)
+		endpoint.TokenURL = rewriteURLOrigin(endpoint.TokenURL, intOrigin, pubOrigin)
+	}
+
 	oauth2Cfg := oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		Endpoint:     provider.Endpoint(),
+		Endpoint:     endpoint,
 		RedirectURL:  redirectURL,
 		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 	}
@@ -68,10 +88,12 @@ func Discover(ctx context.Context, issuerURL, discoveryURL, clientID, clientSecr
 	})
 
 	return &OIDCClient{
-		provider:     provider,
-		oauth2Config: oauth2Cfg,
-		verifier:     verifier,
-		httpClient:   httpClient,
+		provider:       provider,
+		oauth2Config:   oauth2Cfg,
+		verifier:       verifier,
+		httpClient:     httpClient,
+		internalOrigin: intOrigin,
+		publicOrigin:   pubOrigin,
 	}, nil
 }
 
@@ -133,7 +155,7 @@ func (c *OIDCClient) EndSessionEndpoint() string {
 	if err := c.provider.Claims(&meta); err != nil {
 		return ""
 	}
-	return meta.EndSession
+	return rewriteURLOrigin(meta.EndSession, c.internalOrigin, c.publicOrigin)
 }
 
 // JWKSURI returns the IdP's jwks_uri from discovery metadata.
@@ -154,6 +176,25 @@ type rewriteTransport struct {
 	base    http.RoundTripper
 	oldBase string
 	newBase string
+}
+
+// urlOrigin returns the scheme + authority of a URL (e.g.
+// "https://auth.example.com" from "https://auth.example.com/path").
+func urlOrigin(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// rewriteURLOrigin replaces the scheme+authority of u from oldOrigin to
+// newOrigin. Returns u unchanged when oldOrigin is empty or doesn't match.
+func rewriteURLOrigin(u, oldOrigin, newOrigin string) string {
+	if oldOrigin != "" && strings.HasPrefix(u, oldOrigin) {
+		return newOrigin + strings.TrimPrefix(u, oldOrigin)
+	}
+	return u
 }
 
 func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
