@@ -804,13 +804,81 @@ func (db *DB) GetUser(sub string) (*UserRow, error) {
 	return &u, nil
 }
 
-func (db *DB) ListUsers() ([]UserRow, error) {
-	var users []UserRow
-	err := db.DB.Select(&users, `SELECT * FROM users ORDER BY last_login DESC`)
-	if err != nil {
-		return nil, err
+// ListUsersOpts holds filter and pagination options for ListUsers.
+// Zero value returns all users, newest login first.
+type ListUsersOpts struct {
+	Search       string // case-insensitive substring match on name, email, sub
+	Role         string // "admin", "publisher", "viewer", or "" for any
+	ActiveFilter string // "active", "inactive", or "" for any
+	Sort         string // "last_login", "name", "email", "role"
+	SortDir      string // "asc" or "desc"
+	Page         int    // 1-based; ignored if PerPage <= 0
+	PerPage      int    // 0 means no limit
+}
+
+func (db *DB) ListUsers(opts ListUsersOpts) ([]UserRow, int, error) {
+	conditions := []string{}
+	var args []any
+
+	if opts.Search != "" {
+		conditions = append(conditions,
+			"(LOWER(name) LIKE LOWER(?) OR LOWER(email) LIKE LOWER(?) OR LOWER(sub) LIKE LOWER(?))")
+		like := "%" + escapeLike(opts.Search) + "%"
+		args = append(args, like, like, like)
 	}
-	return users, nil
+	if opts.Role != "" {
+		conditions = append(conditions, "role = ?")
+		args = append(args, opts.Role)
+	}
+	switch opts.ActiveFilter {
+	case "active":
+		conditions = append(conditions, "active = 1")
+	case "inactive":
+		conditions = append(conditions, "active = 0")
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var total int
+	countQuery := db.rebind(fmt.Sprintf("SELECT COUNT(*) FROM users %s", where))
+	if err := db.DB.Get(&total, countQuery, args...); err != nil {
+		return nil, 0, err
+	}
+
+	orderBy := "last_login DESC"
+	userSortCols := map[string]string{
+		"last_login": "last_login",
+		"name":       "name",
+		"email":      "email",
+		"role":       "role",
+	}
+	if col, ok := userSortCols[opts.Sort]; ok {
+		dir := "ASC"
+		if strings.EqualFold(opts.SortDir, "desc") {
+			dir = "DESC"
+		}
+		orderBy = col + " " + dir
+	}
+
+	query := fmt.Sprintf("SELECT * FROM users %s ORDER BY %s", where, orderBy)
+	if opts.PerPage > 0 {
+		page := opts.Page
+		if page < 1 {
+			page = 1
+		}
+		offset := (page - 1) * opts.PerPage
+		query += " LIMIT ? OFFSET ?"
+		args = append(args, opts.PerPage, offset)
+	}
+
+	var users []UserRow
+	if err := db.DB.Select(&users, db.rebind(query), args...); err != nil {
+		return nil, 0, err
+	}
+	return users, total, nil
 }
 
 // UserUpdate holds optional fields for updating a user.

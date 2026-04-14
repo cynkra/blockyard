@@ -57,6 +57,11 @@
                     });
                 },
 
+                selectClosest(event) {
+                    var el = event.target.closest('[role=option]');
+                    if (el) this.select(el);
+                },
+
                 syncAria() {
                     var v = this.value;
                     this.items.forEach(function(el) { el.setAttribute('aria-selected', el.dataset.value === v); });
@@ -189,6 +194,11 @@
                     });
                 },
 
+                selectClosest(event) {
+                    var el = event.target.closest('[role=option]');
+                    if (el) this.select(el);
+                },
+
                 onKeydown(e) {
                     var items = this.visibleItems.filter(function(el) { return el.getAttribute('aria-disabled') !== 'true'; });
                     switch (e.key) {
@@ -256,9 +266,9 @@
             </a>
             {{end}}
             {{if .IsAdmin}}
-            <a href="/system" class="left-nav-link {{if eq .ActivePage "system"}}active{{end}}">
+            <a href="/admin" class="left-nav-link {{if eq .ActivePage "admin"}}active{{end}}">
                 <svg><use href="#i-settings"/></svg>
-                <span class="link-text">System</span>
+                <span class="link-text">Admin</span>
             </a>
             {{end}}
             <a href="/profile" class="left-nav-link {{if eq .ActivePage "profile"}}active{{end}}">

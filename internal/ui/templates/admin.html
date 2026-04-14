@@ -1,0 +1,51 @@
+{{template "base" .}}
+
+{{define "title"}}Admin — blockyard{{end}}
+
+{{define "content"}}
+<div class="page-header">
+    <h1>Admin</h1>
+    <p class="page-description">User management and system checks.</p>
+</div>
+
+<details class="admin-section" open>
+    <summary class="admin-section-title">
+        <span>Users</span>
+        <span class="admin-section-count">{{len .Users.Users}}{{if gt .Users.Pagination.TotalPages 1}} / page{{end}}</span>
+    </summary>
+    <div class="admin-section-body">
+        {{template "adminUsers" .Users}}
+    </div>
+</details>
+
+<details class="admin-section" id="system-checks">
+    <summary class="admin-section-title">
+        <span>System checks</span>
+        {{if .Report}}{{if .Report.HasWarnings}}
+        <span class="badge badge-sm badge-soft badge-warning">{{.Report.Summary.Errors}}E / {{.Report.Summary.Warnings}}W</span>
+        {{end}}{{end}}
+    </summary>
+    <div class="admin-section-body">
+        <div class="flex justify-end mb-3">
+            <button class="btn btn-soft btn-sm"
+                    hx-post="/ui/system/run"
+                    hx-target="#check-results"
+                    hx-swap="innerHTML"
+                    hx-disabled-elt="this">
+                Run Checks
+            </button>
+        </div>
+        <div id="check-results">
+        {{template "checkResults" .}}
+        </div>
+    </div>
+</details>
+
+<script>
+/* Open the system-checks section when the URL fragment points at it */
+if (window.location.hash === '#system-checks') {
+    var el = document.getElementById('system-checks');
+    if (el) el.open = true;
+}
+</script>
+{{end}}

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2749,5 +2750,213 @@ func TestSettingsTabStoppingStatusShowsDisabling(t *testing.T) {
 	}
 	if !strings.Contains(body, "status-stopping") {
 		t.Error("expected stopping status badge")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Admin page tests
+// ---------------------------------------------------------------------------
+
+func TestAdminPageRendersForAdmin(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User One", "viewer")
+	srv.DB.UpsertUserWithRole("user-2", "user2@example.com", "User Two", "publisher")
+
+	resp, err := noRedirectClient().Get(ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "User One") {
+		t.Error("expected User One in admin page")
+	}
+	if !strings.Contains(body, "User Two") {
+		t.Error("expected User Two in admin page")
+	}
+	if !strings.Contains(body, "System checks") {
+		t.Error("expected System checks section")
+	}
+	if !strings.Contains(body, ">Users<") {
+		t.Error("expected Users section header")
+	}
+}
+
+func TestAdminPageRedirectsForNonAdmin(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "pub", auth.RolePublisher)
+
+	resp, err := noRedirectClient().Get(ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("expected 302, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Location"); got != "/" {
+		t.Errorf("expected redirect to /, got %q", got)
+	}
+}
+
+func TestAdminPageNavLabelled(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+
+	resp, err := http.Get(ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, `href="/admin"`) {
+		t.Error("expected /admin nav href")
+	}
+	if !strings.Contains(body, ">Admin<") {
+		t.Error("expected Admin nav label")
+	}
+}
+
+func TestAdminPageDisablesSelfControls(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+
+	resp, err := http.Get(ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	// Self-row should render role as a static badge, not a dropdown.
+	if !strings.Contains(body, "(you)") {
+		t.Error("expected '(you)' marker on caller's row")
+	}
+	// Make sure self-row has no PATCH dropdown targeting admin-1.
+	if strings.Contains(body, `hx-patch="/api/v1/users/admin-1"`) {
+		t.Error("self-row should not expose PATCH controls")
+	}
+}
+
+func TestAdminUsersFragmentFiltersByRole(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.DB.UpsertUserWithRole("v-1", "v1@example.com", "Viewer One", "viewer")
+	srv.DB.UpsertUserWithRole("p-1", "p1@example.com", "Publisher One", "publisher")
+
+	resp, err := http.Get(ts.URL + "/ui/admin/users?role=publisher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "Publisher One") {
+		t.Error("expected Publisher One in filtered result")
+	}
+	if strings.Contains(body, "Viewer One") {
+		t.Error("did not expect Viewer One when filtering by publisher")
+	}
+}
+
+func TestAdminUsersFragmentFiltersByActive(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.DB.UpsertUserWithRole("v-1", "v1@example.com", "Viewer One", "viewer")
+	inactive := false
+	srv.DB.UpdateUser("v-1", db.UserUpdate{Active: &inactive})
+	srv.DB.UpsertUserWithRole("v-2", "v2@example.com", "Viewer Two", "viewer")
+
+	resp, err := http.Get(ts.URL + "/ui/admin/users?active=inactive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Viewer One") {
+		t.Error("expected Viewer One when filtering inactive")
+	}
+	if strings.Contains(body, "Viewer Two") {
+		t.Error("did not expect Viewer Two when filtering inactive")
+	}
+}
+
+func TestAdminUsersFragmentSearchesNameAndEmail(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.DB.UpsertUserWithRole("alice-sub", "alice@example.com", "Alice", "viewer")
+	srv.DB.UpsertUserWithRole("bob-sub", "bob@example.com", "Bob", "viewer")
+
+	resp, err := http.Get(ts.URL + "/ui/admin/users?search=alic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Alice") {
+		t.Error("expected Alice when searching 'alic'")
+	}
+	if strings.Contains(body, "Bob") {
+		t.Error("did not expect Bob when searching 'alic'")
+	}
+}
+
+func TestAdminUsersFragmentForbiddenForNonAdmin(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "viewer-1", auth.RoleViewer)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminUsersFragmentSetsPushURL(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/users?search=foo&role=viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	push := resp.Header.Get("HX-Push-Url")
+	if !strings.HasPrefix(push, "/admin?") {
+		t.Fatalf("expected HX-Push-Url starting with /admin?, got %q", push)
+	}
+	if !strings.Contains(push, "search=foo") || !strings.Contains(push, "role=viewer") {
+		t.Errorf("expected filter params in push URL, got %q", push)
+	}
+}
+
+func TestAdminUsersFragmentPaginates(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	for i := 0; i < 25; i++ {
+		srv.DB.UpsertUserWithRole(
+			fmt.Sprintf("u-%02d", i),
+			fmt.Sprintf("u%02d@example.com", i),
+			fmt.Sprintf("User %02d", i),
+			"viewer",
+		)
+	}
+
+	resp, err := http.Get(ts.URL + "/ui/admin/users?page=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Page 2 of 2") {
+		t.Error("expected pagination label 'Page 2 of 2'")
 	}
 }
