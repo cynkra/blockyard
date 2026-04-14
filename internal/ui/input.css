@@ -505,9 +505,12 @@
   /* ── Misc ── */
   .hidden { display: none !important; }
   .empty-state { @apply p-8 text-center text-base-content/50; }
-  .htmx-indicator { @apply hidden; }
-  .htmx-request .htmx-indicator { @apply inline-block; }
-  .htmx-request.htmx-indicator { @apply inline-block; }
+  /* !important beats daisyUI's .loading { display: inline-block } which
+     otherwise wins layer ordering and leaves the spinner taking space
+     (blockified to display: block inside flex buttons like btn). */
+  .htmx-indicator { display: none !important; }
+  .htmx-request .htmx-indicator { display: inline-block !important; }
+  .htmx-request.htmx-indicator { display: inline-block !important; }
   /* ── Mobile responsive ── */
   @media (max-width: 768px) {
     .left-nav { width: 56px; }
