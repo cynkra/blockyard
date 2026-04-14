@@ -507,6 +507,51 @@ func TestParseOidcConfig(t *testing.T) {
 	if cfg.OIDC.CookieMaxAge.Duration != 24*time.Hour {
 		t.Errorf("expected default cookie_max_age 24h, got %v", cfg.OIDC.CookieMaxAge.Duration)
 	}
+	if cfg.OIDC.DefaultRole != "viewer" {
+		t.Errorf("expected default_role viewer, got %q", cfg.OIDC.DefaultRole)
+	}
+}
+
+func TestOidcDefaultRolePublisher(t *testing.T) {
+	toml := oidcTOML(t) + "default_role = \"publisher\"\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	if err := os.WriteFile(path, []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected publisher to be accepted, got: %v", err)
+	}
+	if cfg.OIDC.DefaultRole != "publisher" {
+		t.Errorf("default_role = %q, want publisher", cfg.OIDC.DefaultRole)
+	}
+}
+
+func TestOidcDefaultRoleRejectsAdmin(t *testing.T) {
+	toml := oidcTOML(t) + "default_role = \"admin\"\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	if err := os.WriteFile(path, []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "oidc.default_role") {
+		t.Errorf("expected oidc.default_role error, got: %v", err)
+	}
+}
+
+func TestOidcDefaultRoleRejectsUnknown(t *testing.T) {
+	toml := oidcTOML(t) + "default_role = \"editor\"\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	if err := os.WriteFile(path, []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "oidc.default_role") {
+		t.Errorf("expected oidc.default_role error, got: %v", err)
+	}
 }
 
 func TestParseConfigWithoutOidc(t *testing.T) {

@@ -13,6 +13,9 @@ play no role in blockyard's permission model.
 
 Every user has one system-wide role, assigned by a blockyard admin.
 New users get **viewer** by default when they first log in via OIDC.
+Operators who treat the IdP itself as the access gate can change that
+default to **publisher** via `oidc.default_role`; see
+[Default role for new users](#default-role-for-new-users).
 
 | Role | What you can do |
 |---|---|
@@ -35,6 +38,29 @@ When this user logs in for the first time, they receive the `admin`
 role instead of `viewer`. Once an admin exists, they can promote other
 users via the API or admin UI. The `initial_admin` field is only checked
 on first login — changing it later has no effect on existing users.
+
+### Default role for new users
+
+When a new user logs in via OIDC for the first time, they receive the
+role configured by `oidc.default_role` (default: `viewer`). Existing
+users keep whatever role an admin has set; the default is consulted
+only on the INSERT path.
+
+```toml
+[oidc]
+default_role = "publisher"
+```
+
+Use `publisher` when access to the IdP is itself the gate — i.e. only
+trusted team members can authenticate at all, so manually promoting
+each new user to publisher adds friction without adding safety. Use
+`viewer` (the default) for deployments where authenticated users are a
+broader audience and the ability to deploy apps should be granted
+explicitly.
+
+`admin` is rejected at config validation: bootstrapping admins belongs
+to `initial_admin`, and an `admin` default would silently grant full
+control to anyone the IdP admits.
 
 ### Managing Users
 
