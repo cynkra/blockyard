@@ -397,13 +397,22 @@
   .dark .refresh-section { border-color: oklch(var(--bc) / 0.15); }
 
   /* ── Admin page ── */
+  /* No overflow-hidden on the section so popovers inside the body
+     (role dropdowns on the last table row) can escape its bounds.
+     Corner-clipping of the summary hover background is handled via
+     border-radius inheritance instead. */
   .admin-section {
-    @apply border border-base-300 rounded-box mb-4 overflow-hidden;
+    @apply border border-base-300 rounded-box mb-4;
   }
   .dark .admin-section { border-color: oklch(var(--bc) / 0.15); }
   .admin-section > summary {
     @apply flex items-center gap-2 px-4 py-3 cursor-pointer list-none select-none;
     font-weight: 500;
+    border-radius: inherit;
+  }
+  .admin-section[open] > summary {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
   }
   .admin-section > summary::-webkit-details-marker { display: none; }
   .admin-section > summary::before {
