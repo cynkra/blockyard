@@ -272,7 +272,7 @@ func TestBuildLabels(t *testing.T) {
 }
 
 func TestDetectMountModeNative(t *testing.T) {
-	cfg, err := detectMountMode(context.Background(), nil, "", "/data/bundles")
+	cfg, err := detectMountMode(nil, "/data/bundles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,19 +330,13 @@ func TestNetworkLabels(t *testing.T) {
 	}
 }
 
-// --- detectMountMode with mock client ---
+// --- detectMountMode ---
 
 func TestDetectMountMode_Volume(t *testing.T) {
-	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
-			return client.ContainerInspectResult{Container: container.InspectResponse{
-				Mounts: []container.MountPoint{
-					{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data"},
-				},
-			}}, nil
-		},
+	mounts := []container.MountPoint{
+		{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data"},
 	}
-	cfg, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
+	cfg, err := detectMountMode(mounts, "/data/bundles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,16 +352,10 @@ func TestDetectMountMode_Volume(t *testing.T) {
 }
 
 func TestDetectMountMode_Bind(t *testing.T) {
-	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
-			return client.ContainerInspectResult{Container: container.InspectResponse{
-				Mounts: []container.MountPoint{
-					{Type: mount.TypeBind, Source: "/host/data", Destination: "/data"},
-				},
-			}}, nil
-		},
+	mounts := []container.MountPoint{
+		{Type: mount.TypeBind, Source: "/host/data", Destination: "/data"},
 	}
-	cfg, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
+	cfg, err := detectMountMode(mounts, "/data/bundles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,17 +368,11 @@ func TestDetectMountMode_Bind(t *testing.T) {
 }
 
 func TestDetectMountMode_LongestPrefixWins(t *testing.T) {
-	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
-			return client.ContainerInspectResult{Container: container.InspectResponse{
-				Mounts: []container.MountPoint{
-					{Type: mount.TypeBind, Source: "/host/root", Destination: "/"},
-					{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data"},
-				},
-			}}, nil
-		},
+	mounts := []container.MountPoint{
+		{Type: mount.TypeBind, Source: "/host/root", Destination: "/"},
+		{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data"},
 	}
-	cfg, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
+	cfg, err := detectMountMode(mounts, "/data/bundles")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,30 +382,12 @@ func TestDetectMountMode_LongestPrefixWins(t *testing.T) {
 }
 
 func TestDetectMountMode_NoMatchingMount(t *testing.T) {
-	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
-			return client.ContainerInspectResult{Container: container.InspectResponse{
-				Mounts: []container.MountPoint{
-					{Type: mount.TypeVolume, Name: "other", Destination: "/other"},
-				},
-			}}, nil
-		},
+	mounts := []container.MountPoint{
+		{Type: mount.TypeVolume, Name: "other", Destination: "/other"},
 	}
-	_, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
+	_, err := detectMountMode(mounts, "/data/bundles")
 	if err == nil {
 		t.Fatal("expected error for no matching mount")
-	}
-}
-
-func TestDetectMountMode_InspectError(t *testing.T) {
-	mock := &mockDockerClient{
-		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
-			return client.ContainerInspectResult{}, errors.New("connection refused")
-		},
-	}
-	_, err := detectMountMode(context.Background(), mock, "server-123", "/data/bundles")
-	if err == nil {
-		t.Fatal("expected error")
 	}
 }
 
