@@ -204,7 +204,7 @@ var funcMap = template.FuncMap{
 // New parses all embedded templates and prepares the static file server.
 func New() *UI {
 	pages := make(map[string]*template.Template)
-	for _, name := range []string{"landing.html", "apps.html", "deployments.html", "api_keys.html", "profile.html", "system.html"} {
+	for _, name := range []string{"landing.html", "apps.html", "deployments.html", "api_keys.html", "profile.html", "admin.html"} {
 		t := template.Must(
 			template.New("").Funcs(funcMap).ParseFS(
 				content, "templates/base.html", "templates/icons.html", "templates/"+name,
@@ -218,10 +218,14 @@ func New() *UI {
 			content, "templates/base.html", "templates/icons.html", "templates/profile.html", "templates/token_list.html",
 		),
 	)
-	// Re-parse system.html with the shared system_checks fragment.
-	pages["system.html"] = template.Must(
+	// Re-parse admin.html with the shared system_checks and admin_users fragments.
+	pages["admin.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
-			content, "templates/base.html", "templates/icons.html", "templates/system.html", "templates/system_checks.html",
+			content,
+			"templates/base.html", "templates/icons.html",
+			"templates/admin.html",
+			"templates/system_checks.html",
+			"templates/admin_users.html",
 		),
 	)
 
@@ -231,6 +235,7 @@ func New() *UI {
 		"pat_created.html",
 		"system_checks.html",
 		"system_banner.html",
+		"admin_users.html",
 		"sidebar.html",
 		"tab_overview.html",
 		"tab_settings.html",
@@ -261,7 +266,8 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/", ui.appsPage(srv))
 	r.Get("/deployments", ui.deploymentsPage(srv))
 	r.Get("/api-keys", ui.apiKeysPage(srv))
-	r.Get("/system", ui.systemPage(srv))
+	r.Get("/admin", ui.adminPage(srv))
+	r.Get("/ui/admin/users", ui.adminUsersFragment(srv))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
 	r.Post("/ui/system/run", ui.systemRunFragment(srv))
@@ -291,7 +297,7 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 // --- Shared layout data ---
 
 type layoutData struct {
-	ActivePage     string // "apps", "deployments", "api-keys", "system", "profile"; empty for landing
+	ActivePage     string // "apps", "deployments", "api-keys", "admin", "profile"; empty for landing
 	OpenbaoEnabled bool
 	IsAdmin        bool
 	Version        string
@@ -339,6 +345,33 @@ type profileData struct {
 type systemData struct {
 	layoutData
 	Report *preflight.Report
+}
+
+type adminData struct {
+	layoutData
+	Report *preflight.Report
+	Users  adminUsersData
+}
+
+type adminUsersData struct {
+	CallerSub    string
+	Users        []adminUserEntry
+	Search       string
+	Role         string
+	ActiveFilter string
+	Sort         string
+	SortDir      string
+	Pagination   paginationData
+}
+
+type adminUserEntry struct {
+	Sub       string
+	Name      string
+	Email     string
+	Role      string
+	Active    bool
+	LastLogin string
+	IsSelf    bool
 }
 
 type catalogEntry struct {
@@ -410,7 +443,7 @@ func openbaoEnabled(srv *server.Server) bool {
 }
 
 func baseLayout(srv *server.Server, activePage string, caller *auth.CallerIdentity) layoutData {
-	isAdmin := caller != nil && caller.Role >= auth.RoleAdmin
+	isAdmin := caller != nil && caller.Role.CanManageRoles()
 	return layoutData{
 		ActivePage:     activePage,
 		OpenbaoEnabled: openbaoEnabled(srv),
@@ -663,7 +696,7 @@ func (ui *UI) profilePage(srv *server.Server) http.HandlerFunc {
 	}
 }
 
-func (ui *UI) systemPage(srv *server.Server) http.HandlerFunc {
+func (ui *UI) adminPage(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := requireAuth(w, r)
 		if user == nil {
@@ -671,20 +704,138 @@ func (ui *UI) systemPage(srv *server.Server) http.HandlerFunc {
 		}
 
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || caller.Role < auth.RoleAdmin {
+		if caller == nil || !caller.Role.CanManageRoles() {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
 
-		data := systemData{
-			layoutData: baseLayout(srv, "system", caller),
-			Report:     srv.Checker.Latest(),
+		usersData, err := buildAdminUsers(srv, caller, r.URL.Query())
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
 		}
 
-		if err := ui.pages["system.html"].ExecuteTemplate(w, "base", data); err != nil {
+		var report *preflight.Report
+		if srv.Checker != nil {
+			report = srv.Checker.Latest()
+		}
+
+		data := adminData{
+			layoutData: baseLayout(srv, "admin", caller),
+			Report:     report,
+			Users:      usersData,
+		}
+
+		if err := ui.pages["admin.html"].ExecuteTemplate(w, "base", data); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// adminUsersFragment serves the users table fragment for HTMX refreshes
+// driven by filter/pagination/sort controls.
+func (ui *UI) adminUsersFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		usersData, err := buildAdminUsers(srv, caller, r.URL.Query())
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Mirror the filter/pagination state into the browser URL so
+		// reloads land on the same view.
+		if pushURL := buildAdminPushURL(r.URL.Query()); pushURL != "" {
+			w.Header().Set("HX-Push-Url", pushURL)
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_users.html"].ExecuteTemplate(w, "adminUsersTable", usersData); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// buildAdminPushURL returns the /admin URL with only the user-visible
+// filter/pagination params, omitting empty values.
+func buildAdminPushURL(q url.Values) string {
+	keep := url.Values{}
+	for _, k := range []string{"search", "role", "active", "sort", "dir", "page"} {
+		if v := q.Get(k); v != "" {
+			keep.Set(k, v)
+		}
+	}
+	if len(keep) == 0 {
+		return "/admin"
+	}
+	return "/admin?" + keep.Encode()
+}
+
+const adminUsersPerPage = 20
+
+func buildAdminUsers(srv *server.Server, caller *auth.CallerIdentity, q url.Values) (adminUsersData, error) {
+	search := q.Get("search")
+	role := q.Get("role")
+	activeFilter := q.Get("active")
+	sort := q.Get("sort")
+	sortDir := q.Get("dir")
+	page := 1
+	if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
+		page = p
+	}
+
+	opts := db.ListUsersOpts{
+		Search:       search,
+		Role:         role,
+		ActiveFilter: activeFilter,
+		Sort:         sort,
+		SortDir:      sortDir,
+		Page:         page,
+		PerPage:      adminUsersPerPage,
+	}
+
+	rows, total, err := srv.DB.ListUsers(opts)
+	if err != nil {
+		return adminUsersData{}, err
+	}
+
+	entries := make([]adminUserEntry, len(rows))
+	for i, u := range rows {
+		entries[i] = adminUserEntry{
+			Sub:       u.Sub,
+			Name:      u.Name,
+			Email:     u.Email,
+			Role:      u.Role,
+			Active:    u.Active,
+			LastLogin: u.LastLogin,
+			IsSelf:    caller != nil && u.Sub == caller.Sub,
+		}
+	}
+
+	totalPages := int(math.Ceil(float64(total) / float64(adminUsersPerPage)))
+	if totalPages < 1 {
+		totalPages = 1
+	}
+
+	return adminUsersData{
+		CallerSub:    caller.Sub,
+		Users:        entries,
+		Search:       search,
+		Role:         role,
+		ActiveFilter: activeFilter,
+		Sort:         sort,
+		SortDir:      sortDir,
+		Pagination: paginationData{
+			Page:       page,
+			TotalPages: totalPages,
+			Search:     search,
+		},
+	}, nil
 }
 
 func (ui *UI) systemRunFragment(srv *server.Server) http.HandlerFunc {

@@ -396,6 +396,103 @@
   .refresh-section { @apply pt-3 border-t border-base-300; }
   .dark .refresh-section { border-color: oklch(var(--bc) / 0.15); }
 
+  /* ── Admin page ── */
+  .admin-section {
+    @apply border border-base-300 rounded-box mb-4 overflow-hidden;
+  }
+  .dark .admin-section { border-color: oklch(var(--bc) / 0.15); }
+  .admin-section > summary {
+    @apply flex items-center gap-2 px-4 py-3 cursor-pointer list-none select-none;
+    font-weight: 500;
+  }
+  .admin-section > summary::-webkit-details-marker { display: none; }
+  .admin-section > summary::before {
+    content: "";
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform 0.15s;
+    margin-right: 0.25rem;
+    opacity: 0.6;
+  }
+  .admin-section[open] > summary::before {
+    transform: rotate(45deg);
+  }
+  .admin-section > summary:hover { @apply bg-base-200; }
+  .admin-section-count {
+    @apply ml-auto text-xs text-base-content/50 font-normal;
+  }
+  .admin-section-body {
+    @apply px-4 pb-4 pt-1;
+    border-top: 1px solid oklch(var(--bc) / 0.08);
+  }
+
+  /* Users table */
+  .admin-users-filters {
+    @apply flex flex-wrap gap-2 items-center mb-3;
+  }
+  .admin-users-filters input[type="search"],
+  .admin-users-filters .dd {
+    @apply min-w-40;
+  }
+  /* Grid-based "table": each column takes its natural content width and
+     the leftover horizontal space is distributed evenly as gaps between
+     the 5 columns (4 boundaries). Cells in the same column stay aligned
+     across rows via `display: contents` on the tr/thead/tbody wrappers. */
+  .admin-users-table {
+    @apply text-sm;
+    display: grid;
+    grid-template-columns: repeat(5, max-content);
+    justify-content: space-between;
+    align-items: center;
+    row-gap: 0.5rem;
+  }
+  .admin-users-table thead,
+  .admin-users-table tbody,
+  .admin-users-table tr { display: contents; }
+  .admin-users-table th {
+    @apply text-left text-sm font-medium text-base-content/60;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid oklch(var(--bc) / 0.1);
+  }
+  .admin-users-table td { padding: 0.25rem 0; }
+  .admin-users-table .user-cell-primary { @apply font-medium; }
+  .admin-users-table .user-cell-secondary {
+    @apply text-xs text-base-content/60;
+  }
+  .admin-users-table .user-sub {
+    @apply font-mono text-xs text-base-content/50;
+    /* Cap the visible width and truncate with an ellipsis when the sub
+       exceeds it — grid gives the column its full content width otherwise,
+       which would push other columns off-screen for very long subs. */
+    display: inline-block;
+    max-width: 32ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+  /* Keep compact cells on one line even when the User column absorbs slack. */
+  .admin-users-table .time-ago,
+  .admin-users-table .admin-users-status,
+  .admin-users-table .user-self-hint {
+    @apply whitespace-nowrap;
+  }
+  .admin-users-table .user-self-hint {
+    @apply ml-2 text-xs text-base-content/40 italic;
+  }
+  /* Role dropdown on each row: enough width to breathe on a desktop
+     container; shrinks back to a compact size when the viewport is tight. */
+  .admin-users-table .user-role-dd {
+    min-width: clamp(6rem, 12vw, 10rem);
+  }
+  .admin-users-table tr.user-inactive td {
+    @apply text-base-content/40;
+  }
+
   /* ── Misc ── */
   .hidden { display: none !important; }
   .empty-state { @apply p-8 text-center text-base-content/50; }

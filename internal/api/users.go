@@ -214,7 +214,7 @@ func ListUsers(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		users, err := srv.DB.ListUsers()
+		users, _, err := srv.DB.ListUsers(db.ListUsersOpts{})
 		if err != nil {
 			serverError(w, "failed to list users")
 			return
@@ -303,9 +303,24 @@ func UpdateUser(srv *server.Server) http.HandlerFunc {
 		}
 
 		var body updateUserRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			badRequest(w, "invalid request body")
-			return
+		ct := r.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			if err := r.ParseForm(); err != nil { //nolint:gosec // G120: auth-gated admin endpoint
+				badRequest(w, "invalid form body")
+				return
+			}
+			if v := r.FormValue("role"); v != "" { //nolint:gosec // G120: auth-gated admin endpoint
+				body.Role = &v
+			}
+			if v := r.FormValue("active"); v != "" { //nolint:gosec // G120: auth-gated admin endpoint
+				active := v == "true" || v == "on" || v == "1"
+				body.Active = &active
+			}
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				badRequest(w, "invalid request body")
+				return
+			}
 		}
 
 		if body.Role == nil && body.Active == nil {

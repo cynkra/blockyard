@@ -826,12 +826,15 @@ func TestUserCRUD(t *testing.T) {
 
 		// ListUsers returns all users.
 		db.UpsertUser("sub-2", "bob@example.com", "Bob")
-		users, err := db.ListUsers()
+		users, total, err := db.ListUsers(ListUsersOpts{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(users) != 2 {
 			t.Errorf("expected 2 users, got %d", len(users))
+		}
+		if total != 2 {
+			t.Errorf("expected total=2, got %d", total)
 		}
 
 		// UpdateUser changes role and active.
@@ -856,6 +859,77 @@ func TestUserCRUD(t *testing.T) {
 			t.Error("expected nil for nonexistent user update")
 		}
 	})
+}
+
+func TestListUsersFilterAndPaginate(t *testing.T) {
+	eachDB(t, func(t *testing.T, db *DB) {
+		// Seed users across roles and active states.
+		db.UpsertUserWithRole("alice-sub", "alice@example.com", "Alice", "admin")
+		db.UpsertUserWithRole("bob-sub", "bob@example.com", "Bob", "publisher")
+		db.UpsertUserWithRole("carol-sub", "carol@example.com", "Carol", "viewer")
+		db.UpsertUserWithRole("dave-sub", "dave@example.com", "Dave", "viewer")
+		inactive := false
+		db.UpdateUser("dave-sub", UserUpdate{Active: &inactive})
+
+		// Search by name substring (case-insensitive).
+		rows, total, err := db.ListUsers(ListUsersOpts{Search: "ali"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != 1 || len(rows) != 1 || rows[0].Sub != "alice-sub" {
+			t.Errorf("search 'ali': got %d rows total=%d, want 1", len(rows), total)
+		}
+
+		// Search by email substring.
+		rows, _, _ = db.ListUsers(ListUsersOpts{Search: "bob@"})
+		if len(rows) != 1 || rows[0].Sub != "bob-sub" {
+			t.Errorf("search 'bob@': got %d rows, want 1 (bob)", len(rows))
+		}
+
+		// Filter by role.
+		rows, total, _ = db.ListUsers(ListUsersOpts{Role: "viewer"})
+		if total != 2 || len(rows) != 2 {
+			t.Errorf("role=viewer: got total=%d len=%d, want 2", total, len(rows))
+		}
+
+		// Filter by active=inactive.
+		rows, _, _ = db.ListUsers(ListUsersOpts{ActiveFilter: "inactive"})
+		if len(rows) != 1 || rows[0].Sub != "dave-sub" {
+			t.Errorf("inactive filter: want only dave, got %v", rows)
+		}
+
+		// Filter by active=active excludes dave.
+		rows, _, _ = db.ListUsers(ListUsersOpts{ActiveFilter: "active"})
+		for _, r := range rows {
+			if r.Sub == "dave-sub" {
+				t.Error("active filter should not include inactive dave")
+			}
+		}
+
+		// Pagination: page size 2 → 2 pages of 4 users.
+		rows, total, _ = db.ListUsers(ListUsersOpts{PerPage: 2, Page: 1})
+		if total != 4 || len(rows) != 2 {
+			t.Errorf("page 1 of 2: got total=%d len=%d, want 4/2", total, len(rows))
+		}
+		rows, _, _ = db.ListUsers(ListUsersOpts{PerPage: 2, Page: 2})
+		if len(rows) != 2 {
+			t.Errorf("page 2 of 2: got %d, want 2", len(rows))
+		}
+
+		// Sort by name ascending.
+		rows, _, _ = db.ListUsers(ListUsersOpts{Sort: "name", SortDir: "asc"})
+		if len(rows) != 4 || rows[0].Name != "Alice" || rows[3].Name != "Dave" {
+			t.Errorf("sort by name asc: got %+v", names(rows))
+		}
+	})
+}
+
+func names(rows []UserRow) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Name
+	}
+	return out
 }
 
 func TestUpsertUserWithRole(t *testing.T) {

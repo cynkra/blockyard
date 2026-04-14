@@ -34,7 +34,7 @@
             </button>
             <input type="hidden" name="expires_in" x-ref="input" :value="value">
             <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
-                 @mousedown.prevent="var it=$event.target.closest('[role=option]');if(it)select(it)">
+                 @mousedown.prevent="selectClosest($event)">
                 <div role="option" class="dd-item" data-value="30d">30 days</div>
                 <div role="option" class="dd-item" data-value="90d">90 days</div>
                 <div role="option" class="dd-item" data-value="365d">1 year</div>

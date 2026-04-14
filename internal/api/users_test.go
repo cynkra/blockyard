@@ -388,6 +388,38 @@ func TestUpdateUser_Deactivate(t *testing.T) {
 	}
 }
 
+func TestUpdateUser_FormEncoded(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole("user-1", "user1@example.com", "User 1", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	req := jwtReq("PATCH", ts.URL+"/api/v1/users/user-1", pat,
+		strings.NewReader("role=publisher&active=false"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var user db.UserRow
+	json.NewDecoder(resp.Body).Decode(&user)
+	if user.Role != "publisher" {
+		t.Errorf("expected role 'publisher', got %q", user.Role)
+	}
+	if user.Active {
+		t.Error("expected user to be inactive")
+	}
+}
+
 func TestUpdateUser_SelfModification(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()

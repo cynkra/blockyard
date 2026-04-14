@@ -1,0 +1,186 @@
+{{define "adminUsers"}}
+<script>
+function refreshAdminUsers() {
+    var form = document.getElementById('admin-users-filters');
+    var params = form ? new URLSearchParams(new FormData(form)) : new URLSearchParams();
+    var curPage = new URLSearchParams(window.location.search).get('page');
+    if (curPage) params.set('page', curPage);
+    htmx.ajax('GET', '/ui/admin/users?' + params.toString(),
+              {target: '#admin-users-container', swap: 'innerHTML'});
+}
+
+/* Toggle-switch handler for the Active column. Flipping OFF prompts
+   for confirmation via the global DaisyUI modal; flipping ON is
+   immediate. Cancelling the confirm reverts the toggle to its prior
+   state. */
+function adminToggleActive(el) {
+    var sub = el.dataset.sub;
+    var display = el.dataset.display;
+    var active = el.checked;
+    var send = function() {
+        htmx.ajax('PATCH', '/api/v1/users/' + encodeURIComponent(sub), {
+            swap: 'none',
+            values: {active: active ? 'true' : 'false'},
+        }).then(refreshAdminUsers);
+    };
+    if (active) { send(); return; }
+    /* Deactivating — show DaisyUI confirm modal. */
+    var dlg = document.getElementById('hx-confirm-dialog');
+    document.getElementById('hx-confirm-message').textContent =
+        'Deactivate ' + display + '? They will be signed out immediately and their API tokens will stop working.';
+    var btn = document.getElementById('hx-confirm-btn');
+    btn.className = 'btn btn-error btn-sm';
+    var confirmed = false;
+    btn.onclick = function() { confirmed = true; dlg.close(); send(); };
+    dlg.addEventListener('close', function onClose() {
+        dlg.removeEventListener('close', onClose);
+        if (!confirmed) el.checked = true;
+    });
+    dlg.showModal();
+}
+</script>
+
+<form id="admin-users-filters" class="admin-users-filters"
+      hx-get="/ui/admin/users"
+      hx-trigger="change, input changed delay:300ms from:input[type=search], search delay:300ms from:input[type=search]"
+      hx-target="#admin-users-container"
+      hx-swap="innerHTML">
+    <input type="search" name="search" value="{{.Search}}"
+           placeholder="Search name, email, sub..."
+           class="input input-sm text-sm flex-1">
+
+    <div x-data="dropdown({value: '{{.Role}}', placeholder: 'All roles'})" class="dd"
+         @click.outside="open = false">
+        <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+            <span x-text="label" class="dd-label"></span>
+        </button>
+        <input type="hidden" name="role" x-ref="input" :value="value">
+        <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+             @mousedown.prevent="selectClosest($event)">
+            <div role="option" class="dd-item" data-value="">All roles</div>
+            <div role="option" class="dd-item" data-value="viewer">Viewer</div>
+            <div role="option" class="dd-item" data-value="publisher">Publisher</div>
+            <div role="option" class="dd-item" data-value="admin">Admin</div>
+        </div>
+    </div>
+
+    <div x-data="dropdown({value: '{{.ActiveFilter}}', placeholder: 'All'})" class="dd"
+         @click.outside="open = false">
+        <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+            <span x-text="label" class="dd-label"></span>
+        </button>
+        <input type="hidden" name="active" x-ref="input" :value="value">
+        <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+             @mousedown.prevent="selectClosest($event)">
+            <div role="option" class="dd-item" data-value="">All users</div>
+            <div role="option" class="dd-item" data-value="active">Active only</div>
+            <div role="option" class="dd-item" data-value="inactive">Inactive only</div>
+        </div>
+    </div>
+</form>
+
+<div id="admin-users-container">
+    {{template "adminUsersTable" .}}
+</div>
+{{end}}
+
+{{define "adminUsersTable"}}
+{{if .Users}}
+<table class="admin-users-table">
+    <thead>
+        <tr>
+            <th>User</th>
+            <th>Sub</th>
+            <th>Role</th>
+            <th>Active</th>
+            <th>Last login</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{$callerSub := .CallerSub}}
+        {{range .Users}}
+        <tr class="{{if not .Active}}user-inactive{{end}}">
+            <td>
+                <div class="user-cell-primary">
+                    {{if .Name}}{{.Name}}{{else}}<span class="text-base-content/50">(no name)</span>{{end}}
+                    {{if .IsSelf}}<span class="user-self-hint">(you)</span>{{end}}
+                </div>
+                <div class="user-cell-secondary">{{.Email}}</div>
+            </td>
+            <td><span class="user-sub" title="{{.Sub}}">{{.Sub}}</span></td>
+            <td>
+                {{if .IsSelf}}
+                    <span class="badge badge-sm badge-soft">{{.Role}}</span>
+                {{else}}
+                    <div x-data="dropdown({value: '{{.Role}}'})" class="dd user-role-dd"
+                         @click.outside="open = false">
+                        <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                                role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                            <span x-text="label" class="dd-label"></span>
+                        </button>
+                        <input type="hidden" name="role" x-ref="input" :value="value"
+                               hx-patch="/api/v1/users/{{.Sub}}"
+                               hx-trigger="change"
+                               hx-swap="none"
+                               hx-on::after-request="if(event.detail.successful) refreshAdminUsers()">
+                        <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                             @mousedown.prevent="selectClosest($event)">
+                            <div role="option" class="dd-item" data-value="viewer">Viewer</div>
+                            <div role="option" class="dd-item" data-value="publisher">Publisher</div>
+                            <div role="option" class="dd-item" data-value="admin">Admin</div>
+                        </div>
+                    </div>
+                {{end}}
+            </td>
+            <td>
+                <input type="checkbox" class="toggle toggle-sm toggle-success"
+                       {{if .Active}}checked{{end}}
+                       {{if .IsSelf}}disabled{{end}}
+                       aria-label="{{if .Active}}Deactivate{{else}}Reactivate{{end}} {{if .Name}}{{.Name}}{{else}}{{.Email}}{{end}}"
+                       data-sub="{{.Sub}}"
+                       data-display="{{if .Name}}{{.Name}}{{else}}{{.Email}}{{end}}"
+                       onchange="adminToggleActive(this)">
+            </td>
+            <td>
+                {{if .LastLogin}}
+                    <span class="time-ago text-sm" data-timestamp="{{.LastLogin}}">{{timeAgo .LastLogin}}</span>
+                {{else}}
+                    <span class="text-base-content/40 text-sm">never</span>
+                {{end}}
+            </td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+
+{{with .Pagination}}
+{{if gt .TotalPages 1}}
+<nav class="pagination">
+    {{if gt .Page 1}}
+    <button class="btn btn-soft btn-sm"
+            hx-get="/ui/admin/users?page={{subtract .Page 1}}"
+            hx-include="#admin-users-filters"
+            hx-target="#admin-users-container"
+            hx-swap="innerHTML">
+        &laquo; Prev
+    </button>
+    {{end}}
+    <span class="pagination-info">Page {{.Page}} of {{.TotalPages}}</span>
+    {{if lt .Page .TotalPages}}
+    <button class="btn btn-soft btn-sm"
+            hx-get="/ui/admin/users?page={{add .Page 1}}"
+            hx-include="#admin-users-filters"
+            hx-target="#admin-users-container"
+            hx-swap="innerHTML">
+        Next &raquo;
+    </button>
+    {{end}}
+</nav>
+{{end}}
+{{end}}
+{{else}}
+<p class="empty-state">No users match the current filters.</p>
+{{end}}
+{{end}}
