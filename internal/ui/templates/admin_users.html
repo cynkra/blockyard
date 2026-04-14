@@ -1,4 +1,15 @@
 {{define "adminUsers"}}
+<script>
+function refreshAdminUsers() {
+    var form = document.getElementById('admin-users-filters');
+    var params = form ? new URLSearchParams(new FormData(form)) : new URLSearchParams();
+    var curPage = new URLSearchParams(window.location.search).get('page');
+    if (curPage) params.set('page', curPage);
+    htmx.ajax('GET', '/ui/admin/users?' + params.toString(),
+              {target: '#admin-users-container', swap: 'innerHTML'});
+}
+</script>
+
 <form id="admin-users-filters" class="admin-users-filters"
       hx-get="/ui/admin/users"
       hx-trigger="change, input changed delay:300ms from:input[type=search], search delay:300ms from:input[type=search]"
@@ -158,14 +169,3 @@
 <p class="empty-state">No users match the current filters.</p>
 {{end}}
 {{end}}
-
-<script>
-function refreshAdminUsers() {
-    var form = document.getElementById('admin-users-filters');
-    var params = form ? new URLSearchParams(new FormData(form)) : new URLSearchParams();
-    var curPage = new URLSearchParams(window.location.search).get('page');
-    if (curPage) params.set('page', curPage);
-    htmx.ajax('GET', '/ui/admin/users?' + params.toString(),
-              {target: '#admin-users-container', swap: 'innerHTML'});
-}
-</script>
