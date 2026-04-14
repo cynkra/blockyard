@@ -275,6 +275,7 @@ client_id            = "blockyard"
 client_secret        = "oidc-client-secret"
 cookie_max_age       = "24h"
 initial_admin        = "google-oauth2|abc123"
+default_role         = "viewer"
 ```
 
 | Field | Type | Default | Required | Description |
@@ -285,6 +286,7 @@ initial_admin        = "google-oauth2|abc123"
 | `client_secret` | `string` | — | **Yes** | OIDC client secret. Supports [vault references](#vault-references). |
 | `cookie_max_age` | `duration` | `24h` | No | Maximum lifetime of session cookies |
 | `initial_admin` | `string` | — | No | OIDC `sub` of the first admin user. Checked only on first login. See [First Admin Setup](/docs/guides/authorization/#first-admin-setup). |
+| `default_role` | `string` | `viewer` | No | Role assigned to new users on first OIDC login. Must be `viewer` or `publisher`. Set to `publisher` when the IdP itself is the access gate and every authenticated user should be trusted to deploy. `admin` is rejected — bootstrap admins via `initial_admin`. |
 
 > [!WARNING]
 > When OIDC is configured, the proxy routes (`/app/{name}/`) enforce

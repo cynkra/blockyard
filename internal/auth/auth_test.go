@@ -994,6 +994,134 @@ func TestCallbackDeactivatedUser(t *testing.T) {
 	}
 }
 
+// runLoginCallback runs one /login + /callback exchange against the
+// given router and returns the response from /callback.
+func runLoginCallback(t *testing.T, router http.Handler, idp *testutil.MockIdP) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/login", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	stateCookie := findCookie(w.Result(), "blockyard_oidc_state")
+	if stateCookie == nil {
+		t.Fatal("login: missing state cookie")
+	}
+	location := w.Header().Get("Location")
+	csrfToken := extractStateParam(location)
+	idp.Nonce = extractNonceParam(location)
+
+	req = httptest.NewRequest("GET", "/callback?code=test-code&state="+csrfToken, nil)
+	req.AddCookie(stateCookie)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func TestCallbackUsesConfiguredDefaultRole(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	deps.Config.OIDC.DefaultRole = "publisher"
+
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	deps.DB = database
+
+	router := buildTestRouter(deps)
+
+	w := runLoginCallback(t, router, idp)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback: expected 302, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	user, err := database.GetUser("test-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user == nil {
+		t.Fatal("expected user to be created on first login")
+	}
+	if user.Role != "publisher" {
+		t.Errorf("first-login role = %q, want publisher (from oidc.default_role)", user.Role)
+	}
+}
+
+func TestCallbackPreservesExistingRoleOnSubsequentLogin(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	deps.Config.OIDC.DefaultRole = "publisher"
+
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	deps.DB = database
+
+	// Pre-existing user with viewer role (e.g. demoted by an admin).
+	if _, err := database.UpsertUserWithRole("test-sub", "test@example.com", "Test User", "viewer"); err != nil {
+		t.Fatal(err)
+	}
+
+	router := buildTestRouter(deps)
+
+	w := runLoginCallback(t, router, idp)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback: expected 302, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	user, err := database.GetUser("test-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user == nil {
+		t.Fatal("user disappeared")
+	}
+	if user.Role != "viewer" {
+		t.Errorf("subsequent-login role = %q, want preserved viewer", user.Role)
+	}
+}
+
+func TestCallbackInitialAdminOverridesDefaultRole(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+
+	deps := buildTestDeps(t, idp)
+	deps.Config.OIDC.DefaultRole = "publisher"
+	deps.Config.OIDC.InitialAdmin = "test-sub"
+
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	deps.DB = database
+
+	router := buildTestRouter(deps)
+
+	w := runLoginCallback(t, router, idp)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback: expected 302, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	user, err := database.GetUser("test-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user == nil {
+		t.Fatal("expected user to be created on first login")
+	}
+	if user.Role != "admin" {
+		t.Errorf("initial_admin role = %q, want admin (must override default_role)", user.Role)
+	}
+}
+
 // TestFullLoginCallbackMiddlewareFlow verifies the complete chain:
 // GET /login → callback with state cookie → session cookie set →
 // middleware recognises session cookie → user is authenticated.

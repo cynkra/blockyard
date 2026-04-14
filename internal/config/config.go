@@ -168,6 +168,7 @@ type OidcConfig struct {
 	ClientSecret      Secret   `toml:"client_secret"`
 	CookieMaxAge      Duration `toml:"cookie_max_age"`
 	InitialAdmin      string   `toml:"initial_admin"`
+	DefaultRole       string   `toml:"default_role"` // role assigned on first login: "viewer" (default) or "publisher"
 }
 
 type OpenbaoConfig struct {
@@ -358,6 +359,9 @@ func redisDefaults(c *RedisConfig) {
 func oidcDefaults(c *OidcConfig) {
 	if c.CookieMaxAge.Duration == 0 {
 		c.CookieMaxAge.Duration = 24 * time.Hour
+	}
+	if c.DefaultRole == "" {
+		c.DefaultRole = "viewer"
 	}
 }
 
@@ -666,6 +670,11 @@ func validate(cfg *Config) error {
 			if cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty() {
 				return fmt.Errorf("config: server.session_secret is required when [oidc] is configured without [openbao]")
 			}
+		}
+		switch cfg.OIDC.DefaultRole {
+		case "viewer", "publisher":
+		default:
+			return fmt.Errorf(`config: oidc.default_role must be "viewer" or "publisher", got %q`, cfg.OIDC.DefaultRole)
 		}
 	}
 

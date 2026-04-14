@@ -42,6 +42,17 @@ type Deps struct {
 	DB           *db.DB
 }
 
+// defaultUserRole returns the role to assign to a brand-new OIDC user.
+// Falls back to "viewer" when oidc is nil or default_role is unset; in
+// production both are populated by [config.Load], so the fallback only
+// matters for tests that build OidcConfig by hand.
+func defaultUserRole(c *config.OidcConfig) string {
+	if c == nil || c.DefaultRole == "" {
+		return "viewer"
+	}
+	return c.DefaultRole
+}
+
 // secureFlag returns "; Secure" if external_url is HTTPS, empty
 // string otherwise.
 func secureFlag(cfg *config.Config) string {
@@ -235,26 +246,16 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			}
 		}
 
-		// 5. Upsert user in database.
+		// 5. Upsert user in database. The role is only used on INSERT;
+		// existing users keep whatever role an admin assigned them
+		// (UpsertUserWithRole's ON CONFLICT clause does not touch role).
 		if deps.DB != nil {
-			// Check if this is the initial_admin on first login.
+			role := defaultUserRole(deps.Config.OIDC)
 			if deps.Config.OIDC != nil && deps.Config.OIDC.InitialAdmin == subClaim {
-				existing, _ := deps.DB.GetUser(subClaim)
-				if existing == nil {
-					// First login — create as admin.
-					if _, err := deps.DB.UpsertUserWithRole(subClaim, emailClaim, nameClaim, "admin"); err != nil {
-						slog.Error("failed to upsert initial admin", "sub", subClaim, "error", err)
-					}
-				} else {
-					// Already exists — just update login info.
-					if _, err := deps.DB.UpsertUser(subClaim, emailClaim, nameClaim); err != nil {
-						slog.Error("failed to upsert user", "sub", subClaim, "error", err)
-					}
-				}
-			} else {
-				if _, err := deps.DB.UpsertUser(subClaim, emailClaim, nameClaim); err != nil {
-					slog.Error("failed to upsert user", "sub", subClaim, "error", err)
-				}
+				role = "admin"
+			}
+			if _, err := deps.DB.UpsertUserWithRole(subClaim, emailClaim, nameClaim, role); err != nil {
+				slog.Error("failed to upsert user", "sub", subClaim, "error", err)
 			}
 
 			// Check if user is active.
