@@ -4,14 +4,14 @@
 
 {{define "content"}}
 <div class="page-header">
-    <h1>Deployment History</h1>
+    <h1 class="mb-4">Deployment History</h1>
+    <form method="GET" action="/deployments" class="flex gap-2">
+        <input type="search" name="search" placeholder="Search by app name..."
+               class="input input-sm flex-1 text-sm" value="{{.Search}}"
+               oninput="filterDeployments(this.value)">
+        <button type="submit" class="btn btn-soft btn-sm">Search</button>
+    </form>
 </div>
-<form method="GET" action="/deployments" class="flex gap-2 mb-6">
-    <input type="search" name="search" placeholder="Search by app name..."
-           class="input input-sm flex-1 text-sm" value="{{.Search}}"
-           oninput="filterDeployments(this.value)">
-    <button type="submit" class="btn btn-soft btn-sm">Search</button>
-</form>
 {{if .Deployments}}
 <table class="table table-sm w-full">
     <thead>
