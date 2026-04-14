@@ -8,6 +8,36 @@ function refreshAdminUsers() {
     htmx.ajax('GET', '/ui/admin/users?' + params.toString(),
               {target: '#admin-users-container', swap: 'innerHTML'});
 }
+
+/* Toggle-switch handler for the Active column. Flipping OFF prompts
+   for confirmation via the global DaisyUI modal; flipping ON is
+   immediate. Cancelling the confirm reverts the toggle to its prior
+   state. */
+function adminToggleActive(el) {
+    var sub = el.dataset.sub;
+    var display = el.dataset.display;
+    var active = el.checked;
+    var send = function() {
+        htmx.ajax('PATCH', '/api/v1/users/' + encodeURIComponent(sub), {
+            swap: 'none',
+            values: {active: active ? 'true' : 'false'},
+        }).then(refreshAdminUsers);
+    };
+    if (active) { send(); return; }
+    /* Deactivating — show DaisyUI confirm modal. */
+    var dlg = document.getElementById('hx-confirm-dialog');
+    document.getElementById('hx-confirm-message').textContent =
+        'Deactivate ' + display + '? They will be signed out immediately and their API tokens will stop working.';
+    var btn = document.getElementById('hx-confirm-btn');
+    btn.className = 'btn btn-error btn-sm';
+    var confirmed = false;
+    btn.onclick = function() { confirmed = true; dlg.close(); send(); };
+    dlg.addEventListener('close', function onClose() {
+        dlg.removeEventListener('close', onClose);
+        if (!confirmed) el.checked = true;
+    });
+    dlg.showModal();
+}
 </script>
 
 <form id="admin-users-filters" class="admin-users-filters"
@@ -64,7 +94,7 @@ function refreshAdminUsers() {
             <th>User</th>
             <th>Sub</th>
             <th>Role</th>
-            <th>Status</th>
+            <th>Active</th>
             <th>Last login</th>
         </tr>
     </thead>
@@ -105,28 +135,13 @@ function refreshAdminUsers() {
                 {{end}}
             </td>
             <td>
-                {{if .IsSelf}}
-                    <span class="badge badge-sm badge-soft {{if .Active}}badge-success{{else}}badge-neutral{{end}}">
-                        {{if .Active}}Active{{else}}Inactive{{end}}
-                    </span>
-                {{else if .Active}}
-                    <button class="btn btn-xs btn-soft btn-error"
-                            hx-patch="/api/v1/users/{{.Sub}}"
-                            hx-vals='{"active": "false"}'
-                            hx-confirm="Deactivate {{if .Name}}{{.Name}}{{else}}{{.Email}}{{end}}? They will be signed out immediately and their API tokens will stop working."
-                            hx-swap="none"
-                            hx-on::after-request="if(event.detail.successful) refreshAdminUsers()">
-                        Deactivate
-                    </button>
-                {{else}}
-                    <button class="btn btn-xs btn-soft"
-                            hx-patch="/api/v1/users/{{.Sub}}"
-                            hx-vals='{"active": "true"}'
-                            hx-swap="none"
-                            hx-on::after-request="if(event.detail.successful) refreshAdminUsers()">
-                        Reactivate
-                    </button>
-                {{end}}
+                <input type="checkbox" class="toggle toggle-sm toggle-success"
+                       {{if .Active}}checked{{end}}
+                       {{if .IsSelf}}disabled{{end}}
+                       aria-label="{{if .Active}}Deactivate{{else}}Reactivate{{end}} {{if .Name}}{{.Name}}{{else}}{{.Email}}{{end}}"
+                       data-sub="{{.Sub}}"
+                       data-display="{{if .Name}}{{.Name}}{{else}}{{.Email}}{{end}}"
+                       onchange="adminToggleActive(this)">
             </td>
             <td>
                 {{if .LastLogin}}
