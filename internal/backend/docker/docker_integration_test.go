@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/google/uuid"
 
@@ -818,5 +819,123 @@ func TestContainerStats(t *testing.T) {
 		t.Error("expected non-zero memory limit")
 	}
 	t.Logf("CPU=%.2f%%, Mem=%d/%d", stats.CPUPercent, stats.MemoryUsageBytes, stats.MemoryLimitBytes)
+}
+
+// TestSpawnWithServiceNetwork reproduces the #230 scenario end-to-end:
+// blockyard deployed as a compose service with a sibling service container
+// on a shared service_network. The bug was that on cgroup v2 hosts,
+// detectServerID fell back to a 12-char /etc/hostname ID that never
+// matched NetworkInspect's full-ID map keys, so connectServiceContainers
+// double-attached the server and the worker spawn failed with "endpoint
+// with name <server> already exists".
+//
+// This test doesn't simulate cgroup v2 (the canonicalization in New()
+// sidesteps that), but it does exercise the composition of ID comparison,
+// service-network connect, and server join that the bug broke.
+func TestSpawnWithServiceNetwork(t *testing.T) {
+	ctx := context.Background()
+	cli, err := client.New(client.WithHost("unix:///var/run/docker.sock"))
+	if err != nil {
+		t.Fatalf("docker client: %v", err)
+	}
+
+	// 1. Create the service network.
+	svcNet := "test-svc-" + uuid.New().String()[:8]
+	netResp, err := cli.NetworkCreate(ctx, svcNet, client.NetworkCreateOptions{
+		Driver: "bridge",
+	})
+	if err != nil {
+		t.Fatalf("NetworkCreate: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = cli.NetworkRemove(ctx, netResp.ID, client.NetworkRemoveOptions{})
+	})
+
+	// 2. Start a dummy "server" container on the service network. This
+	// stands in for blockyard itself — the container whose ID the backend
+	// carries in d.serverID.
+	startOnNet := func(name string) string {
+		t.Helper()
+		resp, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+			Config: &container.Config{
+				Image: testutil.AlpineImage(t),
+				Cmd:   []string{"sleep", "300"},
+			},
+			HostConfig: &container.HostConfig{
+				NetworkMode: container.NetworkMode(svcNet),
+			},
+			Name: name,
+		})
+		if err != nil {
+			t.Fatalf("ContainerCreate %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			_, _ = cli.ContainerRemove(ctx, resp.ID, client.ContainerRemoveOptions{Force: true})
+		})
+		if _, err := cli.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
+			t.Fatalf("ContainerStart %s: %v", name, err)
+		}
+		return resp.ID
+	}
+
+	serverID := startOnNet("test-srv-" + uuid.New().String()[:8])
+	_ = startOnNet("test-svc-peer-" + uuid.New().String()[:8])
+
+	// 3. Construct a DockerBackend manually with serverID set to the
+	// full canonical ID (as New() does after the #230 fix) and
+	// ServiceNetwork pointing at our test network.
+	fullCfg := &config.Config{
+		Docker: config.DockerConfig{
+			Socket:         "/var/run/docker.sock",
+			Image:          testutil.AlpineImage(t),
+			ShinyPort:      8080,
+			ServiceNetwork: svcNet,
+		},
+	}
+	b := &DockerBackend{
+		client:   cli,
+		serverID: serverID,
+		config:   &fullCfg.Docker,
+		fullCfg:  fullCfg,
+		mountCfg: MountConfig{Mode: MountModeNative},
+		workers:  make(map[string]*workerState),
+		runCmd:   defaultCmdRunner,
+	}
+
+	// 4. Spawn — with the #230 bug, this fails with "endpoint <server>
+	// already exists" because the server gets attached twice to the
+	// worker network.
+	workerID := "test-" + uuid.New().String()[:8]
+	spec := backend.WorkerSpec{
+		AppID:       "test-app",
+		WorkerID:    workerID,
+		Image:       testutil.AlpineImage(t),
+		Cmd:         []string{"sleep", "300"},
+		BundlePath:  "/tmp",
+		LibraryPath: "",
+		WorkerMount: "/app",
+		ShinyPort:   8080,
+		Labels:      map[string]string{},
+	}
+	if err := b.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn with service network: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop(ctx, workerID) })
+
+	// 5. Sanity check: the server is attached to the worker network with
+	// the "blockyard" alias, which is what joinNetwork in step 6 of Spawn
+	// is supposed to do. If the bug were present, the server would be
+	// attached via its compose aliases instead (and Spawn would have
+	// failed above).
+	workerNet := "blockyard-" + workerID
+	ni, err := cli.NetworkInspect(ctx, workerNet, client.NetworkInspectOptions{})
+	if err != nil {
+		t.Fatalf("inspect worker network: %v", err)
+	}
+	ep, ok := ni.Network.Containers[serverID]
+	if !ok {
+		t.Fatalf("server %s not attached to worker network", serverID)
+	}
+	t.Logf("server endpoint on worker network: name=%s", ep.Name)
 }
 

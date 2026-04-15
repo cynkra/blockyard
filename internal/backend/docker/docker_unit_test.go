@@ -444,14 +444,24 @@ func TestConnectServiceContainers_ConnectsWithAliases(t *testing.T) {
 }
 
 func TestConnectServiceContainers_SkipsServerContainer(t *testing.T) {
+	// NetworkInspect returns full 64-char container IDs as map keys. The
+	// skip-self comparison uses ==, so d.serverID must also be the full
+	// canonical ID — docker.New() inspects to enforce this invariant.
+	// See #230: on cgroup v2 hosts /etc/hostname gave only a 12-char short
+	// ID, the == never matched, and the server double-attached to worker
+	// networks. Tests must use full IDs to reflect the real shapes.
+	const (
+		serverFullID = "36b2eaae013c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"
+		dbFullID     = "a1b2c3d4e5f6071829304152637485960a1b2c3d4e5f6071829304152637485a"
+	)
 	var connected []string
 
 	mock := &mockDockerClient{
 		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
 			return client.NetworkInspectResult{Network: network.Inspect{
 				Containers: map[string]network.EndpointResource{
-					"server-id":   {},
-					"db-container": {},
+					serverFullID: {},
+					dbFullID:     {},
 				},
 			}}, nil
 		},
@@ -470,13 +480,59 @@ func TestConnectServiceContainers_SkipsServerContainer(t *testing.T) {
 
 	d := newTestBackend(mock)
 	d.config.ServiceNetwork = "svc-net"
-	d.serverID = "server-id"
+	d.serverID = serverFullID
 
 	if err := d.connectServiceContainers(context.Background(), "worker-net"); err != nil {
 		t.Fatal(err)
 	}
-	if len(connected) != 1 || connected[0] != "db-container" {
-		t.Fatalf("expected only db-container connected, got %v", connected)
+	if len(connected) != 1 || connected[0] != dbFullID {
+		t.Fatalf("expected only db container connected, got %v", connected)
+	}
+}
+
+// TestConnectServiceContainers_ShortServerIDDoesNotSkip documents the
+// invariant that d.serverID must be the full 64-char ID, not the 12-char
+// short form. When given a short ID, the skip-self check fails and the
+// server gets double-attached — which is exactly the #230 bug. This test
+// exists to catch any regression that lets docker.New() bypass ID
+// canonicalization.
+func TestConnectServiceContainers_ShortServerIDDoesNotSkip(t *testing.T) {
+	const (
+		serverFullID  = "36b2eaae013c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e"
+		serverShortID = "36b2eaae013c" // 12-char prefix as /etc/hostname would yield
+	)
+	var connected []string
+
+	mock := &mockDockerClient{
+		networkInspectFn: func(_ context.Context, _ string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			return client.NetworkInspectResult{Network: network.Inspect{
+				Containers: map[string]network.EndpointResource{
+					serverFullID: {},
+				},
+			}}, nil
+		},
+		containerInspectFn: func(_ context.Context, _ string, _ client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: container.InspectResponse{
+				NetworkSettings: &container.NetworkSettings{
+					Networks: map[string]*network.EndpointSettings{},
+				},
+			}}, nil
+		},
+		networkConnectFn: func(_ context.Context, _ string, opts client.NetworkConnectOptions) (client.NetworkConnectResult, error) {
+			connected = append(connected, opts.Container)
+			return client.NetworkConnectResult{}, nil
+		},
+	}
+
+	d := newTestBackend(mock)
+	d.config.ServiceNetwork = "svc-net"
+	d.serverID = serverShortID
+
+	if err := d.connectServiceContainers(context.Background(), "worker-net"); err != nil {
+		t.Fatal(err)
+	}
+	if len(connected) != 1 || connected[0] != serverFullID {
+		t.Fatalf("expected server to be (wrongly) attached given short ID, got %v", connected)
 	}
 }
 
