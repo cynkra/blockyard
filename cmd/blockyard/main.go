@@ -207,7 +207,7 @@ func main() {
 	// ── Initialize OpenBao (must happen before OIDC for vault reference resolution) ──
 
 	if cfg.Openbao != nil {
-		tokenFilePath := filepath.Join(filepath.Dir(cfg.Database.Path), ".vault-token")
+		tokenFilePath := cfg.Openbao.TokenFile
 
 		var adminTokenFunc func() string
 
