@@ -18,6 +18,7 @@ import (
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 var (
@@ -113,7 +114,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		}
 		// Worker unreachable — evict and fall through to spawn.
 		slog.Warn("evicting stale worker", "worker_id", wid, "error", addrErr)
-		ops.EvictWorker(ctx, srv, wid)
+		ops.EvictWorker(ctx, srv, wid, telemetry.ReasonCrashed)
 	}
 
 	// No worker with capacity — spawn a new one.

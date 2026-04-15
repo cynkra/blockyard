@@ -126,7 +126,7 @@ func testServerWithMock(t *testing.T) (*Server, *mock.MockBackend) {
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
 		PkgStore: pkgstore.NewStore(storeRoot),
-		EvictWorkerFn: func(_ context.Context, _ *Server, _ string) {},
+		EvictWorkerFn: func(_ context.Context, _ *Server, _, _ string) {},
 	}
 
 	return srv, be

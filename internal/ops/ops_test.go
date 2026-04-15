@@ -14,6 +14,7 @@ import (
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 func testServer(t *testing.T) (*server.Server, *mock.MockBackend) {
@@ -61,7 +62,7 @@ func TestEvictWorker(t *testing.T) {
 	srv.Sessions.Set("sess1", session.Entry{WorkerID: "w1"})
 	srv.LogStore.Create("w1", "app1")
 
-	EvictWorker(context.Background(), srv, "w1")
+	EvictWorker(context.Background(), srv, "w1", telemetry.ReasonGraceful)
 
 	if _, ok := srv.Workers.Get("w1"); ok {
 		t.Error("worker should be removed from WorkerMap")
@@ -84,8 +85,8 @@ func TestEvictWorkerIdempotent(t *testing.T) {
 	srv, be := testServer(t)
 	spawnWorker(t, srv, be, "w1", "app1")
 
-	EvictWorker(context.Background(), srv, "w1")
-	EvictWorker(context.Background(), srv, "w1") // must not panic
+	EvictWorker(context.Background(), srv, "w1", telemetry.ReasonGraceful)
+	EvictWorker(context.Background(), srv, "w1", telemetry.ReasonCrashed) // must not panic
 }
 
 func TestEvictWorkerCleansUpPkgStore(t *testing.T) {
@@ -101,7 +102,7 @@ func TestEvictWorkerCleansUpPkgStore(t *testing.T) {
 	os.MkdirAll(workerLib, 0o755)
 	os.WriteFile(filepath.Join(workerLib, "marker"), []byte("x"), 0o644)
 
-	EvictWorker(context.Background(), srv, "w1")
+	EvictWorker(context.Background(), srv, "w1", telemetry.ReasonGraceful)
 
 	// Worker library should be removed.
 	if _, err := os.Stat(workerLib); !os.IsNotExist(err) {
@@ -249,7 +250,7 @@ func TestEvictWorkerCleansUpTransferAndToken(t *testing.T) {
 	os.MkdirAll(tokenDir, 0o755)
 	os.WriteFile(filepath.Join(tokenDir, "token"), []byte("tok"), 0o644)
 
-	EvictWorker(context.Background(), srv, "w1")
+	EvictWorker(context.Background(), srv, "w1", telemetry.ReasonGraceful)
 
 	if _, err := os.Stat(transferDir); !os.IsNotExist(err) {
 		t.Error("transfer dir should be removed after eviction")

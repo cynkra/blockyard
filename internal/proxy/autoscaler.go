@@ -9,6 +9,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // RunAutoscaler runs as a background goroutine alongside health polling.
@@ -66,7 +67,7 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 	for _, wid := range idle {
 		slog.Info("autoscaler: evicting idle worker",
 			"worker_id", wid, "idle_for", idleWorkerTimeout)
-		ops.EvictWorker(ctx, srv, wid)
+		ops.EvictWorker(ctx, srv, wid, telemetry.ReasonIdleTimeout)
 	}
 
 	appIDs := srv.Workers.AppIDs()
@@ -111,6 +112,36 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 	if err := srv.DB.CleanupExpiredRedirects(); err != nil {
 		slog.Error("autoscaler: redirect cleanup failed", "error", err)
 	}
+
+	// Refresh the workers-by-state gauge from the (now reconciled)
+	// worker map. Doing this last ensures the snapshot reflects
+	// evictions and idle marks applied earlier in the tick.
+	reconcileWorkersByState(srv)
+}
+
+// reconcileWorkersByState sets blockyard_workers{state=…} to the
+// current count of workers in each state. Called from the autoscaler
+// tick; derives state from ActiveWorker.Draining and per-worker
+// session counts rather than tracking explicit transitions.
+func reconcileWorkersByState(srv *server.Server) {
+	var busy, idle, draining float64
+	for _, wid := range srv.Workers.All() {
+		w, ok := srv.Workers.Get(wid)
+		if !ok {
+			continue
+		}
+		switch {
+		case w.Draining:
+			draining++
+		case srv.Sessions.CountForWorker(wid) > 0:
+			busy++
+		default:
+			idle++
+		}
+	}
+	srv.Metrics.WorkersByState.WithLabelValues(telemetry.StateBusy).Set(busy)
+	srv.Metrics.WorkersByState.WithLabelValues(telemetry.StateIdle).Set(idle)
+	srv.Metrics.WorkersByState.WithLabelValues(telemetry.StateDraining).Set(draining)
 }
 
 // evictUnhealthy checks each worker's health and evicts any that have
@@ -122,7 +153,7 @@ func evictUnhealthy(ctx context.Context, srv *server.Server, workerIDs []string)
 			healthy = append(healthy, wid)
 		} else {
 			slog.Warn("autoscaler: evicting crashed worker", "worker_id", wid)
-			ops.EvictWorker(ctx, srv, wid)
+			ops.EvictWorker(ctx, srv, wid, telemetry.ReasonCrashed)
 		}
 	}
 	return healthy

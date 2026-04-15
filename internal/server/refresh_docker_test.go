@@ -87,8 +87,8 @@ func setupDockerServer(t *testing.T) *server.Server {
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
 		PkgStore: pkgstore.NewStore(storeRoot),
-		EvictWorkerFn: func(ctx context.Context, srv *server.Server, workerID string) {
-			ops.EvictWorker(ctx, srv, workerID)
+		EvictWorkerFn: func(ctx context.Context, srv *server.Server, workerID, reason string) {
+			ops.EvictWorker(ctx, srv, workerID, reason)
 		},
 	}
 

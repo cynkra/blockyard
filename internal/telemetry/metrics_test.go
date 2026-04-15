@@ -68,3 +68,41 @@ func TestNewMetricsIsolation(t *testing.T) {
 		t.Errorf("b.WorkersSpawned: expected 0 (isolated), got %v", got)
 	}
 }
+
+func TestProxyStatusClass(t *testing.T) {
+	cases := []struct {
+		code int
+		want string
+	}{
+		{100, "1xx"},
+		{101, "1xx"},
+		{200, "2xx"},
+		{299, "2xx"},
+		{301, "3xx"},
+		{404, "4xx"},
+		{418, "4xx"},
+		{499, "4xx"},
+		{500, "5xx"},
+		{503, "5xx"},
+		{520, "5xx"}, // long-tail upstream code (Cloudflare)
+	}
+	for _, c := range cases {
+		if got := ProxyStatusClass(c.code); got != c.want {
+			t.Errorf("ProxyStatusClass(%d) = %q, want %q", c.code, got, c.want)
+		}
+	}
+}
+
+func TestLabeledMetricsDoNotPanic(t *testing.T) {
+	// Smoke-test the *Vec collectors so a wrong label arity is
+	// caught here rather than at the first scrape in production.
+	m := newTestMetrics(t)
+	m.ProxyRequests.WithLabelValues("app1", "2xx").Inc()
+	m.ProxyRequests.WithLabelValues("app1", "5xx").Inc()
+	m.HealthChecksFailed.WithLabelValues("app1").Inc()
+	m.WorkersStopped.WithLabelValues(ReasonGraceful).Inc()
+	m.WorkersStopped.WithLabelValues(ReasonCrashed).Inc()
+	m.WorkersByState.WithLabelValues(StateBusy).Set(3)
+	m.WorkersByState.WithLabelValues(StateIdle).Set(7)
+	m.WorkersByState.WithLabelValues(StateDraining).Set(1)
+}
