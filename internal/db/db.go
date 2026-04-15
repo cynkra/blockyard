@@ -175,9 +175,9 @@ func openPostgres(dsn string, options openOptions) (*DB, error) {
 	}
 
 	sqlDB := stdlib.OpenDBFromPool(pool)
-	db := sqlx.NewDb(sqlDB, "pgx")
-	d := &DB{
-		DB:      db,
+	sx := sqlx.NewDb(sqlDB, "pgx")
+	db := &DB{
+		DB:      sx,
 		dialect: DialectPostgres,
 		connURL: dsn,
 		pgPool:  pool,
@@ -187,40 +187,40 @@ func openPostgres(dsn string, options openOptions) (*DB, error) {
 	// Initial connect: Ping first; on auth failure, rotate creds and
 	// retry once. This covers the hot-restart case where the env
 	// creds were revoked when the provisioner token died.
-	if err := d.pingWithRotate(context.Background()); err != nil {
-		db.Close()
+	if err := db.pingWithRotate(context.Background()); err != nil {
+		sx.Close()
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	if err := d.runMigrations(); err != nil {
-		db.Close()
+	if err := db.runMigrations(); err != nil {
+		sx.Close()
 		pool.Close()
 		return nil, err
 	}
-	return d, nil
+	return db, nil
 }
 
 // pingWithRotate attempts a Ping. On PostgreSQL auth failure, if a
 // CredsRotator is configured, creds are rotated and Ping is retried
 // once. On success after rotation, the pool is reset so any prior
 // conns opened with stale creds are evicted.
-func (d *DB) pingWithRotate(ctx context.Context) error {
-	err := d.DB.PingContext(ctx)
+func (db *DB) pingWithRotate(ctx context.Context) error {
+	err := db.DB.PingContext(ctx)
 	if err == nil {
 		return nil
 	}
-	if !isPostgresAuthError(err) || d.creds == nil || !d.creds.hasRotator() {
+	if !isPostgresAuthError(err) || db.creds == nil || !db.creds.hasRotator() {
 		return err
 	}
 	slog.Warn("postgres auth failed, rotating credentials", "error", err)
-	if rErr := d.creds.rotate(ctx); rErr != nil {
+	if rErr := db.creds.rotate(ctx); rErr != nil {
 		return fmt.Errorf("%w; rotate failed: %v", err, rErr)
 	}
 	// Reset the pool so any half-open conns using stale creds are
 	// discarded; next Acquire triggers BeforeConnect with fresh creds.
-	d.pgPool.Reset()
-	return d.DB.PingContext(ctx)
+	db.pgPool.Reset()
+	return db.DB.PingContext(ctx)
 }
 
 // isPostgresAuthError reports whether err is a PostgreSQL auth
