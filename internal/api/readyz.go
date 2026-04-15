@@ -121,15 +121,6 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 			}()
 		}
 
-		// Vault token (AppRole renewal)
-		if srv.VaultTokenHealthy != nil {
-			if srv.VaultTokenHealthy() {
-				checks["vault_token"] = "pass"
-			} else {
-				checks["vault_token"] = "fail"
-			}
-		}
-
 		allOK := true
 		for _, v := range checks {
 			if v == "fail" {

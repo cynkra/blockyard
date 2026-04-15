@@ -57,9 +57,10 @@ When not all checks pass, `status` is `"not_ready"` and the HTTP status is `503`
 
 When OIDC, Redis, and/or OpenBao are configured, their health is
 included in the checks (as `"idp"`, `"redis"`, and `"openbao"`
-respectively). When AppRole auth is used (`openbao.role_id`), a
-`"vault_token"` check reports whether the token renewal goroutine is
-healthy.
+respectively). There is no separate AppRole-token health check:
+admin-scoped calls transparently re-login on 403, so token expiry
+manifests only as short-lived `"openbao"` failures if a login cannot
+be completed.
 
 When served on the [management listener](/docs/guides/observability/#management-listener),
 `/readyz` always returns full per-component check details regardless of

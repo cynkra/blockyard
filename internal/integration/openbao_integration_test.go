@@ -196,21 +196,21 @@ func vaultPost(httpClient *http.Client, path string, data map[string]any) error 
 }
 
 func TestBootstrapReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, integration.StaticAdmin(func() string { return rootToken }))
 	if err := integration.Bootstrap(context.Background(), client, "jwt", false); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 }
 
 func TestHealthReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, integration.StaticAdmin(func() string { return rootToken }))
 	if err := client.Health(context.Background()); err != nil {
 		t.Fatalf("Health: %v", err)
 	}
 }
 
 func TestJWTLoginReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, integration.StaticAdmin(func() string { return rootToken }))
 
 	// Issue a JWT using the mock IdP.
 	jwt := mockIdP.IssueJWT("test-user-1", []string{"testers"})
@@ -228,7 +228,7 @@ func TestJWTLoginReal(t *testing.T) {
 }
 
 func TestEnrollAndReadCredential(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, integration.StaticAdmin(func() string { return rootToken }))
 
 	sub := "test-user-enroll"
 	service := "openai"
@@ -252,7 +252,7 @@ func TestEnrollAndReadCredential(t *testing.T) {
 }
 
 func TestTokenScopingReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, integration.StaticAdmin(func() string { return rootToken }))
 
 	// Write a secret for user-a.
 	err := integration.EnrollCredential(context.Background(), client, "user-a", "svc", map[string]any{

@@ -14,7 +14,7 @@ func mockBao(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, func() string { return "test-admin-token" })
+	return NewClient(srv.URL, StaticAdmin(func() string { return "test-admin-token" }))
 }
 
 func TestHealth_OK(t *testing.T) {
@@ -197,5 +197,100 @@ func TestKVRead_NotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' in error, got %v", err)
+	}
+}
+
+func TestKVReadAdmin_RetriesOn403(t *testing.T) {
+	// First admin request returns 403; after a Reauth the second
+	// request returns 200. We assert the caller sees the 200 payload
+	// and that exactly one login + two KV reads happened.
+	var loginCount, readCount int
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/auth/approle/login", func(w http.ResponseWriter, r *http.Request) {
+		loginCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"auth": map[string]any{
+				"client_token":   "tok-v" + string(rune('0'+loginCount)),
+				"lease_duration": 300,
+			},
+		})
+	})
+	mux.HandleFunc("GET /v1/secret/data/foo", func(w http.ResponseWriter, r *http.Request) {
+		readCount++
+		if readCount == 1 {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		// After reauth the new token must be attached.
+		if r.Header.Get("X-Vault-Token") != "tok-v2" {
+			t.Errorf("retry used wrong token: %q", r.Header.Get("X-Vault-Token"))
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"data": map[string]any{"api_key": "revealed"},
+			},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	auth := NewAppRoleAuth(srv.URL, AppRoleCreds{RoleIDEnv: "r", SecretIDEnv: "s"})
+	if err := auth.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(srv.URL, auth)
+
+	data, err := client.KVReadAdmin(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("KVReadAdmin: %v", err)
+	}
+	if data["api_key"] != "revealed" {
+		t.Errorf("api_key = %v", data["api_key"])
+	}
+	if loginCount != 2 {
+		t.Errorf("login count = %d, want 2 (initial + reauth)", loginCount)
+	}
+	if readCount != 2 {
+		t.Errorf("read count = %d, want 2 (initial 403 + retry)", readCount)
+	}
+}
+
+func TestKVReadAdmin_HardFailOn403Twice(t *testing.T) {
+	// Vault always returns 403. After one reauth attempt the retry
+	// also 403s — we expect a hard error rather than an infinite
+	// retry loop.
+	var readCount int
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/auth/approle/login", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"auth": map[string]any{
+				"client_token":   "tok",
+				"lease_duration": 300,
+			},
+		})
+	})
+	mux.HandleFunc("GET /v1/secret/data/foo", func(w http.ResponseWriter, r *http.Request) {
+		readCount++
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	auth := NewAppRoleAuth(srv.URL, AppRoleCreds{RoleIDEnv: "r", SecretIDEnv: "s"})
+	if err := auth.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(srv.URL, auth)
+
+	_, err := client.KVReadAdmin(context.Background(), "foo")
+	if err == nil {
+		t.Fatal("expected error after persistent 403")
+	}
+	if readCount != 2 {
+		t.Errorf("read count = %d, want 2 (one retry only, no loop)", readCount)
 	}
 }

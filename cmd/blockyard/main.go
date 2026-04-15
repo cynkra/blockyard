@@ -200,41 +200,33 @@ func main() {
 	srv.EvictWorkerFn = ops.EvictWorker
 	srv.SpawnLogCaptureFn = ops.SpawnLogCapture
 
-	// Background goroutine context — used for vault token renewal and others.
+	// Background goroutine context — used for long-running background work.
 	bgCtx, bgCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: bgCancel is called by Drainer.Finish/Shutdown, not defer
 	var bgWg sync.WaitGroup
 
 	// ── Initialize OpenBao (must happen before OIDC for vault reference resolution) ──
 
 	if cfg.Openbao != nil {
-		tokenFilePath := cfg.Openbao.TokenFile
+		var admin integration.AdminAuthenticator
 
-		var adminTokenFunc func() string
-
-		if cfg.Openbao.RoleID != "" {
-			// AppRole auth flow.
-			token, ttl, err := integration.InitAppRole(context.Background(), cfg.Openbao.Address, cfg.Openbao.RoleID, tokenFilePath)
-			if err != nil {
+		if cfg.Openbao.RoleID != "" || os.Getenv("BLOCKYARD_OPENBAO_ROLE_ID_FILE") != "" {
+			// AppRole auth flow. Credentials are resolved lazily at
+			// login time, so _FILE-based delivery can be rotated without
+			// restart — a fresh login on any 403 picks up the new
+			// secret_id from disk.
+			creds := integration.AppRoleCredsFromEnv(cfg.Openbao.RoleID)
+			auth := integration.NewAppRoleAuth(cfg.Openbao.Address, creds)
+			if err := auth.Login(context.Background()); err != nil {
 				slog.Error("vault authentication failed", "error", err)
 				os.Exit(1)
 			}
-
-			// Start token renewal goroutine.
-			renewer := integration.NewTokenRenewer(cfg.Openbao.Address, token, tokenFilePath)
-			adminTokenFunc = renewer.Token
-			srv.VaultTokenHealthy = renewer.Healthy
-
-			bgWg.Add(1)
-			go func() {
-				defer bgWg.Done()
-				renewer.Run(bgCtx, ttl)
-			}()
+			admin = auth
 		} else {
 			// Deprecated static admin_token.
-			adminTokenFunc = cfg.Openbao.AdminToken.MustExpose
+			admin = integration.StaticAdmin(cfg.Openbao.AdminToken.MustExpose)
 		}
 
-		srv.VaultClient = integration.NewClient(cfg.Openbao.Address, adminTokenFunc)
+		srv.VaultClient = integration.NewClient(cfg.Openbao.Address, admin)
 		srv.VaultTokenCache = integration.NewVaultTokenCache()
 
 		// Resolve vault references in config (e.g. "vault:path#key").
@@ -498,9 +490,6 @@ func main() {
 	}
 	if srv.RedisClient != nil {
 		checkerDeps.RedisPing = srv.RedisClient.Ping
-	}
-	if srv.VaultTokenHealthy != nil {
-		checkerDeps.VaultTokenOK = srv.VaultTokenHealthy
 	}
 	srv.Checker = preflight.NewChecker(checkerDeps)
 	srv.Checker.Init(context.Background(), configReport, backendReport)

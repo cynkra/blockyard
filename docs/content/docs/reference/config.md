@@ -330,25 +330,41 @@ role_id       = "blockyard-server"    # AppRole role identifier (recommended)
 # admin_token = "vault-admin-token"   # deprecated: use role_id instead
 token_ttl     = "1h"
 jwt_auth_path = "jwt"
-# token_file  = "/data/.vault-token"  # where the AppRole token is persisted
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `address` | `string` | — | **Yes** | OpenBao server address (must start with `http://` or `https://`) |
-| `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via the `BLOCKYARD_OPENBAO_SECRET_ID` env var at bootstrap. |
+| `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via `BLOCKYARD_OPENBAO_SECRET_ID` (or `_FILE`) at login time. |
 | `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Supports [vault references](#vault-references). Use `role_id` with AppRole auth instead. |
-| `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
+| `token_ttl` | `duration` | `1h` | No | TTL for per-user OpenBao tokens issued via JWT login |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in OpenBao |
-| `token_file` | `string` | `/data/.vault-token` | No | Path where the persisted AppRole token is stored. The parent directory must be writable. |
 | `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during OpenBao bootstrap. Useful when the OpenBao policy format differs from what Blockyard expects. |
 
+### AppRole credential delivery
+
+With `role_id` set, the server authenticates to OpenBao via AppRole. Both
+`role_id` and `secret_id` can be delivered via env var or via a file —
+file-backed delivery is re-read on every login, so rotations on disk are
+picked up without a restart:
+
+| Env var | Purpose |
+|---|---|
+| `BLOCKYARD_OPENBAO_ROLE_ID` | `role_id` literal. Overrides `role_id` from TOML. |
+| `BLOCKYARD_OPENBAO_ROLE_ID_FILE` | Path to a file containing `role_id`. Re-read on every login. Takes precedence over the env variant. |
+| `BLOCKYARD_OPENBAO_SECRET_ID` | `secret_id` literal. Required unless `_FILE` is set. |
+| `BLOCKYARD_OPENBAO_SECRET_ID_FILE` | Path to a file containing `secret_id`. Re-read on every login. Takes precedence over the env variant. |
+
+Token lifecycle: the server performs an AppRole login at startup and caches
+the token in process memory. On any OpenBao 403 the server re-resolves
+credentials (re-reading any `_FILE` source) and logs in again transparently;
+concurrent retries share one login attempt. There is no on-disk token and
+no background renewer — shorter `token_ttl` settings on the AppRole role
+simply produce more frequent logins and make rotation more responsive.
+
 > [!TIP]
-> With AppRole auth (`role_id`), the server authenticates to OpenBao using a
-> one-time `secret_id` (via `BLOCKYARD_OPENBAO_SECRET_ID`) and then renews
-> its own token indefinitely. After initial bootstrap, the env var is no
-> longer needed — the token is persisted to disk and reused across restarts.
-> `session_secret` is also auto-generated and stored in vault.
+> `session_secret` is auto-generated and stored in vault when not set
+> explicitly.
 
 > [!WARNING]
 > `admin_token` and `role_id` are mutually exclusive — setting both is a
