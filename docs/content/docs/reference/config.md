@@ -330,6 +330,7 @@ role_id       = "blockyard-server"    # AppRole role identifier (recommended)
 # admin_token = "vault-admin-token"   # deprecated: use role_id instead
 token_ttl     = "1h"
 jwt_auth_path = "jwt"
+# token_file  = "/data/.vault-token"  # where the AppRole token is persisted
 ```
 
 | Field | Type | Default | Required | Description |
@@ -339,6 +340,7 @@ jwt_auth_path = "jwt"
 | `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Supports [vault references](#vault-references). Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in OpenBao |
+| `token_file` | `string` | `/data/.vault-token` | No | Path where the persisted AppRole token is stored. The parent directory must be writable. |
 | `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during OpenBao bootstrap. Useful when the OpenBao policy format differs from what Blockyard expects. |
 
 > [!TIP]
