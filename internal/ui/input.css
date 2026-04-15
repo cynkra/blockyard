@@ -378,8 +378,10 @@
   .table th { @apply text-left text-sm font-medium text-base-content/60; }
 
   /* ── Drop zone (new-app upload) ── */
+  /* border-base-content/30 stays visible in both themes; border-base-300
+     blends into the dark-theme background. */
   .drop-zone {
-    @apply border-2 border-dashed border-base-300 rounded-lg p-6 text-center cursor-pointer;
+    @apply border-2 border-dashed border-base-content/30 rounded-lg p-6 text-center cursor-pointer;
     transition: border-color 0.15s, background 0.15s;
   }
   .drop-zone:hover, .drop-zone.active {
@@ -523,18 +525,27 @@
     box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent) !important;
   }
 
-  /* file-input is a composite element: Safari renders
-     ::file-selector-button and the input body as separate boxes, so a
-     box-shadow on the input itself wraps only the right-hand portion.
-     Suppress all focus styling on the input and move the halo to a
-     .file-input-wrap parent driven by :focus-within — the wrapper is
-     one box in every browser. */
-  .file-input:focus {
+  /* file-input is a composite: Safari renders ::file-selector-button
+     and the input body as separate boxes, each with its own border
+     and native focus ring, so a border/halo on the input itself looked
+     like two rings. Strip the input's own chrome — border, box-shadow,
+     outline, and the button's native focus ring — and draw the border
+     + focus halo on a wrapping .file-input-wrap instead, which is
+     a single box in every browser. */
+  .file-input {
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+  .file-input:focus,
+  .file-input::file-selector-button:focus,
+  .file-input::file-selector-button:focus-visible {
     outline: none !important;
     box-shadow: none !important;
   }
+  .file-input-wrap {
+    @apply border border-base-content/20 rounded-md overflow-hidden;
+  }
   .file-input-wrap:focus-within {
-    border-radius: 4px;
     box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent);
   }
 
