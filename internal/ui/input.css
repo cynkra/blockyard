@@ -378,8 +378,10 @@
   .table th { @apply text-left text-sm font-medium text-base-content/60; }
 
   /* ── Drop zone (new-app upload) ── */
+  /* border-base-content/30 stays visible in both themes; border-base-300
+     blends into the dark-theme background. */
   .drop-zone {
-    @apply border-2 border-dashed border-base-300 rounded-lg p-6 text-center cursor-pointer;
+    @apply border-2 border-dashed border-base-content/30 rounded-lg p-6 text-center cursor-pointer;
     transition: border-color 0.15s, background 0.15s;
   }
   .drop-zone:hover, .drop-zone.active {
@@ -505,9 +507,56 @@
   /* ── Misc ── */
   .hidden { display: none !important; }
   .empty-state { @apply p-8 text-center text-base-content/50; }
-  .htmx-indicator { @apply hidden; }
-  .htmx-request .htmx-indicator { @apply inline-block; }
-  .htmx-request.htmx-indicator { @apply inline-block; }
+  /* !important beats daisyUI's .loading { display: inline-block } which
+     otherwise wins layer ordering and leaves the spinner taking space
+     (blockified to display: block inside flex buttons like btn). */
+  .htmx-indicator { display: none !important; }
+  .htmx-request .htmx-indicator { display: inline-block !important; }
+  .htmx-request.htmx-indicator { display: inline-block !important; }
+
+  /* Form-control focus: daisyUI 5's default draws a 2px black outline
+     offset 2px outside a 1px black border, giving a heavy doubled-up
+     ring on focus. Replace with a single soft 2px halo in the primary
+     hue. !important is needed to beat daisyUI's later-declared layer. */
+  .input:focus,
+  .select:focus,
+  .textarea:focus {
+    outline: none !important;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent) !important;
+  }
+
+  /* file-input is a composite: Safari renders ::file-selector-button
+     and the input body as separate boxes, each with its own border
+     and native focus ring, so a border/halo on the input itself looked
+     like two rings. Strip the input's own chrome — border, box-shadow,
+     outline, and the button's native focus ring — and draw the border
+     + focus halo on a wrapping .file-input-wrap instead, which is
+     a single box in every browser. */
+  .file-input {
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+  .file-input:focus,
+  .file-input::file-selector-button:focus,
+  .file-input::file-selector-button:focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+  .file-input-wrap {
+    @apply border border-base-content/20 rounded-md overflow-hidden;
+  }
+  .file-input-wrap:focus-within {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent);
+  }
+
+  /* file-input text vertical centering: daisyUI sets line-height: 28px on
+     a 40px-tall input, which leaves both the ::file-selector-button
+     label and the "No file chosen" text visibly above center. Match
+     line-height to height so the text sits on the vertical midline. */
+  .file-input,
+  .file-input::file-selector-button {
+    line-height: 40px !important;
+  }
   /* ── Mobile responsive ── */
   @media (max-width: 768px) {
     .left-nav { width: 56px; }

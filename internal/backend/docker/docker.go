@@ -119,13 +119,28 @@ func New(ctx context.Context, fullCfg *config.Config, bundleServerPath, serverVe
 	}
 
 	serverID := detectServerID()
+	var serverMounts []container.MountPoint
 	if serverID != "" {
+		// Inspect once to canonicalize the ID and fetch mounts. The
+		// canonical full 64-char ID is required because detectServerID
+		// may return a 12-char short ID (notably from /etc/hostname on
+		// cgroup v2 hosts), but NetworkInspect's Containers map is
+		// keyed by full IDs — the skip-self checks in
+		// (dis)connectServiceContainers use ==, so without this the
+		// server double-attaches to the worker network and Spawn fails
+		// with "endpoint ... already exists". See #230.
+		r, err := cli.ContainerInspect(ctx, serverID, client.ContainerInspectOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("inspect server container %s: %w", serverID, err)
+		}
+		serverID = r.Container.ID
+		serverMounts = r.Container.Mounts
 		slog.Info("running in container mode", "server_id", serverID)
 	} else {
 		slog.Info("running in native mode (no server container ID detected)")
 	}
 
-	mountCfg, err := detectMountMode(ctx, cli, serverID, bundleServerPath)
+	mountCfg, err := detectMountMode(serverMounts, bundleServerPath)
 	if err != nil {
 		return nil, err
 	}

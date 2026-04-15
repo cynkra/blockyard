@@ -1,35 +1,33 @@
 package docker
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"strings"
 
-	"github.com/moby/moby/client"
+	"github.com/moby/moby/api/types/container"
 )
 
-// detectMountMode inspects the server's own container to determine how
-// dataPath (e.g. "/data/bundles") is mounted. It returns a MountConfig
+// detectMountMode examines the server container's mount set to determine
+// how dataPath (e.g. "/data/bundles") is mounted. It returns a MountConfig
 // describing the mount type (native, bind, or volume) and the information
 // needed to create corresponding mounts for sibling containers.
 //
+// Pass nil mounts for native mode (no containerized server). The caller is
+// responsible for inspecting the server container and passing its mounts;
+// this keeps detection a pure function and lets the caller reuse the
+// inspect result for other purposes (e.g. canonicalizing the container ID).
+//
 // Detection algorithm:
-//  1. If serverID is empty (native mode), no translation is needed.
-//  2. Inspect the server container and iterate its mounts.
-//  3. Find the mount whose Destination is a prefix of dataPath.
-//  4. If type=volume → store volume name and destination.
-//  5. If type=bind → store host source path and destination.
-//  6. If no covering mount is found → error.
-func detectMountMode(ctx context.Context, cli dockerClient, serverID, dataPath string) (MountConfig, error) {
-	if serverID == "" {
+//  1. Iterate the server container's mounts.
+//  2. Find the mount whose Destination is the longest prefix of dataPath.
+//  3. If type=volume → store volume name and destination.
+//  4. If type=bind → store host source path and destination.
+//  5. If no covering mount is found → error.
+func detectMountMode(mounts []container.MountPoint, dataPath string) (MountConfig, error) {
+	if mounts == nil {
 		slog.Info("mount auto-detect: native mode (no container)")
 		return MountConfig{Mode: MountModeNative}, nil
-	}
-
-	cResult, err := cli.ContainerInspect(ctx, serverID, client.ContainerInspectOptions{})
-	if err != nil {
-		return MountConfig{}, fmt.Errorf("mount auto-detect: inspect container %s: %w", serverID, err)
 	}
 
 	// Find the mount whose Destination is the longest prefix of dataPath.
@@ -37,7 +35,7 @@ func detectMountMode(ctx context.Context, cli dockerClient, serverID, dataPath s
 	var bestCfg MountConfig
 	found := false
 
-	for _, m := range cResult.Container.Mounts {
+	for _, m := range mounts {
 		dest := m.Destination
 		if !pathIsPrefix(dest, dataPath) {
 			continue
