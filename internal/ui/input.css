@@ -511,6 +511,20 @@
   .htmx-indicator { display: none !important; }
   .htmx-request .htmx-indicator { display: inline-block !important; }
   .htmx-request.htmx-indicator { display: inline-block !important; }
+
+  /* Form-control focus: daisyUI 5's default draws a 2px black outline
+     offset 2px outside a 1px black border, producing a heavy double-line
+     on focus. Collapse the offset and swap to the primary color so the
+     border and outline merge into a single 3px primary-colored ring.
+     !important is needed to beat daisyUI's later-declared layer. */
+  .file-input:focus,
+  .input:focus,
+  .select:focus,
+  .textarea:focus {
+    outline: 2px solid var(--color-primary) !important;
+    outline-offset: 0 !important;
+    border-color: var(--color-primary) !important;
+  }
   /* ── Mobile responsive ── */
   @media (max-width: 768px) {
     .left-nav { width: 56px; }
