@@ -210,3 +210,50 @@ func (c *Client) KVRead(ctx context.Context, path string, token string) (map[str
 	}
 	return result.Data.Data, nil
 }
+
+// dbCredsResponse is the relevant subset of OpenBao's database
+// secrets-engine credential-generation response.
+type dbCredsResponse struct {
+	LeaseDuration int `json:"lease_duration"`
+	Data          struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	} `json:"data"`
+}
+
+// GenerateDBCreds reads a fresh dynamic credential from the database
+// secrets engine at database/creds/{role}. The returned lease is owned
+// by the token used for the call, so pass in a token with a lifetime
+// at least as long as the consumer's lifetime (e.g. blockyard's own
+// AppRole token) — if the caller's token is revoked, OpenBao cascades
+// the revocation to the DB role.
+// GET {addr}/v1/database/creds/{role}
+func (c *Client) GenerateDBCreds(ctx context.Context, token, role string) (username, password string, ttl time.Duration, err error) {
+	url := fmt.Sprintf("%s/v1/database/creds/%s", c.addr, role)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("openbao db creds: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("openbao db creds: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return "", "", 0, fmt.Errorf("openbao db creds: status %d", resp.StatusCode)
+	}
+
+	var result dbCredsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", 0, fmt.Errorf("openbao db creds: decode: %w", err)
+	}
+	if result.Data.Username == "" || result.Data.Password == "" {
+		return "", "", 0, fmt.Errorf("openbao db creds: empty username or password")
+	}
+
+	return result.Data.Username, result.Data.Password, time.Duration(result.LeaseDuration) * time.Second, nil
+}

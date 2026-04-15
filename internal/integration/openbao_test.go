@@ -199,3 +199,69 @@ func TestKVRead_NotFound(t *testing.T) {
 		t.Errorf("expected 'not found' in error, got %v", err)
 	}
 }
+
+func TestGenerateDBCreds_Success(t *testing.T) {
+	var receivedPath, receivedToken string
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedToken = r.Header.Get("X-Vault-Token")
+		json.NewEncoder(w).Encode(map[string]any{
+			"lease_duration": 2592000,
+			"data": map[string]any{
+				"username": "v-token-blockyard-abc123",
+				"password": "A1b2C3d4",
+			},
+		})
+	}))
+
+	user, pass, ttl, err := client.GenerateDBCreds(context.Background(), "caller-token", "blockyard-app")
+	if err != nil {
+		t.Fatalf("GenerateDBCreds: %v", err)
+	}
+	if receivedPath != "/v1/database/creds/blockyard-app" {
+		t.Errorf("path = %q, want /v1/database/creds/blockyard-app", receivedPath)
+	}
+	if receivedToken != "caller-token" {
+		t.Errorf("token header = %q, want caller-token", receivedToken)
+	}
+	if user != "v-token-blockyard-abc123" {
+		t.Errorf("user = %q, want v-token-blockyard-abc123", user)
+	}
+	if pass != "A1b2C3d4" {
+		t.Errorf("pass = %q, want A1b2C3d4", pass)
+	}
+	if ttl.Hours() != 720 {
+		t.Errorf("ttl = %v, want 720h (30d)", ttl)
+	}
+}
+
+func TestGenerateDBCreds_Forbidden(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	_, _, _, err := client.GenerateDBCreds(context.Background(), "bad-token", "blockyard-app")
+	if err == nil {
+		t.Fatal("expected error for forbidden")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected 403 in error, got %v", err)
+	}
+}
+
+func TestGenerateDBCreds_EmptyCreds(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"lease_duration": 60,
+			"data":           map[string]any{"username": "", "password": ""},
+		})
+	}))
+
+	_, _, _, err := client.GenerateDBCreds(context.Background(), "token", "blockyard-app")
+	if err == nil {
+		t.Fatal("expected error for empty creds")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("expected 'empty' in error, got %v", err)
+	}
+}

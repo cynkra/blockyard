@@ -142,9 +142,10 @@ type DataMountSource struct {
 }
 
 type DatabaseConfig struct {
-	Driver string `toml:"driver"` // "sqlite" (default) or "postgres"
-	Path   string `toml:"path"`   // used when driver = "sqlite"
-	URL    string `toml:"url"`    // PostgreSQL connection string; used when driver = "postgres"
+	Driver         string `toml:"driver"`           // "sqlite" (default) or "postgres"
+	Path           string `toml:"path"`             // used when driver = "sqlite"
+	URL            string `toml:"url"`              // PostgreSQL connection string; used when driver = "postgres"
+	VaultCredsPath string `toml:"vault_creds_path"` // OpenBao database secrets role (e.g. "blockyard-app"); when set, blockyard mints its own Postgres creds from database/creds/{path} on auth failure
 }
 
 type ProxyConfig struct {

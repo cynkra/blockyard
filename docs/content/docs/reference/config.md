@@ -171,7 +171,8 @@ max_bundle_size       = 104857600
 [database]
 driver = "sqlite"
 path   = "/data/db/blockyard.db"
-# url  = ""   # PostgreSQL connection string (when driver = "postgres")
+# url              = ""                 # PostgreSQL connection string (when driver = "postgres")
+# vault_creds_path = "blockyard-app"    # OpenBao database secrets role; enables self-mint on auth failure
 ```
 
 | Field | Type | Default | Required | Description |
@@ -179,6 +180,7 @@ path   = "/data/db/blockyard.db"
 | `driver` | `string` | `sqlite` | No | Database driver: `sqlite` or `postgres` |
 | `path` | `path` | `/data/db/blockyard.db` | When `driver = "sqlite"` | Path to the SQLite database file (created if missing). The parent directory must be writable. |
 | `url` | `string` | — | When `driver = "postgres"` | PostgreSQL connection string (e.g. `postgres://user:pass@host/dbname`) |
+| `vault_creds_path` | `string` | — | No (postgres-only) | OpenBao database-secrets role (e.g. `blockyard-app`). When set and `[openbao]` is configured, blockyard self-mints fresh Postgres credentials from `database/creds/{path}` on auth failure — both at startup (env creds may already be revoked) and mid-run (lease expiry or manual revoke). The lease then inherits blockyard's own AppRole token, so it survives as long as blockyard does. |
 
 ## `[proxy]`
 

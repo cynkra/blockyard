@@ -710,32 +710,37 @@ func TestMigrateRoundtrip(t *testing.T) {
 func roundtrip(t *testing.T, db *DB) {
 	t.Helper()
 
-	m, err := db.newMigrator()
+	m, cleanup, err := db.newMigrator()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Up
 	if err := m.Up(); err != nil {
+		cleanup()
 		t.Fatalf("initial up: %v", err)
 	}
+	cleanup()
 	schemaAfterUp := dumpSchema(t, db)
 
 	// Need a fresh migrator — golang-migrate is stateful
-	m, err = db.newMigrator()
+	m, cleanup, err = db.newMigrator()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Down
 	if err := m.Down(); err != nil {
+		cleanup()
 		t.Fatalf("down: %v", err)
 	}
+	cleanup()
 
-	m, err = db.newMigrator()
+	m, cleanup, err = db.newMigrator()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cleanup()
 
 	// Up again
 	if err := m.Up(); err != nil {
