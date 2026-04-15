@@ -5,7 +5,7 @@
 {{define "content"}}
 <div class="page-header">
     <h1>Admin</h1>
-    <p class="page-description">User management and system checks.</p>
+    <p class="page-description">User management, system checks, and recent server warnings.</p>
 </div>
 
 <details class="admin-section" open>
@@ -38,6 +38,18 @@
         <div id="check-results">
         {{template "checkResults" .}}
         </div>
+    </div>
+</details>
+
+<details class="admin-section" id="recent-errors">
+    <summary class="admin-section-title">
+        <span>Recent server warnings</span>
+        {{if .Errors.Count}}
+        <span class="admin-section-count">{{.Errors.Count}}</span>
+        {{end}}
+    </summary>
+    <div class="admin-section-body">
+        {{template "adminErrors" .Errors}}
     </div>
 </details>
 

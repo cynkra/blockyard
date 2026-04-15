@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -218,7 +219,8 @@ func New() *UI {
 			content, "templates/base.html", "templates/icons.html", "templates/profile.html", "templates/token_list.html",
 		),
 	)
-	// Re-parse admin.html with the shared system_checks and admin_users fragments.
+	// Re-parse admin.html with the shared system_checks, admin_users,
+	// and admin_errors fragments.
 	pages["admin.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
 			content,
@@ -226,6 +228,7 @@ func New() *UI {
 			"templates/admin.html",
 			"templates/system_checks.html",
 			"templates/admin_users.html",
+			"templates/admin_errors.html",
 		),
 	)
 
@@ -236,6 +239,7 @@ func New() *UI {
 		"system_checks.html",
 		"system_banner.html",
 		"admin_users.html",
+		"admin_errors.html",
 		"sidebar.html",
 		"tab_overview.html",
 		"tab_settings.html",
@@ -268,6 +272,7 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/api-keys", ui.apiKeysPage(srv))
 	r.Get("/admin", ui.adminPage(srv))
 	r.Get("/ui/admin/users", ui.adminUsersFragment(srv))
+	r.Get("/ui/admin/errors", ui.adminErrorsFragment(srv))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
 	r.Post("/ui/system/run", ui.systemRunFragment(srv))
@@ -351,6 +356,27 @@ type adminData struct {
 	layoutData
 	Report *preflight.Report
 	Users  adminUsersData
+	Errors adminErrorsData
+}
+
+type adminErrorsData struct {
+	Count    int
+	Capacity int
+	Entries  []adminErrorEntry
+}
+
+type adminErrorEntry struct {
+	TimeRel     string
+	TimeRFC3339 string
+	Level       string
+	LevelClass  string // daisyUI badge variant
+	Message     string
+	Attrs       []adminErrorAttr
+}
+
+type adminErrorAttr struct {
+	Key   string
+	Value string
 }
 
 type adminUsersData struct {
@@ -724,6 +750,7 @@ func (ui *UI) adminPage(srv *server.Server) http.HandlerFunc {
 			layoutData: baseLayout(srv, "admin", caller),
 			Report:     report,
 			Users:      usersData,
+			Errors:     buildAdminErrors(srv),
 		}
 
 		if err := ui.pages["admin.html"].ExecuteTemplate(w, "base", data); err != nil {
@@ -758,6 +785,87 @@ func (ui *UI) adminUsersFragment(srv *server.Server) http.HandlerFunc {
 		if err := ui.fragments["admin_users.html"].ExecuteTemplate(w, "adminUsersTable", usersData); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
+	}
+}
+
+// adminErrorsFragment serves the recent-errors table fragment, polled
+// by HTMX every few seconds from the /admin page. Admin-only.
+func (ui *UI) adminErrorsFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		data := buildAdminErrors(srv)
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_errors.html"].ExecuteTemplate(w, "adminErrorsTable", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// buildAdminErrors snapshots the error-log ring buffer and formats
+// entries for the admin UI. Returns a zero-value struct (no entries)
+// when the store is nil — shouldn't happen in production but keeps
+// tests resilient.
+func buildAdminErrors(srv *server.Server) adminErrorsData {
+	if srv.ErrorLog == nil {
+		return adminErrorsData{}
+	}
+	snap := srv.ErrorLog.Snapshot()
+	entries := make([]adminErrorEntry, 0, len(snap))
+	for _, e := range snap {
+		attrs := make([]adminErrorAttr, 0, len(e.Attrs))
+		for _, a := range e.Attrs {
+			attrs = append(attrs, adminErrorAttr{Key: a.Key, Value: a.Value})
+		}
+		entries = append(entries, adminErrorEntry{
+			TimeRel:     relTimeShort(e.Time),
+			TimeRFC3339: e.Time.UTC().Format(time.RFC3339),
+			Level:       e.Level.String(),
+			LevelClass:  errorLevelBadgeClass(e.Level),
+			Message:     e.Message,
+			Attrs:       attrs,
+		})
+	}
+	return adminErrorsData{
+		Count:    srv.ErrorLog.Len(),
+		Capacity: srv.ErrorLog.Cap(),
+		Entries:  entries,
+	}
+}
+
+// errorLevelBadgeClass picks the daisyUI badge variant for a slog level.
+func errorLevelBadgeClass(lvl slog.Level) string {
+	switch {
+	case lvl >= slog.LevelError:
+		return "badge-error"
+	case lvl >= slog.LevelWarn:
+		return "badge-warning"
+	case lvl >= slog.LevelInfo:
+		return "badge-info"
+	default:
+		return "badge-neutral"
+	}
+}
+
+// relTimeShort renders a compact relative timestamp ("5s ago", "2m ago",
+// "just now") tuned for dense log rows where the existing timeAgo
+// helper's longer phrasing would wrap.
+func relTimeShort(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < 5*time.Second:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 

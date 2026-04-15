@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/errorlog"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
@@ -2950,6 +2952,103 @@ func TestAdminUsersFragmentSetsPushURL(t *testing.T) {
 	}
 	if !strings.Contains(push, "search=foo") || !strings.Contains(push, "role=viewer") {
 		t.Errorf("expected filter params in push URL, got %q", push)
+	}
+}
+
+func TestAdminErrorsFragmentEmpty(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "No warnings or errors captured yet") {
+		t.Errorf("expected empty-state message, got: %s", body)
+	}
+}
+
+func TestAdminErrorsFragmentRendersEntries(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelError,
+		Message: "deploy failed",
+		Attrs:   []errorlog.Attr{{Key: "app", Value: "foo"}},
+	})
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelWarn,
+		Message: "slow db query",
+	})
+
+	resp, err := http.Get(ts.URL + "/ui/admin/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "deploy failed") {
+		t.Error("expected ERROR message in body")
+	}
+	if !strings.Contains(body, "slow db query") {
+		t.Error("expected WARN message in body")
+	}
+	if !strings.Contains(body, "app") || !strings.Contains(body, "foo") {
+		t.Error("expected attr key/value in body")
+	}
+	// Newest-first — the WARN was appended after the ERROR so it should appear first.
+	if idxWarn, idxErr := strings.Index(body, "slow db query"), strings.Index(body, "deploy failed"); idxWarn == -1 || idxErr == -1 || idxWarn > idxErr {
+		t.Errorf("expected newest-first ordering: warn idx %d, err idx %d", idxWarn, idxErr)
+	}
+}
+
+func TestAdminErrorsFragmentForbiddenForNonAdmin(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "viewer-1", auth.RoleViewer)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminPageIncludesRecentErrorsSection(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelWarn,
+		Message: "startup warning here",
+	})
+
+	resp, err := http.Get(ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Recent server warnings") {
+		t.Error("expected Recent server warnings section header in admin page")
+	}
+	if !strings.Contains(body, "startup warning here") {
+		t.Error("expected initial snapshot rendered inline on /admin")
+	}
+	if !strings.Contains(body, `hx-get="/ui/admin/errors"`) {
+		t.Error("expected HTMX polling attribute for /ui/admin/errors")
 	}
 }
 
