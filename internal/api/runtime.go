@@ -16,6 +16,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // runtimeWorker is the JSON shape for a worker in the runtime response.
@@ -499,7 +500,7 @@ func DisableApp(srv *server.Server) http.HandlerFunc {
 					time.Sleep(time.Second)
 				}
 				for _, wid := range workerIDs {
-					ops.EvictWorker(context.Background(), srv, wid)
+					ops.EvictWorker(context.Background(), srv, wid, telemetry.ReasonGraceful)
 				}
 			}()
 		}

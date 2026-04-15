@@ -17,6 +17,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
 
@@ -55,7 +56,8 @@ func TestMetricsProxyRequestCounter(t *testing.T) {
 	srv, ts := testProxyServer(t)
 	createAndStartApp(t, ts, "metrics-app")
 
-	beforeCount := counterValue(srv.Metrics.ProxyRequests)
+	ok2xx := srv.Metrics.ProxyRequests.WithLabelValues("metrics-app", "2xx")
+	beforeCount := counterValue(ok2xx)
 	beforeHist := histogramCount(srv.Metrics.ProxyRequestDuration)
 
 	// Two requests
@@ -75,11 +77,11 @@ func TestMetricsProxyRequestCounter(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	afterCount := counterValue(srv.Metrics.ProxyRequests)
+	afterCount := counterValue(ok2xx)
 	afterHist := histogramCount(srv.Metrics.ProxyRequestDuration)
 
 	if delta := afterCount - beforeCount; delta != 2 {
-		t.Errorf("expected proxy_requests_total to increase by 2, got %v", delta)
+		t.Errorf("expected proxy_requests_total{app=metrics-app,status=2xx} +2, got %v", delta)
 	}
 	if delta := afterHist - beforeHist; delta != 2 {
 		t.Errorf("expected proxy_request_seconds observation count to increase by 2, got %v", delta)
@@ -171,14 +173,15 @@ func TestMetricsSessionActive(t *testing.T) {
 
 	// Evict the worker directly — sessions_active should drop
 	beforeEvict := gaugeValue(srv.Metrics.SessionsActive)
-	beforeStopped := counterValue(srv.Metrics.WorkersStopped)
+	stoppedGraceful := srv.Metrics.WorkersStopped.WithLabelValues(telemetry.ReasonGraceful)
+	beforeStopped := counterValue(stoppedGraceful)
 
 	workerIDs := srv.Workers.All()
 	if len(workerIDs) == 0 {
 		t.Fatal("expected at least one worker to evict")
 	}
 	for _, wid := range workerIDs {
-		ops.EvictWorker(context.Background(), srv, wid)
+		ops.EvictWorker(context.Background(), srv, wid, telemetry.ReasonGraceful)
 	}
 
 	afterEvict := gaugeValue(srv.Metrics.SessionsActive)
@@ -187,9 +190,9 @@ func TestMetricsSessionActive(t *testing.T) {
 			beforeEvict, afterEvict)
 	}
 
-	afterStopped := counterValue(srv.Metrics.WorkersStopped)
+	afterStopped := counterValue(stoppedGraceful)
 	if delta := afterStopped - beforeStopped; delta < 1 {
-		t.Errorf("expected workers_stopped_total +1 after eviction, got %v", delta)
+		t.Errorf("expected workers_stopped_total{reason=graceful} +1 after eviction, got %v", delta)
 	}
 }
 
@@ -235,7 +238,9 @@ func TestMetricsWebSocketRequest(t *testing.T) {
 	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
 	createAndStartApp(t, ts, "ws-metrics")
 
-	beforeCount := counterValue(srv.Metrics.ProxyRequests)
+	// WebSocket upgrades complete with HTTP 101 → 1xx class.
+	wsCounter := srv.Metrics.ProxyRequests.WithLabelValues("ws-metrics", "1xx")
+	beforeCount := counterValue(wsCounter)
 
 	ctx := context.Background()
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) +
@@ -259,19 +264,21 @@ func TestMetricsWebSocketRequest(t *testing.T) {
 
 	conn.Close(websocket.StatusNormalClosure, "done")
 
-	afterCount := counterValue(srv.Metrics.ProxyRequests)
+	afterCount := counterValue(wsCounter)
 	if delta := afterCount - beforeCount; delta < 1 {
-		t.Errorf("expected proxy_requests_total to increase for WebSocket, got %v", delta)
+		t.Errorf("expected proxy_requests_total{app=ws-metrics,status=1xx} to increase for WebSocket, got %v", delta)
 	}
 }
 
-// TestMetricsNotFoundDoesNotRecordDuration verifies that requests for
-// non-existent apps still increment proxy_requests_total (the counter
-// fires at the top of the handler) but the request returns 404.
+// TestMetricsNotFoundStillCounts verifies that requests for non-existent
+// apps still increment proxy_requests_total — under the
+// app="unknown",status="4xx" label combination, since we deliberately
+// don't echo the requested name into the label (cardinality bound).
 func TestMetricsNotFoundStillCounts(t *testing.T) {
 	srv, ts := testProxyServer(t)
 
-	before := counterValue(srv.Metrics.ProxyRequests)
+	notFound := srv.Metrics.ProxyRequests.WithLabelValues(telemetry.AppUnknown, "4xx")
+	before := counterValue(notFound)
 
 	resp, err := http.Get(ts.URL + "/app/no-such-app/")
 	if err != nil {
@@ -281,9 +288,9 @@ func TestMetricsNotFoundStillCounts(t *testing.T) {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 
-	after := counterValue(srv.Metrics.ProxyRequests)
+	after := counterValue(notFound)
 	if delta := after - before; delta != 1 {
-		t.Errorf("expected proxy_requests_total +1 even for 404, got %v", delta)
+		t.Errorf("expected proxy_requests_total{app=unknown,status=4xx} +1 for 404, got %v", delta)
 	}
 }
 

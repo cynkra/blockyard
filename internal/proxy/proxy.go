@@ -15,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/authz"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // Handler returns an http.Handler that proxies requests to Shiny app
@@ -43,7 +44,25 @@ func Handler(srv *server.Server) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		srv.Metrics.ProxyRequests.Inc()
+		// Record blockyard_proxy_requests_total once per request, the
+		// moment the response status is decided. Capturing appLabel by
+		// reference (it starts as "unknown" and is overwritten when
+		// the app is resolved) means the increment uses whatever name
+		// was known at status-decision time — "unknown" for 404s and
+		// bad URLs, the app name for everything else. This bounds
+		// cardinality against arbitrary inbound paths.
+		appLabel := telemetry.AppUnknown
+		rec := newStatusRecorder(w, func(code int) {
+			srv.Metrics.ProxyRequests.
+				WithLabelValues(appLabel, telemetry.ProxyStatusClass(code)).
+				Inc()
+		})
+		w = rec
+		// Defensive: if the handler returns without ever writing a
+		// status (no http.Error / Redirect / Write), still record one
+		// sample so the counter never silently misses requests.
+		defer rec.fireDefault()
+
 		appName := chi.URLParam(r, "name")
 
 		// 1. Look up app by ID (UUID) first, then by name.
@@ -72,6 +91,7 @@ func Handler(srv *server.Server) http.Handler {
 				return
 			}
 			if app != nil && phase == "redirect" {
+				appLabel = app.Name
 				newPath := "/app/" + app.Name + "/"
 				if rest := chi.URLParam(r, "*"); rest != "" {
 					newPath += rest
@@ -84,6 +104,7 @@ func Handler(srv *server.Server) http.Handler {
 			http.Error(w, "app not found", http.StatusNotFound)
 			return
 		}
+		appLabel = app.Name
 
 		// Reject requests to disabled apps before session routing.
 		if !app.Enabled {

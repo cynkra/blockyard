@@ -254,10 +254,13 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 	// the bwrap pid is sufficient.
 	//
 	// The first successful read may catch bwrap before it has written
-	// the uid_map (the real UID still shows the caller's UID). Keep
-	// polling while the observed UID matches the caller — namespace
-	// setup is still in progress.
+	// uid_map/gid_map (the real UID still shows the caller's UID).
+	// bwrap writes uid_map and gid_map as two separate syscalls, so
+	// there is also a window where UID has been remapped but GID has
+	// not. Keep polling while EITHER UID or GID still reads as the
+	// caller's — namespace setup is still in progress. Fixes #233.
 	callerUID := os.Getuid()
+	callerGID := os.Getgid()
 	var uidLine, gidLine string
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
@@ -274,12 +277,13 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 			}
 			if curUID != "" && curGID != "" {
 				hostUID, _ := parseStatusUID(curUID)
-				if hostUID != callerUID {
+				hostGID, _ := parseStatusUID(curGID)
+				if hostUID != callerUID && hostGID != callerGID {
 					uidLine = curUID
 					gidLine = curGID
 					break
 				}
-				// Still showing caller's UID — namespace
+				// Still showing caller's UID or GID — namespace
 				// setup in progress, keep polling.
 				uidLine = curUID
 				gidLine = curGID

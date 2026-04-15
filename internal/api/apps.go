@@ -24,6 +24,7 @@ import (
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/task"
+	"github.com/cynkra/blockyard/internal/telemetry"
 	"github.com/cynkra/blockyard/internal/units"
 )
 
@@ -1017,7 +1018,7 @@ func drainWorkers(srv *server.Server, appID string, workerIDs []string, sender t
 	}
 
 	for _, wid := range workerIDs {
-		ops.EvictWorker(context.Background(), srv, wid)
+		ops.EvictWorker(context.Background(), srv, wid, telemetry.ReasonGraceful)
 		sender.Write(fmt.Sprintf("stopped worker %s", wid))
 	}
 	sender.Write(fmt.Sprintf("stopped %d workers", len(workerIDs)))

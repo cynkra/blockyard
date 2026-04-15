@@ -114,7 +114,7 @@ type Server struct {
 
 	// Hooks for operations that would cause import cycles if called
 	// directly from server. Set during initialization in main().
-	EvictWorkerFn    func(ctx context.Context, srv *Server, workerID string)
+	EvictWorkerFn    func(ctx context.Context, srv *Server, workerID, reason string)
 	SpawnLogCaptureFn func(ctx context.Context, srv *Server, workerID, appID string)
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,11 @@ func newTestServer(t *testing.T, cfg *config.Config) (*server.Server, *httptest.
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
+	// Track background restore goroutines so cleanup waits for them
+	// before t.TempDir / DB teardown — otherwise the restore can race
+	// with dir removal and DB close (see #234).
+	var wg sync.WaitGroup
+	srv.RestoreWG = &wg
 
 	r := chi.NewRouter()
 	uiHandler := New()
@@ -41,6 +47,8 @@ func newTestServer(t *testing.T, cfg *config.Config) (*server.Server, *httptest.
 
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
+	// LIFO order: wg.Wait runs before ts.Close, DB close, TempDir cleanup.
+	t.Cleanup(wg.Wait)
 	return srv, ts
 }
 
@@ -58,6 +66,11 @@ func authServer(t *testing.T, cfg *config.Config, sub string, role auth.Role) (*
 
 	be := mock.New()
 	srv := server.NewServer(cfg, be, database)
+	// Track background restore goroutines so cleanup waits for them
+	// before t.TempDir / DB teardown — otherwise the restore can race
+	// with dir removal and DB close (see #234).
+	var wg sync.WaitGroup
+	srv.RestoreWG = &wg
 
 	uiHandler := New()
 	r := chi.NewRouter()
@@ -82,6 +95,8 @@ func authServer(t *testing.T, cfg *config.Config, sub string, role auth.Role) (*
 
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
+	// LIFO order: wg.Wait runs before ts.Close, DB close, TempDir cleanup.
+	t.Cleanup(wg.Wait)
 	return srv, ts
 }
 

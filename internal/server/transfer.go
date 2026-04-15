@@ -15,6 +15,7 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/mount"
 	"github.com/cynkra/blockyard/internal/pkgstore"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // TransferDir returns the host-side transfer directory for a worker.
@@ -190,7 +191,7 @@ func (srv *Server) completeTransfer(
 	srv.Sessions.RerouteWorker(oldWorkerID, newWorkerID)
 
 	// Evict old worker and clean up its transfer directory.
-	srv.EvictWorkerFn(ctx, srv, oldWorkerID)
+	srv.EvictWorkerFn(ctx, srv, oldWorkerID, telemetry.ReasonGraceful)
 	os.RemoveAll(transferDir) //nolint:errcheck
 
 	slog.Info("transfer complete",

@@ -10,22 +10,26 @@ import (
 	"time"
 
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/telemetry"
 )
 
 // EvictWorker is the single codepath for decommissioning a worker.
 // Idempotent — safe to call concurrently from multiple goroutines.
-func EvictWorker(ctx context.Context, srv *server.Server, workerID string) {
+// reason is recorded in the blockyard_workers_stopped_total metric
+// and must be one of the telemetry.Reason* constants.
+func EvictWorker(ctx context.Context, srv *server.Server, workerID, reason string) {
 	w, found := srv.Workers.Get(workerID)
 	srv.Workers.Delete(workerID)
 	if found {
 		// Cancel the token refresher goroutine.
 		srv.CancelTokenRefresher(workerID)
-		slog.Info("evicting worker", "worker_id", workerID, "app_id", w.AppID)
+		slog.Info("evicting worker",
+			"worker_id", workerID, "app_id", w.AppID, "reason", reason)
 		if err := srv.Backend.Stop(ctx, workerID); err != nil {
 			slog.Warn("evict: failed to stop worker",
 				"worker_id", workerID, "error", err)
 		}
-		srv.Metrics.WorkersStopped.Inc()
+		srv.Metrics.WorkersStopped.WithLabelValues(reason).Inc()
 		srv.Metrics.WorkersActive.Dec()
 	}
 	sessionCount := srv.Sessions.CountForWorkers([]string{workerID})
@@ -163,6 +167,22 @@ func StartupCleanup(ctx context.Context, srv *server.Server, passive bool) error
 
 const maxMisses = 2
 
+// appLabelForWorker returns the app name for the given worker, or
+// telemetry.AppUnknown if the worker/app cannot be resolved. Used for
+// labelling per-worker metrics (health-check failures) with a human
+// readable app name rather than an opaque ID.
+func appLabelForWorker(srv *server.Server, workerID string) string {
+	w, ok := srv.Workers.Get(workerID)
+	if !ok {
+		return telemetry.AppUnknown
+	}
+	app, err := srv.DB.GetApp(w.AppID)
+	if err != nil || app == nil {
+		return telemetry.AppUnknown
+	}
+	return app.Name
+}
+
 // evictDrainedWorkers checks draining workers and evicts those with
 // zero active sessions. Called from the health poller tick.
 func evictDrainedWorkers(ctx context.Context, srv *server.Server) {
@@ -174,7 +194,7 @@ func evictDrainedWorkers(ctx context.Context, srv *server.Server) {
 		if srv.Sessions.CountForWorker(wid) == 0 {
 			slog.Info("evicting drained worker with zero sessions",
 				"worker_id", wid, "app_id", w.AppID)
-			EvictWorker(ctx, srv, wid)
+			EvictWorker(ctx, srv, wid, telemetry.ReasonGraceful)
 		}
 	}
 }
@@ -223,13 +243,13 @@ func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
 			slog.Warn("health poller: evicting unhealthy worker",
 				"worker_id", r.workerID,
 				"consecutive_misses", misses[r.workerID])
-			srv.Metrics.HealthChecksFailed.Inc()
+			srv.Metrics.HealthChecksFailed.WithLabelValues(appLabelForWorker(srv, r.workerID)).Inc()
 			// Mark sessions as crashed before eviction (which marks them as ended).
 			if err := srv.DB.CrashWorkerSessions(r.workerID); err != nil {
 				slog.Warn("health poller: failed to crash worker sessions",
 					"worker_id", r.workerID, "error", err)
 			}
-			EvictWorker(ctx, srv, r.workerID)
+			EvictWorker(ctx, srv, r.workerID, telemetry.ReasonCrashed)
 			delete(misses, r.workerID)
 		}
 	}
@@ -327,7 +347,7 @@ func drainAndEvictAll(ctx context.Context, srv *server.Server, workerIDs []strin
 			defer wg.Done()
 			evictCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			EvictWorker(evictCtx, srv, id)
+			EvictWorker(evictCtx, srv, id, telemetry.ReasonGraceful)
 		}(wid)
 	}
 	wg.Wait()
@@ -378,7 +398,7 @@ func StopAppSync(srv *server.Server, appID string) {
 	}
 
 	for _, wid := range workerIDs {
-		EvictWorker(context.Background(), srv, wid)
+		EvictWorker(context.Background(), srv, wid, telemetry.ReasonGraceful)
 	}
 }
 
