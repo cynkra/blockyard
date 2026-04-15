@@ -16,7 +16,7 @@ const workerKeyKVPath = "blockyard/worker-signing-key"
 // generate + store if not. Transient vault errors are fatal --
 // only ErrNotFound triggers generation.
 func ResolveWorkerKey(ctx context.Context, client *Client) ([]byte, error) {
-	data, err := client.KVRead(ctx, workerKeyKVPath, client.AdminToken())
+	data, err := client.KVReadAdmin(ctx, workerKeyKVPath)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, fmt.Errorf("read worker key from vault: %w", err)
 	}

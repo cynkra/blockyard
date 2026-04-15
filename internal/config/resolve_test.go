@@ -12,15 +12,13 @@ type mockResolver struct {
 	secrets map[string]map[string]any // path → data
 }
 
-func (m *mockResolver) KVRead(_ context.Context, path string, _ string) (map[string]any, error) {
+func (m *mockResolver) KVReadAdmin(_ context.Context, path string) (map[string]any, error) {
 	data, ok := m.secrets[path]
 	if !ok {
 		return nil, fmt.Errorf("secret not found at %s", path)
 	}
 	return data, nil
 }
-
-func (m *mockResolver) AdminToken() string { return "admin-token" }
 
 func TestResolveSecretsResolvesOIDCClientSecret(t *testing.T) {
 	cfg := &Config{

@@ -53,14 +53,7 @@ func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string, skipPoli
 }
 
 func checkJWTAuth(ctx context.Context, client *Client, jwtAuthPath string) error {
-	url := fmt.Sprintf("%s/v1/sys/auth", client.addr)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("check jwt auth: %w", err)
-	}
-	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
-
-	resp, err := client.httpClient.Do(req)
+	resp, err := client.doAdmin(ctx, "GET", "/v1/sys/auth", nil)
 	if err != nil {
 		return fmt.Errorf("check jwt auth: %w", err)
 	}
@@ -97,14 +90,7 @@ type roleResponse struct {
 }
 
 func readRole(ctx context.Context, client *Client, jwtAuthPath string) (*roleResponse, error) {
-	url := fmt.Sprintf("%s/v1/auth/%s/role/blockyard-user", client.addr, jwtAuthPath)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("check role: %w", err)
-	}
-	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
-
-	resp, err := client.httpClient.Do(req)
+	resp, err := client.doAdmin(ctx, "GET", fmt.Sprintf("/v1/auth/%s/role/blockyard-user", jwtAuthPath), nil)
 	if err != nil {
 		return nil, fmt.Errorf("check role: %w", err)
 	}
@@ -126,14 +112,7 @@ func readRole(ctx context.Context, client *Client, jwtAuthPath string) (*roleRes
 }
 
 func checkKVMount(ctx context.Context, client *Client) error {
-	url := fmt.Sprintf("%s/v1/sys/mounts", client.addr)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("check kv mount: %w", err)
-	}
-	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
-
-	resp, err := client.httpClient.Do(req)
+	resp, err := client.doAdmin(ctx, "GET", "/v1/sys/mounts", nil)
 	if err != nil {
 		return fmt.Errorf("check kv mount: %w", err)
 	}
@@ -196,14 +175,7 @@ type policyResponse struct {
 }
 
 func readPolicy(ctx context.Context, client *Client, name string) (string, error) {
-	url := fmt.Sprintf("%s/v1/sys/policies/acl/%s", client.addr, name)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("read policy %s: %w", name, err)
-	}
-	req.Header.Set("X-Vault-Token", client.adminTokenFunc())
-
-	resp, err := client.httpClient.Do(req)
+	resp, err := client.doAdmin(ctx, "GET", "/v1/sys/policies/acl/"+name, nil)
 	if err != nil {
 		return "", fmt.Errorf("read policy %s: %w", name, err)
 	}

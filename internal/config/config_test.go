@@ -871,28 +871,6 @@ func TestParseOpenbaoConfig(t *testing.T) {
 	if cfg.Openbao.JWTAuthPath != "jwt" {
 		t.Errorf("expected default jwt_auth_path 'jwt', got %q", cfg.Openbao.JWTAuthPath)
 	}
-	if cfg.Openbao.TokenFile != "/data/.vault-token" {
-		t.Errorf("expected default token_file '/data/.vault-token', got %q", cfg.Openbao.TokenFile)
-	}
-}
-
-func TestOpenbaoTokenFileOverride(t *testing.T) {
-	toml := strings.Replace(
-		openbaoTOML(t),
-		`admin_token = "hvs.admin123"`,
-		`admin_token = "hvs.admin123"`+"\n"+`token_file   = "/var/lib/blockyard/.vault-token"`,
-		1,
-	)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "blockyard.toml")
-	os.WriteFile(path, []byte(toml), 0o644)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Openbao.TokenFile != "/var/lib/blockyard/.vault-token" {
-		t.Errorf("token_file = %q, want /var/lib/blockyard/.vault-token", cfg.Openbao.TokenFile)
-	}
 }
 
 func TestParseConfigWithoutOpenbao(t *testing.T) {

@@ -70,10 +70,11 @@ When `management_bind` is set:
 - Container bridge networks cannot reach `127.0.0.1`, so untrusted
   workloads cannot access operational data
 
-When AppRole auth is used (`openbao.role_id`), `/readyz` also reports a
-`vault_token` check that reflects whether the token renewal goroutine is
-healthy. A stale or expired token degrades readiness, signaling the
-operator to re-bootstrap with a fresh `secret_id`.
+With AppRole auth (`openbao.role_id`), the server re-logins transparently
+when OpenBao returns 403 to any admin-scoped call, so there is no
+separate token-health check: persistent failures surface as `"openbao"`
+becoming unhealthy once a login can no longer succeed (e.g. because the
+AppRole credentials have been revoked).
 
 Point your health checks and Prometheus scraper at the management port:
 

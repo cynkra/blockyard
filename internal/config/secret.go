@@ -15,11 +15,11 @@ type Secret struct {
 	value string
 }
 
-// SecretResolver reads secrets from a vault-compatible KV v2 store.
-// Implemented by integration.Client.
+// SecretResolver reads secrets from a vault-compatible KV v2 store
+// using the caller's admin credentials. Implemented by
+// integration.Client.
 type SecretResolver interface {
-	KVRead(ctx context.Context, path string, token string) (map[string]any, error)
-	AdminToken() string
+	KVReadAdmin(ctx context.Context, path string) (map[string]any, error)
 }
 
 func NewSecret(s string) Secret {
@@ -74,7 +74,7 @@ func (s *Secret) Resolve(ctx context.Context, r SecretResolver) error {
 	}
 	kvPath, key := parts[0], parts[1]
 
-	data, err := r.KVRead(ctx, kvPath, r.AdminToken())
+	data, err := r.KVReadAdmin(ctx, kvPath)
 	if err != nil {
 		return fmt.Errorf("resolve vault reference %q: %w", s.value, err)
 	}

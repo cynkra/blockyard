@@ -57,7 +57,7 @@ segment, `label` is shown in the web UI. Credentials are stored at
 ## Authentication
 
 Blockyard authenticates to OpenBao using **AppRole**. This replaces the
-previous static `admin_token` approach with a more secure, renewable
+previous static `admin_token` approach with a short-lived, revocable
 credential.
 
 ### Initial bootstrap
@@ -65,27 +65,38 @@ credential.
 1. Configure the AppRole role in OpenBao (see the `setup-openbao.sh` script
    in the hello-pocketbase example for reference)
 2. Set `role_id` in your config (this is a role identifier, not a secret)
-3. Deliver the `secret_id` via environment variable:
+3. Deliver the `secret_id` via env var or file:
 
 ```bash
 BLOCKYARD_OPENBAO_SECRET_ID="your-secret-id" blockyard
+# or
+BLOCKYARD_OPENBAO_SECRET_ID_FILE=/run/secrets/blockyard-secret-id blockyard
 ```
 
-On first startup, blockyard uses the `secret_id` to authenticate, obtains a
-scoped token, and persists it to disk. The `secret_id` is a one-time
-bootstrap input — after initial authentication, the server renews its own
-token indefinitely.
+On startup, blockyard reads `secret_id` from the configured source, performs
+an AppRole login, and caches the resulting token in process memory.
 
 ### Steady state
 
-After bootstrap, the server renews its vault token at half-TTL intervals.
-The persisted token is reused across restarts. No `secret_id` is needed
-for routine restarts.
+The server holds the AppRole-issued token for the duration of its process.
+If OpenBao returns 403 to any admin-scoped call — because the token
+expired, was revoked, or the `secret_id` rotated — blockyard transparently
+re-reads its credentials (re-reading any `_FILE` source) and performs a
+fresh AppRole login, then retries the original request once. Concurrent
+403 retries share one login attempt (singleflight).
 
-### Re-bootstrap
+There is no proactive renewal loop and no on-disk token. Operators who
+want shorter-lived tokens can set `token_ttl` on the AppRole role to
+e.g. 5–15 minutes; the server will simply re-login more often.
 
-If the server is down long enough for the persisted token to expire beyond
-renewal, re-deliver a fresh `secret_id` via the environment variable.
+### Rotating `secret_id` without a restart
+
+Deliver `secret_id` via `BLOCKYARD_OPENBAO_SECRET_ID_FILE` pointing at a
+file managed by Vault Agent, a scheduled `bao write`, or another rotation
+tool. When the file's contents change, the new `secret_id` is picked up
+at the next AppRole login — which happens at the first 403 after the
+previous token expired or was revoked. Mounting the file on tmpfs with
+mode `0400` owned by the blockyard user further narrows exposure.
 
 ### Migrating from `admin_token`
 
@@ -93,7 +104,7 @@ The `admin_token` field is deprecated but still accepted. To migrate:
 
 1. Set up AppRole in OpenBao (enable the auth method, create a policy and role)
 2. Replace `admin_token` with `role_id` in your config
-3. Set `BLOCKYARD_OPENBAO_SECRET_ID` for the first startup
+3. Set `BLOCKYARD_OPENBAO_SECRET_ID` (or `_FILE`) for the first startup
 4. Remove the old `admin_token` / `BLOCKYARD_OPENBAO_ADMIN_TOKEN`
 
 ## Bootstrapping

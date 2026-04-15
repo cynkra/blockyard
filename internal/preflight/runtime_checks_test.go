@@ -107,24 +107,6 @@ func TestCheckVault(t *testing.T) {
 	})
 }
 
-func TestCheckVaultToken(t *testing.T) {
-	t.Run("healthy", func(t *testing.T) {
-		deps := RuntimeDeps{VaultTokenOK: func() bool { return true }}
-		res := checkVaultToken(deps)
-		if res.Severity != SeverityOK {
-			t.Errorf("expected OK, got %v", res.Severity)
-		}
-	})
-
-	t.Run("unhealthy", func(t *testing.T) {
-		deps := RuntimeDeps{VaultTokenOK: func() bool { return false }}
-		res := checkVaultToken(deps)
-		if res.Severity != SeverityError {
-			t.Errorf("expected Error, got %v", res.Severity)
-		}
-	})
-}
-
 func TestCheckDiskSpace(t *testing.T) {
 	// Use the OS temp dir which should exist and have plenty of space.
 	res := checkDiskSpace(t.TempDir())
@@ -175,11 +157,10 @@ func TestCheckUpdateAvailable(t *testing.T) {
 func TestRunDynamicChecks(t *testing.T) {
 	deps := RuntimeDeps{
 		DBPing:        func(ctx context.Context) error { return nil },
-		BackendPing:    func(ctx context.Context) error { return nil },
+		BackendPing:   func(ctx context.Context) error { return nil },
 		RedisPing:     func(ctx context.Context) error { return nil },
 		IDPCheck:      func(ctx context.Context) error { return nil },
 		VaultCheck:    func(ctx context.Context) error { return nil },
-		VaultTokenOK:  func() bool { return true },
 		StorePath:     t.TempDir(),
 		UpdateVersion: func() *string { return nil },
 		ServerVersion: "1.0.0",

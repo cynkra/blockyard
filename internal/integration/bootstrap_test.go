@@ -58,7 +58,7 @@ func fullMockBaoWithPolicy(t *testing.T, policy string) *Client {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, func() string { return "admin-token" })
+	return NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 }
 
 func TestBootstrap_AllPass(t *testing.T) {
@@ -73,7 +73,7 @@ func TestBootstrap_HealthFails(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -97,7 +97,7 @@ func TestBootstrap_JWTAuthMissing(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -124,7 +124,7 @@ func TestBootstrap_RoleMissing(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -172,7 +172,7 @@ func TestCheckPolicyScoping_PolicyReadFails(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := checkPolicyScoping(context.Background(), client, "jwt")
 	if err == nil {
@@ -201,7 +201,7 @@ func TestBootstrap_KVMountMissing(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -228,7 +228,7 @@ func TestBootstrap_JWTAuthMalformedJSON(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -253,7 +253,7 @@ func TestBootstrap_JWTAuthMissingTypeField(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -281,7 +281,7 @@ func TestBootstrap_RoleMalformedJSON(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -308,7 +308,7 @@ func TestBootstrap_RoleUnexpectedStatus(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -339,7 +339,7 @@ func TestBootstrap_KVMountMalformedJSON(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -369,14 +369,14 @@ func TestBootstrap_KVMountUnexpectedStatus(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for forbidden mounts status")
 	}
-	if !strings.Contains(err.Error(), "status 403") {
-		t.Errorf("expected 'status 403' in error, got %v", err)
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected '403' in error, got %v", err)
 	}
 }
 
@@ -409,7 +409,7 @@ func TestBootstrap_PolicyMalformedJSON(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	// Policy read failure is logged as a warning and skipped, so the
 	// error should be about no scoped policy found (not a decode error).
@@ -453,7 +453,7 @@ func TestBootstrap_PolicyEmptyBody(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
@@ -475,14 +475,14 @@ func TestBootstrap_JWTAuthUnexpectedStatus(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err == nil {
 		t.Fatal("expected error for forbidden auth status")
 	}
-	if !strings.Contains(err.Error(), "status 403") {
-		t.Errorf("expected 'status 403' in error, got %v", err)
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("expected '403' in error, got %v", err)
 	}
 }
 
@@ -519,7 +519,7 @@ func TestBootstrap_PolicyFallbackToRules(t *testing.T) {
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	client := NewClient(srv.URL, func() string { return "admin-token" })
+	client := NewClient(srv.URL, StaticAdmin(func() string { return "admin-token" }))
 
 	err := Bootstrap(context.Background(), client, "jwt", false)
 	if err != nil {

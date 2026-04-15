@@ -272,7 +272,7 @@ func TestReadyzWithVaultPass(t *testing.T) {
 	t.Cleanup(baoSrv.Close)
 
 	srv := testServerForReadyz(t)
-	srv.VaultClient = integration.NewClient(baoSrv.URL, func() string { return "test-token" })
+	srv.VaultClient = integration.NewClient(baoSrv.URL, integration.StaticAdmin(func() string { return "test-token" }))
 
 	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()
@@ -306,7 +306,7 @@ func TestReadyzWithVaultFail(t *testing.T) {
 	t.Cleanup(baoSrv.Close)
 
 	srv := testServerForReadyz(t)
-	srv.VaultClient = integration.NewClient(baoSrv.URL, func() string { return "test-token" })
+	srv.VaultClient = integration.NewClient(baoSrv.URL, integration.StaticAdmin(func() string { return "test-token" }))
 
 	handler := readyzHandler(srv, false)
 	rec := httptest.NewRecorder()

@@ -173,11 +173,10 @@ type OidcConfig struct {
 
 type OpenbaoConfig struct {
 	Address              string          `toml:"address"`
-	AdminToken           Secret          `toml:"admin_token"`              // deprecated: use role_id with AppRole auth
-	RoleID               string          `toml:"role_id"`                  // AppRole role identifier
-	TokenTTL             Duration        `toml:"token_ttl"`                // default: 1h
-	JWTAuthPath          string          `toml:"jwt_auth_path"`            // default: "jwt"
-	TokenFile            string          `toml:"token_file"`               // persisted vault token path; default: "/data/.vault-token"
+	AdminToken           Secret          `toml:"admin_token"`   // deprecated: use role_id with AppRole auth
+	RoleID               string          `toml:"role_id"`       // AppRole role identifier
+	TokenTTL             Duration        `toml:"token_ttl"`     // default: 1h (per-user JWT-issued token TTL)
+	JWTAuthPath          string          `toml:"jwt_auth_path"` // default: "jwt"
 	SkipPolicyScopeCheck bool            `toml:"skip_policy_scope_check"`
 	Services             []ServiceConfig `toml:"services"`
 }
@@ -372,12 +371,6 @@ func openbaoDefaults(c *OpenbaoConfig) {
 	}
 	if c.JWTAuthPath == "" {
 		c.JWTAuthPath = "jwt"
-	}
-	if c.TokenFile == "" {
-		// Lives at /data/.vault-token so it survives restarts regardless
-		// of database.driver. Previously derived from database.path,
-		// which broke Postgres deployments that don't mount /data/db/.
-		c.TokenFile = "/data/.vault-token"
 	}
 }
 

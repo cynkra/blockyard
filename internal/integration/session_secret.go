@@ -16,7 +16,7 @@ func ResolveSessionSecret(ctx context.Context, client *Client) (string, error) {
 	const kvPath = "blockyard/server-secrets"
 
 	// Try reading existing.
-	data, err := client.KVRead(ctx, kvPath, client.AdminToken())
+	data, err := client.KVReadAdmin(ctx, kvPath)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return "", fmt.Errorf("read session_secret from vault: %w", err)
 	}

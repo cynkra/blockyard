@@ -26,9 +26,6 @@ func runDynamicChecks(ctx context.Context, deps RuntimeDeps) *Report {
 	if deps.VaultCheck != nil {
 		r.Add(checkVault(ctx, deps))
 	}
-	if deps.VaultTokenOK != nil {
-		r.Add(checkVaultToken(deps))
-	}
 
 	// Runtime checks.
 	if deps.StorePath != "" {
@@ -162,26 +159,6 @@ func checkVault(ctx context.Context, deps RuntimeDeps) Result {
 		Name:     name,
 		Severity: SeverityOK,
 		Message:  "OpenBao is healthy",
-		Category: category,
-	}
-}
-
-func checkVaultToken(deps RuntimeDeps) Result {
-	const name = "vault_token"
-	const category = "runtime"
-
-	if deps.VaultTokenOK() {
-		return Result{
-			Name:     name,
-			Severity: SeverityOK,
-			Message:  "vault token is valid",
-			Category: category,
-		}
-	}
-	return Result{
-		Name:     name,
-		Severity: SeverityError,
-		Message:  "vault token renewal has failed; secrets operations may be broken",
 		Category: category,
 	}
 }

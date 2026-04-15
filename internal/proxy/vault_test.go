@@ -29,7 +29,7 @@ func mockJWTLogin(t *testing.T, token string, leaseDuration int) *integration.Cl
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	return integration.NewClient(srv.URL, func() string { return "admin-token" })
+	return integration.NewClient(srv.URL, integration.StaticAdmin(func() string { return "admin-token" }))
 }
 
 // mockJWTLoginError creates a mock OpenBao that returns errors for JWT login.
@@ -40,7 +40,7 @@ func mockJWTLoginError(t *testing.T) *integration.Client {
 		w.Write([]byte(`{"errors":["permission denied"]}`))
 	}))
 	t.Cleanup(srv.Close)
-	return integration.NewClient(srv.URL, func() string { return "admin-token" })
+	return integration.NewClient(srv.URL, integration.StaticAdmin(func() string { return "admin-token" }))
 }
 
 func vaultServer(t *testing.T, vaultClient *integration.Client) *server.Server {

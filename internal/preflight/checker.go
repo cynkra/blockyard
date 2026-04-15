@@ -16,7 +16,6 @@ type RuntimeDeps struct {
 	RedisPing     func(ctx context.Context) error // Redis health (nil = no Redis)
 	IDPCheck      func(ctx context.Context) error // OIDC IdP health (nil = no OIDC)
 	VaultCheck    func(ctx context.Context) error // OpenBao health (nil = no vault)
-	VaultTokenOK  func() bool                     // AppRole token health (nil = no AppRole)
 	UpdateVersion func() *string                  // latest available version (nil = not checked)
 	ServerVersion string
 }
