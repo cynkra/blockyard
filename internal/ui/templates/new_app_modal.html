@@ -16,9 +16,11 @@
             <div id="drop-zone" class="drop-zone">
                 <p class="drop-zone-hint">Drop files here or click to browse</p>
                 <p class="text-xs opacity-60 mt-1">Single files, multiple files, or a .tar.gz / .zip archive</p>
-                <input type="file" name="files" multiple
-                       id="new-app-files"
-                       class="file-input file-input-bordered w-full mt-2">
+                <div class="file-input-wrap mt-2">
+                    <input type="file" name="files" multiple
+                           id="new-app-files"
+                           class="file-input file-input-bordered w-full">
+                </div>
             </div>
             <ul id="file-list" class="file-list hidden"></ul>
         </fieldset>

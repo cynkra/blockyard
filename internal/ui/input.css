@@ -515,15 +515,27 @@
   /* Form-control focus: daisyUI 5's default draws a 2px black outline
      offset 2px outside a 1px black border, giving a heavy doubled-up
      ring on focus. Replace with a single soft 2px halo in the primary
-     hue — the border keeps its regular color so there's no stacked
-     border + ring, just one clean indicator. !important is needed to
-     beat daisyUI's later-declared layer. */
-  .file-input:focus,
+     hue. !important is needed to beat daisyUI's later-declared layer. */
   .input:focus,
   .select:focus,
   .textarea:focus {
     outline: none !important;
     box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent) !important;
+  }
+
+  /* file-input is a composite element: Safari renders
+     ::file-selector-button and the input body as separate boxes, so a
+     box-shadow on the input itself wraps only the right-hand portion.
+     Suppress all focus styling on the input and move the halo to a
+     .file-input-wrap parent driven by :focus-within — the wrapper is
+     one box in every browser. */
+  .file-input:focus {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+  .file-input-wrap:focus-within {
+    border-radius: 4px;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent);
   }
 
   /* file-input text vertical centering: daisyUI sets line-height: 28px on
