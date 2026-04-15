@@ -525,6 +525,15 @@
     outline: none !important;
     box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent) !important;
   }
+
+  /* file-input text vertical centering: daisyUI sets line-height: 28px on
+     a 40px-tall input, which leaves both the ::file-selector-button
+     label and the "No file chosen" text visibly above center. Match
+     line-height to height so the text sits on the vertical midline. */
+  .file-input,
+  .file-input::file-selector-button {
+    line-height: 40px !important;
+  }
   /* ── Mobile responsive ── */
   @media (max-width: 768px) {
     .left-nav { width: 56px; }
