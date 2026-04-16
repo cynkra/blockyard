@@ -402,6 +402,16 @@
   .admin-tabs {
     @apply tabs tabs-border overflow-x-auto mb-4;
   }
+  /* DaisyUI's tabs-border marker is 80% wide and centered under the
+     button — fine for equal-width text tabs, but our tabs carry
+     counter badges that widen the button and pull the bar off the
+     label's visual center. Full-width per-tab bars touch edge-to-
+     edge and form a continuous baseline that the active tab colors
+     in. */
+  .admin-tabs > .tab::before {
+    width: 100%;
+    left: 0;
+  }
   .admin-tab-content {
     @apply pt-2;
   }
