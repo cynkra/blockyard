@@ -2798,8 +2798,8 @@ func TestAdminPageRendersForAdmin(t *testing.T) {
 	if !strings.Contains(body, "System checks") {
 		t.Error("expected System checks section")
 	}
-	if !strings.Contains(body, ">Users<") {
-		t.Error("expected Users section header")
+	if !strings.Contains(body, `hx-get="/ui/admin/tab/users"`) {
+		t.Error("expected Users tab on admin page")
 	}
 }
 
@@ -3050,6 +3050,11 @@ func TestAdminPageHasErrorsTab(t *testing.T) {
 	// Errors count badge shown on the tab.
 	if !strings.Contains(body, `badge-warning ml-2">1</span>`) {
 		t.Error("expected errors count badge with 1 entry")
+	}
+	// Users count badge shown on the Users tab so every tab has a
+	// pill — keeps the tabs-border indicator visually balanced.
+	if !strings.Contains(body, `badge-soft ml-2">1</span>`) {
+		t.Error("expected users count badge on Users tab")
 	}
 }
 

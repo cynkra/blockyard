@@ -14,7 +14,12 @@
             hx-target="#admin-tab-content"
             hx-swap="innerHTML"
             hx-push-url="/admin"
-            hx-on::after-request="setAdminActiveTab(this)">Users</button>
+            hx-on::after-request="setAdminActiveTab(this)">
+        Users
+        {{if .Users.Total}}
+        <span class="badge badge-xs badge-soft ml-2">{{.Users.Total}}</span>
+        {{end}}
+    </button>
     <button class="tab {{if eq .ActiveTab "system"}}tab-active{{end}}"
             hx-get="/ui/admin/tab/system"
             hx-target="#admin-tab-content"

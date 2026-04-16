@@ -394,6 +394,7 @@ type adminErrorAttr struct {
 type adminUsersData struct {
 	CallerSub    string
 	Users        []adminUserEntry
+	Total        int // Total users matching the current filters; shown as a tab-bar badge.
 	Search       string
 	Role         string
 	ActiveFilter string
@@ -1014,6 +1015,7 @@ func buildAdminUsers(srv *server.Server, caller *auth.CallerIdentity, q url.Valu
 	return adminUsersData{
 		CallerSub:    caller.Sub,
 		Users:        entries,
+		Total:        total,
 		Search:       search,
 		Role:         role,
 		ActiveFilter: activeFilter,
