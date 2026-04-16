@@ -14,6 +14,7 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/errorlog"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/logstore"
 	"github.com/cynkra/blockyard/internal/pkgstore"
@@ -37,6 +38,7 @@ type Server struct {
 	Registry registry.WorkerRegistry
 	Tasks    *task.Store
 	LogStore *logstore.Store
+	ErrorLog *errorlog.Store
 	Metrics  *telemetry.Metrics
 
 	// Auth fields — nil when [oidc] is not configured (v0 compat).
@@ -208,6 +210,7 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 		Registry: registry.NewMemoryRegistry(),
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),
+		ErrorLog: errorlog.NewStore(errorlog.DefaultCapacity),
 		Metrics:  telemetry.NewMetrics(prometheus.NewRegistry()),
 	}
 }

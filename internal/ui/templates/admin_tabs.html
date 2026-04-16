@@ -1,0 +1,14 @@
+{{define "adminTabSystem"}}
+<div class="flex justify-end mb-3">
+    <button class="btn btn-soft btn-sm"
+            hx-post="/ui/system/run"
+            hx-target="#check-results"
+            hx-swap="innerHTML"
+            hx-disabled-elt="this">
+        Run checks
+    </button>
+</div>
+<div id="check-results">
+    {{template "checkResults" .}}
+</div>
+{{end}}

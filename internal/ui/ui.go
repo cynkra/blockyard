@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -218,7 +219,8 @@ func New() *UI {
 			content, "templates/base.html", "templates/icons.html", "templates/profile.html", "templates/token_list.html",
 		),
 	)
-	// Re-parse admin.html with the shared system_checks and admin_users fragments.
+	// Re-parse admin.html with the shared system_checks, admin_users,
+	// admin_errors, and admin_tabs fragments.
 	pages["admin.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
 			content,
@@ -226,6 +228,8 @@ func New() *UI {
 			"templates/admin.html",
 			"templates/system_checks.html",
 			"templates/admin_users.html",
+			"templates/admin_errors.html",
+			"templates/admin_tabs.html",
 		),
 	)
 
@@ -236,6 +240,7 @@ func New() *UI {
 		"system_checks.html",
 		"system_banner.html",
 		"admin_users.html",
+		"admin_errors.html",
 		"sidebar.html",
 		"tab_overview.html",
 		"tab_settings.html",
@@ -256,6 +261,13 @@ func New() *UI {
 		)
 		fragments[name] = t
 	}
+	// admin_tabs.html's adminTabSystem define references checkResults from
+	// system_checks.html, so parse them together.
+	fragments["admin_tabs.html"] = template.Must(
+		template.New("admin_tabs.html").Funcs(funcMap).ParseFS(
+			content, "templates/admin_tabs.html", "templates/system_checks.html",
+		),
+	)
 
 	static := http.FileServer(http.FS(content))
 	return &UI{pages: pages, fragments: fragments, static: static}
@@ -268,6 +280,10 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/api-keys", ui.apiKeysPage(srv))
 	r.Get("/admin", ui.adminPage(srv))
 	r.Get("/ui/admin/users", ui.adminUsersFragment(srv))
+	r.Get("/ui/admin/errors", ui.adminErrorsFragment(srv))
+	r.Get("/ui/admin/tab/users", ui.adminTabUsersFragment(srv))
+	r.Get("/ui/admin/tab/system", ui.adminTabSystemFragment(srv))
+	r.Get("/ui/admin/tab/errors", ui.adminTabErrorsFragment(srv))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
 	r.Post("/ui/system/run", ui.systemRunFragment(srv))
@@ -349,13 +365,36 @@ type systemData struct {
 
 type adminData struct {
 	layoutData
-	Report *preflight.Report
-	Users  adminUsersData
+	ActiveTab string // "users" (default), "system", "errors"
+	Report    *preflight.Report
+	Users     adminUsersData
+	Errors    adminErrorsData
+}
+
+type adminErrorsData struct {
+	Count    int
+	Capacity int
+	Entries  []adminErrorEntry
+}
+
+type adminErrorEntry struct {
+	TimeRel     string
+	TimeRFC3339 string
+	Level       string
+	LevelClass  string // daisyUI badge variant
+	Message     string
+	Attrs       []adminErrorAttr
+}
+
+type adminErrorAttr struct {
+	Key   string
+	Value string
 }
 
 type adminUsersData struct {
 	CallerSub    string
 	Users        []adminUserEntry
+	Total        int // Total users matching the current filters; shown as a tab-bar badge.
 	Search       string
 	Role         string
 	ActiveFilter string
@@ -722,8 +761,10 @@ func (ui *UI) adminPage(srv *server.Server) http.HandlerFunc {
 
 		data := adminData{
 			layoutData: baseLayout(srv, "admin", caller),
+			ActiveTab:  parseAdminTab(r.URL.Query().Get("tab")),
 			Report:     report,
 			Users:      usersData,
+			Errors:     buildAdminErrors(srv),
 		}
 
 		if err := ui.pages["admin.html"].ExecuteTemplate(w, "base", data); err != nil {
@@ -758,6 +799,155 @@ func (ui *UI) adminUsersFragment(srv *server.Server) http.HandlerFunc {
 		if err := ui.fragments["admin_users.html"].ExecuteTemplate(w, "adminUsersTable", usersData); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
+	}
+}
+
+// parseAdminTab normalizes the ?tab= query value against the known set.
+// Unknown or empty values fall back to "users".
+func parseAdminTab(v string) string {
+	switch v {
+	case "system", "errors":
+		return v
+	default:
+		return "users"
+	}
+}
+
+// adminTabUsersFragment renders the full Users tab body (filters + table)
+// for an HTMX tab-swap on the /admin page.
+func (ui *UI) adminTabUsersFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		data, err := buildAdminUsers(srv, caller, r.URL.Query())
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_users.html"].ExecuteTemplate(w, "adminUsers", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminTabSystemFragment renders the System checks tab body.
+func (ui *UI) adminTabSystemFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		var report *preflight.Report
+		if srv.Checker != nil {
+			report = srv.Checker.Latest()
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_tabs.html"].ExecuteTemplate(w, "adminTabSystem", systemData{Report: report}); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminTabErrorsFragment renders the Recent warnings tab body (container
+// + table). The polling trigger is on the container, so swapping tabs
+// naturally starts/stops the poll loop.
+func (ui *UI) adminTabErrorsFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_errors.html"].ExecuteTemplate(w, "adminErrors", buildAdminErrors(srv)); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminErrorsFragment serves the recent-errors table fragment, polled
+// by HTMX every few seconds from the /admin page. Admin-only.
+func (ui *UI) adminErrorsFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		data := buildAdminErrors(srv)
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_errors.html"].ExecuteTemplate(w, "adminErrorsTable", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// buildAdminErrors snapshots the error-log ring buffer and formats
+// entries for the admin UI. Returns a zero-value struct (no entries)
+// when the store is nil — shouldn't happen in production but keeps
+// tests resilient.
+func buildAdminErrors(srv *server.Server) adminErrorsData {
+	if srv.ErrorLog == nil {
+		return adminErrorsData{}
+	}
+	snap := srv.ErrorLog.Snapshot()
+	entries := make([]adminErrorEntry, 0, len(snap))
+	for _, e := range snap {
+		attrs := make([]adminErrorAttr, 0, len(e.Attrs))
+		for _, a := range e.Attrs {
+			attrs = append(attrs, adminErrorAttr{Key: a.Key, Value: a.Value})
+		}
+		entries = append(entries, adminErrorEntry{
+			TimeRel:     relTimeShort(e.Time),
+			TimeRFC3339: e.Time.UTC().Format(time.RFC3339),
+			Level:       e.Level.String(),
+			LevelClass:  errorLevelBadgeClass(e.Level),
+			Message:     e.Message,
+			Attrs:       attrs,
+		})
+	}
+	return adminErrorsData{
+		Count:    srv.ErrorLog.Len(),
+		Capacity: srv.ErrorLog.Cap(),
+		Entries:  entries,
+	}
+}
+
+// errorLevelBadgeClass picks the daisyUI badge variant for a slog level.
+func errorLevelBadgeClass(lvl slog.Level) string {
+	switch {
+	case lvl >= slog.LevelError:
+		return "badge-error"
+	case lvl >= slog.LevelWarn:
+		return "badge-warning"
+	case lvl >= slog.LevelInfo:
+		return "badge-info"
+	default:
+		return "badge-neutral"
+	}
+}
+
+// relTimeShort renders a compact relative timestamp ("5s ago", "2m ago",
+// "just now") tuned for dense log rows where the existing timeAgo
+// helper's longer phrasing would wrap.
+func relTimeShort(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < 5*time.Second:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 
@@ -825,6 +1015,7 @@ func buildAdminUsers(srv *server.Server, caller *auth.CallerIdentity, q url.Valu
 	return adminUsersData{
 		CallerSub:    caller.Sub,
 		Users:        entries,
+		Total:        total,
 		Search:       search,
 		Role:         role,
 		ActiveFilter: activeFilter,

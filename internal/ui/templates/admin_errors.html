@@ -1,0 +1,55 @@
+{{define "adminErrors"}}
+<div id="admin-errors-container"
+     hx-get="/ui/admin/errors"
+     hx-trigger="every 5s"
+     hx-swap="innerHTML"
+     hx-target="this">
+    {{template "adminErrorsTable" .}}
+</div>
+{{end}}
+
+{{define "adminErrorsTable"}}
+<div class="flex items-center justify-between gap-2 mb-3">
+    <span class="text-sm text-base-content/60">
+        Ring buffer — {{.Count}} / {{.Capacity}} entries, newest first. In-memory only; cleared on restart.
+    </span>
+</div>
+{{if .Entries}}
+<div class="overflow-x-auto">
+<table class="table table-sm w-full">
+    <thead>
+        <tr>
+            <th class="w-28">Time</th>
+            <th class="w-20">Level</th>
+            <th>Message</th>
+            <th>Attributes</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Entries}}
+        <tr class="align-top">
+            <td class="whitespace-nowrap">
+                <span class="time-ago text-sm text-base-content/70" data-timestamp="{{.TimeRFC3339}}" title="{{.TimeRFC3339}}">{{.TimeRel}}</span>
+            </td>
+            <td>
+                <span class="badge badge-sm badge-soft {{.LevelClass}}">{{.Level}}</span>
+            </td>
+            <td class="font-mono text-sm break-all">{{.Message}}</td>
+            <td>
+                {{if .Attrs}}
+                <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs font-mono">
+                    {{range .Attrs}}
+                    <span><span class="text-base-content/60">{{.Key}}=</span><span>{{.Value}}</span></span>
+                    {{end}}
+                </div>
+                {{end}}
+            </td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+</div>
+{{else}}
+<p class="empty-state">No warnings or errors captured yet. Anything logged at WARN or above will appear here.</p>
+{{end}}
+{{end}}

@@ -26,6 +26,7 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/drain"
+	"github.com/cynkra/blockyard/internal/errorlog"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/orchestrator"
@@ -100,10 +101,16 @@ func main() {
 	cfg.ConfigPath = *configPath
 
 	// Reconfigure log level from config (server.log_level / BLOCKYARD_SERVER_LOG_LEVEL).
+	// Compose the JSON stderr handler with an errorlog capture handler so
+	// WARN+ records flow into the in-memory ring buffer that backs the
+	// admin UI "recent errors" panel. Stderr output is unchanged.
 	logLevel := config.ParseLogLevel(cfg.Server.LogLevel)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: logLevel,
-	})))
+	errLog := errorlog.NewStore(errorlog.DefaultCapacity)
+	slog.SetDefault(slog.New(errorlog.NewHandler(
+		slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}),
+		errLog,
+		slog.LevelWarn,
+	)))
 	logAttrs := []any{"bind", cfg.Server.Bind, "log_level", logLevel.String()}
 	if cfg.Server.ManagementBind != "" {
 		logAttrs = append(logAttrs, "management_bind", cfg.Server.ManagementBind)
@@ -166,6 +173,10 @@ func main() {
 	// /metrics HTTP endpoint (served by promhttp.Handler) can scrape them.
 	srv := server.NewServerWithDefaultMetrics(cfg, be, database)
 	srv.Version = version
+	// Point the server at the same ErrorLog store the slog handler has
+	// been feeding since config load, so the admin panel sees startup
+	// warnings too (e.g. preflight errors).
+	srv.ErrorLog = errLog
 
 	// Initialize package store.
 	storePath := filepath.Join(cfg.Storage.BundleServerPath, ".pkg-store")

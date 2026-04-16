@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/errorlog"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
 	"github.com/cynkra/blockyard/internal/session"
@@ -2796,8 +2798,8 @@ func TestAdminPageRendersForAdmin(t *testing.T) {
 	if !strings.Contains(body, "System checks") {
 		t.Error("expected System checks section")
 	}
-	if !strings.Contains(body, ">Users<") {
-		t.Error("expected Users section header")
+	if !strings.Contains(body, `hx-get="/ui/admin/tab/users"`) {
+		t.Error("expected Users tab on admin page")
 	}
 }
 
@@ -2950,6 +2952,213 @@ func TestAdminUsersFragmentSetsPushURL(t *testing.T) {
 	}
 	if !strings.Contains(push, "search=foo") || !strings.Contains(push, "role=viewer") {
 		t.Errorf("expected filter params in push URL, got %q", push)
+	}
+}
+
+func TestAdminErrorsFragmentEmpty(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "No warnings or errors captured yet") {
+		t.Errorf("expected empty-state message, got: %s", body)
+	}
+}
+
+func TestAdminErrorsFragmentRendersEntries(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelError,
+		Message: "deploy failed",
+		Attrs:   []errorlog.Attr{{Key: "app", Value: "foo"}},
+	})
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelWarn,
+		Message: "slow db query",
+	})
+
+	resp, err := http.Get(ts.URL + "/ui/admin/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "deploy failed") {
+		t.Error("expected ERROR message in body")
+	}
+	if !strings.Contains(body, "slow db query") {
+		t.Error("expected WARN message in body")
+	}
+	if !strings.Contains(body, "app") || !strings.Contains(body, "foo") {
+		t.Error("expected attr key/value in body")
+	}
+	// Newest-first — the WARN was appended after the ERROR so it should appear first.
+	if idxWarn, idxErr := strings.Index(body, "slow db query"), strings.Index(body, "deploy failed"); idxWarn == -1 || idxErr == -1 || idxWarn > idxErr {
+		t.Errorf("expected newest-first ordering: warn idx %d, err idx %d", idxWarn, idxErr)
+	}
+}
+
+func TestAdminErrorsFragmentForbiddenForNonAdmin(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "viewer-1", auth.RoleViewer)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminPageHasErrorsTab(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelWarn,
+		Message: "startup warning here",
+	})
+
+	resp, err := http.Get(ts.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Recent warnings") {
+		t.Error("expected Recent warnings tab label in admin page")
+	}
+	if !strings.Contains(body, `hx-get="/ui/admin/tab/errors"`) {
+		t.Error("expected HTMX tab swap attribute for errors tab")
+	}
+	// Errors count badge shown on the tab.
+	if !strings.Contains(body, `badge-warning ml-2">1</span>`) {
+		t.Error("expected errors count badge with 1 entry")
+	}
+	// Users count badge shown on the Users tab so every tab has a
+	// pill — keeps the tabs-border indicator visually balanced.
+	if !strings.Contains(body, `badge-soft ml-2">1</span>`) {
+		t.Error("expected users count badge on Users tab")
+	}
+}
+
+func TestAdminPageErrorsTabRendersInlineWhenSelected(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelWarn,
+		Message: "startup warning here",
+	})
+
+	resp, err := http.Get(ts.URL + "/admin?tab=errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "startup warning here") {
+		t.Error("expected errors panel rendered inline on ?tab=errors")
+	}
+	if !strings.Contains(body, `hx-get="/ui/admin/errors"`) {
+		t.Error("expected HTMX polling attribute in inlined errors panel")
+	}
+}
+
+func TestAdminTabErrorsFragment(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelError,
+		Message: "kaboom",
+	})
+
+	resp, err := http.Get(ts.URL + "/ui/admin/tab/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "kaboom") {
+		t.Error("expected errors tab fragment to include entry")
+	}
+	if !strings.Contains(body, `id="admin-errors-container"`) {
+		t.Error("expected polling container in tab fragment")
+	}
+}
+
+func TestAdminTabUsersFragment(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.DB.UpsertUserWithRole("u-1", "u1@example.com", "Userone", "viewer")
+
+	resp, err := http.Get(ts.URL + "/ui/admin/tab/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Userone") {
+		t.Error("expected users tab fragment to include user row")
+	}
+	if !strings.Contains(body, `id="admin-users-filters"`) {
+		t.Error("expected filter form in users tab fragment")
+	}
+}
+
+func TestAdminTabSystemFragment(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/tab/system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Run checks") {
+		t.Error("expected Run checks button in system tab fragment")
+	}
+	if !strings.Contains(body, `id="check-results"`) {
+		t.Error("expected check-results container in system tab fragment")
+	}
+}
+
+func TestAdminTabsForbiddenForNonAdmin(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "viewer-1", auth.RoleViewer)
+
+	for _, path := range []string{
+		"/ui/admin/tab/users",
+		"/ui/admin/tab/system",
+		"/ui/admin/tab/errors",
+	} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: expected 403, got %d", path, resp.StatusCode)
+		}
 	}
 }
 
