@@ -55,6 +55,11 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          # docs/themes/hugo-book is a submodule; docker/server.Dockerfile's
+          # Hugo stage needs it to produce real docs output. Without this,
+          # the image silently ships near-empty pages under /docs/.
+          submodules: true
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
