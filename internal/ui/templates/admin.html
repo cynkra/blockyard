@@ -8,56 +8,52 @@
     <p class="page-description">User management, system checks, and recent server warnings.</p>
 </div>
 
-<details class="admin-section" open>
-    <summary class="admin-section-title">
-        <span>Users</span>
-        <span class="admin-section-count">{{len .Users.Users}}{{if gt .Users.Pagination.TotalPages 1}} / page{{end}}</span>
-    </summary>
-    <div class="admin-section-body">
-        {{template "adminUsers" .Users}}
-    </div>
-</details>
-
-<details class="admin-section" id="system-checks">
-    <summary class="admin-section-title">
-        <span>System checks</span>
+<nav class="admin-tabs" role="tablist">
+    <button class="tab {{if eq .ActiveTab "users"}}tab-active{{end}}"
+            hx-get="/ui/admin/tab/users"
+            hx-target="#admin-tab-content"
+            hx-swap="innerHTML"
+            hx-push-url="/admin"
+            hx-on::after-request="setAdminActiveTab(this)">Users</button>
+    <button class="tab {{if eq .ActiveTab "system"}}tab-active{{end}}"
+            hx-get="/ui/admin/tab/system"
+            hx-target="#admin-tab-content"
+            hx-swap="innerHTML"
+            hx-push-url="/admin?tab=system"
+            hx-on::after-request="setAdminActiveTab(this)">
+        System checks
         {{if .Report}}{{if .Report.HasWarnings}}
-        <span class="badge badge-sm badge-soft badge-warning">{{.Report.Summary.Errors}}E / {{.Report.Summary.Warnings}}W</span>
+        <span class="badge badge-xs badge-soft badge-warning ml-2">{{.Report.Summary.Errors}}E/{{.Report.Summary.Warnings}}W</span>
         {{end}}{{end}}
-    </summary>
-    <div class="admin-section-body">
-        <div class="flex justify-end mb-3">
-            <button class="btn btn-soft btn-sm"
-                    hx-post="/ui/system/run"
-                    hx-target="#check-results"
-                    hx-swap="innerHTML"
-                    hx-disabled-elt="this">
-                Run Checks
-            </button>
-        </div>
-        <div id="check-results">
-        {{template "checkResults" .}}
-        </div>
-    </div>
-</details>
-
-<details class="admin-section" id="recent-errors">
-    <summary class="admin-section-title">
-        <span>Recent server warnings</span>
+    </button>
+    <button class="tab {{if eq .ActiveTab "errors"}}tab-active{{end}}"
+            hx-get="/ui/admin/tab/errors"
+            hx-target="#admin-tab-content"
+            hx-swap="innerHTML"
+            hx-push-url="/admin?tab=errors"
+            hx-on::after-request="setAdminActiveTab(this)">
+        Recent warnings
         {{if .Errors.Count}}
-        <span class="admin-section-count">{{.Errors.Count}}</span>
+        <span class="badge badge-xs badge-soft badge-warning ml-2">{{.Errors.Count}}</span>
         {{end}}
-    </summary>
-    <div class="admin-section-body">
+    </button>
+</nav>
+
+<div id="admin-tab-content" class="admin-tab-content">
+    {{if eq .ActiveTab "system"}}
+        {{template "adminTabSystem" .}}
+    {{else if eq .ActiveTab "errors"}}
         {{template "adminErrors" .Errors}}
-    </div>
-</details>
+    {{else}}
+        {{template "adminUsers" .Users}}
+    {{end}}
+</div>
 
 <script>
-/* Open the system-checks section when the URL fragment points at it */
-if (window.location.hash === '#system-checks') {
-    var el = document.getElementById('system-checks');
-    if (el) el.open = true;
+function setAdminActiveTab(btn) {
+    btn.closest('.admin-tabs').querySelectorAll('.tab').forEach(
+        function(t) { t.classList.remove('tab-active'); });
+    btn.classList.add('tab-active');
 }
 </script>
 {{end}}

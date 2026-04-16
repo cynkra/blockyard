@@ -3025,7 +3025,7 @@ func TestAdminErrorsFragmentForbiddenForNonAdmin(t *testing.T) {
 	}
 }
 
-func TestAdminPageIncludesRecentErrorsSection(t *testing.T) {
+func TestAdminPageHasErrorsTab(t *testing.T) {
 	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
 	srv.ErrorLog = errorlog.NewStore(10)
 	srv.ErrorLog.Append(errorlog.Entry{
@@ -3041,14 +3041,119 @@ func TestAdminPageIncludesRecentErrorsSection(t *testing.T) {
 	defer resp.Body.Close()
 	body := readBody(t, resp)
 
-	if !strings.Contains(body, "Recent server warnings") {
-		t.Error("expected Recent server warnings section header in admin page")
+	if !strings.Contains(body, "Recent warnings") {
+		t.Error("expected Recent warnings tab label in admin page")
 	}
+	if !strings.Contains(body, `hx-get="/ui/admin/tab/errors"`) {
+		t.Error("expected HTMX tab swap attribute for errors tab")
+	}
+	// Errors count badge shown on the tab.
+	if !strings.Contains(body, `badge-warning ml-2">1</span>`) {
+		t.Error("expected errors count badge with 1 entry")
+	}
+}
+
+func TestAdminPageErrorsTabRendersInlineWhenSelected(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelWarn,
+		Message: "startup warning here",
+	})
+
+	resp, err := http.Get(ts.URL + "/admin?tab=errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
 	if !strings.Contains(body, "startup warning here") {
-		t.Error("expected initial snapshot rendered inline on /admin")
+		t.Error("expected errors panel rendered inline on ?tab=errors")
 	}
 	if !strings.Contains(body, `hx-get="/ui/admin/errors"`) {
-		t.Error("expected HTMX polling attribute for /ui/admin/errors")
+		t.Error("expected HTMX polling attribute in inlined errors panel")
+	}
+}
+
+func TestAdminTabErrorsFragment(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.ErrorLog = errorlog.NewStore(10)
+	srv.ErrorLog.Append(errorlog.Entry{
+		Time:    time.Now(),
+		Level:   slog.LevelError,
+		Message: "kaboom",
+	})
+
+	resp, err := http.Get(ts.URL + "/ui/admin/tab/errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "kaboom") {
+		t.Error("expected errors tab fragment to include entry")
+	}
+	if !strings.Contains(body, `id="admin-errors-container"`) {
+		t.Error("expected polling container in tab fragment")
+	}
+}
+
+func TestAdminTabUsersFragment(t *testing.T) {
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.DB.UpsertUserWithRole("u-1", "u1@example.com", "Userone", "viewer")
+
+	resp, err := http.Get(ts.URL + "/ui/admin/tab/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Userone") {
+		t.Error("expected users tab fragment to include user row")
+	}
+	if !strings.Contains(body, `id="admin-users-filters"`) {
+		t.Error("expected filter form in users tab fragment")
+	}
+}
+
+func TestAdminTabSystemFragment(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+
+	resp, err := http.Get(ts.URL + "/ui/admin/tab/system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body := readBody(t, resp)
+
+	if !strings.Contains(body, "Run checks") {
+		t.Error("expected Run checks button in system tab fragment")
+	}
+	if !strings.Contains(body, `id="check-results"`) {
+		t.Error("expected check-results container in system tab fragment")
+	}
+}
+
+func TestAdminTabsForbiddenForNonAdmin(t *testing.T) {
+	_, ts := authServer(t, oidcConfig(), "viewer-1", auth.RoleViewer)
+
+	for _, path := range []string{
+		"/ui/admin/tab/users",
+		"/ui/admin/tab/system",
+		"/ui/admin/tab/errors",
+	} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: expected 403, got %d", path, resp.StatusCode)
+		}
 	}
 }
 

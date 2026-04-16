@@ -220,7 +220,7 @@ func New() *UI {
 		),
 	)
 	// Re-parse admin.html with the shared system_checks, admin_users,
-	// and admin_errors fragments.
+	// admin_errors, and admin_tabs fragments.
 	pages["admin.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
 			content,
@@ -229,6 +229,7 @@ func New() *UI {
 			"templates/system_checks.html",
 			"templates/admin_users.html",
 			"templates/admin_errors.html",
+			"templates/admin_tabs.html",
 		),
 	)
 
@@ -260,6 +261,13 @@ func New() *UI {
 		)
 		fragments[name] = t
 	}
+	// admin_tabs.html's adminTabSystem define references checkResults from
+	// system_checks.html, so parse them together.
+	fragments["admin_tabs.html"] = template.Must(
+		template.New("admin_tabs.html").Funcs(funcMap).ParseFS(
+			content, "templates/admin_tabs.html", "templates/system_checks.html",
+		),
+	)
 
 	static := http.FileServer(http.FS(content))
 	return &UI{pages: pages, fragments: fragments, static: static}
@@ -273,6 +281,9 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
 	r.Get("/admin", ui.adminPage(srv))
 	r.Get("/ui/admin/users", ui.adminUsersFragment(srv))
 	r.Get("/ui/admin/errors", ui.adminErrorsFragment(srv))
+	r.Get("/ui/admin/tab/users", ui.adminTabUsersFragment(srv))
+	r.Get("/ui/admin/tab/system", ui.adminTabSystemFragment(srv))
+	r.Get("/ui/admin/tab/errors", ui.adminTabErrorsFragment(srv))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
 	r.Post("/ui/system/run", ui.systemRunFragment(srv))
@@ -354,9 +365,10 @@ type systemData struct {
 
 type adminData struct {
 	layoutData
-	Report *preflight.Report
-	Users  adminUsersData
-	Errors adminErrorsData
+	ActiveTab string // "users" (default), "system", "errors"
+	Report    *preflight.Report
+	Users     adminUsersData
+	Errors    adminErrorsData
 }
 
 type adminErrorsData struct {
@@ -748,6 +760,7 @@ func (ui *UI) adminPage(srv *server.Server) http.HandlerFunc {
 
 		data := adminData{
 			layoutData: baseLayout(srv, "admin", caller),
+			ActiveTab:  parseAdminTab(r.URL.Query().Get("tab")),
 			Report:     report,
 			Users:      usersData,
 			Errors:     buildAdminErrors(srv),
@@ -783,6 +796,74 @@ func (ui *UI) adminUsersFragment(srv *server.Server) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "text/html")
 		if err := ui.fragments["admin_users.html"].ExecuteTemplate(w, "adminUsersTable", usersData); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// parseAdminTab normalizes the ?tab= query value against the known set.
+// Unknown or empty values fall back to "users".
+func parseAdminTab(v string) string {
+	switch v {
+	case "system", "errors":
+		return v
+	default:
+		return "users"
+	}
+}
+
+// adminTabUsersFragment renders the full Users tab body (filters + table)
+// for an HTMX tab-swap on the /admin page.
+func (ui *UI) adminTabUsersFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		data, err := buildAdminUsers(srv, caller, r.URL.Query())
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_users.html"].ExecuteTemplate(w, "adminUsers", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminTabSystemFragment renders the System checks tab body.
+func (ui *UI) adminTabSystemFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		var report *preflight.Report
+		if srv.Checker != nil {
+			report = srv.Checker.Latest()
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_tabs.html"].ExecuteTemplate(w, "adminTabSystem", systemData{Report: report}); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminTabErrorsFragment renders the Recent warnings tab body (container
+// + table). The polling trigger is on the container, so swapping tabs
+// naturally starts/stops the poll loop.
+func (ui *UI) adminTabErrorsFragment(srv *server.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_errors.html"].ExecuteTemplate(w, "adminErrors", buildAdminErrors(srv)); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}

@@ -399,6 +399,12 @@
   .dark .refresh-section { border-color: oklch(var(--bc) / 0.15); }
 
   /* ── Admin page ── */
+  .admin-tabs {
+    @apply tabs tabs-border overflow-x-auto mb-4;
+  }
+  .admin-tab-content {
+    @apply pt-2;
+  }
   /* No overflow-hidden on the section so popovers inside the body
      (role dropdowns on the last table row) can escape its bounds.
      Corner-clipping of the summary hover background is handled via
