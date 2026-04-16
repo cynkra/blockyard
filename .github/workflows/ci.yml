@@ -125,6 +125,20 @@ jobs:
       BLOCKYARD_TEST_POSTGRES_URL: postgres://blockyard:blockyard@localhost:5432/blockyard_test?sslmode=disable
     steps:
       - uses: actions/checkout@v6
+        with:
+          # docs/themes/hugo-book submodule is required for the Hugo
+          # build below, which produces the real internal/docs/dist
+          # content that TestDocsServesHTML asserts against.
+          submodules: true
+      - uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: "0.147.4"
+          extended: true
+      # Replace the committed stub at internal/docs/dist/index.html
+      # with a real Hugo build so TestDocsServesHTML exercises the
+      # production embed. Mirrors the step in release.yml.
+      - name: Build docs for embed
+        run: cd docs && hugo --baseURL /docs/ --minify && rm -rf ../internal/docs/dist && cp -r public ../internal/docs/dist
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
