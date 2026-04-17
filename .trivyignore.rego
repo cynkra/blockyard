@@ -71,3 +71,17 @@ ignore if input.PkgName in {
 # different-class CVE in the same package should re-trigger triage
 # rather than silence automatically.
 ignore if input.VulnerabilityID == "CVE-2025-45582"
+
+# review-after: 2027-04-17
+# libexpat algorithmic-complexity DoS: a ~2 MiB crafted XML causes
+# dozens of seconds of processing. libexpat1 is a transitive dep
+# (likely fontconfig), not linked on any request path in blockyard:
+# the Go server has no encoding/xml usage, R's xml2 links libxml2
+# explicitly installed alongside libexpat, not expat itself. The
+# plausible in-image expat consumers (fontconfig reading fonts.conf)
+# only parse developer-controlled config at process init, never
+# attacker-supplied data. Kept at CVE level because the invariant
+# is library-linkage — not grep-testable — so a future memory-
+# corruption-class CVE in the same package should re-trigger
+# triage rather than silence automatically.
+ignore if input.VulnerabilityID == "CVE-2025-66382"
