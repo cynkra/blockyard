@@ -1,0 +1,57 @@
+name: Review Reminders
+
+# Scheduled workflow that scans .trivyignore.rego for expired
+# `# review-after: YYYY-MM-DD` comments and opens (or updates) a
+# tracker issue. Chosen over a blocking CI check so unrelated PRs
+# aren't held hostage by an expired date — the issue is the forcing
+# function instead.
+
+on:
+  schedule:
+    - cron: "0 12 * * 1"  # Monday noon UTC — after the Monday 6 AM publish rebuild
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  trivyignore-expired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: "security: expired review-after dates in .trivyignore.rego"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Scan and manage tracker issue
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          expired=$(grep -nE '^# *review-after:' .trivyignore.rego \
+            | awk -F'[: ]+' -v t="$today" '$NF < t { printf "- line %d: %s\n", $1, $NF }') || true
+
+          existing=$(gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg title "$ISSUE_TITLE" '[.[] | select(.title == $title) | .number] | .[0] // empty')
+
+          if [ -z "$expired" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "All review-after dates are now in the future."
+            fi
+            exit 0
+          fi
+
+          body=$(cat <<EOF
+          The review-after comments in .trivyignore.rego below have expired. Re-check each rule's justification:
+
+          - If the invariant still holds, bump the date.
+          - If not, narrow the rule to specific CVE IDs or remove it.
+
+          $expired
+          EOF
+          )
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body "$body"
+          fi

@@ -50,6 +50,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+  # Enforces the "Go code does not exec these tools" half of the
+  # binutils-family package-level ignore in .trivyignore.rego. If any
+  # of these binaries is legitimately needed from Go code, drop the
+  # ignore to CVE-level first so the trust boundary is explicit.
+  # Review-after dates are tracked via .github/workflows/review-reminders.yml
+  # which opens a GitHub issue rather than blocking CI.
+  exec-guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check no exec of tools whose CVEs are silenced
+        run: |
+          tools='readelf|objdump|ld|as|nm|strip|addr2line|ar|ranlib|gprof|size'
+          # Catches both bare names and absolute paths:
+          #   exec.Command("tool", ...)
+          #   exec.Command("/usr/bin/tool", ...)
+          #   exec.CommandContext(ctx, "tool", ...)
+          pattern='exec\.Command\("(/[^"]*/)?('"$tools"')"|exec\.CommandContext\([^,]+, *"(/[^"]*/)?('"$tools"')"'
+          if grep -rnE "$pattern" --include='*.go' .; then
+            echo "::error::Go code invokes a binutils tool whose CVEs are silenced via package-level ignore in .trivyignore.rego. Drop the ignore to CVE-level, or remove the invocation."
+            exit 1
+          fi
+
   dependencies:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
