@@ -274,7 +274,6 @@ jobs:
           name: seccomp-outer-json
           path: .
 
-      # TODO: bump to v3 once released with node24 support
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
