@@ -81,9 +81,11 @@ jobs:
       - name: Check no exec of tools whose CVEs are silenced
         run: |
           tools='readelf|objdump|ld|as|nm|strip|addr2line|ar|ranlib|gprof|size'
-          # exec.Command("X", ...) — tool name is the first arg
-          # exec.CommandContext(ctx, "X", ...) — tool name is the second arg
-          pattern="exec\\.Command\\(\"(${tools})\"|exec\\.CommandContext\\([^,]+, *\"(${tools})\""
+          # Catches both bare names and absolute paths:
+          #   exec.Command("tool", ...)
+          #   exec.Command("/usr/bin/tool", ...)
+          #   exec.CommandContext(ctx, "tool", ...)
+          pattern='exec\.Command\("(/[^"]*/)?('"$tools"')"|exec\.CommandContext\([^,]+, *"(/[^"]*/)?('"$tools"')"'
           if grep -rnE "$pattern" --include='*.go' .; then
             echo "::error::Go code invokes a binutils tool whose CVEs are silenced via package-level ignore in .trivyignore.rego. Drop the ignore to CVE-level, or remove the invocation."
             exit 1
