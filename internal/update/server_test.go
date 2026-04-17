@@ -5,70 +5,92 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
 
 type mockStore struct {
-	version   string
-	available string
+	version string
+	last    *Result
 }
 
-func (m *mockStore) SetUpdateAvailable(v string) { m.available = v }
-func (m *mockStore) GetVersion() string           { return m.version }
+func (m *mockStore) SetUpdateStatus(r *Result) { m.last = r }
+func (m *mockStore) GetVersion() string        { return m.version }
 
-func TestCheck_UpdateAvailable(t *testing.T) {
+func TestPerformCheck_Semver_UpdateAvailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v2.0.0"})
 	}))
 	defer srv.Close()
-
 	old := APIBase
 	APIBase = srv.URL
 	defer func() { APIBase = old }()
 
 	store := &mockStore{version: "1.0.0"}
-	check("1.0.0", store)
-
-	if store.available != "2.0.0" {
-		t.Errorf("expected available=2.0.0, got %q", store.available)
+	res, err := PerformCheck(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != StateUpdateAvailable {
+		t.Errorf("State = %q", res.State)
+	}
+	if store.last == nil || store.last.State != StateUpdateAvailable {
+		t.Errorf("store not updated, got %+v", store.last)
 	}
 }
 
-func TestCheck_NoUpdate(t *testing.T) {
+func TestPerformCheck_Semver_UpToDateStillRecorded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v1.0.0"})
 	}))
 	defer srv.Close()
-
 	old := APIBase
 	APIBase = srv.URL
 	defer func() { APIBase = old }()
 
 	store := &mockStore{version: "1.0.0"}
-	check("1.0.0", store)
-
-	if store.available != "" {
-		t.Errorf("expected no update, got %q", store.available)
+	_, _ = PerformCheck(store)
+	if store.last == nil || store.last.State != StateUpToDate {
+		t.Errorf("expected up_to_date recorded, got %+v", store.last)
 	}
 }
 
-func TestCheck_FetchError(t *testing.T) {
+// Regression: a previous "update available" record must be replaced
+// by a fresh "up to date" record once the user upgrades, otherwise
+// the post-upgrade banner would linger forever.
+func TestPerformCheck_OverwritesPriorAvailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "error", http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v1.0.0"})
 	}))
 	defer srv.Close()
-
 	old := APIBase
 	APIBase = srv.URL
 	defer func() { APIBase = old }()
 
-	store := &mockStore{version: "1.0.0"}
-	// Should not panic or set update.
-	check("1.0.0", store)
+	store := &mockStore{
+		version: "1.0.0",
+		last:    &Result{State: StateUpdateAvailable, LatestVersion: "2.0.0"},
+	}
+	_, _ = PerformCheck(store)
+	if store.last.State != StateUpToDate {
+		t.Errorf("expected stale available record cleared, got %+v", store.last)
+	}
+}
 
-	if store.available != "" {
-		t.Errorf("expected no update on error, got %q", store.available)
+func TestPerformCheck_DevBuild(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v0.0.2"})
+	}))
+	defer srv.Close()
+	old := APIBase
+	APIBase = srv.URL
+	defer func() { APIBase = old }()
+
+	store := &mockStore{version: "dev"}
+	_, _ = PerformCheck(store)
+	if store.last == nil || store.last.State != StateDevBuild {
+		t.Errorf("expected dev_build state, got %+v", store.last)
 	}
 }
 
@@ -85,8 +107,31 @@ func TestSpawnChecker_CancelledImmediately(t *testing.T) {
 
 	select {
 	case <-done:
-		// Returned as expected.
 	case <-time.After(2 * time.Second):
 		t.Fatal("SpawnChecker did not return after context cancel")
+	}
+}
+
+// Smoke test that the http server fixture echoes a recognizable
+// response (sanity check for the test infra; not exercising new
+// behaviour).
+func TestFetchBranchHEAD(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/branches/") {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"commit":{"sha":"deadbeef00000000000000000000000000000000"}}`))
+	}))
+	defer srv.Close()
+	old := APIBase
+	APIBase = srv.URL
+	defer func() { APIBase = old }()
+
+	sha, err := FetchBranchHEAD("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != "deadbeef00000000000000000000000000000000" {
+		t.Errorf("sha = %q", sha)
 	}
 }

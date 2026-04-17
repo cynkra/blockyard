@@ -49,7 +49,6 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/orchestrator"
 	"github.com/cynkra/blockyard/internal/task"
-	"github.com/cynkra/blockyard/internal/update"
 )
 
 var builtBlockyardBinary string
@@ -291,11 +290,7 @@ func TestProcessOrchestratorFullUpdate(t *testing.T) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	checker := &e2eChecker{result: &update.Result{
-		CurrentVersion:  "1.0.0",
-		LatestVersion:   "2.0.0",
-		UpdateAvailable: true,
-	}}
+	checker := &e2eChecker{target: "2.0.0"}
 
 	var drainCalls, undrainCalls, exitCalls atomic.Int32
 	orch := orchestrator.New(
@@ -381,14 +376,14 @@ func TestProcessOrchestratorFullUpdate(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 }
 
-// e2eChecker is a test-only update checker that returns a fixed result.
+// e2eChecker is a test-only updateAPI that returns a fixed install target.
 type e2eChecker struct {
-	result *update.Result
+	target string
 	err    error
 }
 
-func (c *e2eChecker) CheckLatest(_, _ string) (*update.Result, error) {
-	return c.result, c.err
+func (c *e2eChecker) FetchInstallTarget(_, _ string) (string, error) {
+	return c.target, c.err
 }
 
 // findFreePort asks the kernel for an ephemeral port and immediately

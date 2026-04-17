@@ -51,7 +51,7 @@ jobs:
         run: docker compose -f examples/${{ matrix.example }}/docker-compose.yml pull --ignore-pull-failures
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request' && github.event_name != 'push'
-        run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 -f docker/server.Dockerfile .
+        run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 --build-arg "VERSION=$(git describe --always --dirty)" -f docker/server.Dockerfile .
       - name: Block cloud metadata endpoint for containers
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
@@ -112,7 +112,7 @@ jobs:
         run: docker compose -f examples/hello-shiny/docker-compose.yml pull --ignore-pull-failures
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request' && github.event_name != 'push'
-        run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 -f docker/server.Dockerfile .
+        run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 --build-arg "VERSION=$(git describe --always --dirty)" -f docker/server.Dockerfile .
       - name: Block cloud metadata endpoint
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true

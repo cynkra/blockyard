@@ -449,6 +449,9 @@ func main() {
 			ops.SpawnSoftDeleteSweeper(bgCtx, srv)
 		}()
 
+		if cfg.Update != nil && cfg.Update.Repo != "" {
+			update.SetRepo(cfg.Update.Repo)
+		}
 		bgWg.Add(1)
 		go func() {
 			defer bgWg.Done()
@@ -495,7 +498,7 @@ func main() {
 			_, err := be.ListManaged(ctx)
 			return err
 		},
-		UpdateVersion: func() *string { return srv.UpdateAvailable.Load() },
+		UpdateAvailable: srv.UpdateAvailableVersion,
 	}
 	if srv.Config.OIDC != nil {
 		checkerDeps.IDPCheck = func(ctx context.Context) error {

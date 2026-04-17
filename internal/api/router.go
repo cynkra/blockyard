@@ -194,7 +194,7 @@ func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrat
 	uiHandler := ui.New()
 	r.Group(func(r chi.Router) {
 		r.Use(auth.AppAuthMiddleware(authDeps))
-		uiHandler.RegisterRoutes(r, srv)
+		uiHandler.RegisterRoutes(r, srv, orch, bgCtx)
 	})
 
 	// Self-hosted documentation (embedded Hugo build).

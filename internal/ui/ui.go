@@ -19,8 +19,11 @@ import (
 
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/orchestrator"
 	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/server"
+	"github.com/cynkra/blockyard/internal/task"
+	updatepkg "github.com/cynkra/blockyard/internal/update"
 )
 
 //go:embed templates/*.html static/*
@@ -220,7 +223,7 @@ func New() *UI {
 		),
 	)
 	// Re-parse admin.html with the shared system_checks, admin_users,
-	// admin_errors, and admin_tabs fragments.
+	// admin_errors, admin_tabs, and admin_version fragments.
 	pages["admin.html"] = template.Must(
 		template.New("").Funcs(funcMap).ParseFS(
 			content,
@@ -230,6 +233,7 @@ func New() *UI {
 			"templates/admin_users.html",
 			"templates/admin_errors.html",
 			"templates/admin_tabs.html",
+			"templates/admin_version.html",
 		),
 	)
 
@@ -241,6 +245,7 @@ func New() *UI {
 		"system_banner.html",
 		"admin_users.html",
 		"admin_errors.html",
+		"admin_version.html",
 		"sidebar.html",
 		"tab_overview.html",
 		"tab_settings.html",
@@ -273,17 +278,23 @@ func New() *UI {
 	return &UI{pages: pages, fragments: fragments, static: static}
 }
 
-// RegisterRoutes mounts the UI routes on the router.
-func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server) {
+// RegisterRoutes mounts the UI routes on the router. The orchestrator
+// and bgCtx are only used by the admin Updates tab; tests without
+// rolling-update support may pass nil for orch.
+func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server, orch *orchestrator.Orchestrator, bgCtx context.Context) {
 	r.Get("/", ui.appsPage(srv))
 	r.Get("/deployments", ui.deploymentsPage(srv))
 	r.Get("/api-keys", ui.apiKeysPage(srv))
-	r.Get("/admin", ui.adminPage(srv))
+	r.Get("/admin", ui.adminPage(srv, orch))
 	r.Get("/ui/admin/users", ui.adminUsersFragment(srv))
 	r.Get("/ui/admin/errors", ui.adminErrorsFragment(srv))
 	r.Get("/ui/admin/tab/users", ui.adminTabUsersFragment(srv))
 	r.Get("/ui/admin/tab/system", ui.adminTabSystemFragment(srv))
 	r.Get("/ui/admin/tab/errors", ui.adminTabErrorsFragment(srv))
+	r.Get("/ui/admin/tab/version", ui.adminTabVersionFragment(srv, orch))
+	r.Post("/ui/admin/update/check", ui.adminUpdateCheck(srv, orch))
+	r.Post("/ui/admin/update/start", ui.adminUpdateStart(srv, orch, bgCtx))
+	r.Get("/ui/admin/update/progress", ui.adminUpdateProgress(srv, orch))
 	r.Get("/profile", ui.profilePage(srv))
 	r.Post("/ui/tokens", ui.createToken(srv))
 	r.Post("/ui/system/run", ui.systemRunFragment(srv))
@@ -365,10 +376,58 @@ type systemData struct {
 
 type adminData struct {
 	layoutData
-	ActiveTab string // "users" (default), "system", "errors"
+	ActiveTab string // "users" (default), "system", "errors", "version"
 	Report    *preflight.Report
 	Users     adminUsersData
 	Errors    adminErrorsData
+	Updates   adminVersionData // field name avoids shadowing layoutData.Version
+}
+
+type adminVersionData struct {
+	CurrentVersion  string
+	State           updatepkg.State // up_to_date, update_available, ahead, diverged, dev_build, no_remote, local_not_found, unknown
+	LatestVersion   string          // tag or short SHA; empty when no check has run
+	Detail          string          // extra context: "3 commits behind", error message, etc.
+	LastCheckedStr  string          // RFC3339 for the time-ago helper; empty when never checked
+	CheckError      string          // surfaced when a manual refresh raised an error from CheckLatest
+	UpdateSupported bool            // false on the containerized backend (orch is nil)
+	UpdateState     string          // orchestrator state: idle, updating, watching, rolling_back
+}
+
+// UpdateAvailable reports whether the Updates tab should show the
+// "new" badge and the "Update to ..." button. Used by the template.
+func (d adminVersionData) UpdateAvailable() bool {
+	return d.State == updatepkg.StateUpdateAvailable
+}
+
+// StatusBadge bundles the label and daisyUI variant class the
+// template uses to render the state pill. Returned as a struct
+// because html/template can only call zero-or-one-return-value
+// methods.
+type adminVersionBadge struct {
+	Label string
+	Class string
+}
+
+func (d adminVersionData) StatusBadge() adminVersionBadge {
+	switch d.State {
+	case updatepkg.StateUpdateAvailable:
+		return adminVersionBadge{"update available", "badge-warning"}
+	case updatepkg.StateUpToDate:
+		return adminVersionBadge{"up to date", "badge-success"}
+	case updatepkg.StateAhead:
+		return adminVersionBadge{"ahead of latest", "badge-info"}
+	case updatepkg.StateDiverged:
+		return adminVersionBadge{"diverged from main", "badge-warning"}
+	case updatepkg.StateDevBuild:
+		return adminVersionBadge{"development build", "badge-ghost"}
+	case updatepkg.StateNoRemote:
+		return adminVersionBadge{"check failed", "badge-error"}
+	case updatepkg.StateLocalNotFound:
+		return adminVersionBadge{"commit not on origin", "badge-ghost"}
+	default:
+		return adminVersionBadge{"not checked", "badge-ghost"}
+	}
 }
 
 type adminErrorsData struct {
@@ -735,7 +794,7 @@ func (ui *UI) profilePage(srv *server.Server) http.HandlerFunc {
 	}
 }
 
-func (ui *UI) adminPage(srv *server.Server) http.HandlerFunc {
+func (ui *UI) adminPage(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := requireAuth(w, r)
 		if user == nil {
@@ -765,6 +824,7 @@ func (ui *UI) adminPage(srv *server.Server) http.HandlerFunc {
 			Report:     report,
 			Users:      usersData,
 			Errors:     buildAdminErrors(srv),
+			Updates:    buildAdminVersion(srv, orch, ""),
 		}
 
 		if err := ui.pages["admin.html"].ExecuteTemplate(w, "base", data); err != nil {
@@ -806,7 +866,7 @@ func (ui *UI) adminUsersFragment(srv *server.Server) http.HandlerFunc {
 // Unknown or empty values fall back to "users".
 func parseAdminTab(v string) string {
 	switch v {
-	case "system", "errors":
+	case "system", "errors", "version":
 		return v
 	default:
 		return "users"
@@ -868,6 +928,163 @@ func (ui *UI) adminTabErrorsFragment(srv *server.Server) http.HandlerFunc {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// adminTabVersionFragment renders the Updates tab body.
+func (ui *UI) adminTabVersionFragment(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersion", buildAdminVersion(srv, orch, "")); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminUpdateCheck runs a live GitHub check and re-renders the
+// version card. Runs synchronously so the user sees the fresh result
+// without a polling loop.
+func (ui *UI) adminUpdateCheck(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		var checkErr string
+		if _, err := updatepkg.PerformCheck(srv); err != nil {
+			checkErr = err.Error()
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", buildAdminVersion(srv, orch, checkErr)); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminUpdateStart triggers a rolling update and swaps the card for
+// a progress panel. Mirrors the goroutine kickoff in
+// api.handleAdminUpdate; kept separate because the UI returns HTML
+// instead of a task-id JSON payload and imports of internal/api here
+// would close a cycle.
+func (ui *UI) adminUpdateStart(srv *server.Server, orch *orchestrator.Orchestrator, bgCtx context.Context) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if orch == nil {
+			w.Header().Set("Content-Type", "text/html")
+			data := buildAdminVersion(srv, orch, "Rolling updates are not supported on this deployment; update through your container runtime.")
+			_ = ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", data)
+			return
+		}
+
+		channel := ""
+		if srv.Config.Update != nil {
+			channel = srv.Config.Update.Channel
+		}
+		if channel == "" {
+			channel = "stable"
+		}
+
+		if !orch.CASState("idle", "updating") {
+			w.Header().Set("Content-Type", "text/html")
+			data := buildAdminVersion(srv, orch, "Update already in progress ("+orch.State()+").")
+			_ = ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", data)
+			return
+		}
+
+		taskID := uuid.New().String()
+		sender := srv.Tasks.Create(taskID, "admin-update")
+
+		go func() {
+			updated, err := orch.Update(bgCtx, channel, sender)
+			if err != nil {
+				sender.Write(err.Error())
+				sender.Complete(task.Failed)
+				orch.SetState("idle")
+				return
+			}
+			if !updated {
+				sender.Complete(task.Completed)
+				orch.SetState("idle")
+				return
+			}
+
+			watchPeriod := 5 * time.Minute
+			if srv.Config.Update != nil && srv.Config.Update.WatchPeriod.Duration > 0 {
+				watchPeriod = srv.Config.Update.WatchPeriod.Duration
+			}
+			if err := orch.Watchdog(bgCtx, watchPeriod, sender); err != nil {
+				sender.Write(err.Error())
+				sender.Complete(task.Failed)
+				return
+			}
+			sender.Write("Update successful. Shutting down old server.")
+			sender.Complete(task.Completed)
+			orch.Exit()
+		}()
+
+		w.Header().Set("Content-Type", "text/html")
+		data := buildAdminVersion(srv, orch, "")
+		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminUpdateProgress", data); err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+		}
+	}
+}
+
+// adminUpdateProgress returns the current orchestrator state as an
+// HTMX-polled fragment. When the state returns to "idle" the page
+// reloads to pick up the new version (or the old state, if the update
+// failed and the orchestrator rolled back).
+func (ui *UI) adminUpdateProgress(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := auth.CallerFromContext(r.Context())
+		if caller == nil || !caller.Role.CanManageRoles() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		data := buildAdminVersion(srv, orch, "")
+		w.Header().Set("Content-Type", "text/html")
+		if data.UpdateState == "idle" {
+			_ = ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", data)
+			return
+		}
+		_ = ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminUpdateProgress", data)
+	}
+}
+
+// buildAdminVersion assembles the data shown on the Updates tab from
+// the server's cached state and the orchestrator's current phase.
+// checkErr is surfaced in the UI when a manual refresh raised an
+// error from CheckLatest itself (rare — most failures fold into
+// State=NoRemote on the cached Result).
+func buildAdminVersion(srv *server.Server, orch *orchestrator.Orchestrator, checkErr string) adminVersionData {
+	data := adminVersionData{
+		CurrentVersion:  srv.Version,
+		State:           updatepkg.StateUnknown,
+		UpdateSupported: orch != nil,
+		UpdateState:     "idle",
+		CheckError:      checkErr,
+	}
+	if status := srv.UpdateStatus.Load(); status != nil {
+		data.State = status.State
+		data.LatestVersion = status.LatestVersion
+		data.Detail = status.Detail
+	}
+	if t := srv.UpdateLastChecked.Load(); t != nil {
+		data.LastCheckedStr = t.UTC().Format(time.RFC3339)
+	}
+	if orch != nil {
+		data.UpdateState = orch.State()
+	}
+	return data
 }
 
 // adminErrorsFragment serves the recent-errors table fragment, polled

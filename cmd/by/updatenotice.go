@@ -14,9 +14,11 @@ import (
 const updateCheckInterval = 24 * time.Hour
 
 // updateCache is persisted to disk to throttle GitHub API calls.
+// State mirrors update.State so a stale "available" entry can be
+// distinguished from "checked, up to date".
 type updateCache struct {
+	State         string    `json:"state"`
 	LatestVersion string    `json:"latest_version"`
-	Channel       string    `json:"channel"`
 	CheckedAt     time.Time `json:"checked_at"`
 }
 
@@ -59,62 +61,52 @@ var updateNoticeState struct {
 	ch chan updateResult
 }
 
-// startUpdateCheck kicks off a background update check if the cache is stale.
-// Called from PersistentPreRun so the HTTP request runs concurrently with the
-// actual command.
+// startUpdateCheck kicks off a background update check if the cache
+// is stale. Called from PersistentPreRun so the HTTP request runs
+// concurrently with the actual command.
 func startUpdateCheck() {
 	cache := loadUpdateCache()
-	channel := update.InferChannel(version)
 
-	// If the cache is fresh and no update is available, skip entirely.
-	if cache != nil && cache.Channel == channel &&
-		time.Since(cache.CheckedAt) < updateCheckInterval &&
-		cache.LatestVersion == version {
+	// Cache is fresh — skip the network call. finishUpdateCheck
+	// will print from cache if there's still an update to flag.
+	if cache != nil && time.Since(cache.CheckedAt) < updateCheckInterval {
 		return
 	}
 
-	// If the cache is fresh and shows an update, we'll print from cache
-	// in finishUpdateCheck — no need for a network call.
-	if cache != nil && cache.Channel == channel &&
-		time.Since(cache.CheckedAt) < updateCheckInterval {
-		return
-	}
-
-	// Cache is stale or missing — start a background check.
 	ch := make(chan updateResult, 1)
 	updateNoticeState.ch = ch
 	go func() {
-		res, err := update.CheckLatest(channel, version)
+		res, err := update.CheckLatest(version)
 		ch <- updateResult{result: res, err: err}
 	}()
 }
 
-// finishUpdateCheck collects the background check result (if any) and prints
-// a one-line notice to stderr when an update is available.
+// finishUpdateCheck collects the background check result (if any) and
+// prints a one-line notice to stderr when an update is available.
 // Called from PersistentPostRunE after the command finishes.
 func finishUpdateCheck() {
-	channel := update.InferChannel(version)
-
 	if updateNoticeState.ch != nil {
-		// A background check is running — collect the result.
 		ur := <-updateNoticeState.ch
 		updateNoticeState.ch = nil
-		if ur.err == nil && ur.result != nil {
-			saveUpdateCache(&updateCache{
-				LatestVersion: ur.result.LatestVersion,
-				Channel:       ur.result.Channel,
-				CheckedAt:     time.Now(),
-			})
-			if ur.result.UpdateAvailable {
-				printUpdateNotice(ur.result.LatestVersion)
-			}
+		if ur.err != nil || ur.result == nil {
+			return
+		}
+		saveUpdateCache(&updateCache{
+			State:         string(ur.result.State),
+			LatestVersion: ur.result.LatestVersion,
+			CheckedAt:     time.Now(),
+		})
+		if ur.result.State == update.StateUpdateAvailable {
+			printUpdateNotice(ur.result.LatestVersion)
 		}
 		return
 	}
 
-	// No background check — use cached result.
+	// No background check — surface the cached "update available"
+	// notice if it's still relevant.
 	cache := loadUpdateCache()
-	if cache != nil && cache.Channel == channel && cache.LatestVersion != version {
+	if cache != nil && cache.State == string(update.StateUpdateAvailable) &&
+		cache.LatestVersion != version {
 		printUpdateNotice(cache.LatestVersion)
 	}
 }

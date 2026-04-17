@@ -6,25 +6,25 @@ import (
 	"time"
 )
 
-// UpdateStore is the interface the checker needs to record its result.
-// Satisfied by server.Server via its UpdateAvailable atomic field.
+// UpdateStore is the interface a long-lived caller (the server)
+// implements to receive check results. Satisfied by server.Server.
 type UpdateStore interface {
-	SetUpdateAvailable(version string)
+	SetUpdateStatus(*Result)
 	GetVersion() string
 }
 
-// SpawnChecker periodically checks GitHub for a newer release and stores
-// the result. It performs an initial check after 1 minute, then every 24
+// SpawnChecker periodically checks GitHub for a newer release and
+// stores the result on store. Performs an initial check after one
+// minute (so startup isn't slowed by network), then once every 24
 // hours. Blocks until ctx is cancelled.
 func SpawnChecker(ctx context.Context, version string, store UpdateStore) {
-	// Initial delay — let the server finish starting up.
 	select {
 	case <-ctx.Done():
 		return
 	case <-time.After(1 * time.Minute):
 	}
 
-	check(version, store)
+	check(store)
 
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
@@ -34,24 +34,32 @@ func SpawnChecker(ctx context.Context, version string, store UpdateStore) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			check(version, store)
+			check(store)
 		}
 	}
 }
 
-func check(version string, store UpdateStore) {
-	channel := InferChannel(version)
-	result, err := CheckLatest(channel, version)
+func check(store UpdateStore) {
+	_, _ = PerformCheck(store)
+}
+
+// PerformCheck runs a single update check synchronously and writes
+// the outcome to store. Always writes — even when the result is
+// "up to date" or "dev build" — so the UI can display the most
+// recent check time. Returns the result so a UI handler can render
+// it directly.
+func PerformCheck(store UpdateStore) (*Result, error) {
+	result, err := CheckLatest(store.GetVersion())
 	if err != nil {
-		slog.Warn("update check failed", "error", err)
-		return
+		return nil, err
 	}
-	if result.UpdateAvailable {
-		store.SetUpdateAvailable(result.LatestVersion)
+	store.SetUpdateStatus(result)
+	if result.State == StateUpdateAvailable {
 		slog.Warn("a newer version is available",
-			"current", version,
+			"current", result.CurrentVersion,
 			"latest", result.LatestVersion,
-			"channel", channel,
+			"detail", result.Detail,
 		)
 	}
+	return result, nil
 }

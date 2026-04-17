@@ -72,9 +72,9 @@ jobs:
         run: |
           V="${{ inputs.version }}"
           if [ -z "$V" ]; then
-            V="dev"
+            V="$(git describe --always --dirty)"
           elif [ "$V" = "main" ]; then
-            V="main+$(git rev-parse --short HEAD)"
+            V="$(git describe --always --dirty)"
           else
             V="${V#v}"
           fi

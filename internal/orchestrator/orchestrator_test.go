@@ -16,7 +16,6 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/task"
-	"github.com/cynkra/blockyard/internal/update"
 )
 
 // --- fake server factory (backend-agnostic) ---
@@ -75,12 +74,12 @@ func (f *fakeServerFactory) SupportsRollback() bool {
 // --- mock update checker ---
 
 type mockChecker struct {
-	result *update.Result
+	target string // install target version; "" = up to date
 	err    error
 }
 
-func (m *mockChecker) CheckLatest(_, _ string) (*update.Result, error) {
-	return m.result, m.err
+func (m *mockChecker) FetchInstallTarget(_, _ string) (string, error) {
+	return m.target, m.err
 }
 
 // --- test helpers ---
@@ -137,11 +136,7 @@ func newSender(t *testing.T) task.Sender {
 
 func TestUpdateAlreadyCurrent(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion:  "1.0.0",
-			LatestVersion:   "1.0.0",
-			UpdateAvailable: false,
-		},
+		target: "",
 	}
 	o, tracker := newTestOrchestrator(t, &fakeServerFactory{}, checker)
 	sender := newSender(t)
@@ -160,11 +155,7 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 
 func TestUpdatePreUpdateFails(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion:  "1.0.0",
-			LatestVersion:   "2.0.0",
-			UpdateAvailable: true,
-		},
+		target: "2.0.0",
 	}
 	factory := &fakeServerFactory{
 		preUpdateErr: io.ErrUnexpectedEOF,
@@ -183,11 +174,7 @@ func TestUpdatePreUpdateFails(t *testing.T) {
 
 func TestUpdateCreateFails(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion:  "1.0.0",
-			LatestVersion:   "2.0.0",
-			UpdateAvailable: true,
-		},
+		target: "2.0.0",
 	}
 	factory := &fakeServerFactory{
 		createInstanceFn: func(context.Context, string, []string, task.Sender) (newServerInstance, error) {
@@ -208,11 +195,7 @@ func TestUpdateCreateFails(t *testing.T) {
 
 func TestUpdateHappyPath(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion:  "1.0.0",
-			LatestVersion:   "2.0.0",
-			UpdateAvailable: true,
-		},
+		target: "2.0.0",
 	}
 
 	readyzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -263,11 +246,7 @@ func TestUpdateConcurrencyGuard(t *testing.T) {
 
 func TestUpdateReadyTimeout(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion:  "1.0.0",
-			LatestVersion:   "2.0.0",
-			UpdateAvailable: true,
-		},
+		target: "2.0.0",
 	}
 
 	var killed atomic.Bool
@@ -301,9 +280,7 @@ func TestUpdateReadyTimeout(t *testing.T) {
 
 func TestUpdateBackupFailsNoDrain(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion: "1.0.0", LatestVersion: "2.0.0", UpdateAvailable: true,
-		},
+		target: "2.0.0",
 	}
 	o, tracker := newTestOrchestrator(t, &fakeServerFactory{}, checker)
 	memDB, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: ":memory:"})
@@ -325,9 +302,7 @@ func TestUpdateBackupFailsNoDrain(t *testing.T) {
 
 func TestUpdateActivateFailsAfterDrain(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion: "1.0.0", LatestVersion: "2.0.0", UpdateAvailable: true,
-		},
+		target: "2.0.0",
 	}
 
 	activateCalled := false
@@ -789,11 +764,7 @@ func TestScheduledSkipsInProgress(t *testing.T) {
 
 func TestRunScheduledCancellation(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion:  "1.0.0",
-			LatestVersion:   "1.0.0",
-			UpdateAvailable: false,
-		},
+		target: "",
 	}
 	o, _ := newTestOrchestrator(t, &fakeServerFactory{}, checker)
 	o.cfg.Update = &config.UpdateConfig{
@@ -826,7 +797,7 @@ func TestRunScheduledInvalidCron(t *testing.T) {
 
 func TestRunScheduledOnceNoUpdate(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{UpdateAvailable: false},
+		target: "",
 	}
 	o, _ := newTestOrchestrator(t, &fakeServerFactory{}, checker)
 	if o.runScheduledOnce(context.Background(), "stable") {
@@ -844,7 +815,7 @@ func TestRunScheduledOnceCheckError(t *testing.T) {
 
 func TestRunScheduledOnceCASFails(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{UpdateAvailable: true, CurrentVersion: "1.0.0", LatestVersion: "2.0.0"},
+		target: "2.0.0",
 	}
 	o, _ := newTestOrchestrator(t, &fakeServerFactory{}, checker)
 	o.state.Store("updating")
@@ -855,7 +826,7 @@ func TestRunScheduledOnceCASFails(t *testing.T) {
 
 func TestRunScheduledOnceUpdateFails(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{UpdateAvailable: true, CurrentVersion: "1.0.0", LatestVersion: "2.0.0"},
+		target: "2.0.0",
 	}
 	factory := &fakeServerFactory{
 		preUpdateErr: io.ErrUnexpectedEOF,
@@ -871,11 +842,7 @@ func TestRunScheduledOnceUpdateFails(t *testing.T) {
 
 func TestRunScheduledNoUpdate(t *testing.T) {
 	checker := &mockChecker{
-		result: &update.Result{
-			CurrentVersion:  "1.0.0",
-			LatestVersion:   "1.0.0",
-			UpdateAvailable: false,
-		},
+		target: "",
 	}
 	o, _ := newTestOrchestrator(t, &fakeServerFactory{}, checker)
 	o.cfg.Update = &config.UpdateConfig{

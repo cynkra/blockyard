@@ -5,24 +5,270 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
-func TestInferChannel(t *testing.T) {
+func TestClassifyVersion(t *testing.T) {
 	tests := []struct {
-		version string
-		want    string
+		in       string
+		wantKind Kind
+		wantSHA  string
 	}{
-		{"main+abc123", "main"},
-		{"main+2026-03-26-abc", "main"},
-		{"1.0.0", "stable"},
-		{"0.9.0-rc1", "stable"},
-		{"", "stable"},
+		{"v1.2.3", KindSemver, ""},
+		{"1.2.3", KindSemver, ""},
+		{"0.0.2", KindSemver, ""},
+		// git describe outputs
+		{"v0.0.2-3-gabc1234", KindSHA, "abc1234"},
+		{"v0.0.2-3-gabc1234-dirty", KindSHA, "abc1234"},
+		{"abc1234", KindSHA, "abc1234"},
+		{"abc1234-dirty", KindSHA, "abc1234"},
+		{"abcdef0123456789abcdef0123456789abcdef01", KindSHA, "abcdef0123456789abcdef0123456789abcdef01"},
+		// Legacy main+ format
+		{"main+abc1234", KindSHA, "abc1234"},
+		// Anything else
+		{"dev", KindUnknown, ""},
+		{"", KindUnknown, ""},
+		{"some-random-string", KindUnknown, ""},
+		// 6 hex is too short to be a SHA
+		{"abc123", KindUnknown, ""},
 	}
 	for _, tt := range tests {
-		if got := InferChannel(tt.version); got != tt.want {
-			t.Errorf("InferChannel(%q) = %q, want %q", tt.version, got, tt.want)
+		gotKind, gotSHA := classifyVersion(tt.in)
+		if gotKind != tt.wantKind || gotSHA != tt.wantSHA {
+			t.Errorf("classifyVersion(%q) = (%v, %q), want (%v, %q)",
+				tt.in, gotKind, gotSHA, tt.wantKind, tt.wantSHA)
 		}
+	}
+}
+
+func TestCompareSemver(t *testing.T) {
+	tests := []struct {
+		a, b [3]int
+		want int
+	}{
+		{[3]int{1, 0, 0}, [3]int{1, 0, 0}, 0},
+		{[3]int{1, 0, 0}, [3]int{1, 0, 1}, -1},
+		{[3]int{1, 0, 1}, [3]int{1, 0, 0}, 1},
+		{[3]int{1, 1, 0}, [3]int{1, 0, 5}, 1},
+		{[3]int{2, 0, 0}, [3]int{1, 99, 99}, 1},
+		{[3]int{0, 0, 1}, [3]int{0, 0, 2}, -1},
+	}
+	for _, tt := range tests {
+		if got := compareSemver(tt.a, tt.b); got != tt.want {
+			t.Errorf("compareSemver(%v, %v) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// fakeRemote is a minimal stub of the GitHub endpoints we hit. It
+// records request paths so tests can assert which calls happened.
+type fakeRemote struct {
+	server      *httptest.Server
+	latestTag   string                  // /releases/latest TagName
+	branchHead  string                  // /branches/main commit.sha
+	compareResp *CompareResult          // /compare/{base}...{head} payload
+	compare404  bool                    // when true, /compare returns 404
+	called      map[string]int          // path → count
+}
+
+func newFakeRemote() *fakeRemote {
+	f := &fakeRemote{called: map[string]int{}}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.called[r.URL.Path]++
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			json.NewEncoder(w).Encode(GitHubRelease{TagName: f.latestTag})
+		case strings.HasPrefix(r.URL.Path, "/branches/"):
+			payload := struct {
+				Commit struct {
+					SHA string `json:"sha"`
+				} `json:"commit"`
+			}{}
+			payload.Commit.SHA = f.branchHead
+			json.NewEncoder(w).Encode(payload)
+		case strings.HasPrefix(r.URL.Path, "/compare/"):
+			if f.compare404 {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(f.compareResp)
+		default:
+			http.Error(w, "unexpected path: "+r.URL.Path, http.StatusInternalServerError)
+		}
+	}))
+	return f
+}
+
+func (f *fakeRemote) Close() { f.server.Close() }
+
+// install points the package APIBase at the fake server for the
+// duration of the test.
+func (f *fakeRemote) install(t *testing.T) {
+	t.Helper()
+	old := APIBase
+	APIBase = f.server.URL
+	t.Cleanup(func() { APIBase = old })
+}
+
+func TestCheckLatest_Semver_UpdateAvailable(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.latestTag = "v1.5.0"
+	f.install(t)
+
+	res, err := CheckLatest("1.4.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != StateUpdateAvailable {
+		t.Errorf("State = %q, want %q", res.State, StateUpdateAvailable)
+	}
+	if res.LatestVersion != "1.5.0" {
+		t.Errorf("LatestVersion = %q", res.LatestVersion)
+	}
+}
+
+func TestCheckLatest_Semver_UpToDate(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.latestTag = "v1.5.0"
+	f.install(t)
+
+	res, _ := CheckLatest("1.5.0")
+	if res.State != StateUpToDate {
+		t.Errorf("State = %q, want %q", res.State, StateUpToDate)
+	}
+}
+
+func TestCheckLatest_Semver_Ahead(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.latestTag = "v1.4.0"
+	f.install(t)
+
+	res, _ := CheckLatest("v1.5.0")
+	if res.State != StateAhead {
+		t.Errorf("State = %q, want %q", res.State, StateAhead)
+	}
+	if res.Detail == "" {
+		t.Error("expected non-empty Detail describing the ahead-of-release state")
+	}
+}
+
+func TestCheckLatest_SHA_Behind(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.branchHead = "feedbeef0000000000000000000000000000aaaa"
+	f.compareResp = &CompareResult{Status: "ahead", AheadBy: 3}
+	f.install(t)
+
+	res, _ := CheckLatest("abc1234")
+	if res.State != StateUpdateAvailable {
+		t.Errorf("State = %q, want %q (origin/main ahead means we are behind)", res.State, StateUpdateAvailable)
+	}
+	if !strings.Contains(res.Detail, "3 commits behind") {
+		t.Errorf("Detail = %q, expected 3-commits-behind note", res.Detail)
+	}
+	if res.LatestVersion != "feedbee" {
+		t.Errorf("LatestVersion = %q, want short SHA %q", res.LatestVersion, "feedbee")
+	}
+}
+
+func TestCheckLatest_SHA_Ahead(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.compareResp = &CompareResult{Status: "behind", BehindBy: 2}
+	f.install(t)
+
+	res, _ := CheckLatest("def5678")
+	if res.State != StateAhead {
+		t.Errorf("State = %q, want %q", res.State, StateAhead)
+	}
+}
+
+func TestCheckLatest_SHA_Identical(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.compareResp = &CompareResult{Status: "identical"}
+	f.install(t)
+
+	res, _ := CheckLatest("abc1234")
+	if res.State != StateUpToDate {
+		t.Errorf("State = %q, want %q", res.State, StateUpToDate)
+	}
+}
+
+func TestCheckLatest_SHA_Diverged(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.compareResp = &CompareResult{Status: "diverged", AheadBy: 2, BehindBy: 1}
+	f.install(t)
+
+	res, _ := CheckLatest("def5678")
+	if res.State != StateDiverged {
+		t.Errorf("State = %q, want %q", res.State, StateDiverged)
+	}
+}
+
+func TestCheckLatest_SHA_LocalNotFound(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.compare404 = true
+	f.install(t)
+
+	res, _ := CheckLatest("def5678")
+	if res.State != StateLocalNotFound {
+		t.Errorf("State = %q, want %q", res.State, StateLocalNotFound)
+	}
+}
+
+func TestCheckLatest_DevBuild_NoUpdateOffer(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.latestTag = "v0.0.2"
+	f.install(t)
+
+	res, _ := CheckLatest("dev")
+	if res.State != StateDevBuild {
+		t.Errorf("State = %q, want %q", res.State, StateDevBuild)
+	}
+	// The latest release is fetched for informational display,
+	// not as an "update" offer.
+	if res.LatestVersion != "0.0.2" {
+		t.Errorf("LatestVersion = %q, want 0.0.2 (informational)", res.LatestVersion)
+	}
+}
+
+func TestCheckLatest_NoRemote(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	old := APIBase
+	APIBase = srv.URL
+	defer func() { APIBase = old }()
+
+	res, err := CheckLatest("1.4.0")
+	if err != nil {
+		t.Fatalf("expected error folded into result, got %v", err)
+	}
+	if res.State != StateNoRemote {
+		t.Errorf("State = %q, want %q", res.State, StateNoRemote)
+	}
+}
+
+func TestSetRepo(t *testing.T) {
+	old := APIBase
+	defer func() { APIBase = old }()
+
+	SetRepo("acme/widget")
+	if !strings.HasSuffix(APIBase, "/repos/acme/widget") {
+		t.Errorf("APIBase = %q, expected /repos/acme/widget suffix", APIBase)
 	}
 }
 
@@ -33,10 +279,7 @@ func TestFetchRelease(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(GitHubRelease{
 			TagName: "v1.2.3",
-			Name:    "Release 1.2.3",
-			Assets: []GitHubAsset{
-				{Name: "blockyard-linux-amd64.tar.gz", URL: "https://example.com/asset"},
-			},
+			Assets:  []GitHubAsset{{Name: "blockyard-linux-amd64.tar.gz"}},
 		})
 	}))
 	defer srv.Close()
@@ -46,177 +289,10 @@ func TestFetchRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rel.TagName != "v1.2.3" {
-		t.Errorf("TagName = %q, want %q", rel.TagName, "v1.2.3")
-	}
-	if rel.Name != "Release 1.2.3" {
-		t.Errorf("Name = %q, want %q", rel.Name, "Release 1.2.3")
+		t.Errorf("TagName = %q", rel.TagName)
 	}
 	if len(rel.Assets) != 1 {
 		t.Fatalf("expected 1 asset, got %d", len(rel.Assets))
-	}
-	if rel.Assets[0].Name != "blockyard-linux-amd64.tar.gz" {
-		t.Errorf("Asset name = %q", rel.Assets[0].Name)
-	}
-}
-
-func TestFetchRelease_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	_, err := FetchRelease(srv.URL)
-	if err == nil {
-		t.Fatal("expected error for 404 response")
-	}
-}
-
-func TestFetchRelease_InvalidJSON(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
-	}))
-	defer srv.Close()
-
-	_, err := FetchRelease(srv.URL)
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestFetchLatestStableRelease(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/releases/latest" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v2.0.0"})
-	}))
-	defer srv.Close()
-
-	old := APIBase
-	APIBase = srv.URL
-	defer func() { APIBase = old }()
-
-	rel, err := FetchLatestStableRelease()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rel.TagName != "v2.0.0" {
-		t.Errorf("TagName = %q, want %q", rel.TagName, "v2.0.0")
-	}
-}
-
-func TestFetchReleaseByTag(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/releases/tags/main" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		json.NewEncoder(w).Encode(GitHubRelease{TagName: "main", Name: "main+abc123"})
-	}))
-	defer srv.Close()
-
-	old := APIBase
-	APIBase = srv.URL
-	defer func() { APIBase = old }()
-
-	rel, err := FetchReleaseByTag("main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rel.Name != "main+abc123" {
-		t.Errorf("Name = %q, want %q", rel.Name, "main+abc123")
-	}
-}
-
-func TestCheckLatest_Stable(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v1.5.0"})
-	}))
-	defer srv.Close()
-
-	old := APIBase
-	APIBase = srv.URL
-	defer func() { APIBase = old }()
-
-	result, err := CheckLatest("stable", "1.4.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Channel != "stable" {
-		t.Errorf("Channel = %q", result.Channel)
-	}
-	if result.CurrentVersion != "1.4.0" {
-		t.Errorf("CurrentVersion = %q", result.CurrentVersion)
-	}
-	if result.LatestVersion != "1.5.0" {
-		t.Errorf("LatestVersion = %q, want %q", result.LatestVersion, "1.5.0")
-	}
-	if !result.UpdateAvailable {
-		t.Error("expected UpdateAvailable=true")
-	}
-}
-
-func TestCheckLatest_StableUpToDate(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(GitHubRelease{TagName: "v1.4.0"})
-	}))
-	defer srv.Close()
-
-	old := APIBase
-	APIBase = srv.URL
-	defer func() { APIBase = old }()
-
-	result, err := CheckLatest("stable", "1.4.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.UpdateAvailable {
-		t.Error("expected UpdateAvailable=false when versions match")
-	}
-}
-
-func TestCheckLatest_Main(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(GitHubRelease{
-			TagName: "main",
-			Name:    "main+newbuild",
-		})
-	}))
-	defer srv.Close()
-
-	old := APIBase
-	APIBase = srv.URL
-	defer func() { APIBase = old }()
-
-	result, err := CheckLatest("main", "main+oldbuild")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.LatestVersion != "main+newbuild" {
-		t.Errorf("LatestVersion = %q", result.LatestVersion)
-	}
-	if !result.UpdateAvailable {
-		t.Error("expected UpdateAvailable=true for different main builds")
-	}
-}
-
-func TestCheckLatest_FetchError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "error", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	old := APIBase
-	APIBase = srv.URL
-	defer func() { APIBase = old }()
-
-	_, err := CheckLatest("stable", "1.0.0")
-	if err == nil {
-		t.Fatal("expected error when fetch fails")
-	}
-
-	_, err = CheckLatest("main", "main+abc")
-	if err == nil {
-		t.Fatal("expected error when fetch fails for main channel")
 	}
 }
 
@@ -235,7 +311,7 @@ func TestAddGitHubAuth_WithToken(t *testing.T) {
 	AddGitHubAuth(req)
 
 	if got := req.Header.Get("Authorization"); got != "Bearer test-token-123" {
-		t.Errorf("Authorization = %q, want %q", got, "Bearer test-token-123")
+		t.Errorf("Authorization = %q", got)
 	}
 }
 

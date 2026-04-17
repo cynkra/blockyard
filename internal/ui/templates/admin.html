@@ -42,6 +42,17 @@
         <span class="badge badge-xs badge-soft badge-warning ml-2">{{.Errors.Count}}</span>
         {{end}}
     </button>
+    <button class="tab {{if eq .ActiveTab "version"}}tab-active{{end}}"
+            hx-get="/ui/admin/tab/version"
+            hx-target="#admin-tab-content"
+            hx-swap="innerHTML"
+            hx-push-url="/admin?tab=version"
+            hx-on::after-request="setAdminActiveTab(this)">
+        Updates
+        {{if .Updates.UpdateAvailable}}
+        <span class="badge badge-xs badge-soft badge-warning ml-2">new</span>
+        {{end}}
+    </button>
 </nav>
 
 <div id="admin-tab-content" class="admin-tab-content">
@@ -49,6 +60,8 @@
         {{template "adminTabSystem" .}}
     {{else if eq .ActiveTab "errors"}}
         {{template "adminErrors" .Errors}}
+    {{else if eq .ActiveTab "version"}}
+        {{template "adminVersion" .Updates}}
     {{else}}
         {{template "adminUsers" .Users}}
     {{end}}

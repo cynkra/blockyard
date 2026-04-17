@@ -17,11 +17,16 @@ func TestInferChannel(t *testing.T) {
 		version string
 		want    string
 	}{
-		{"dev", "stable"},
+		// Clean semver tags map to the stable release stream.
 		{"0.0.3", "stable"},
 		{"1.2.3", "stable"},
+		{"v1.2.3", "stable"},
+		// SHA-shaped builds (legacy main+, git describe, bare hash) and
+		// the unidentified "dev" placeholder all default to main.
 		{"main+abc1234", "main"},
-		{"main+0000000", "main"},
+		{"v0.0.3-3-gabc1234", "main"},
+		{"abc1234", "main"},
+		{"dev", "main"},
 	}
 	for _, tt := range tests {
 		got := update.InferChannel(tt.version)

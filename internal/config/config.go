@@ -60,6 +60,12 @@ type UpdateConfig struct {
 	Channel     string   `toml:"channel"`       // "stable" (default) or "main"
 	WatchPeriod Duration `toml:"watch_period"`  // health monitoring after update completes
 
+	// Repo is the GitHub owner/repo to query for releases and the
+	// origin/main HEAD comparison (e.g. "cynkra/blockyard"). Empty
+	// keeps the upstream default. Operators of forks override this
+	// to point the update check at their own repo.
+	Repo string `toml:"repo"`
+
 	// AltBindRange is the port range the process orchestrator picks
 	// an alternate bind from when spawning the new server during a
 	// rolling update. Operator-configured, separate from

@@ -57,12 +57,12 @@ func (o *Orchestrator) RunScheduled(
 // (successful update), false to continue the schedule loop.
 func (o *Orchestrator) runScheduledOnce(ctx context.Context, channel string) bool {
 	slog.Info("update scheduler: checking for updates")
-	result, err := o.update.CheckLatest(channel, o.version)
+	target, err := o.update.FetchInstallTarget(channel, o.version)
 	if err != nil {
 		slog.Warn("update scheduler: check failed", "error", err)
 		return false
 	}
-	if !result.UpdateAvailable {
+	if target == "" {
 		slog.Info("update scheduler: already up to date")
 		return false
 	}
@@ -74,8 +74,8 @@ func (o *Orchestrator) runScheduledOnce(ctx context.Context, channel string) boo
 	}
 
 	slog.Info("update scheduler: starting update",
-		"current", result.CurrentVersion,
-		"latest", result.LatestVersion)
+		"current", o.version,
+		"target", target)
 
 	sender := o.tasks.Create(uuid.New().String(), "scheduled-update")
 	updated, err := o.Update(ctx, channel, sender)

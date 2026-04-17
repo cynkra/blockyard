@@ -34,7 +34,7 @@ func runDynamicChecks(ctx context.Context, deps RuntimeDeps) *Report {
 	if deps.StorePath != "" {
 		r.Add(checkDiskSpace(deps.StorePath))
 	}
-	if deps.UpdateVersion != nil {
+	if deps.UpdateAvailable != nil {
 		r.Add(checkUpdateAvailable(deps))
 	}
 
@@ -249,12 +249,12 @@ func checkUpdateAvailable(deps RuntimeDeps) Result {
 	const name = "update_available"
 	const category = "runtime"
 
-	latest := deps.UpdateVersion()
-	if latest == nil {
+	latest := deps.UpdateAvailable()
+	if latest == "" {
 		return Result{
 			Name:     name,
 			Severity: SeverityOK,
-			Message:  "running " + deps.ServerVersion + " (update check pending)",
+			Message:  "running " + deps.ServerVersion,
 			Category: category,
 		}
 	}
@@ -262,7 +262,7 @@ func checkUpdateAvailable(deps RuntimeDeps) Result {
 	return Result{
 		Name:     name,
 		Severity: SeverityInfo,
-		Message:  fmt.Sprintf("running %s; version %s is available", deps.ServerVersion, *latest),
+		Message:  fmt.Sprintf("running %s; version %s is available", deps.ServerVersion, latest),
 		Category: category,
 	}
 }

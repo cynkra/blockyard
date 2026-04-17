@@ -17,8 +17,8 @@ type RuntimeDeps struct {
 	IDPCheck      func(ctx context.Context) error // OIDC IdP health (nil = no OIDC)
 	VaultCheck    func(ctx context.Context) error // OpenBao health (nil = no vault)
 	VaultTokenOK  func() bool                     // AppRole token health (nil = no AppRole)
-	UpdateVersion func() *string                  // latest available version (nil = not checked)
-	ServerVersion string
+	UpdateAvailable func() string                 // latest version when an update is recommended; "" otherwise
+	ServerVersion   string
 }
 
 // Checker runs system checks and caches the latest report. It

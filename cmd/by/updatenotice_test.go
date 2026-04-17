@@ -20,7 +20,7 @@ func TestLoadUpdateCache_Valid(t *testing.T) {
 	cacheDir := filepath.Join(dir, "by")
 	os.MkdirAll(cacheDir, 0o700)
 	os.WriteFile(filepath.Join(cacheDir, "update-check.json"),
-		[]byte(`{"latest_version":"2.0.0","channel":"stable","checked_at":"2026-01-01T00:00:00Z"}`),
+		[]byte(`{"latest_version":"2.0.0","state":"update_available","checked_at":"2026-01-01T00:00:00Z"}`),
 		0o600)
 
 	c := loadUpdateCache()
@@ -30,8 +30,8 @@ func TestLoadUpdateCache_Valid(t *testing.T) {
 	if c.LatestVersion != "2.0.0" {
 		t.Errorf("LatestVersion = %q, want 2.0.0", c.LatestVersion)
 	}
-	if c.Channel != "stable" {
-		t.Errorf("Channel = %q, want stable", c.Channel)
+	if c.State != "update_available" {
+		t.Errorf("State = %q, want update_available", c.State)
 	}
 }
 
@@ -55,7 +55,7 @@ func TestSaveUpdateCache(t *testing.T) {
 
 	saveUpdateCache(&updateCache{
 		LatestVersion: "3.0.0",
-		Channel:       "main",
+		State:         "update_available",
 	})
 
 	// Verify file was created.

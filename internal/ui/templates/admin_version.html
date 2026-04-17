@@ -1,0 +1,103 @@
+{{define "adminVersion"}}
+<div id="admin-version-card">
+    {{template "adminVersionCard" .}}
+</div>
+{{end}}
+
+{{define "adminVersionCard"}}
+{{$badge := .StatusBadge}}
+<div class="flex items-start justify-between gap-4 mb-4">
+    <div class="space-y-1">
+        <div class="text-sm">
+            <span class="text-base-content/60">Running:</span>
+            <span class="font-mono">{{.CurrentVersion}}</span>
+            {{if .LastCheckedStr}}
+            <span class="badge badge-sm badge-soft {{$badge.Class}} ml-1">{{$badge.Label}}</span>
+            {{end}}
+        </div>
+        {{if .LatestVersion}}
+        <div class="text-sm">
+            <span class="text-base-content/60">{{if .UpdateAvailable}}Latest:{{else}}Reference:{{end}}</span>
+            <span class="font-mono">{{.LatestVersion}}</span>
+        </div>
+        {{end}}
+        {{if .Detail}}
+        <div class="text-xs text-base-content/70">{{.Detail}}</div>
+        {{end}}
+        <div class="text-xs text-base-content/60">
+            {{if .LastCheckedStr}}
+            Last checked <span class="time-ago" data-timestamp="{{.LastCheckedStr}}" title="{{.LastCheckedStr}}">{{timeAgo .LastCheckedStr}}</span>.
+            {{else}}
+            No check has run yet.
+            {{end}}
+        </div>
+        {{if .CheckError}}
+        <div class="text-sm text-error">Check failed: {{.CheckError}}</div>
+        {{end}}
+    </div>
+    <div class="flex items-center gap-2 shrink-0">
+        <button class="btn btn-soft btn-sm"
+                hx-post="/ui/admin/update/check"
+                hx-target="#admin-version-card"
+                hx-swap="innerHTML"
+                hx-disabled-elt="this">
+            Check for updates
+        </button>
+        {{if .UpdateAvailable}}
+        <button class="btn btn-primary btn-sm"
+                hx-post="/ui/admin/update/start"
+                hx-target="#admin-version-card"
+                hx-swap="innerHTML"
+                hx-disabled-elt="this"
+                hx-confirm="Start rolling update to {{.LatestVersion}}? The server will restart when the new version is healthy."
+                {{if not .UpdateSupported}}disabled title="This deployment is managed by the container runtime; update through there."{{end}}
+                {{if and .UpdateSupported (ne .UpdateState "idle")}}disabled title="Update already in progress ({{.UpdateState}})."{{end}}>
+            Update to {{.LatestVersion}}
+        </button>
+        {{end}}
+    </div>
+</div>
+{{if and .UpdateAvailable (not .UpdateSupported)}}
+<div class="alert alert-info alert-soft text-sm">
+    <span>This server runs as a managed container. Apply the update through your container runtime (e.g. redeploy with the new image tag).</span>
+</div>
+{{end}}
+{{end}}
+
+{{define "adminUpdateProgress"}}
+<div id="admin-update-progress"
+     hx-get="/ui/admin/update/progress"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     data-state="{{.UpdateState}}">
+    <div class="flex items-center gap-3">
+        <span class="loading loading-spinner loading-sm"></span>
+        <div class="text-sm">
+            <div>Update in progress — server will restart when the new version is healthy.</div>
+            <div class="text-xs text-base-content/60">State: <span class="font-mono">{{.UpdateState}}</span></div>
+        </div>
+    </div>
+</div>
+<script>
+(function() {
+    if (window.__adminUpdateWatcherInstalled) return;
+    window.__adminUpdateWatcherInstalled = true;
+    document.body.addEventListener('htmx:sendError', onDrop);
+    document.body.addEventListener('htmx:responseError', onDrop);
+    function onDrop() {
+        if (!document.getElementById('admin-update-progress')) return;
+        showReloadOverlay();
+    }
+    function showReloadOverlay() {
+        if (document.getElementById('update-reload-overlay')) return;
+        var o = document.createElement('div');
+        o.id = 'update-reload-overlay';
+        o.className = 'fixed inset-0 bg-base-100/90 flex items-center justify-center z-[9999]';
+        o.innerHTML = '<div class="text-center space-y-3"><span class="loading loading-spinner loading-lg"></span>' +
+                      '<p class="text-sm">Server restarting — reloading…</p></div>';
+        document.body.appendChild(o);
+        setTimeout(function() { window.location.reload(); }, 5000);
+    }
+})();
+</script>
+{{end}}
