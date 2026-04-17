@@ -1,8 +1,11 @@
 package telemetry
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 
@@ -92,4 +95,28 @@ func (w *statusWriter) WriteHeader(code int) {
 		w.wroteHeader = true
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack forwards to the underlying ResponseWriter so WebSocket
+// upgrades work when this middleware is in the chain. Without this,
+// wrapping ResponseWriter hides the Hijacker interface and upgrades
+// fail.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("telemetry: underlying ResponseWriter does not implement http.Hijacker")
+	}
+	if !w.wroteHeader {
+		w.status = http.StatusSwitchingProtocols
+		w.wroteHeader = true
+	}
+	return h.Hijack()
+}
+
+// Flush forwards to the underlying ResponseWriter so streaming
+// responses are not held up by the wrapper.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -119,6 +120,33 @@ func TestStatusWriterWriteHeaderIdempotent(t *testing.T) {
 	if sw.status != http.StatusNotFound {
 		t.Errorf("expected status to remain 404, got %d", sw.status)
 	}
+}
+
+func TestTracingMiddlewarePreservesWebSocketUpgrade(t *testing.T) {
+	// Regression test for #246: the tracing middleware must not hide
+	// the http.Hijacker interface, otherwise WebSocket upgrades fail.
+	shutdown, _ := InitTracing(context.Background(), "")
+	defer shutdown(context.Background())
+
+	mw := TracingMiddleware()
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("websocket.Accept: %v", err)
+			return
+		}
+		c.Close(websocket.StatusNormalClosure, "")
+	}))
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	wsURL := "ws" + srv.URL[len("http"):]
+	c, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket.Dial: %v", err)
+	}
+	c.Close(websocket.StatusNormalClosure, "")
 }
 
 func TestTracingMiddlewareWithoutRouteContext(t *testing.T) {
