@@ -86,6 +86,31 @@ func testProxyServer(t *testing.T) (*server.Server, *httptest.Server) {
 	return srv, ts
 }
 
+// waitForBundleActive polls GET /apps/{id} until the app's active_bundle
+// field is non-null, meaning a bundle restore completed and activated.
+// Replaces a fixed sleep that was racy on slow runners.
+func waitForBundleActive(t *testing.T, ts *httptest.Server, id, token string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequest("GET", ts.URL+"/api/v1/apps/"+id, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			var app map[string]interface{}
+			json.NewDecoder(resp.Body).Decode(&app)
+			resp.Body.Close()
+			if ab, ok := app["active_bundle"]; ok && ab != nil {
+				return
+			}
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("bundle for app %s did not become active within 5s", id)
+}
+
 // createAndStartApp creates an app, uploads a bundle, waits for the
 // mock restore, and starts the app via the API.
 func createAndStartApp(t *testing.T, ts *httptest.Server, name string) {
@@ -108,7 +133,7 @@ func createAndStartApp(t *testing.T, ts *httptest.Server, name string) {
 		bytes.NewReader(testutil.MakeBundle(t)))
 	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
-	time.Sleep(200 * time.Millisecond)
+	waitForBundleActive(t, ts, id, testPAT)
 
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/start", nil)
@@ -317,7 +342,7 @@ func TestProxyColdStartSpawnsWorker(t *testing.T) {
 		bytes.NewReader(testutil.MakeBundle(t)))
 	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
-	time.Sleep(200 * time.Millisecond)
+	waitForBundleActive(t, ts, id, testPAT)
 
 	if srv.Workers.Count() != 0 {
 		t.Fatalf("expected 0 workers before proxy hit, got %d", srv.Workers.Count())
@@ -895,7 +920,7 @@ func TestProxyAppLookupByUUID(t *testing.T) {
 		bytes.NewReader(testutil.MakeBundle(t)))
 	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
-	time.Sleep(200 * time.Millisecond)
+	waitForBundleActive(t, ts, appID, testPAT)
 
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+appID+"/start", nil)
@@ -1307,7 +1332,7 @@ func createAndStartAppWithPAT(t *testing.T, ts *httptest.Server, name, token str
 		bytes.NewReader(testutil.MakeBundle(t)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	http.DefaultClient.Do(req)
-	time.Sleep(200 * time.Millisecond)
+	waitForBundleActive(t, ts, id, token)
 
 	req, _ = http.NewRequest("POST",
 		ts.URL+"/api/v1/apps/"+id+"/start", nil)
@@ -1509,7 +1534,7 @@ func TestProxyMultiplexSessions(t *testing.T) {
 		bytes.NewReader(testutil.MakeBundle(t)))
 	req.Header.Set("Authorization", "Bearer "+testPAT)
 	http.DefaultClient.Do(req)
-	time.Sleep(200 * time.Millisecond)
+	waitForBundleActive(t, ts, id, testPAT)
 
 	// Allow two sessions per worker.
 	maxSessions := 2
