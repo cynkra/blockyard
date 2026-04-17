@@ -85,3 +85,32 @@ ignore if input.VulnerabilityID == "CVE-2025-45582"
 # corruption-class CVE in the same package should re-trigger
 # triage rather than silence automatically.
 ignore if input.VulnerabilityID == "CVE-2025-66382"
+
+# review-after: 2027-04-17
+# libde265 heap buffer overflows in HEIC decode (38949 targets
+# display444as420; 38950 targets __interceptor_memcpy). libde265-0
+# is pulled in transitively via libheif by the R graphics stack;
+# no request-path consumer exposes it — the Go server doesn't
+# decode images and blockyard's APIs don't accept HEIC. Reachable
+# only from user R code that invokes HEIC decoding, which is
+# already RCE-equivalent. Kept at CVE level because a future
+# libde265 CVE may have a different shape (e.g. a parser bug on
+# a path we overlooked) and deserves fresh triage.
+ignore if input.VulnerabilityID in {
+	"CVE-2024-38949",
+	"CVE-2024-38950",
+}
+
+# review-after: 2027-04-17
+# pixman is a 2D graphics rasterization library reached via cairo
+# by R's plotting devices (png, pdf, svg). It operates on
+# in-memory pixel buffers produced by R — no attacker-supplied
+# serialized data is fed into it on any blockyard request path;
+# the only consumer is user R code rendering plots, which is
+# already RCE-equivalent. The current CVE (CVE-2023-37769) is
+# additionally in the pixman stress-test binary that does not
+# ship in the libpixman-1-0 runtime package at all. Kept at
+# package level because pixman's role is structurally a
+# rasterizer, not a data parser — re-review if any feature
+# ever processes images server-side outside the R worker.
+ignore if input.PkgName == "libpixman-1-0"
