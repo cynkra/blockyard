@@ -402,22 +402,36 @@ func readVaultSecret(t *testing.T, vaultURL, token, path string) map[string]any 
 // App page fetch (proxy — requires session cookies, not CLI)
 // ---------------------------------------------------------------------------
 
-func fetchAppPage(t *testing.T, baseURL, appName string, cookies []*http.Cookie, timeout time.Duration) (int, string) {
+// newProxyClient returns an http.Client seeded with the given auth cookies
+// and a cookie jar that retains Set-Cookie values across requests. Reusing
+// the same client across fetchAppPage and dialAppWebSocket keeps the proxy
+// session cookie stable so subsequent requests route to the same backend
+// worker instead of cold-starting a fresh one per call.
+func newProxyClient(t *testing.T, baseURL string, cookies []*http.Cookie) *http.Client {
+	t.Helper()
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse baseURL: %v", err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookie jar: %v", err)
+	}
+	jar.SetCookies(u, cookies)
+	return &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func fetchAppPage(t *testing.T, client *http.Client, baseURL, appName string, timeout time.Duration) (int, string) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	for {
-		req, _ := http.NewRequest("GET", baseURL+"/app/"+appName+"/", nil)
-		for _, c := range cookies {
-			req.AddCookie(c)
-		}
-		// Don't follow redirects automatically — we want to see the redirect.
-		client := &http.Client{
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		resp, err := client.Do(req)
+		resp, err := client.Get(baseURL + "/app/" + appName + "/")
 		if err != nil {
 			if time.Now().After(deadline) {
 				t.Fatalf("fetch app page: %v", err)
@@ -461,15 +475,21 @@ func fetchAppPageNoRedirect(t *testing.T, baseURL, appName string) (int, string)
 // WebSocket helper (proxy — requires session cookies, not CLI)
 // ---------------------------------------------------------------------------
 
-func dialAppWebSocket(t *testing.T, baseURL, appName string, cookies []*http.Cookie) {
+func dialAppWebSocket(t *testing.T, client *http.Client, baseURL, appName string) {
 	t.Helper()
 
 	// Use http:// (not ws://) since we do a raw HTTP upgrade via RoundTrip.
 	wsURL := baseURL + "/app/" + appName + "/websocket/"
 
-	// Build cookie header.
+	// Build cookie header from the client jar so the blockyard_session
+	// cookie (set on the first fetchAppPage) is included. All retry
+	// attempts therefore share the same backend worker.
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse baseURL: %v", err)
+	}
 	var cookieStrs []string
-	for _, c := range cookies {
+	for _, c := range client.Jar.Cookies(u) {
 		cookieStrs = append(cookieStrs, c.Name+"="+c.Value)
 	}
 

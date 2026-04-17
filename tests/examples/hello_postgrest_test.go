@@ -22,9 +22,9 @@ func TestHelloPostgrest(t *testing.T) {
 	waitForHealth(t, baseURL, 90*time.Second)
 
 	var (
-		cookies1 []*http.Cookie
-		cookies2 []*http.Cookie
-		token1   string
+		client1 *http.Client
+		client2 *http.Client
+		token1  string
 	)
 
 	t.Run("vault_oidc_configured", func(t *testing.T) {
@@ -86,8 +86,9 @@ func TestHelloPostgrest(t *testing.T) {
 	})
 
 	t.Run("user1_deploy", func(t *testing.T) {
-		cookies1 = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
+		cookies1 := dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token1 = createPAT(t, baseURL, cookies1)
+		client1 = newProxyClient(t, baseURL, cookies1)
 
 		appDir := copyAppDir(t, "../../examples/hello-postgrest/app")
 
@@ -105,7 +106,7 @@ func TestHelloPostgrest(t *testing.T) {
 
 		// Enable and trigger cold-start via proxy.
 		runCLI(t, baseURL, token1, "enable", "hello-postgrest")
-		fetchAppPage(t, baseURL, "hello-postgrest", cookies1, 120*time.Second)
+		fetchAppPage(t, client1, baseURL, "hello-postgrest", 120*time.Second)
 	})
 
 	t.Run("user1_app_serves", func(t *testing.T) {
@@ -113,7 +114,7 @@ func TestHelloPostgrest(t *testing.T) {
 			t.Skip("depends on user1_deploy")
 		}
 
-		status, body := fetchAppPage(t, baseURL, "hello-postgrest", cookies1, 60*time.Second)
+		status, body := fetchAppPage(t, client1, baseURL, "hello-postgrest", 60*time.Second)
 		if status != 200 {
 			t.Fatalf("expected 200, got %d", status)
 		}
@@ -127,7 +128,7 @@ func TestHelloPostgrest(t *testing.T) {
 			t.Skip("depends on user1_deploy")
 		}
 
-		dialAppWebSocket(t, baseURL, "hello-postgrest", cookies1)
+		dialAppWebSocket(t, client1, baseURL, "hello-postgrest")
 	})
 
 	t.Run("user2_access", func(t *testing.T) {
@@ -135,20 +136,21 @@ func TestHelloPostgrest(t *testing.T) {
 			t.Skip("depends on user1_deploy")
 		}
 
-		cookies2 = dexLogin(t, baseURL, dexURL, dexEmail2, dexPassword)
+		cookies2 := dexLogin(t, baseURL, dexURL, dexEmail2, dexPassword)
+		client2 = newProxyClient(t, baseURL, cookies2)
 
-		status, _ := fetchAppPage(t, baseURL, "hello-postgrest", cookies2, 60*time.Second)
+		status, _ := fetchAppPage(t, client2, baseURL, "hello-postgrest", 60*time.Second)
 		if status != 200 {
 			t.Fatalf("user2 access: expected 200, got %d", status)
 		}
 	})
 
 	t.Run("user2_websocket", func(t *testing.T) {
-		if cookies2 == nil {
+		if client2 == nil {
 			t.Skip("depends on user2_access")
 		}
 
-		dialAppWebSocket(t, baseURL, "hello-postgrest", cookies2)
+		dialAppWebSocket(t, client2, baseURL, "hello-postgrest")
 	})
 
 	t.Run("stop_and_cleanup", func(t *testing.T) {
