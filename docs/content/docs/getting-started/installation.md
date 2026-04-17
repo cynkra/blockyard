@@ -131,8 +131,12 @@ You can also grab the binary directly from the
 If you have Go 1.25+ installed:
 
 ```bash
-go install github.com/cynkra/blockyard/cmd/by@latest
+go install github.com/cynkra/blockyard/cmd/by@main
 ```
+
+`@main` tracks the current main branch — the most recent release tag
+predates the `by` CLI, so `@latest` will not yet resolve a working
+version.
 
 Or clone and build:
 
