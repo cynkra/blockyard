@@ -9,6 +9,7 @@ import (
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend/mock"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/update"
 )
 
 func TestWorkerMapCountForApp(t *testing.T) {
@@ -411,12 +412,34 @@ func TestSetIdleSinceIfZero(t *testing.T) {
 	}
 }
 
-func TestSetUpdateAvailable(t *testing.T) {
+func TestSetUpdateStatus(t *testing.T) {
 	srv := &Server{}
-	srv.SetUpdateAvailable("2.0.0")
-	got := srv.UpdateAvailable.Load()
-	if got == nil || *got != "2.0.0" {
-		t.Errorf("expected 2.0.0, got %v", got)
+	srv.SetUpdateStatus(&update.Result{
+		State:          update.StateUpdateAvailable,
+		CurrentVersion: "1.0.0",
+		LatestVersion:  "2.0.0",
+	})
+	got := srv.UpdateStatus.Load()
+	if got == nil || got.LatestVersion != "2.0.0" {
+		t.Errorf("expected LatestVersion=2.0.0, got %+v", got)
+	}
+	if srv.UpdateLastChecked.Load() == nil {
+		t.Error("expected UpdateLastChecked to be stamped")
+	}
+}
+
+func TestUpdateAvailableVersion(t *testing.T) {
+	srv := &Server{}
+	if v := srv.UpdateAvailableVersion(); v != "" {
+		t.Errorf("expected empty before any check, got %q", v)
+	}
+	srv.SetUpdateStatus(&update.Result{State: update.StateUpToDate, LatestVersion: "1.0.0"})
+	if v := srv.UpdateAvailableVersion(); v != "" {
+		t.Errorf("up_to_date should not surface an available version, got %q", v)
+	}
+	srv.SetUpdateStatus(&update.Result{State: update.StateUpdateAvailable, LatestVersion: "2.0.0"})
+	if v := srv.UpdateAvailableVersion(); v != "2.0.0" {
+		t.Errorf("expected 2.0.0, got %q", v)
 	}
 }
 

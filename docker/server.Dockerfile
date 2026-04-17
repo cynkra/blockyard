@@ -30,6 +30,10 @@ ARG VERSION=dev
 # Docker implementation back in. The resulting binary does not
 # import internal/backend/process and cannot speak to a process
 # backend config.
+#
+# Callers should pass VERSION as the release tag or `git describe`
+# output so the update check has a real identifier to compare. The
+# "dev" fallback only kicks in for ad-hoc builds with no build-arg.
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} \
     -tags "minimal,docker_backend" \
     -ldflags "-X main.version=${VERSION}" \

@@ -41,16 +41,18 @@ type Orchestrator struct {
 	state atomic.Value // "idle"/"updating"/"watching"/"rolling_back"
 }
 
-// updateAPI abstracts the GitHub release check so tests can mock it.
+// updateAPI abstracts the GitHub release lookup so tests can mock
+// it. FetchInstallTarget returns the version string to install on
+// the given channel, or "" when current already matches.
 type updateAPI interface {
-	CheckLatest(channel, currentVersion string) (*update.Result, error)
+	FetchInstallTarget(channel, currentVersion string) (string, error)
 }
 
-// DefaultChecker wraps the existing update.CheckLatest function.
+// DefaultChecker wraps the update package's install-target lookup.
 type DefaultChecker struct{}
 
-func (DefaultChecker) CheckLatest(channel, currentVersion string) (*update.Result, error) {
-	return update.CheckLatest(channel, currentVersion)
+func (DefaultChecker) FetchInstallTarget(channel, currentVersion string) (string, error) {
+	return update.FetchInstallTarget(channel, currentVersion)
 }
 
 // New creates an Orchestrator wired to a ServerFactory. The factory
@@ -118,8 +120,8 @@ func newForTestWithFactory(f ServerFactory) *Orchestrator {
 
 type noopChecker struct{}
 
-func (noopChecker) CheckLatest(_, _ string) (*update.Result, error) {
-	return &update.Result{UpdateAvailable: false}, nil
+func (noopChecker) FetchInstallTarget(_, _ string) (string, error) {
+	return "", nil
 }
 
 // stubFactory is a minimal ServerFactory used by NewForTest. All
@@ -185,21 +187,20 @@ func (o *Orchestrator) Update(
 	channel string,
 	sender task.Sender,
 ) (bool, error) {
-	// 1. Check for newer version.
-	result, err := o.update.CheckLatest(channel, o.version)
+	// 1. Resolve install target for the configured channel.
+	target, err := o.update.FetchInstallTarget(channel, o.version)
 	if err != nil {
-		return false, fmt.Errorf("check latest: %w", err)
+		return false, fmt.Errorf("fetch install target: %w", err)
 	}
-	if !result.UpdateAvailable {
-		sender.Write("Already up to date (" + result.CurrentVersion + ").")
+	if target == "" {
+		sender.Write("Already up to date (" + o.version + ").")
 		return false, nil
 	}
-	newRef := imageWithTag(o.factory.CurrentImageBase(ctx), result.LatestVersion)
-	sender.Write(fmt.Sprintf("Update available: %s → %s",
-		result.CurrentVersion, result.LatestVersion))
+	newRef := imageWithTag(o.factory.CurrentImageBase(ctx), target)
+	sender.Write(fmt.Sprintf("Update target: %s → %s", o.version, target))
 
 	// 2. Variant-specific prep (Docker: pull image; process: no-op).
-	if err := o.factory.PreUpdate(ctx, result.LatestVersion, sender); err != nil {
+	if err := o.factory.PreUpdate(ctx, target, sender); err != nil {
 		return false, fmt.Errorf("pre-update: %w", err)
 	}
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -45,7 +46,7 @@ func newTestServer(t *testing.T, cfg *config.Config) (*server.Server, *httptest.
 
 	r := chi.NewRouter()
 	uiHandler := New()
-	uiHandler.RegisterRoutes(r, srv)
+	uiHandler.RegisterRoutes(r, srv, nil, context.Background())
 
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
@@ -93,7 +94,7 @@ func authServer(t *testing.T, cfg *config.Config, sub string, role auth.Role) (*
 		})
 	})
 
-	uiHandler.RegisterRoutes(r, srv)
+	uiHandler.RegisterRoutes(r, srv, nil, context.Background())
 
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
@@ -689,7 +690,7 @@ func TestAppsPageNoCaller(t *testing.T) {
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
 	})
-	uiHandler.RegisterRoutes(r, srv)
+	uiHandler.RegisterRoutes(r, srv, nil, context.Background())
 
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
@@ -1211,7 +1212,7 @@ func TestCreateTokenForbiddenForPATSource(t *testing.T) {
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
 	})
-	uiHandler.RegisterRoutes(r, srv)
+	uiHandler.RegisterRoutes(r, srv, nil, context.Background())
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
 

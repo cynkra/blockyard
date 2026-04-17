@@ -23,6 +23,7 @@ import (
 	"github.com/cynkra/blockyard/internal/session"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/telemetry"
+	"github.com/cynkra/blockyard/internal/update"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -106,9 +107,15 @@ type Server struct {
 	// Version is the server version string, set at build time.
 	Version string
 
-	// UpdateAvailable stores the latest available version string when
-	// a newer release is detected. Nil means no update or not yet checked.
-	UpdateAvailable atomic.Pointer[string]
+	// UpdateStatus holds the most recent CheckLatest result. Nil
+	// until the first check runs. The richer State enum lets readers
+	// distinguish "update available" from "ahead of latest" / "dev
+	// build" / "couldn't reach GitHub" / etc.
+	UpdateStatus atomic.Pointer[update.Result]
+
+	// UpdateLastChecked records the wall-clock time of the most recent
+	// update check (scheduled or manual). Nil until the first check runs.
+	UpdateLastChecked atomic.Pointer[time.Time]
 
 	// RestoreWG is used in tests to wait for background restore goroutines
 	// to complete before cleanup. Nil in production.
@@ -120,9 +127,25 @@ type Server struct {
 	SpawnLogCaptureFn func(ctx context.Context, srv *Server, workerID, appID string)
 }
 
-// SetUpdateAvailable records that a newer version is available.
-func (srv *Server) SetUpdateAvailable(v string) {
-	srv.UpdateAvailable.Store(&v)
+// SetUpdateStatus records the latest update check result and stamps
+// UpdateLastChecked with the current time. Satisfies the
+// update.UpdateStore interface so the periodic checker and the UI's
+// manual-refresh handler can both feed results in.
+func (srv *Server) SetUpdateStatus(r *update.Result) {
+	srv.UpdateStatus.Store(r)
+	now := time.Now()
+	srv.UpdateLastChecked.Store(&now)
+}
+
+// UpdateAvailableVersion returns the upstream version string when an
+// update is recommended, or "" otherwise. Convenience for consumers
+// (preflight, readyz) that previously only cared about the boolean.
+func (srv *Server) UpdateAvailableVersion() string {
+	s := srv.UpdateStatus.Load()
+	if s == nil || s.State != update.StateUpdateAvailable {
+		return ""
+	}
+	return s.LatestVersion
 }
 
 // GetVersion returns the running server version.

@@ -150,8 +150,8 @@ func TestCheckDiskSpaceBadPath(t *testing.T) {
 func TestCheckUpdateAvailable(t *testing.T) {
 	t.Run("no update", func(t *testing.T) {
 		deps := RuntimeDeps{
-			UpdateVersion: func() *string { return nil },
-			ServerVersion: "1.0.0",
+			UpdateAvailable: func() string { return "" },
+			ServerVersion:   "1.0.0",
 		}
 		res := checkUpdateAvailable(deps)
 		if res.Severity != SeverityOK {
@@ -160,10 +160,9 @@ func TestCheckUpdateAvailable(t *testing.T) {
 	})
 
 	t.Run("update available", func(t *testing.T) {
-		v := "1.1.0"
 		deps := RuntimeDeps{
-			UpdateVersion: func() *string { return &v },
-			ServerVersion: "1.0.0",
+			UpdateAvailable: func() string { return "1.1.0" },
+			ServerVersion:   "1.0.0",
 		}
 		res := checkUpdateAvailable(deps)
 		if res.Severity != SeverityInfo {
@@ -180,9 +179,9 @@ func TestRunDynamicChecks(t *testing.T) {
 		IDPCheck:      func(ctx context.Context) error { return nil },
 		VaultCheck:    func(ctx context.Context) error { return nil },
 		VaultTokenOK:  func() bool { return true },
-		StorePath:     t.TempDir(),
-		UpdateVersion: func() *string { return nil },
-		ServerVersion: "1.0.0",
+		StorePath:       t.TempDir(),
+		UpdateAvailable: func() string { return "" },
+		ServerVersion:   "1.0.0",
 	}
 
 	report := runDynamicChecks(context.Background(), deps)

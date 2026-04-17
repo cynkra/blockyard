@@ -163,8 +163,8 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 		}
 		if trusted || isAuthenticated(r, srv) {
 			result["checks"] = checks
-			if v := srv.UpdateAvailable.Load(); v != nil {
-				result["update_available"] = *v
+			if v := srv.UpdateAvailableVersion(); v != "" {
+				result["update_available"] = v
 			}
 		}
 		json.NewEncoder(w).Encode(result)
