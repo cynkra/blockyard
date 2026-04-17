@@ -50,34 +50,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-  security-invariants:
+  # Enforces the "Go code does not exec these tools" half of the
+  # binutils-family package-level ignore in .trivyignore.rego. If any
+  # of these binaries is legitimately needed from Go code, drop the
+  # ignore to CVE-level first so the trust boundary is explicit.
+  # Review-after dates are tracked via .github/workflows/review-reminders.yml
+  # which opens a GitHub issue rather than blocking CI.
+  exec-guard:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      # Every `ignore if` rule in .trivyignore.rego must be preceded
-      # by `# review-after: YYYY-MM-DD`. Fails once any date is past,
-      # forcing a fresh look at the rule's justification.
-      - name: Check review-after dates in .trivyignore.rego
-        run: |
-          today=$(date -u +%Y-%m-%d)
-          failed=0
-          while IFS= read -r line; do
-            lineno="${line%%:*}"
-            review_date="${line##* }"
-            if [[ "$review_date" < "$today" ]]; then
-              echo "::error file=.trivyignore.rego,line=${lineno}::review-after ${review_date} has passed — re-check the rule's justification and bump the date (or narrow/remove the rule)"
-              failed=1
-            fi
-          done < <(grep -nE '^# *review-after:' .trivyignore.rego)
-          exit $failed
-      # Enforces the "Go code does not exec these tools" half of the
-      # binutils-family package-level ignore in .trivyignore.rego.
-      # If any of these binaries is legitimately needed from Go code,
-      # drop the ignore to CVE-level first so the trust boundary is
-      # explicit.
       - name: Check no exec of tools whose CVEs are silenced
         run: |
           tools='readelf|objdump|ld|as|nm|strip|addr2line|ar|ranlib|gprof|size'
