@@ -102,16 +102,29 @@ terminal. See the [CLI Reference](/docs/reference/cli/) for the full command lis
 
 ### Download a release binary
 
-Download the latest binary for your platform from the
-[releases page](https://github.com/cynkra/blockyard/releases) and place it
-somewhere on your `PATH`:
+Pick the asset that matches your platform:
+
+| Platform | Asset |
+|---|---|
+| Linux amd64 | `by-linux-amd64` |
+| Linux arm64 | `by-linux-arm64` |
+| macOS Intel | `by-darwin-amd64` |
+| macOS Apple Silicon | `by-darwin-arm64` |
+| Windows amd64 | `by-windows-amd64.exe` |
+
+Download it and place it on your `PATH`. The `-f` flag makes `curl` exit
+with an error on HTTP failures (e.g. 404) instead of saving the error
+page as your binary:
 
 ```bash
-# Example for Linux amd64
-curl -Lo by https://github.com/cynkra/blockyard/releases/latest/download/by-linux-amd64
+# Replace <asset> with the filename from the table above
+curl -fLo by https://github.com/cynkra/blockyard/releases/latest/download/<asset>
 chmod +x by
 sudo mv by /usr/local/bin/
 ```
+
+You can also grab the binary directly from the
+[releases page](https://github.com/cynkra/blockyard/releases).
 
 ### Build from source
 
