@@ -95,16 +95,17 @@ func TestHelloShiny(t *testing.T) {
 	waitForHealth(t, baseURL, 60*time.Second)
 
 	var (
-		cookies []*http.Cookie
-		token   string
+		client *http.Client
+		token  string
 	)
 
 	t.Run("auth", func(t *testing.T) {
-		cookies = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
+		cookies := dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token = createPAT(t, baseURL, cookies)
 		if !strings.HasPrefix(token, "by_") {
 			t.Fatalf("token %q missing by_ prefix", token)
 		}
+		client = newProxyClient(t, baseURL, cookies)
 	})
 
 	t.Run("deploy", func(t *testing.T) {
@@ -137,7 +138,7 @@ func TestHelloShiny(t *testing.T) {
 		// Ensure the app is enabled (should be by default after deploy).
 		runCLI(t, baseURL, token, "enable", "hello")
 
-		status, body := fetchAppPage(t, baseURL, "hello", cookies, 120*time.Second)
+		status, body := fetchAppPage(t, client, baseURL, "hello", 120*time.Second)
 		if status != 200 {
 			t.Fatalf("expected 200, got %d", status)
 		}
@@ -158,7 +159,7 @@ func TestHelloShiny(t *testing.T) {
 			t.Skip("depends on deploy")
 		}
 
-		dialAppWebSocket(t, baseURL, "hello", cookies)
+		dialAppWebSocket(t, client, baseURL, "hello")
 	})
 
 	t.Run("unauthenticated_redirects", func(t *testing.T) {

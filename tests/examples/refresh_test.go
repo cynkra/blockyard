@@ -21,17 +21,18 @@ func TestRefreshAndRollback(t *testing.T) {
 	waitForHealth(t, baseURL, 90*time.Second)
 
 	var (
-		cookies []*http.Cookie
+		client  *http.Client
 		token   string
 		appName = "refresh-test"
 	)
 
 	t.Run("auth", func(t *testing.T) {
-		cookies = dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
+		cookies := dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)
 		token = createPAT(t, baseURL, cookies)
 		if !strings.HasPrefix(token, "by_") {
 			t.Fatalf("token %q missing by_ prefix", token)
 		}
+		client = newProxyClient(t, baseURL, cookies)
 	})
 
 	t.Run("deploy_unpinned", func(t *testing.T) {
@@ -51,7 +52,7 @@ func TestRefreshAndRollback(t *testing.T) {
 
 		// Enable and trigger cold-start via proxy.
 		runCLI(t, baseURL, token, "enable", appName)
-		fetchAppPage(t, baseURL, appName, cookies, 120*time.Second)
+		fetchAppPage(t, client, baseURL, appName, 120*time.Second)
 
 		// Verify app is running via CLI.
 		var app map[string]any
