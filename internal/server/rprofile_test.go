@@ -43,6 +43,11 @@ func TestEnsureRProfile(t *testing.T) {
 	if !strings.Contains(content, "shiny.port") {
 		t.Error("profile does not set shiny.port option")
 	}
+	// Must unset SHINY_PORT so Shiny does not misreport itself as
+	// running under Shiny Server (issue #245).
+	if !strings.Contains(content, "Sys.unsetenv") {
+		t.Error("profile does not unset SHINY_* env vars")
+	}
 }
 
 func TestEnsureRProfile_Idempotent(t *testing.T) {

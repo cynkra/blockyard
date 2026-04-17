@@ -6,10 +6,13 @@ import (
 	"sync"
 )
 
+// SHINY_PORT is unset after reading so Shiny does not mistake the
+// worker for a Shiny Server deployment and emit a version warning.
 const rProfileContent = `local({
   host <- Sys.getenv("SHINY_HOST", "127.0.0.1")
   port <- Sys.getenv("SHINY_PORT", "3838")
   options(shiny.host = host, shiny.port = as.integer(port))
+  Sys.unsetenv(c("SHINY_HOST", "SHINY_PORT"))
 })
 `
 
