@@ -29,14 +29,14 @@ import rego.v1
 
 default ignore := false
 
-# review-after: 2027-04-17
+# review-after: 2026-07-17
 # linux-libc-dev ships kernel header files pulled in transitively
 # by rig's R installation. The CVEs describe running-kernel
 # vulnerabilities — containers use the host kernel, not a kernel
 # built from these headers, so they are not container-exploitable.
 ignore if input.PkgName == "linux-libc-dev"
 
-# review-after: 2027-04-17
+# review-after: 2026-07-17
 # binutils and its transitive libraries are pulled in by rig to
 # support the R source-build path (R CMD INSTALL compiles C/C++
 # in user-supplied packages). They are a build toolchain, not a
@@ -60,7 +60,7 @@ ignore if input.PkgName in {
 	"libsframe1",
 }
 
-# review-after: 2027-04-17
+# review-after: 2026-07-17
 # GNU tar path-traversal via symlink + two-stage extraction. Not
 # exploitable in blockyard's current paths: bundle upload uses Go's
 # stdlib archive/tar (no /usr/bin/tar exec), and R's own tar usage
@@ -72,7 +72,7 @@ ignore if input.PkgName in {
 # rather than silence automatically.
 ignore if input.VulnerabilityID == "CVE-2025-45582"
 
-# review-after: 2027-04-17
+# review-after: 2026-07-17
 # libexpat algorithmic-complexity DoS: a ~2 MiB crafted XML causes
 # dozens of seconds of processing. libexpat1 is a transitive dep
 # (likely fontconfig), not linked on any request path in blockyard:
@@ -86,7 +86,7 @@ ignore if input.VulnerabilityID == "CVE-2025-45582"
 # triage rather than silence automatically.
 ignore if input.VulnerabilityID == "CVE-2025-66382"
 
-# review-after: 2027-04-17
+# review-after: 2026-07-17
 # libde265 heap buffer overflows in HEIC decode (38949 targets
 # display444as420; 38950 targets __interceptor_memcpy). libde265-0
 # is pulled in transitively via libheif by the R graphics stack;
@@ -101,7 +101,7 @@ ignore if input.VulnerabilityID in {
 	"CVE-2024-38950",
 }
 
-# review-after: 2027-04-17
+# review-after: 2026-07-17
 # pixman is a 2D graphics rasterization library reached via cairo
 # by R's plotting devices (png, pdf, svg). It operates on
 # in-memory pixel buffers produced by R — no attacker-supplied
