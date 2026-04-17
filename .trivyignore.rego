@@ -13,10 +13,14 @@
 #     so a future CVE in the same package forces fresh triage.
 #
 # Every `ignore if` rule must be preceded by a `# review-after: YYYY-MM-DD`
-# comment. The Review Reminders workflow (.github/workflows/review-reminders.yml)
-# runs weekly and opens a tracker issue listing any expired dates — the
-# issue is the forcing function, not a blocked PR. On re-review: if the
-# argument still holds, bump the date; if not, remove or narrow the rule.
+# comment. Default cadence is 3 months from the time the rule is added
+# or last re-reviewed — use a shorter date for fragile invariants; do
+# not extend beyond 3 months without an explicit reason. The Review
+# Reminders workflow (.github/workflows/review-reminders.yml) runs
+# weekly and opens a tracker issue listing any expired dates — the
+# issue is the forcing function, not a blocked PR. On re-review: if
+# the argument still holds, bump the date; if not, remove or narrow
+# the rule.
 #
 # For exec-reachable invariants ("Go code does not invoke tool X"), the
 # `exec-guard` job in .github/workflows/ci.yml greps the Go source for
