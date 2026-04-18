@@ -1,0 +1,61 @@
+name: Trivy image scan
+description: >
+  Scan a ghcr.io container image for CVEs, filter through
+  .trivyignore.rego, and upload the SARIF to the GitHub Security tab.
+  Shared between publish.yml (continuous main) and release.yml (tagged
+  releases) so both apply the same severity threshold and ignore policy.
+
+inputs:
+  image-ref:
+    description: Full image reference (e.g. ghcr.io/cynkra/blockyard:build-linux-amd64).
+    required: true
+  variant:
+    description: Variant name (docker | process | everything) — used for the SARIF category and output filename.
+    required: true
+  ghcr-username:
+    description: GHCR username for pulling the image.
+    required: true
+  ghcr-token:
+    description: GHCR token for pulling the image.
+    required: true
+  fail-on-findings:
+    description: When "true", exit non-zero if any unignored vulnerability is found. Release uses true; publish uses false so main continues to publish and the SARIF still reaches the Security tab.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Run Trivy vulnerability scanner (${{ inputs.variant }})
+      uses: aquasecurity/trivy-action@v0.35.0
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        format: sarif
+        output: trivy-results-${{ inputs.variant }}.sarif
+        # Includes MEDIUM because blockyard executes arbitrary R code,
+        # and in-process library CVEs (libssl, libtiff, libcurl, ...)
+        # are trivially exploitable by a malicious R package even when
+        # they're rated medium — nothing isolates a compromised lib
+        # from the process that linked it.
+        severity: CRITICAL,HIGH,MEDIUM
+        # Required for `severity` to actually filter the SARIF output.
+        # Without this the action unsets TRIVY_SEVERITY when format=sarif
+        # and every severity gets uploaded to the Security tab.
+        limit-severities-for-sarif: true
+        # OPA/Rego policy that filters by package name instead of by
+        # CVE ID, so future kernel-header CVEs are silenced
+        # automatically. See the file itself for rationale.
+        ignore-policy: .trivyignore.rego
+        exit-code: ${{ inputs.fail-on-findings == 'true' && '1' || '0' }}
+      env:
+        TRIVY_USERNAME: ${{ inputs.ghcr-username }}
+        TRIVY_PASSWORD: ${{ inputs.ghcr-token }}
+
+    - name: Upload Trivy results to GitHub Security tab
+      if: always()
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: trivy-results-${{ inputs.variant }}.sarif
+        # Per-variant category so the three scans don't overwrite each
+        # other's alerts in the Security tab.
+        category: trivy-${{ inputs.variant }}

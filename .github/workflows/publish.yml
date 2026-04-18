@@ -106,39 +106,12 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v6
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.35.0
+      - uses: ./.github/actions/scan-image
         with:
           image-ref: ${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-amd64
-          format: sarif
-          output: trivy-results.sarif
-          # Includes MEDIUM because blockyard executes arbitrary R code,
-          # and in-process library CVEs (libssl, libtiff, libcurl, ...)
-          # are trivially exploitable by a malicious R package even when
-          # they're rated medium — nothing isolates a compromised lib
-          # from the process that linked it.
-          severity: CRITICAL,HIGH,MEDIUM
-          # Required for `severity` to actually filter the SARIF output.
-          # Without this the action unsets TRIVY_SEVERITY when format=sarif
-          # and every severity gets uploaded to the Security tab.
-          limit-severities-for-sarif: true
-          # OPA/Rego policy that filters by package name instead of by
-          # CVE ID, so future kernel-header CVEs are silenced
-          # automatically. See the file itself for rationale.
-          ignore-policy: .trivyignore.rego
-        env:
-          TRIVY_USERNAME: ${{ github.actor }}
-          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Trivy results to GitHub Security tab
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results.sarif
-          # Per-variant category so the three scans don't overwrite each
-          # other's alerts in the Security tab.
-          category: trivy-${{ matrix.variant }}
+          variant: ${{ matrix.variant }}
+          ghcr-username: ${{ github.actor }}
+          ghcr-token: ${{ secrets.GITHUB_TOKEN }}
 
   manifest:
     needs: [server-image, scan-image]
