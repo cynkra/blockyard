@@ -166,6 +166,11 @@ jobs:
               -e BLOCKYARD_PROCESS_BWRAP_PATH=/usr/bin/bwrap
             )
           fi
+          # Bind on 0.0.0.0 so `-p 18080:8080` reaches the server —
+          # the baked-in config binds 127.0.0.1 (fronted by a reverse
+          # proxy in production), which Docker's published-port NAT
+          # can't target.
+          BACKEND_ARGS+=(-e BLOCKYARD_SERVER_BIND=0.0.0.0:8080)
           if [ "${{ matrix.variant }}" != "docker" ]; then
             # Override the entrypoint — the image's default entrypoint
             # is ["blockyard", "--config", ...], so without
