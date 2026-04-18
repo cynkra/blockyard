@@ -522,6 +522,43 @@ func TestUpdateUser_Forbidden(t *testing.T) {
 	}
 }
 
+// TestUpdateUser_EncodedSub exercises the case where the OIDC sub contains
+// a character (like "@") that JS encodeURIComponent percent-escapes and Go's
+// net/http preserves in r.URL.RawPath. chi.URLParam returns the still-encoded
+// value in that case, so the handler must decode before looking up the user
+// — otherwise the deactivate flow returns 404 for email-shaped subs.
+func TestUpdateUser_EncodedSub(t *testing.T) {
+	idp := testutil.NewMockIdP()
+	defer idp.Close()
+	srv, ts := testServerWithOIDC(t, idp)
+
+	const sub = "dex|user@example.com"
+	srv.DB.UpsertUserWithRole("admin-1", "admin@example.com", "Admin", "admin")
+	srv.DB.UpsertUserWithRole(sub, "user@example.com", "User", "viewer")
+	pat := createTestPAT(t, srv.DB, "admin-1")
+
+	// Mirror JS encodeURIComponent, which percent-escapes "@" — Go's
+	// url.URL.EscapedPath leaves "@" alone and wouldn't trigger the bug.
+	encoded := strings.NewReplacer("|", "%7C", "@", "%40").Replace(sub)
+	body := `{"active":false}`
+	resp, err := http.DefaultClient.Do(jwtReq("PATCH", ts.URL+"/api/v1/users/"+encoded, pat, strings.NewReader(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	got, err := srv.DB.GetUser(sub)
+	if err != nil || got == nil {
+		t.Fatalf("get user: %v, %v", got, err)
+	}
+	if got.Active {
+		t.Error("expected user to be inactive")
+	}
+}
+
 func TestUpdateUser_InvalidJSON(t *testing.T) {
 	idp := testutil.NewMockIdP()
 	defer idp.Close()
