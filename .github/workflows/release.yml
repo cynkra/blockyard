@@ -132,11 +132,20 @@ jobs:
           BACKEND_ARGS=()
           case "${{ matrix.variant }}" in
             docker|everything)
-              # Baked-in config defaults backend=docker, which needs a
-              # reachable Docker daemon to pass the client.Ping in
-              # backend/docker.New. Mount the runner's socket so the
-              # process starts.
-              BACKEND_ARGS=(-v /var/run/docker.sock:/var/run/docker.sock)
+              # Baked-in config defaults backend=docker, which needs
+              # a reachable Docker daemon and a persistent bind mount
+              # covering storage.bundle_server_path (/data/bundles) —
+              # the detectMountMode check rejects an unmounted /data
+              # so sibling worker containers would see a different
+              # inode. Mount the runner's socket and an empty host
+              # dir for /data. SKIP_PREFLIGHT avoids the rocker/r-ver
+              # pull and sibling-container checks, which are
+              # orthogonal to whether the server can answer /healthz.
+              BACKEND_ARGS=(
+                -v /var/run/docker.sock:/var/run/docker.sock
+                -v /tmp/smoke-data:/data
+                -e BLOCKYARD_SERVER_SKIP_PREFLIGHT=true
+              )
               ;;
           esac
           if [ "${{ matrix.variant }}" = "process" ]; then
@@ -146,8 +155,14 @@ jobs:
             # factory; PROCESS_BWRAP_PATH is the sentinel that forces
             # applyEnvOverrides to auto-construct the [process] section
             # (processDefaults fills in the remaining knobs).
+            # SKIP_PREFLIGHT bypasses bwrap_host_uid_mapping, which
+            # fails inside a rootful GH runner container because the
+            # outer container lacks the user-namespace privileges
+            # bwrap needs to remap uids as seen from host /proc. The
+            # smoke test only checks /healthz, not worker spawning.
             BACKEND_ARGS=(
               -e BLOCKYARD_SERVER_BACKEND=process
+              -e BLOCKYARD_SERVER_SKIP_PREFLIGHT=true
               -e BLOCKYARD_PROCESS_BWRAP_PATH=/usr/bin/bwrap
             )
           fi
