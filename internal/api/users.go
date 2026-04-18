@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +18,18 @@ import (
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
 )
+
+// urlParamSub returns the {sub} path parameter, URL-decoded. Chi returns
+// RawPath-backed params still percent-encoded when the path contains
+// characters Go's net/http preserved as-is (e.g. "@" in email-shaped subs
+// from dex or similar IdPs), so the raw value would miss the DB lookup.
+func urlParamSub(r *http.Request) string {
+	raw := chi.URLParam(r, "sub")
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return decoded
+	}
+	return raw
+}
 
 // serviceNameRe validates service names: alphanumeric, hyphens, underscores, 1-64 chars.
 var serviceNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
@@ -249,7 +262,7 @@ func GetUser(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		sub := chi.URLParam(r, "sub")
+		sub := urlParamSub(r)
 		user, err := srv.DB.GetUser(sub)
 		if err != nil {
 			serverError(w, "failed to get user")
@@ -294,7 +307,7 @@ func UpdateUser(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		sub := chi.URLParam(r, "sub")
+		sub := urlParamSub(r)
 
 		// Prevent self-demotion/deactivation.
 		if sub == caller.Sub {
