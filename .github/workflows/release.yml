@@ -49,25 +49,13 @@ jobs:
             suffix: ""
     steps:
       - uses: actions/checkout@v6
-
-      - name: Run Trivy vulnerability scanner (${{ matrix.variant }})
-        uses: aquasecurity/trivy-action@v0.35.0
+      - uses: ./.github/actions/scan-image
         with:
           image-ref: ${{ env.SERVER_IMAGE }}${{ matrix.suffix }}:build-linux-amd64
-          format: sarif
-          output: trivy-results-${{ matrix.variant }}.sarif
-          severity: CRITICAL,HIGH
-          exit-code: "1"
-        env:
-          TRIVY_USERNAME: ${{ github.actor }}
-          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Trivy results to GitHub Security tab
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results-${{ matrix.variant }}.sarif
-          category: trivy-${{ matrix.variant }}
+          variant: ${{ matrix.variant }}
+          ghcr-username: ${{ github.actor }}
+          ghcr-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-findings: "true"
 
   server-manifest:
     needs: scan-image
@@ -141,6 +129,28 @@ jobs:
           IMAGE="${{ env.SERVER_IMAGE }}${{ matrix.suffix }}:build-linux-amd64"
           docker pull "$IMAGE"
           SECCOMP=""
+          BACKEND_ARGS=()
+          case "${{ matrix.variant }}" in
+            docker|everything)
+              # Baked-in config defaults backend=docker, which needs a
+              # reachable Docker daemon to pass the client.Ping in
+              # backend/docker.New. Mount the runner's socket so the
+              # process starts.
+              BACKEND_ARGS=(-v /var/run/docker.sock:/var/run/docker.sock)
+              ;;
+          esac
+          if [ "${{ matrix.variant }}" = "process" ]; then
+            # The process-only build does not register a docker factory,
+            # so the baked-in backend=docker fails fast at startup.
+            # Override via env vars: SERVER_BACKEND selects the process
+            # factory; PROCESS_BWRAP_PATH is the sentinel that forces
+            # applyEnvOverrides to auto-construct the [process] section
+            # (processDefaults fills in the remaining knobs).
+            BACKEND_ARGS=(
+              -e BLOCKYARD_SERVER_BACKEND=process
+              -e BLOCKYARD_PROCESS_BWRAP_PATH=/usr/bin/bwrap
+            )
+          fi
           if [ "${{ matrix.variant }}" != "docker" ]; then
             # Override the entrypoint — the image's default entrypoint
             # is ["blockyard", "--config", ...], so without
@@ -148,7 +158,7 @@ jobs:
             docker run --rm --entrypoint cat "$IMAGE" /etc/blockyard/seccomp.json > /tmp/seccomp.json
             SECCOMP="--security-opt seccomp=/tmp/seccomp.json"
           fi
-          docker run -d --name smoke ${SECCOMP} -p 18080:8080 "$IMAGE" || true
+          docker run -d --name smoke ${SECCOMP} "${BACKEND_ARGS[@]}" -p 18080:8080 "$IMAGE" || true
           for i in $(seq 1 30); do
             if curl -sf http://localhost:18080/healthz >/dev/null; then
               docker rm -f smoke
