@@ -238,6 +238,13 @@ func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
 			delete(misses, r.workerID)
 			continue
 		}
+		// Workers still in their cold-start window are owned by
+		// spawnWorker's pollHealthy; don't count misses against them.
+		if w, ok := srv.Workers.Get(r.workerID); ok {
+			if time.Since(w.StartedAt) < srv.Config.Proxy.WorkerStartTimeout.Duration {
+				continue
+			}
+		}
 		misses[r.workerID]++
 		if misses[r.workerID] >= maxMisses {
 			slog.Warn("health poller: evicting unhealthy worker",
