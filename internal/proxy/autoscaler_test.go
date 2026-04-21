@@ -337,6 +337,11 @@ func TestEvictUnhealthyReturnsHealthy(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Backdate StartedAt past WorkerStartTimeout so these are treated
+	// as post-cold-start — evictUnhealthy's cold-start exemption does
+	// not apply.
+	backdateStart(srv, time.Hour, wid1, wid2, wid3)
+
 	// All unhealthy — should evict all.
 	be.HealthOK.Store(false)
 	healthy := evictUnhealthy(context.Background(), srv, []string{wid1, wid2, wid3})
@@ -358,6 +363,55 @@ func TestEvictUnhealthyReturnsHealthy(t *testing.T) {
 	healthy = evictUnhealthy(context.Background(), srv, []string{wid4, wid5})
 	if len(healthy) != 2 {
 		t.Errorf("expected 2 healthy workers, got %d", len(healthy))
+	}
+}
+
+// Regression for #269: when HealthInterval is shorter than a worker's
+// real cold-start time, the autoscaler tick must not evict a still-
+// starting worker as "crashed" — spawnWorker's pollHealthy owns that
+// window.
+func TestEvictUnhealthySkipsColdStart(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+	be := srv.Backend.(*mock.MockBackend)
+
+	wid, _, err := spawnWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Worker hasn't finished its cold-start window yet and isn't
+	// answering health checks.
+	be.HealthOK.Store(false)
+
+	healthy := evictUnhealthy(context.Background(), srv, []string{wid})
+	if len(healthy) != 1 {
+		t.Fatalf("cold-starting worker must be kept, got %d retained", len(healthy))
+	}
+	if _, ok := srv.Workers.Get(wid); !ok {
+		t.Error("cold-starting worker was evicted from the worker map")
+	}
+
+	// Once the cold-start window elapses, the same unhealthy worker
+	// is correctly treated as crashed.
+	backdateStart(srv, time.Hour, wid)
+	healthy = evictUnhealthy(context.Background(), srv, []string{wid})
+	if len(healthy) != 0 {
+		t.Errorf("post-cold-start unhealthy worker must be evicted, got %d retained", len(healthy))
+	}
+	if _, ok := srv.Workers.Get(wid); ok {
+		t.Error("post-cold-start unhealthy worker was not evicted")
+	}
+}
+
+func backdateStart(srv *server.Server, d time.Duration, workerIDs ...string) {
+	for _, wid := range workerIDs {
+		w, ok := srv.Workers.Get(wid)
+		if !ok {
+			continue
+		}
+		w.StartedAt = time.Now().Add(-d)
+		srv.Workers.Set(wid, w)
 	}
 }
 

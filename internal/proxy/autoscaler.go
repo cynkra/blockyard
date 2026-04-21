@@ -145,16 +145,24 @@ func reconcileWorkersByState(srv *server.Server) {
 }
 
 // evictUnhealthy checks each worker's health and evicts any that have
-// crashed. Returns the remaining healthy worker IDs.
+// crashed. Returns the remaining healthy worker IDs. Workers still
+// within their cold-start window are left alone — spawnWorker's
+// pollHealthy owns their lifecycle until it returns.
 func evictUnhealthy(ctx context.Context, srv *server.Server, workerIDs []string) []string {
 	healthy := make([]string, 0, len(workerIDs))
+	coldStart := srv.Config.Proxy.WorkerStartTimeout.Duration
+	now := time.Now()
 	for _, wid := range workerIDs {
 		if srv.Backend.HealthCheck(ctx, wid) {
 			healthy = append(healthy, wid)
-		} else {
-			slog.Warn("autoscaler: evicting crashed worker", "worker_id", wid)
-			ops.EvictWorker(ctx, srv, wid, telemetry.ReasonCrashed)
+			continue
 		}
+		if w, ok := srv.Workers.Get(wid); ok && now.Sub(w.StartedAt) < coldStart {
+			healthy = append(healthy, wid)
+			continue
+		}
+		slog.Warn("autoscaler: evicting crashed worker", "worker_id", wid)
+		ops.EvictWorker(ctx, srv, wid, telemetry.ReasonCrashed)
 	}
 	return healthy
 }
