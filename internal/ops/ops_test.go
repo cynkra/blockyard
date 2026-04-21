@@ -384,6 +384,43 @@ func TestHealthPollerEvictsAfterConsecutiveMisses(t *testing.T) {
 	}
 }
 
+// Regression for #269: the health poller must not count misses against
+// a worker that is still inside its WorkerStartTimeout cold-start
+// window — spawnWorker's pollHealthy owns that phase.
+func TestHealthPollerSkipsColdStartingWorker(t *testing.T) {
+	srv, be := testServer(t)
+	srv.Config.Proxy.WorkerStartTimeout = config.Duration{Duration: time.Minute}
+	spawnWorker(t, srv, be, "w1", "app1")
+	// Mark the worker as just-spawned, inside the cold-start window.
+	w, _ := srv.Workers.Get("w1")
+	w.StartedAt = time.Now()
+	srv.Workers.Set("w1", w)
+
+	be.HealthOK.Store(false)
+	misses := make(map[string]int)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		pollOnce(ctx, srv, misses)
+	}
+	if _, ok := srv.Workers.Get("w1"); !ok {
+		t.Error("cold-starting worker should not be evicted while its window is active")
+	}
+	if misses["w1"] != 0 {
+		t.Errorf("cold-starting worker should not accrue misses, got %d", misses["w1"])
+	}
+
+	// After the window, the usual crash-detection behavior applies.
+	w, _ = srv.Workers.Get("w1")
+	w.StartedAt = time.Now().Add(-2 * time.Minute)
+	srv.Workers.Set("w1", w)
+	pollOnce(ctx, srv, misses)
+	pollOnce(ctx, srv, misses)
+	if _, ok := srv.Workers.Get("w1"); ok {
+		t.Error("post-cold-start unhealthy worker should be evicted after maxMisses")
+	}
+}
+
 func TestHealthPollerResetsOnRecovery(t *testing.T) {
 	srv, be := testServer(t)
 	spawnWorker(t, srv, be, "w1", "app1")
