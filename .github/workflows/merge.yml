@@ -88,6 +88,23 @@ jobs:
         if: failure()
         run: |
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
+          # Workers are spawned by blockyard outside docker-compose,
+          # so their stdout/stderr isn't in the compose logs above.
+          # Dump them by label so we can see R/Shiny startup failures.
+          workers=$(docker ps -a --filter 'label=dev.blockyard/role=worker' --format '{{.ID}} {{.Names}}')
+          if [ -n "$workers" ]; then
+            echo "==> blockyard worker containers"
+            echo "$workers"
+            while IFS= read -r line; do
+              id=${line%% *}
+              name=${line#* }
+              echo "==> worker $name ($id) logs"
+              docker logs "$id" 2>&1 || true
+              echo
+            done <<< "$workers"
+          else
+            echo "==> no blockyard worker containers found"
+          fi
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
 
   e2e:

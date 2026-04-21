@@ -18,7 +18,7 @@ max_bundle_size    = 104857600
 [proxy]
 ws_cache_ttl         = "60s"
 health_interval      = "15s"
-worker_start_timeout = "60s"
+worker_start_timeout = "120s"
 max_workers          = 100
 log_retention        = "1h"
 # session_idle_ttl   = "0"
