@@ -64,6 +64,23 @@ jobs:
       - name: Prepare coverage directory
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: mkdir -p /tmp/e2e-coverage/{cli,server}
+      - name: Start worker log streamer
+        if: github.event_name != 'pull_request' && github.event_name != 'push'
+        run: |
+          # blockyard removes worker containers when it stops them, so
+          # by the time a failure step runs the containers (and their
+          # logs) are gone. Stream them to files as they appear.
+          mkdir -p /tmp/worker-logs
+          nohup bash -c '
+            docker events --format "{{.Actor.ID}}" \
+              --filter event=start \
+              --filter "label=dev.blockyard/role=worker" \
+              | while read -r id; do
+                short=${id:0:12}
+                ( docker logs -f "$id" >"/tmp/worker-logs/${short}.log" 2>&1 ) &
+              done
+          ' >/tmp/worker-events.log 2>&1 &
+          echo $! > /tmp/worker-events.pid
       - name: Run example tests
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo --preserve-env=PATH,E2E_GOCOVERDIR go test -v -tags examples -run ${{ matrix.test }} -timeout 20m ./tests/examples/...
@@ -94,6 +111,19 @@ jobs:
         if: failure()
         run: |
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" logs --no-color 2>/dev/null || true
+          # Stop the log streamer and dump what it captured. Workers
+          # are removed by blockyard when it stops them, so the only
+          # record of their stdout/stderr is these captured files.
+          [ -f /tmp/worker-events.pid ] && kill "$(cat /tmp/worker-events.pid)" 2>/dev/null || true
+          if ls /tmp/worker-logs/*.log >/dev/null 2>&1; then
+            for f in /tmp/worker-logs/*.log; do
+              echo "==> $(basename "$f")"
+              cat "$f" || true
+              echo
+            done
+          else
+            echo "==> no worker logs captured"
+          fi
           docker compose -f "examples/${{ matrix.example }}/docker-compose.yml" down -v --remove-orphans 2>/dev/null || true
 
   e2e:
