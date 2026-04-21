@@ -1,15 +1,31 @@
 # Board Storage
 
-Board storage is a **blockr concern**, not a blockyard concern. Blockyard
-does not store, read, or mediate access to board data. Its role is limited
-to:
+Board storage is split across blockyard, PostgreSQL, and blockr along
+control-plane / data-plane lines:
 
-1. Authenticating users (OIDC)
-2. Injecting credentials into the R session (access token + env vars)
-3. Running the app
+- **Blockyard** owns the control plane: schema migrations, per-user
+  role provisioning, vault integration. It is not in the data path
+  at runtime.
+- **PostgreSQL** is the data store and the enforcement point: data
+  lives in PG, RLS policies filter by `current_user` at query time.
+- **Blockr** owns the R-side client API: DBI queries, sharing UI,
+  serialization.
 
-The choice of storage backend, the data model, the sharing semantics,
-and the path layout are all owned by blockr.
+Blockyard's responsibilities in the storage lifecycle:
+
+1. Authenticating users via OIDC.
+2. Provisioning the schema at deploy time (migrations shipped in
+   `internal/db/migrations/postgres/`) and per-user PG roles on
+   first login.
+3. Issuing credentials via vault and injecting references into
+   the R session.
+4. Running the app.
+
+At runtime, R talks directly to vault (for credential issuance
+and renewal) and PostgreSQL (for data operations); blockyard is
+not on that path. Blockr stays storage-agnostic at the rack API
+layer — it just happens to have a PostgreSQL-backed implementation
+of `rack_*` operations for this backend.
 
 ## Requirements
 
@@ -31,17 +47,17 @@ PostgreSQL directly, using per-user credentials issued by vault's
 `database` secrets engine. No middleware sits between R and the
 database at runtime.
 
-Blockyard's runtime involvement is limited to:
+Blockyard's provisioning responsibilities for this backend:
 
-1. Provisioning the schema (via its own migration system —
-   `golang-migrate` with embedded SQL files).
+1. Running the schema migrations (via `golang-migrate` with
+   embedded SQL files in `internal/db/migrations/postgres/`).
 2. Creating the per-user PG role on first login and registering it
    with vault's `database` static-role feature for password rotation.
 3. Deactivating the role when the user is deactivated.
 
-After session bootstrap, the R app talks directly to vault (for
-credential issuance and renewal) and PostgreSQL (for data operations).
-Blockyard is neither in the data path nor the auth path at runtime.
+At runtime, R talks directly to vault (for credential issuance and
+renewal) and PostgreSQL (for data operations); blockyard is
+neither in the data path nor the auth path.
 
 For installations that outgrow per-user PG connections (typically
 when `max_connections` becomes a bottleneck, beyond a few hundred
@@ -371,18 +387,24 @@ additive.
 
 The PostgreSQL + vault-creds combination is recommended because it
 keeps all auth enforcement inside PostgreSQL and requires no
-middleware service. However, blockr is storage-agnostic. Any
-backend works if:
+middleware service. However, blockr's rack API is storage-agnostic.
+Any backend works if:
 
-1. The R app can obtain credentials for it (typically from vault).
+1. The R app can obtain credentials for it.
 2. The backend supports per-user scoping and sharing.
 
-For backends that require per-user credentials (S3, PocketBase,
-Gitea, etc.), the operator provisions credentials and stores them
-in OpenBao at `secret/data/users/{sub}/apikeys/{service}`.
-Blockyard's existing credential injection (vault token +
-`VAULT_ADDR`) delivers them to the R app at runtime. No blockyard
-code changes are needed.
+Two provisioning models are supported:
+
+- **Blockyard auto-provisions** (the PostgreSQL + vault-creds flow
+  above): blockyard creates per-user roles on first login and
+  registers them with vault. Requires backend-specific code in
+  blockyard.
+- **Operator provisions out-of-band** (S3, PocketBase, Gitea,
+  etc.): credentials are created externally and stored in OpenBao
+  at `secret/data/users/{sub}/apikeys/{service}`. Blockyard's
+  existing credential injection (vault token + `VAULT_ADDR`)
+  delivers them to the R app at runtime — no blockyard code
+  changes needed.
 
 | Backend                  | Provisioning                      | Sharing model             | Versioning          |
 |--------------------------|-----------------------------------|---------------------------|---------------------|
