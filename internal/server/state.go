@@ -36,6 +36,7 @@ type Server struct {
 	DB       *db.DB
 	Workers  WorkerMap
 	Sessions session.Store
+	WsConns  *WsConnCounter
 	Registry registry.WorkerRegistry
 	Tasks    *task.Store
 	LogStore *logstore.Store
@@ -230,6 +231,7 @@ func NewServer(cfg *config.Config, be backend.Backend, database *db.DB) *Server 
 		DB:       database,
 		Workers:  NewMemoryWorkerMap(),
 		Sessions: session.NewMemoryStore(),
+		WsConns:  NewWsConnCounter(),
 		Registry: registry.NewMemoryRegistry(),
 		Tasks:    task.NewStore(),
 		LogStore: logstore.NewStore(),

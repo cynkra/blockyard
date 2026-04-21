@@ -274,6 +274,7 @@ func TestFinishWaitForIdleDeadlineElapses(t *testing.T) {
 	srv := server.NewServer(&config.Config{}, mock.New(), testDB(t))
 	srv.Workers.Set("w1", server.ActiveWorker{AppID: "app1"})
 	srv.Sessions.Set("sess-never-drains", session.Entry{WorkerID: "w1"})
+	srv.WsConns.TryInc("w1", 1<<30)
 
 	const idleWait = 80 * time.Millisecond
 	d := drainerForIdleTest(t, srv, idleWait, "test-server")
@@ -303,12 +304,14 @@ func TestFinishWaitForIdleSessionDrainsMidWait(t *testing.T) {
 	srv := server.NewServer(&config.Config{}, mock.New(), testDB(t))
 	srv.Workers.Set("w1", server.ActiveWorker{AppID: "app1"})
 	srv.Sessions.Set("sess-clearing", session.Entry{WorkerID: "w1"})
+	srv.WsConns.TryInc("w1", 1<<30)
 
 	// Clear the session after ~50ms — a few polls in, well before
 	// the 1s deadline.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		srv.Sessions.Delete("sess-clearing")
+		srv.WsConns.Dec("w1")
 	}()
 
 	d := drainerForIdleTest(t, srv, time.Second, "test-server")
@@ -357,6 +360,7 @@ func TestFinishWaitForIdleFiltersByServerID(t *testing.T) {
 	// The peer's worker has an active session; without the
 	// ServerID filter, Finish would wait for it.
 	srv.Sessions.Set("peer-sess", session.Entry{WorkerID: newWorker})
+	srv.WsConns.TryInc(newWorker, 1<<30)
 
 	d := drainerForIdleTest(t, srv, 500*time.Millisecond, oldServerID)
 

@@ -138,16 +138,18 @@ func TestMetricsColdStartSpawn(t *testing.T) {
 	}
 }
 
-// TestMetricsSessionActive verifies that new proxy sessions increment
-// sessions_active and that eviction via ops.EvictWorker decrements it
-// along with incrementing workers_stopped_total.
+// TestMetricsSessionActive verifies that active WebSocket connections
+// drive sessions_active up, and that closing them brings it back down.
+// Sessions are now per-WebSocket, so HTTP requests alone don't move
+// the gauge — opening a WS does.
 func TestMetricsSessionActive(t *testing.T) {
 	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
 	createAndStartApp(t, ts, "sess-metrics")
 
 	beforeSessions := gaugeValue(srv.Metrics.SessionsActive)
 
-	// First request creates a new session
+	// Plain HTTP request does NOT create a session record for capacity.
 	resp, err := http.Get(ts.URL + "/app/sess-metrics/")
 	if err != nil {
 		t.Fatal(err)
@@ -155,27 +157,48 @@ func TestMetricsSessionActive(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-
-	afterSessions := gaugeValue(srv.Metrics.SessionsActive)
-	if delta := afterSessions - beforeSessions; delta != 1 {
-		t.Errorf("expected sessions_active +1 after new session, got %v", delta)
+	if delta := gaugeValue(srv.Metrics.SessionsActive) - beforeSessions; delta != 0 {
+		t.Errorf("expected sessions_active unchanged after HTTP-only request, got %v", delta)
 	}
 
-	// Second request without cookie creates another session
-	_, err = http.Get(ts.URL + "/app/sess-metrics/")
+	// Open a WebSocket — this is what counts as a session.
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/app/sess-metrics/"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	afterSessions2 := gaugeValue(srv.Metrics.SessionsActive)
-	if delta := afterSessions2 - beforeSessions; delta != 2 {
-		t.Errorf("expected sessions_active +2 after two new sessions, got %v", delta)
+
+	// Allow the shuttle goroutine to Inc before we sample.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if gaugeValue(srv.Metrics.SessionsActive)-beforeSessions >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if delta := gaugeValue(srv.Metrics.SessionsActive) - beforeSessions; delta != 1 {
+		t.Errorf("expected sessions_active +1 after WS open, got %v", delta)
 	}
 
-	// Evict the worker directly — sessions_active should drop
-	beforeEvict := gaugeValue(srv.Metrics.SessionsActive)
+	// Close the client WS — the shuttle exits and decrements.
+	conn.Close(websocket.StatusNormalClosure, "done")
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if gaugeValue(srv.Metrics.SessionsActive) <= beforeSessions {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if after := gaugeValue(srv.Metrics.SessionsActive); after > beforeSessions {
+		t.Errorf("expected sessions_active to return to baseline after WS close, before=%v after=%v",
+			beforeSessions, after)
+	}
+
+	// Evict the worker — make sure eviction still increments stopped counter.
 	stoppedGraceful := srv.Metrics.WorkersStopped.WithLabelValues(telemetry.ReasonGraceful)
 	beforeStopped := counterValue(stoppedGraceful)
-
 	workerIDs := srv.Workers.All()
 	if len(workerIDs) == 0 {
 		t.Fatal("expected at least one worker to evict")
@@ -183,13 +206,6 @@ func TestMetricsSessionActive(t *testing.T) {
 	for _, wid := range workerIDs {
 		ops.EvictWorker(context.Background(), srv, wid, telemetry.ReasonGraceful)
 	}
-
-	afterEvict := gaugeValue(srv.Metrics.SessionsActive)
-	if afterEvict >= beforeEvict {
-		t.Errorf("expected sessions_active to decrease after eviction, before=%v after=%v",
-			beforeEvict, afterEvict)
-	}
-
 	afterStopped := counterValue(stoppedGraceful)
 	if delta := afterStopped - beforeStopped; delta < 1 {
 		t.Errorf("expected workers_stopped_total{reason=graceful} +1 after eviction, got %v", delta)

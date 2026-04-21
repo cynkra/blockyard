@@ -341,6 +341,8 @@ func TestEvictDrainedWorkersKeepsWithSessions(t *testing.T) {
 	spawnWorker(t, srv, be, "w-drain", "app1")
 	srv.Workers.SetDraining("w-drain")
 	srv.Sessions.Set("sess1", session.Entry{WorkerID: "w-drain"})
+	// Active WS on the worker — draining should wait for it.
+	srv.WsConns.TryInc("w-drain", 1<<30)
 
 	evictDrainedWorkers(context.Background(), srv)
 

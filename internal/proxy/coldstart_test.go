@@ -15,7 +15,6 @@ import (
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/server"
-	"github.com/cynkra/blockyard/internal/session"
 )
 
 func testColdstartServer(t *testing.T) *server.Server {
@@ -311,8 +310,8 @@ func TestEnsureWorkerCapacityExhausted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fill its session capacity
-	srv.Sessions.Set("sess-1", session.Entry{WorkerID: wid})
+	// Fill its session capacity (one active WS on this worker).
+	srv.WsConns.TryInc(wid, 1)
 
 	// Now ensureWorker should return errCapacityExhausted
 	_, _, err = ensureWorker(context.Background(), srv, app)
@@ -392,7 +391,7 @@ func TestEnsureWorkerRecheckAfterSpawnSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.Sessions.Set("sess-1", session.Entry{WorkerID: wid1})
+	srv.WsConns.TryInc(wid1, 1<<30)
 
 	// Now spawn a second concurrent request: first call to lb.Assign
 	// returns "", nil (no capacity, but can spawn). Inside spawnGroup.do,
@@ -407,10 +406,10 @@ func TestEnsureWorkerRecheckAfterSpawnSlot(t *testing.T) {
 	}
 
 	// Free the session from wid1 so re-check can find capacity
-	srv.Sessions.Delete("sess-1")
+	srv.WsConns.Dec(wid1)
 
 	// Saturate wid2 so we need to check existing workers
-	srv.Sessions.Set("sess-2", session.Entry{WorkerID: wid2})
+	srv.WsConns.TryInc(wid2, 1<<30)
 
 	// Now ensureWorker should reuse wid1 via the outer lb.Assign (not
 	// entering the spawn path at all). To cover the inner re-check path

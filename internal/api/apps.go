@@ -1005,7 +1005,7 @@ func drainWorkers(srv *server.Server, appID string, workerIDs []string, sender t
 	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
 
 	for {
-		remaining := srv.Sessions.CountForWorkers(workerIDs)
+		remaining := srv.WsConns.CountForWorkers(workerIDs)
 		if remaining == 0 {
 			sender.Write("all sessions ended")
 			break

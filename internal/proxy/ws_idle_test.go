@@ -57,7 +57,7 @@ func TestWSIdleTimeout(t *testing.T) {
 
 	cache := NewWsCache()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, cache, srv)
+		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, "w1", 100, cache, srv)
 	}))
 	t.Cleanup(proxy.Close)
 
@@ -90,7 +90,7 @@ func TestWSIdleTimeoutResetOnMessage(t *testing.T) {
 
 	cache := NewWsCache()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, cache, srv)
+		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, "w1", 100, cache, srv)
 	}))
 	t.Cleanup(proxy.Close)
 
@@ -135,7 +135,7 @@ func TestWSIdleTimeoutDisabled(t *testing.T) {
 
 	cache := NewWsCache()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, cache, srv)
+		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, "w1", 100, cache, srv)
 	}))
 	t.Cleanup(proxy.Close)
 
@@ -181,7 +181,7 @@ func TestWSTouchDuringMessages(t *testing.T) {
 
 	cache := NewWsCache()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, cache, srv)
+		shuttleWS(w, r, backend.Listener.Addr().String(), "test-app", sessionID, "w1", 100, cache, srv)
 	}))
 	t.Cleanup(proxy.Close)
 

@@ -1640,3 +1640,76 @@ func TestProxyMultiplexSessions(t *testing.T) {
 		t.Errorf("expected 2 backend WS accepts on same worker, got %d", accepts)
 	}
 }
+
+// TestSecondWebSocketRejectedAtCapacity is the regression test for
+// issue #268. With max_workers_per_app=1 and max_sessions_per_worker=1,
+// the second WebSocket from the same browser (sharing the session
+// cookie) must be rejected — not silently share the worker. A session
+// is now one active WebSocket, so the second tab hits capacity.
+func TestSecondWebSocketRejectedAtCapacity(t *testing.T) {
+	srv, ts := testProxyServer(t)
+	srv.Backend.(*mock.MockBackend).SetWSHandler(wsEchoHandler())
+
+	// Create, bundle, start.
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/apps",
+		bytes.NewReader([]byte(`{"name":"cap-app"}`)))
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	var created map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&created)
+	id := created["id"].(string)
+
+	req, _ = http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/bundles",
+		bytes.NewReader(testutil.MakeBundle(t)))
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	http.DefaultClient.Do(req)
+	waitForBundleActive(t, ts, id, testPAT)
+
+	// Enforce max_workers_per_app=1, max_sessions_per_worker=1.
+	body := `{"max_workers_per_app":1,"max_sessions_per_worker":1}`
+	req, _ = http.NewRequest("PATCH", ts.URL+"/api/v1/apps/"+id,
+		strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode >= 400 {
+		t.Fatalf("patch app failed: %v, status=%d", err, resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest("POST",
+		ts.URL+"/api/v1/apps/"+id+"/start", nil)
+	req.Header.Set("Authorization", "Bearer "+testPAT)
+	http.DefaultClient.Do(req)
+
+	ctx := context.Background()
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/app/cap-app/"
+
+	// First WS opens successfully and holds the only seat.
+	conn1, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("first WS dial failed: %v", err)
+	}
+	defer conn1.CloseNow()
+
+	// Prove the first WS is live — round-trip a message.
+	if err := conn1.Write(ctx, websocket.MessageText, []byte("hi")); err != nil {
+		t.Fatalf("first WS write failed: %v", err)
+	}
+	if _, _, err := conn1.Read(ctx); err != nil {
+		t.Fatalf("first WS read failed: %v", err)
+	}
+
+	// Second WS must be rejected by the proxy at capacity.
+	_, rejResp, err := websocket.Dial(ctx, wsURL, nil)
+	if err == nil {
+		t.Fatal("expected second WS to be rejected at capacity, got success")
+	}
+	if rejResp == nil {
+		t.Fatalf("expected HTTP response for rejected WS, got nil: %v", err)
+	}
+	if rejResp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("second WS: expected status 503, got %d", rejResp.StatusCode)
+	}
+}

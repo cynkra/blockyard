@@ -272,7 +272,7 @@ func (ui *UI) overviewTab(srv *server.Server) http.HandlerFunc {
 
 func (ui *UI) buildOverviewData(srv *server.Server, app *db.AppRow) overviewTabData {
 	workerIDs := srv.Workers.ForApp(app.ID)
-	activeSessionCount := srv.Sessions.CountForWorkers(workerIDs)
+	activeSessionCount := srv.WsConns.CountForWorkers(workerIDs)
 
 	since := time.Now().AddDate(0, 0, -7).UTC()
 	totalViews, _ := srv.DB.CountSessions(app.ID)
@@ -478,7 +478,7 @@ func (ui *UI) logsTab(srv *server.Server) http.HandlerFunc {
 				status = "draining"
 			}
 			startedAt := aw.StartedAt.UTC().Format(time.RFC3339)
-			sessionCount := srv.Sessions.CountForWorker(wid)
+			sessionCount := srv.WsConns.Count(wid)
 			workers = append(workers, logWorkerEntry{
 				ID:           wid,
 				Status:       status,
