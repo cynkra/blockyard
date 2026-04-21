@@ -220,6 +220,85 @@ func TestSpawnRestore_FailureWithAuditLog(t *testing.T) {
 	}
 }
 
+// TestSpawnRestore_StopAppWorkersCalledBeforeActivate verifies that a
+// successful restore invokes StopAppWorkers and that it runs before
+// ActivateBundle. This is what makes redeploy pick up new code — old
+// workers must be torn down before the active bundle pointer flips.
+func TestSpawnRestore_StopAppWorkersCalledBeforeActivate(t *testing.T) {
+	params, tasks := setupRestoreTest(t, true)
+
+	var stopCalled bool
+	var activeAtStop *string
+	params.StopAppWorkers = func(appID string) {
+		if appID != params.AppID {
+			t.Errorf("StopAppWorkers called with app_id %q, want %q", appID, params.AppID)
+		}
+		stopCalled = true
+		// Snapshot the active bundle at the moment stop fires. It must
+		// still be the old value (nil on a fresh app) because activation
+		// has not happened yet.
+		appRow, err := params.DB.GetApp(params.AppID)
+		if err != nil {
+			t.Fatalf("GetApp during StopAppWorkers: %v", err)
+		}
+		activeAtStop = appRow.ActiveBundle
+	}
+
+	SpawnRestore(params)
+
+	_, _, done, ok := tasks.Subscribe("task-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SpawnRestore to complete")
+	}
+
+	if !stopCalled {
+		t.Fatal("StopAppWorkers was not invoked on successful restore")
+	}
+	if activeAtStop != nil {
+		t.Fatalf("StopAppWorkers ran after activation (active=%q), want before", *activeAtStop)
+	}
+
+	// Sanity check: activation did eventually happen.
+	appRow, err := params.DB.GetApp(params.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appRow.ActiveBundle == nil || *appRow.ActiveBundle != "b-1" {
+		t.Fatal("expected active bundle to be 'b-1' after restore")
+	}
+}
+
+// TestSpawnRestore_StopAppWorkersSkippedOnFailure verifies that a
+// failed build does not invoke StopAppWorkers. Running workers should
+// keep serving the previous bundle when a new build fails.
+func TestSpawnRestore_StopAppWorkersSkippedOnFailure(t *testing.T) {
+	params, tasks := setupRestoreTest(t, false)
+
+	var stopCalled bool
+	params.StopAppWorkers = func(string) { stopCalled = true }
+
+	SpawnRestore(params)
+
+	_, _, done, ok := tasks.Subscribe("task-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SpawnRestore to complete")
+	}
+
+	if stopCalled {
+		t.Fatal("StopAppWorkers must not fire when the build fails")
+	}
+}
+
 func TestBuildCommand(t *testing.T) {
 	cmd := BuildCommand()
 	if len(cmd) != 4 {
