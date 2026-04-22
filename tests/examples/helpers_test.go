@@ -493,12 +493,21 @@ func dialAppWebSocket(t *testing.T, client *http.Client, baseURL, appName string
 		cookieStrs = append(cookieStrs, c.Name+"="+c.Value)
 	}
 
-	// Retry on transient errors (EOF, connection reset) common on CI.
+	// httpuv wires the WebSocket upgrade handler shortly after Shiny's
+	// TCP listener comes up, so an early attempt can get 101 from the
+	// proxy but EOF from the backend. Retry with exponential backoff
+	// over ~15s to absorb that window on contended CI runners.
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	sleep := 500 * time.Millisecond
+	const maxSleep = 2 * time.Second
+	const maxAttempts = 10
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			t.Logf("websocket dial: retrying (attempt %d) after: %v", attempt+1, lastErr)
-			time.Sleep(2 * time.Second)
+			time.Sleep(sleep)
+			if sleep < maxSleep {
+				sleep = min(sleep*2, maxSleep)
+			}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
