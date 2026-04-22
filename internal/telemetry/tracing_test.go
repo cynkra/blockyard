@@ -9,7 +9,6 @@ import (
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 func TestInitTracingEmpty(t *testing.T) {
@@ -67,11 +66,6 @@ func TestInitTracingSetsPropagator(t *testing.T) {
 	}
 	if !sawTraceparent {
 		t.Errorf("expected propagator to handle traceparent, fields=%v", fields)
-	}
-	// Ensure the installed propagator is actually a composite including
-	// the W3C trace-context propagator (not just a no-op).
-	if _, ok := otel.GetTextMapPropagator().(propagation.TextMapPropagator); !ok {
-		t.Error("expected a TextMapPropagator to be installed")
 	}
 }
 
