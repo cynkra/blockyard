@@ -9,6 +9,9 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // forwardHTTP proxies an HTTP request to the worker at addr. The
@@ -50,6 +53,9 @@ func forwardHTTP(w http.ResponseWriter, r *http.Request, addr, appName, external
 				proto = "https"
 			}
 			pr.Out.Header.Set("X-Forwarded-Proto", proto)
+
+			otel.GetTextMapPropagator().Inject(pr.Out.Context(),
+				propagation.HeaderCarrier(pr.Out.Header))
 		},
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

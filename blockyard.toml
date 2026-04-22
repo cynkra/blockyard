@@ -7,6 +7,7 @@ shutdown_timeout = "30s"
 # management_bind = "127.0.0.1:9100"  # separate listener for /healthz, /readyz, /metrics
 # log_level      = "info"             # trace, debug, info, warn, error
 # trusted_proxies = ["10.0.0.0/8", "172.16.0.0/12"]  # CIDRs whose X-Forwarded-For to trust for rate limiting
+# worker_env = { OTEL_EXPORTER_OTLP_ENDPOINT = "http://alloy:4317" }  # env vars injected into every worker
 
 [docker]
 socket     = "/var/run/docker.sock"

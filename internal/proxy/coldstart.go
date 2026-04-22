@@ -180,8 +180,6 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 		"dev.blockyard/role":      "worker",
 	}
 
-	extraEnv := server.WorkerEnv(srv)
-
 	// Assemble per-worker library from the package store.
 	var libDir string
 	if srv.PkgStore != nil {
@@ -254,7 +252,6 @@ func spawnWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (strin
 	spec.MemoryLimit = ptrOr(app.MemoryLimit, "")
 	spec.CPULimit = ptrOr(app.CPULimit, 0.0)
 	spec.Labels = labels
-	spec.Env = extraEnv
 
 	// Resolve per-app data mounts.
 	appMounts, err := srv.DB.ListAppDataMounts(app.ID)

@@ -584,6 +584,96 @@ func TestWorkerEnv_ShinyHostDefault(t *testing.T) {
 	}
 }
 
+func TestWorkerEnv_UserWorkerEnvPassthrough(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{
+				Bind: ":8080",
+				WorkerEnv: map[string]string{
+					"OTEL_EXPORTER_OTLP_ENDPOINT": "http://alloy:4317",
+					"TEAM":                        "data",
+				},
+			},
+		},
+	}
+	env := WorkerEnv(srv)
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://alloy:4317" {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	if env["TEAM"] != "data" {
+		t.Errorf("TEAM = %q", env["TEAM"])
+	}
+}
+
+func TestWorkerEnv_BlockyardKeysWinOverWorkerEnv(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{
+				Bind: ":8080",
+				WorkerEnv: map[string]string{
+					"BLOCKYARD_API_URL": "http://evil",
+					"SHINY_HOST":        "1.2.3.4",
+				},
+			},
+		},
+	}
+	env := WorkerEnv(srv)
+	if env["BLOCKYARD_API_URL"] == "http://evil" {
+		t.Error("user worker_env must not override BLOCKYARD_API_URL")
+	}
+	if env["SHINY_HOST"] == "1.2.3.4" {
+		t.Error("user worker_env must not override SHINY_HOST")
+	}
+}
+
+func TestInjectOTELIdentity_NoEndpoint(t *testing.T) {
+	env := map[string]string{"FOO": "bar"}
+	injectOTELIdentity(env, "myapp", "w-123")
+	if _, ok := env["OTEL_SERVICE_NAME"]; ok {
+		t.Error("should not inject OTEL_SERVICE_NAME when endpoint is unset")
+	}
+	if _, ok := env["OTEL_RESOURCE_ATTRIBUTES"]; ok {
+		t.Error("should not inject OTEL_RESOURCE_ATTRIBUTES when endpoint is unset")
+	}
+}
+
+func TestInjectOTELIdentity_WithEndpoint(t *testing.T) {
+	env := map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://alloy:4317",
+	}
+	injectOTELIdentity(env, "myapp", "w-123")
+	if env["OTEL_SERVICE_NAME"] != "myapp" {
+		t.Errorf("OTEL_SERVICE_NAME = %q, want %q", env["OTEL_SERVICE_NAME"], "myapp")
+	}
+	want := "blockyard.app=myapp,blockyard.worker_id=w-123"
+	if env["OTEL_RESOURCE_ATTRIBUTES"] != want {
+		t.Errorf("OTEL_RESOURCE_ATTRIBUTES = %q, want %q", env["OTEL_RESOURCE_ATTRIBUTES"], want)
+	}
+}
+
+func TestInjectOTELIdentity_MergesUserResourceAttrs(t *testing.T) {
+	env := map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://alloy:4317",
+		"OTEL_RESOURCE_ATTRIBUTES":    "team=data,env=prod",
+	}
+	injectOTELIdentity(env, "myapp", "w-123")
+	want := "team=data,env=prod,blockyard.app=myapp,blockyard.worker_id=w-123"
+	if env["OTEL_RESOURCE_ATTRIBUTES"] != want {
+		t.Errorf("OTEL_RESOURCE_ATTRIBUTES = %q, want %q", env["OTEL_RESOURCE_ATTRIBUTES"], want)
+	}
+}
+
+func TestInjectOTELIdentity_UserServiceNameWins(t *testing.T) {
+	env := map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://alloy:4317",
+		"OTEL_SERVICE_NAME":           "custom-name",
+	}
+	injectOTELIdentity(env, "myapp", "w-123")
+	if env["OTEL_SERVICE_NAME"] != "custom-name" {
+		t.Errorf("user-set OTEL_SERVICE_NAME overwritten: %q", env["OTEL_SERVICE_NAME"])
+	}
+}
+
 func TestMarkDraining(t *testing.T) {
 	m := NewMemoryWorkerMap()
 	m.Set("w1", ActiveWorker{AppID: "app-a"})
