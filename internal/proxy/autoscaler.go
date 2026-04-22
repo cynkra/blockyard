@@ -73,12 +73,11 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 	appIDs := srv.Workers.AppIDs()
 
 	for _, appID := range appIDs {
-		if srv.Workers.IsDraining(appID) {
-			continue
-		}
-
 		app, err := srv.DB.GetApp(appID)
 		if err != nil || app == nil {
+			continue
+		}
+		if !app.Enabled {
 			continue
 		}
 
@@ -212,7 +211,7 @@ func preWarmApps(ctx context.Context, srv *server.Server) {
 		return
 	}
 	for _, app := range apps {
-		if !app.Enabled || srv.Workers.IsDraining(app.ID) {
+		if !app.Enabled {
 			continue
 		}
 		ensurePreWarmed(ctx, srv, &app)

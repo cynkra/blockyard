@@ -220,28 +220,29 @@ func TestSpawnRestore_FailureWithAuditLog(t *testing.T) {
 	}
 }
 
-// TestSpawnRestore_StopAppWorkersCalledBeforeActivate verifies that a
-// successful restore invokes StopAppWorkers and that it runs before
-// ActivateBundle. This is what makes redeploy pick up new code — old
-// workers must be torn down before the active bundle pointer flips.
-func TestSpawnRestore_StopAppWorkersCalledBeforeActivate(t *testing.T) {
+// TestSpawnRestore_DrainOldWorkersCalledBeforeActivate verifies that a
+// successful restore invokes DrainOldWorkers and that it runs before
+// ActivateBundle. Flagging old workers as draining before the active
+// bundle pointer flips is what keeps new cold starts on the new bundle
+// while existing sessions finish on the old workers.
+func TestSpawnRestore_DrainOldWorkersCalledBeforeActivate(t *testing.T) {
 	params, tasks := setupRestoreTest(t, true)
 
-	var stopCalled bool
-	var activeAtStop *string
-	params.StopAppWorkers = func(appID string) {
+	var drainCalled bool
+	var activeAtDrain *string
+	params.DrainOldWorkers = func(appID string) {
 		if appID != params.AppID {
-			t.Errorf("StopAppWorkers called with app_id %q, want %q", appID, params.AppID)
+			t.Errorf("DrainOldWorkers called with app_id %q, want %q", appID, params.AppID)
 		}
-		stopCalled = true
-		// Snapshot the active bundle at the moment stop fires. It must
+		drainCalled = true
+		// Snapshot the active bundle at the moment drain fires. It must
 		// still be the old value (nil on a fresh app) because activation
 		// has not happened yet.
 		appRow, err := params.DB.GetApp(params.AppID)
 		if err != nil {
-			t.Fatalf("GetApp during StopAppWorkers: %v", err)
+			t.Fatalf("GetApp during DrainOldWorkers: %v", err)
 		}
-		activeAtStop = appRow.ActiveBundle
+		activeAtDrain = appRow.ActiveBundle
 	}
 
 	SpawnRestore(params)
@@ -256,11 +257,11 @@ func TestSpawnRestore_StopAppWorkersCalledBeforeActivate(t *testing.T) {
 		t.Fatal("timed out waiting for SpawnRestore to complete")
 	}
 
-	if !stopCalled {
-		t.Fatal("StopAppWorkers was not invoked on successful restore")
+	if !drainCalled {
+		t.Fatal("DrainOldWorkers was not invoked on successful restore")
 	}
-	if activeAtStop != nil {
-		t.Fatalf("StopAppWorkers ran after activation (active=%q), want before", *activeAtStop)
+	if activeAtDrain != nil {
+		t.Fatalf("DrainOldWorkers ran after activation (active=%q), want before", *activeAtDrain)
 	}
 
 	// Sanity check: activation did eventually happen.
@@ -273,14 +274,14 @@ func TestSpawnRestore_StopAppWorkersCalledBeforeActivate(t *testing.T) {
 	}
 }
 
-// TestSpawnRestore_StopAppWorkersSkippedOnFailure verifies that a
-// failed build does not invoke StopAppWorkers. Running workers should
+// TestSpawnRestore_DrainOldWorkersSkippedOnFailure verifies that a
+// failed build does not invoke DrainOldWorkers. Running workers should
 // keep serving the previous bundle when a new build fails.
-func TestSpawnRestore_StopAppWorkersSkippedOnFailure(t *testing.T) {
+func TestSpawnRestore_DrainOldWorkersSkippedOnFailure(t *testing.T) {
 	params, tasks := setupRestoreTest(t, false)
 
-	var stopCalled bool
-	params.StopAppWorkers = func(string) { stopCalled = true }
+	var drainCalled bool
+	params.DrainOldWorkers = func(string) { drainCalled = true }
 
 	SpawnRestore(params)
 
@@ -294,8 +295,8 @@ func TestSpawnRestore_StopAppWorkersSkippedOnFailure(t *testing.T) {
 		t.Fatal("timed out waiting for SpawnRestore to complete")
 	}
 
-	if stopCalled {
-		t.Fatal("StopAppWorkers must not fire when the build fails")
+	if drainCalled {
+		t.Fatal("DrainOldWorkers must not fire when the build fails")
 	}
 }
 

@@ -215,8 +215,6 @@ func Handler(srv *server.Server) http.Handler {
 					http.Error(w, "server at capacity", http.StatusServiceUnavailable)
 				case errCapacityExhausted:
 					http.Error(w, "app at capacity", http.StatusServiceUnavailable)
-				case errAppDraining:
-					http.Error(w, "app is shutting down", http.StatusServiceUnavailable)
 				case errNoBundle:
 					http.Error(w, "app has no active bundle", http.StatusServiceUnavailable)
 				case errHealthTimeout:

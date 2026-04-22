@@ -44,11 +44,13 @@ type RestoreParams struct {
 	AuditActor       string // sub of the user who triggered the upload
 	Metrics          *telemetry.Metrics // records restore duration + outcome
 	WG               *sync.WaitGroup    // if non-nil, Add(1) before goroutine, Done() on exit
-	// StopAppWorkers, if set, is invoked just before the new bundle is
-	// activated. It must drain and evict any workers still running the
-	// previous bundle so new sessions spawn with the new code. Blocks
-	// until workers are stopped (up to the server's shutdown_timeout).
-	StopAppWorkers func(appID string)
+	// DrainOldWorkers, if set, is invoked just before the new bundle is
+	// activated. It marks workers of the previous bundle as draining so
+	// that new sessions cold-start against the new bundle while existing
+	// sessions keep running on the old workers until they end naturally.
+	// Must not force-evict; the autoscaler's idle-timeout reaps drained
+	// workers once their sessions complete.
+	DrainOldWorkers func(appID string)
 }
 
 // SpawnRestore launches the restore pipeline in a background goroutine.
@@ -375,11 +377,12 @@ func runRestore(p RestoreParams) error {
 	slog.Info("bundle state transition",
 		"app_id", p.AppID, "bundle_id", p.BundleID, "status", "activating")
 
-	// Stop workers running the previous bundle before flipping the
-	// active pointer; otherwise they stay up with stale code and new
-	// sessions get routed to them until they drain on their own.
-	if p.StopAppWorkers != nil {
-		p.StopAppWorkers(p.AppID)
+	// Mark workers of the previous bundle as draining before flipping
+	// the active pointer; the load balancer skips draining workers, so
+	// new sessions will cold-start against the new bundle while old
+	// sessions continue running on their existing workers.
+	if p.DrainOldWorkers != nil {
+		p.DrainOldWorkers(p.AppID)
 	}
 
 	if err := p.DB.ActivateBundle(p.AppID, p.BundleID); err != nil {

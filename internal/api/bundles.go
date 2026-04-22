@@ -14,7 +14,6 @@ import (
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/manifest"
-	"github.com/cynkra/blockyard/internal/ops"
 	"github.com/cynkra/blockyard/internal/server"
 )
 
@@ -151,8 +150,8 @@ func UploadBundle(srv *server.Server) http.HandlerFunc {
 			AuditActor:       actorSub,
 			Metrics:          srv.Metrics,
 			WG:               srv.RestoreWG,
-			StopAppWorkers: func(appID string) {
-				ops.StopAppSync(srv, appID)
+			DrainOldWorkers: func(appID string) {
+				srv.Workers.MarkDraining(appID)
 			},
 		})
 

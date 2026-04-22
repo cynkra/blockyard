@@ -25,7 +25,6 @@ var (
 	errMaxWorkers    = errors.New("max workers reached")
 	errNoBundle      = errors.New("app has no active bundle")
 	errHealthTimeout = errors.New("worker did not become healthy in time")
-	errAppDraining   = errors.New("app is shutting down")
 )
 
 var lb LoadBalancer
@@ -81,10 +80,13 @@ func (g *spawnSingleFlight) do(key string, fn func() (string, string, error)) (s
 // Concurrent calls for the same app are deduplicated — only one spawn
 // runs at a time per app.
 func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (workerID, addr string, err error) {
-	// Reject new sessions for apps being drained.
-	if srv.Workers.IsDraining(app.ID) {
-		return "", "", errAppDraining
-	}
+	// New sessions for disabled apps are already rejected upstream in
+	// proxy.go. Draining workers are excluded from assignment by
+	// ForAppAvailable, so the load balancer returns "" and the caller
+	// spawns a fresh worker using app.ActiveBundle — which is correct
+	// for bundle changes (redeploy, rollback) where we want old
+	// sessions to finish on old workers while new sessions cold-start
+	// against the new bundle.
 
 	// Try to assign to an existing worker with capacity.
 	wid, err := lb.Assign(

@@ -279,18 +279,24 @@ func TestSpawnSingleFlightDedup(t *testing.T) {
 	<-done
 }
 
-// TestEnsureWorkerDrainingRejects covers lines 82-84.
-func TestEnsureWorkerDrainingRejects(t *testing.T) {
+// TestEnsureWorkerDrainingSpawns verifies that when every existing
+// worker for an app is draining, ensureWorker spawns a fresh one
+// rather than rejecting the request. This is the redeploy/rollback
+// path: old workers keep their sessions; new sessions cold-start
+// against the current active bundle.
+func TestEnsureWorkerDrainingSpawns(t *testing.T) {
 	srv := testColdstartServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
-	// Mark app as draining
 	srv.Workers.Set("drain-worker", server.ActiveWorker{AppID: app.ID})
 	srv.Workers.MarkDraining(app.ID)
 
-	_, _, err := ensureWorker(context.Background(), srv, app)
-	if err != errAppDraining {
-		t.Errorf("expected errAppDraining, got %v", err)
+	wid, _, err := ensureWorker(context.Background(), srv, app)
+	if err != nil {
+		t.Fatalf("expected spawn to succeed, got %v", err)
+	}
+	if wid == "drain-worker" {
+		t.Fatal("ensureWorker returned the drained worker; expected a fresh spawn")
 	}
 }
 
