@@ -76,7 +76,7 @@ Docker/Podman runtime used for worker and build containers.
 ```toml
 [docker]
 socket          = "/var/run/docker.sock"
-image           = "ghcr.io/rocker-org/r-ver:4.4.3"
+image           = "ghcr.io/cynkra/blockyard-worker:4.4.3"
 shiny_port      = 3838
 pak_version     = "stable"
 # service_network  = ""

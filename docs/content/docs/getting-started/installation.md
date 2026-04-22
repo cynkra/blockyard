@@ -39,7 +39,7 @@ docker run -d \
   -p 8080:8080 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v blockyard-data:/data \
-  -e BLOCKYARD_DOCKER_IMAGE=ghcr.io/rocker-org/r-ver:4.4.3 \
+  -e BLOCKYARD_DOCKER_IMAGE=ghcr.io/cynkra/blockyard-worker:4.4.3 \
   ghcr.io/cynkra/blockyard-docker:latest
 ```
 
