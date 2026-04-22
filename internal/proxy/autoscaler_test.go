@@ -651,22 +651,41 @@ func TestEnsurePreWarmedClaimedWorkerReplacement(t *testing.T) {
 	}
 }
 
-func TestPreWarmAppsSkipsDraining(t *testing.T) {
+func TestPreWarmAppsSkipsDisabled(t *testing.T) {
+	srv := testAutoscaleServer(t)
+	app := createTestApp(t, srv, "my-app", true)
+
+	sessions := 2
+	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
+	srv.DB.SetAppEnabled(app.ID, false)
+
+	before := srv.Workers.Count()
+	preWarmApps(context.Background(), srv)
+
+	if srv.Workers.Count() != before {
+		t.Errorf("expected no new workers for disabled app, got %d total", srv.Workers.Count())
+	}
+}
+
+// TestPreWarmAppsRunsDuringDrain confirms the new semantics: when an
+// app's existing workers are draining (e.g. after a redeploy), the
+// pre-warmer still spawns fresh workers for the new bundle. Under the
+// old "any worker draining = app draining" rule this was blocked.
+func TestPreWarmAppsRunsDuringDrain(t *testing.T) {
 	srv := testAutoscaleServer(t)
 	app := createTestApp(t, srv, "my-app", true)
 
 	sessions := 2
 	srv.DB.UpdateApp(app.ID, db.AppUpdate{PreWarmedSessions: &sessions})
 
-	// Register a draining worker so IsDraining returns true.
 	srv.Workers.Set("drain-w", server.ActiveWorker{AppID: app.ID})
 	srv.Workers.MarkDraining(app.ID)
 
 	before := srv.Workers.Count()
 	preWarmApps(context.Background(), srv)
 
-	if srv.Workers.Count() != before {
-		t.Errorf("expected no new workers for draining app, got %d total", srv.Workers.Count())
+	if srv.Workers.Count() <= before {
+		t.Errorf("expected pre-warm to spawn new workers alongside the drained one, got %d total", srv.Workers.Count())
 	}
 }
 

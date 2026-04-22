@@ -220,6 +220,86 @@ func TestSpawnRestore_FailureWithAuditLog(t *testing.T) {
 	}
 }
 
+// TestSpawnRestore_DrainOldWorkersCalledBeforeActivate verifies that a
+// successful restore invokes DrainOldWorkers and that it runs before
+// ActivateBundle. Flagging old workers as draining before the active
+// bundle pointer flips is what keeps new cold starts on the new bundle
+// while existing sessions finish on the old workers.
+func TestSpawnRestore_DrainOldWorkersCalledBeforeActivate(t *testing.T) {
+	params, tasks := setupRestoreTest(t, true)
+
+	var drainCalled bool
+	var activeAtDrain *string
+	params.DrainOldWorkers = func(appID string) {
+		if appID != params.AppID {
+			t.Errorf("DrainOldWorkers called with app_id %q, want %q", appID, params.AppID)
+		}
+		drainCalled = true
+		// Snapshot the active bundle at the moment drain fires. It must
+		// still be the old value (nil on a fresh app) because activation
+		// has not happened yet.
+		appRow, err := params.DB.GetApp(params.AppID)
+		if err != nil {
+			t.Fatalf("GetApp during DrainOldWorkers: %v", err)
+		}
+		activeAtDrain = appRow.ActiveBundle
+	}
+
+	SpawnRestore(params)
+
+	_, _, done, ok := tasks.Subscribe("task-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SpawnRestore to complete")
+	}
+
+	if !drainCalled {
+		t.Fatal("DrainOldWorkers was not invoked on successful restore")
+	}
+	if activeAtDrain != nil {
+		t.Fatalf("DrainOldWorkers ran after activation (active=%q), want before", *activeAtDrain)
+	}
+
+	// Sanity check: activation did eventually happen.
+	appRow, err := params.DB.GetApp(params.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appRow.ActiveBundle == nil || *appRow.ActiveBundle != "b-1" {
+		t.Fatal("expected active bundle to be 'b-1' after restore")
+	}
+}
+
+// TestSpawnRestore_DrainOldWorkersSkippedOnFailure verifies that a
+// failed build does not invoke DrainOldWorkers. Running workers should
+// keep serving the previous bundle when a new build fails.
+func TestSpawnRestore_DrainOldWorkersSkippedOnFailure(t *testing.T) {
+	params, tasks := setupRestoreTest(t, false)
+
+	var drainCalled bool
+	params.DrainOldWorkers = func(string) { drainCalled = true }
+
+	SpawnRestore(params)
+
+	_, _, done, ok := tasks.Subscribe("task-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SpawnRestore to complete")
+	}
+
+	if drainCalled {
+		t.Fatal("DrainOldWorkers must not fire when the build fails")
+	}
+}
+
 func TestBuildCommand(t *testing.T) {
 	cmd := BuildCommand()
 	if len(cmd) != 4 {

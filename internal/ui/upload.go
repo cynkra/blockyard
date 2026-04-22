@@ -322,6 +322,9 @@ func (ui *UI) createApp(srv *server.Server) http.HandlerFunc {
 			AuditActor:       caller.Sub,
 			Metrics:          srv.Metrics,
 			WG:               srv.RestoreWG,
+			DrainOldWorkers: func(appID string) {
+				srv.Workers.MarkDraining(appID)
+			},
 		})
 
 		srv.Metrics.BundlesUploaded.Inc()

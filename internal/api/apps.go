@@ -720,10 +720,9 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 		// Capture previous bundle before switching.
 		previousBundle := app.ActiveBundle
 
-		// Drain and stop running workers.
-		ops.StopAppSync(srv, app.ID)
-
-		// Switch active bundle and record deployment tracking.
+		// Switch the active bundle before draining so any cold-start
+		// spawn that races the drain window uses the target bundle,
+		// not the one we're about to evict.
 		if err := srv.DB.SetActiveBundle(app.ID, body.BundleID); err != nil {
 			serverError(w, "set active bundle: "+err.Error())
 			return
@@ -732,6 +731,9 @@ func RollbackApp(srv *server.Server) http.HandlerFunc {
 			slog.Warn("rollback: failed to update deployment tracking", //nolint:gosec // G706: slog structured logging handles this
 				"bundle_id", body.BundleID, "error", err)
 		}
+
+		// Drain and stop workers still running the previous bundle.
+		ops.StopAppSync(srv, app.ID)
 
 		// Re-read app to get updated state.
 		app, err = srv.DB.GetApp(app.ID)
