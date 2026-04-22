@@ -293,46 +293,59 @@ func main() {
 	hostname, _ := os.Hostname()
 	serverID := hostname + "-" + randomNonceHex(8)
 
-	// Wire Redis-backed shared state into the server if Redis is
-	// configured. The rc client was constructed above, before the
-	// backend, so the process backend's allocators share it.
-	if rc != nil {
-		srv.RedisClient = rc
-		registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
+	// Shared-state backend selection — see #287, #286, parent #262.
+	// Postgres is the source of truth; Redis is an optional read-through
+	// cache so restarts don't cause session / worker loss. The same mode
+	// drives all three stores (registry, worker map, session store)
+	// because their durability requirements are identical — operators
+	// rarely want asymmetric modes.
+	mode := resolveSessionStore(cfg)
+	registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
+	idleTTL := cfg.Proxy.SessionIdleTTL.Duration
+	var pgSessions *session.PostgresStore
+	switch mode {
+	case config.SessionStoreMemory:
+		srv.Registry = registry.NewMemoryRegistry()
+		srv.Workers = server.NewMemoryWorkerMap()
+		srv.Sessions = session.NewMemoryStore()
+	case config.SessionStoreRedis:
 		srv.Registry = registry.NewRedisRegistry(rc, registryTTL)
 		srv.Workers = server.NewRedisWorkerMap(rc, serverID)
+		srv.Sessions = session.NewRedisStore(rc, idleTTL)
+	case config.SessionStorePostgres:
+		srv.Registry = registry.NewPostgresRegistry(database.DB, registryTTL)
+		srv.Workers = server.NewPostgresWorkerMap(database.DB, serverID)
+		pgSessions = session.NewPostgresStore(database.DB, idleTTL)
+		srv.Sessions = pgSessions
+	case config.SessionStoreLayered:
+		srv.Registry = registry.NewLayeredRegistry(
+			registry.NewPostgresRegistry(database.DB, registryTTL),
+			registry.NewRedisRegistry(rc, registryTTL),
+		)
+		srv.Workers = server.NewLayeredWorkerMap(
+			server.NewPostgresWorkerMap(database.DB, serverID),
+			server.NewRedisWorkerMap(rc, serverID),
+		)
+		pgSessions = session.NewPostgresStore(database.DB, idleTTL)
+		srv.Sessions = session.NewLayeredStore(
+			pgSessions, session.NewRedisStore(rc, idleTTL),
+		)
+	}
+	if rc != nil {
+		srv.RedisClient = rc
 		slog.Info("using redis for shared state",
 			"url", maskRedisPassword(cfg.Redis.URL),
 			"prefix", cfg.Redis.KeyPrefix,
 			"server_id", serverID)
 	}
-
-	// Session store selection — see #286, parent #262. Postgres is the
-	// source of truth; Redis is an optional read-through cache so that
-	// Redis restarts don't cause session loss.
-	mode := resolveSessionStore(cfg)
-	idleTTL := cfg.Proxy.SessionIdleTTL.Duration
-	var pg *session.PostgresStore
-	switch mode {
-	case config.SessionStoreMemory:
-		srv.Sessions = session.NewMemoryStore()
-	case config.SessionStoreRedis:
-		srv.Sessions = session.NewRedisStore(rc, idleTTL)
-	case config.SessionStorePostgres:
-		pg = session.NewPostgresStore(database.DB, idleTTL)
-		srv.Sessions = pg
-	case config.SessionStoreLayered:
-		pg = session.NewPostgresStore(database.DB, idleTTL)
-		srv.Sessions = session.NewLayeredStore(pg, session.NewRedisStore(rc, idleTTL))
-	}
-	if pg != nil {
+	if pgSessions != nil {
 		bgWg.Add(1)
 		go func() {
 			defer bgWg.Done()
-			pg.RunExpiry(bgCtx, time.Minute)
+			pgSessions.RunExpiry(bgCtx, time.Minute)
 		}()
 	}
-	slog.Info("session store selected", "mode", mode)
+	slog.Info("shared state store selected", "mode", mode)
 
 	// Deferred validation: session_secret must be present if OIDC is configured.
 	if cfg.OIDC != nil {
