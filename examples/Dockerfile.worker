@@ -1,0 +1,13 @@
+# Worker image for examples whose bundles depend on R packages that
+# need libuv at runtime (fs → bslib → shiny — every Shiny app, plus
+# blockr boards). rocker/r-ver ships only the R toolchain, so layer
+# libuv1 on top.
+#
+# Built locally (not pulled from a registry):
+#   docker build -t blockyard-example-worker:4.4.3 -f examples/Dockerfile.worker examples
+#
+# CI builds it as a step before example tests run.
+FROM ghcr.io/rocker-org/r-ver:4.4.3
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libuv1 \
+    && rm -rf /var/lib/apt/lists/*
