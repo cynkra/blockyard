@@ -285,6 +285,13 @@ jobs:
           phase: setup
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
+      # pak_test reads docker.image from blockyard.toml via
+      # testutil.TOMLDockerImage (→ ghcr.io/cynkra/blockyard-worker:<ver>),
+      # which isn't on the registry until worker-publish.yml fires on
+      # main. Build it locally under the same tag so the tests can
+      # pull-from-local.
+      - name: Build worker image from source
+        run: docker build -t ghcr.io/cynkra/blockyard-worker:4.4.3 --build-arg R_VERSION=4.4.3 -f docker/worker.Dockerfile .
       - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -count=1 -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/server/...
       - uses: actions/upload-artifact@v7
         with:
@@ -425,6 +432,10 @@ jobs:
     # sysctl that the kernel enforces for container processes too).
     # Tests still run as a non-root user for the setuid/unprivileged
     # modes, so the capability matrix is preserved per-test.
+    # TODO(#191): flip to ghcr.io/cynkra/blockyard-worker:<r-version>
+    # once worker-publish.yml has fired on main and the tag exists on
+    # ghcr.io — this container line runs on pull_request, which can't
+    # reference a tag that hasn't been published yet.
     container:
       image: ghcr.io/rocker-org/r-ver:4.4.3
       options: --privileged

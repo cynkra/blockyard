@@ -101,6 +101,7 @@ RUN apt-get update \
         libpq5 \
         libsqlite3-0 \
         libssl3t64 \
+        libuv1 \
         libxml2 \
         libzstd1 \
     && case "${TARGETARCH}" in \

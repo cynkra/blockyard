@@ -84,7 +84,7 @@ log_level        = "info"  # trace, debug, info, warn, error
 
 [docker]
 socket     = "/var/run/docker.sock"  # or Podman socket path
-image      = "ghcr.io/rocker-org/r-ver:4.4.3"
+image      = "ghcr.io/cynkra/blockyard-worker:4.4.3"
 shiny_port = 3838                    # internal port Shiny listens on
 pak_version = "stable"               # pak release channel: "stable", "devel"
 
