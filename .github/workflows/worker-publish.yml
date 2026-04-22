@@ -1,0 +1,77 @@
+name: Worker Publish
+
+# Decoupled from Publish because worker images aren't tied to
+# blockyard's release cadence — their tags track R versions, and
+# unrelated server code changes shouldn't fire a 10-job (5 versions
+# × 2 arches) rebuild matrix. Triggers:
+#   - paths filter on main: rebuild when the worker image recipe
+#     or its workflows actually change
+#   - weekly cron: pick up Ubuntu security patches and new rig
+#     releases even when nothing in-repo has changed
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/worker.Dockerfile"
+      - ".github/workflows/worker.yml"
+      - ".github/workflows/worker-publish.yml"
+  schedule:
+    - cron: "0 6 * * 1" # Monday 6 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: worker-publish
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/cynkra/blockyard-worker
+
+jobs:
+  worker-image:
+    uses: ./.github/workflows/worker.yml
+
+  scan-worker-image:
+    needs: worker-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      packages: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/scan-image
+        with:
+          # Worker images are identical apart from R version; scanning
+          # the default tag covers the shared lib surface (libssl,
+          # libcurl, libuv, ...) for all R-version variants.
+          image-ref: ${{ env.IMAGE }}:4.4.3-build-linux-amd64
+          variant: worker
+          ghcr-username: ${{ github.actor }}
+          ghcr-token: ${{ secrets.GITHUB_TOKEN }}
+
+  worker-manifest:
+    needs: [worker-image, scan-worker-image]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirror the matrix in worker.yml — keep the two lists in sync
+        # when adding or dropping an R version.
+        r_version: ["4.5.0", "4.4.3", "4.3.3", "4.2.3", "4.1.3"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push multi-arch manifest
+        run: |
+          docker buildx imagetools create \
+            -t "${{ env.IMAGE }}:${{ matrix.r_version }}" \
+            "${{ env.IMAGE }}:${{ matrix.r_version }}-build-linux-amd64" \
+            "${{ env.IMAGE }}:${{ matrix.r_version }}-build-linux-arm64"
