@@ -417,17 +417,20 @@ jobs:
     timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'process')
-    # Run inside the published blockyard-worker image so R is at
-    # /usr/local/bin/R and the runtime lib surface (libuv, libssl, ...)
-    # matches what production workers see — TestRSmokeBoot exercises R
-    # from the production path. --privileged is required for the
-    # unprivileged matrix leg to write
+    # Run inside rocker/r-ver so R is pre-installed at /usr/local/bin/R
+    # — same image blockyard.toml uses as the default worker image, so
+    # TestRSmokeBoot exercises R from the production path. --privileged
+    # is required for the unprivileged matrix leg to write
     # kernel.apparmor_restrict_unprivileged_userns (a non-namespaced
     # sysctl that the kernel enforces for container processes too).
     # Tests still run as a non-root user for the setuid/unprivileged
     # modes, so the capability matrix is preserved per-test.
+    # TODO(#191): flip to ghcr.io/cynkra/blockyard-worker:<r-version>
+    # once worker-publish.yml has fired on main and the tag exists on
+    # ghcr.io — this container line runs on pull_request, which can't
+    # reference a tag that hasn't been published yet.
     container:
-      image: ghcr.io/cynkra/blockyard-worker:4.4.3
+      image: ghcr.io/rocker-org/r-ver:4.4.3
       options: --privileged
     strategy:
       fail-fast: false

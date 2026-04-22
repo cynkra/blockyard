@@ -1,13 +1,16 @@
 # Worker image for the Docker backend (issue #191). Replaces the
-# upstream rocker/r-ver:<v> default with a hardened ubuntu + single-
+# upstream rocker/r-ver:<v> default with a slim ubuntu + single-
 # version R foundation, mirroring server-process.Dockerfile (#185).
 #
 # Rocker ships a full compiler toolchain (binutils, g++, gfortran)
 # and -dev headers at runtime — convenient for interactive research,
-# wrong default for a runtime that executes user-supplied R code in
-# internet-facing Shiny apps. This image ships only runtime shared
-# libraries; operators who need source builds or extra packages
-# layer them on via FROM blockyard-worker:<v>.
+# dead weight for a runtime that only loads compiled R packages.
+# Dropping the toolchain shrinks the image and removes build-time
+# binaries from the attack surface the container boundary has to
+# contain, but this isn't "hardening" in the sandbox / capability-
+# drop / seccomp sense — runtime isolation is the operator's
+# responsibility via `docker run` flags. Operators who need source
+# builds or extra packages layer them on via FROM blockyard-worker:<v>.
 #
 # One image per R version. Built and pushed as
 # ghcr.io/cynkra/blockyard-worker:<r-version> by worker-publish.yml
