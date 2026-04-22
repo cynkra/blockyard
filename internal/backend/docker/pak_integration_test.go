@@ -105,6 +105,7 @@ func TestBuildE2E_ScanDeps(t *testing.T) {
 		[]byte("library(mime)\n"), 0o644); err != nil {
 		t.Fatalf("write app.R: %v", err)
 	}
+	cacheDir := t.TempDir()
 
 	pakCachePath := t.TempDir()
 	pakPath, err := pakcache.EnsureInstalled(ctx, b, image, "stable", pakCachePath)
@@ -112,10 +113,12 @@ func TestBuildE2E_ScanDeps(t *testing.T) {
 		t.Fatalf("EnsureInstalled: %v", err)
 	}
 
-	// Mirrors the .libPaths() setup used by restore.go and preprocess.go.
-	// If someone changes the call from pak::scan_deps() back to
-	// pkgdepends::scan_deps(), this test fails with the #266 error.
+	// Mirrors the .libPaths() + R_USER_CACHE_DIR setup used by
+	// restore.go and preprocess.go. If someone changes the call from
+	// pak::scan_deps() back to pkgdepends::scan_deps(), this test fails
+	// with the #266 error ("not an exported object from namespace:pkgdepends").
 	rScript := `
+Sys.setenv(R_USER_CACHE_DIR = "/cache")
 .libPaths(c("/pak", .libPaths()))
 library(pak)
 pak_lib <- system.file("library", package = "pak")
@@ -136,6 +139,7 @@ cat("OK:", pkgs, "\n")
 		Mounts: []backend.MountEntry{
 			{Source: bundleDir, Target: "/app", ReadOnly: true},
 			{Source: pakPath, Target: "/pak", ReadOnly: true},
+			{Source: cacheDir, Target: "/cache", ReadOnly: false},
 		},
 		Labels: map[string]string{},
 	}
