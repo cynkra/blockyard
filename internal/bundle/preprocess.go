@@ -10,7 +10,7 @@ import (
 	"github.com/cynkra/blockyard/internal/backend"
 )
 
-// preProcess runs pkgdepends::scan_deps() in a container to discover
+// preProcess runs pak::scan_deps() in a container to discover
 // dependencies from bare scripts and generates a synthetic DESCRIPTION.
 func preProcess(ctx context.Context, be backend.Backend,
 	pakPath string, p RestoreParams) error {
@@ -25,12 +25,12 @@ func preProcess(ctx context.Context, be backend.Backend,
 		Sys.setenv(R_USER_CACHE_DIR = "/output")
 		.libPaths(c("/pak", .libPaths()))
 		library(pak)
-		# Make pak's bundled dependencies (pkgdepends, desc) available.
+		# Make pak's bundled dependencies (desc) available.
 		pak_lib <- system.file("library", package = "pak")
 		if (nzchar(pak_lib) && dir.exists(pak_lib)) {
 		  .libPaths(c(pak_lib, .libPaths()))
 		}
-		deps <- pkgdepends::scan_deps("/app")
+		deps <- pak::scan_deps("/app")
 		pkgs <- unique(deps$package[deps$type == "prod"])
 		dsc <- desc::desc("!new")
 		dsc$set(Package = "app", Version = "0.0.1")

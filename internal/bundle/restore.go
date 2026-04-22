@@ -192,7 +192,7 @@ func runRestore(p RestoreParams) error {
 	// 4. Handle manifest / bare scripts.
 	if p.Store != nil {
 		// Store-aware: bare scripts handled directly by R build script
-		// (scan_deps). Manifest written if generated server-side.
+		// (pak::scan_deps). Manifest written if generated server-side.
 		if m != nil {
 			manifestPath := filepath.Join(p.Paths.Unpacked, "manifest.json")
 			if !fileExists(manifestPath) {
@@ -474,7 +474,7 @@ if (!is.null(manifest) && !is.null(manifest$packages)) {
 } else {
   # Bare scripts: scan for library()/require()/:: calls directly.
   message("No manifest or DESCRIPTION found -- scanning scripts")
-  deps <- pkgdepends::scan_deps(path = "/app", root = "/app")
+  deps <- pak::scan_deps(path = "/app", root = "/app")
   refs <- unique(deps$package[deps$type == "prod"])
   if (length(refs) == 0) stop("No package dependencies found in scripts")
 }
