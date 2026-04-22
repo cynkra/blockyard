@@ -17,6 +17,7 @@ import (
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/pakcache"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/testutil"
 )
@@ -82,6 +83,73 @@ func TestBuildE2E_PakBuild(t *testing.T) {
 	}
 	if !result.Success {
 		t.Fatalf("build failed with exit code %d\n--- build logs ---\n%s", result.ExitCode, result.Logs)
+	}
+}
+
+// TestBuildE2E_ScanDeps exercises pak::scan_deps() in the same R library
+// setup the bare-script build path uses. Regression test for #266 — calling
+// pkgdepends::scan_deps() directly via :: fails because pak loads its bundled
+// pkgdepends only inside subprocesses, so the build script must go through
+// pak's exported wrapper.
+func TestBuildE2E_ScanDeps(t *testing.T) {
+	image := testutil.TOMLDockerImage(t)
+
+	ctx := context.Background()
+	b, err := New(ctx, pakTestConfig(t), t.TempDir(), "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bundleDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundleDir, "app.R"),
+		[]byte("library(mime)\n"), 0o644); err != nil {
+		t.Fatalf("write app.R: %v", err)
+	}
+
+	pakCachePath := t.TempDir()
+	pakPath, err := pakcache.EnsureInstalled(ctx, b, image, "stable", pakCachePath)
+	if err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+
+	// Mirrors the .libPaths() setup used by restore.go and preprocess.go.
+	// If someone changes the call from pak::scan_deps() back to
+	// pkgdepends::scan_deps(), this test fails with the #266 error.
+	rScript := `
+.libPaths(c("/pak", .libPaths()))
+library(pak)
+pak_lib <- system.file("library", package = "pak")
+if (nzchar(pak_lib) && dir.exists(pak_lib)) {
+  .libPaths(c(pak_lib, .libPaths()))
+}
+deps <- pak::scan_deps(path = "/app", root = "/app")
+pkgs <- unique(deps$package[deps$type == "prod"])
+if (!"mime" %in% pkgs) stop("mime not detected: ", paste(pkgs, collapse = ","))
+cat("OK:", pkgs, "\n")
+`
+
+	spec := backend.BuildSpec{
+		AppID:    "scan-deps-test",
+		BundleID: uuid.New().String()[:8],
+		Image:    image,
+		Cmd:      []string{"Rscript", "--vanilla", "-e", rScript},
+		Mounts: []backend.MountEntry{
+			{Source: bundleDir, Target: "/app", ReadOnly: true},
+			{Source: pakPath, Target: "/pak", ReadOnly: true},
+		},
+		Labels: map[string]string{},
+	}
+
+	result, err := b.Build(ctx, spec)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("scan_deps failed with exit code %d\n--- logs ---\n%s",
+			result.ExitCode, result.Logs)
+	}
+	if !strings.Contains(result.Logs, "OK: mime") {
+		t.Fatalf("expected 'OK: mime' in logs; got:\n%s", result.Logs)
 	}
 }
 
