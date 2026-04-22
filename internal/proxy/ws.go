@@ -145,10 +145,28 @@ func (br *backendReader) Close() {
 func shuttleWS(
 	w http.ResponseWriter,
 	r *http.Request,
-	addr, appName, sessionID string,
+	addr, appName, sessionID, workerID string,
+	maxSessionsPerWorker int,
 	cache *WsCache,
 	srv *server.Server,
 ) {
+	// Enforce max_sessions_per_worker at handshake time. A session in
+	// blockyard is one active WebSocket, so this is where the limit is
+	// checked. Reject before Accept so the browser sees a 503 rather
+	// than a successful Upgrade followed by an immediate close.
+	if !srv.WsConns.TryInc(workerID, maxSessionsPerWorker) {
+		slog.Info("ws rejected: worker at session capacity", //nolint:gosec // G706: slog structured logging handles this
+			"app", appName, "worker_id", workerID,
+			"max_sessions_per_worker", maxSessionsPerWorker)
+		http.Error(w, "app at capacity", http.StatusServiceUnavailable)
+		return
+	}
+	srv.Metrics.SessionsActive.Inc()
+	defer func() {
+		srv.WsConns.Dec(workerID)
+		srv.Metrics.SessionsActive.Dec()
+	}()
+
 	// Accept client WebSocket. Origin is restricted to the configured
 	// external_url host. Auth is enforced at the session/cookie layer.
 	clientConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -333,10 +351,10 @@ done:
 					return
 				}
 				srv.Sessions.Delete(sessionID)
-				// If no other sessions reference this worker, mark idle.
+				// If no active WebSocket remains on this worker, mark idle.
 				// The idle worker reaper will evict it after idle_worker_timeout
 				// if no new sessions arrive (and it's not the last worker for the app).
-				if srv.Sessions.CountForWorker(entry.WorkerID) == 0 {
+				if srv.WsConns.Count(entry.WorkerID) == 0 {
 					srv.Workers.SetIdleSince(entry.WorkerID, time.Now())
 				}
 			})

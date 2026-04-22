@@ -90,7 +90,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 	wid, err := lb.Assign(
 		app.ID,
 		srv.Workers,
-		srv.Sessions,
+		srv.WsConns,
 		app.MaxSessionsPerWorker,
 		app.MaxWorkersPerApp,
 	)
@@ -125,7 +125,7 @@ func ensureWorker(ctx context.Context, srv *server.Server, app *db.AppRow) (work
 		wid, err := lb.Assign(
 			app.ID,
 			srv.Workers,
-			srv.Sessions,
+			srv.WsConns,
 			app.MaxSessionsPerWorker,
 			app.MaxWorkersPerApp,
 		)

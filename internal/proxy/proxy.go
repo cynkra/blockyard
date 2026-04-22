@@ -235,7 +235,6 @@ func Handler(srv *server.Server) http.Handler {
 				UserSub:    callerSub,
 				LastAccess: time.Now(),
 			})
-			srv.Metrics.SessionsActive.Inc()
 
 			// Track session in the database for activity metrics.
 			if err := srv.DB.CreateSession(sessionID, app.ID, workerID, callerSub); err != nil {
@@ -291,7 +290,7 @@ func Handler(srv *server.Server) http.Handler {
 				http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
 				return
 			}
-			shuttleWS(w, r, addr, appName, sessionID, cache, srv)
+			shuttleWS(w, r, addr, appName, sessionID, workerID, app.MaxSessionsPerWorker, cache, srv)
 		} else {
 			forwardHTTP(w, r, addr, appName, srv.Config.Server.ExternalURL, transport, srv.Config.Proxy.HTTPForwardTimeout.Duration)
 		}

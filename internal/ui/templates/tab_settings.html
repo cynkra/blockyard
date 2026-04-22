@@ -99,6 +99,7 @@
     </div>
     <div class="field-group">
         <label for="max-workers">Max workers</label>
+        <p class="field-description">Upper bound on concurrent worker containers for this app. Leave empty for no per-app cap (still bounded by the server-wide limit).</p>
         <div class="field-row">
             <input type="number" id="max-workers" name="max_workers_per_app"
                    value="{{derefInt .App.MaxWorkersPerApp}}"
@@ -113,6 +114,7 @@
     </div>
     <div class="field-group">
         <label for="max-sessions">Max sessions per worker</label>
+        <p class="field-description">A session is one active browser tab (one Shiny WebSocket). <code>1</code> = isolated worker per tab; higher values = tabs share a worker process. New tabs beyond the limit are rejected with 503.</p>
         <div class="field-row">
             <input type="number" id="max-sessions" name="max_sessions_per_worker"
                    value="{{.App.MaxSessionsPerWorker}}"

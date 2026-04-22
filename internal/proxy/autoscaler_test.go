@@ -22,6 +22,7 @@ func testAutoscaleServer(t *testing.T) *server.Server {
 
 func setSession(srv *server.Server, id, workerID string) {
 	srv.Sessions.Set(id, session.Entry{WorkerID: workerID, LastAccess: time.Now()})
+	srv.WsConns.TryInc(workerID, 1<<30)
 }
 
 func TestAutoscaleScaleUp(t *testing.T) {

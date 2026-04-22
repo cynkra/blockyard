@@ -5,17 +5,23 @@ import (
 	"log/slog"
 
 	"github.com/cynkra/blockyard/internal/server"
-	"github.com/cynkra/blockyard/internal/session"
 )
 
 var errCapacityExhausted = errors.New("all workers at capacity")
 
 // LoadBalancer assigns new sessions to workers using a least-loaded
 // strategy. Stateless — decisions are based on current worker and
-// session state at call time.
+// WebSocket state at call time.
 type LoadBalancer struct{}
 
 // Assign picks a worker for a new session belonging to appID.
+//
+// A session here is one active Shiny WebSocket (one tab). Load is
+// measured via the WsConnCounter: handshakes that have been accepted
+// and haven't closed yet. The cookie-level session store tracks
+// browser-to-worker pinning for HTTP routing but does not gate
+// capacity — two tabs in the same browser share the cookie but open
+// two distinct WebSockets, so the counter sees the second tab.
 //
 // Returns a worker ID when an existing worker has available capacity.
 // Returns ("", nil) when no worker has capacity but the per-app limit
@@ -25,7 +31,7 @@ type LoadBalancer struct{}
 func (lb *LoadBalancer) Assign(
 	appID string,
 	workers server.WorkerMap,
-	sessions session.Store,
+	wsConns *server.WsConnCounter,
 	maxSessionsPerWorker int,
 	maxWorkersPerApp *int,
 ) (string, error) {
@@ -41,7 +47,7 @@ func (lb *LoadBalancer) Assign(
 	bestCount := maxSessionsPerWorker // upper bound
 
 	for _, wid := range workerIDs {
-		count := sessions.CountForWorker(wid)
+		count := wsConns.Count(wid)
 		if count < maxSessionsPerWorker && count < bestCount {
 			bestID = wid
 			bestCount = count
@@ -51,7 +57,7 @@ func (lb *LoadBalancer) Assign(
 	if bestID != "" {
 		slog.Debug("lb: assigned to least-loaded worker", //nolint:gosec // G706: slog structured logging handles this
 			"app_id", appID, "worker_id", bestID,
-			"session_count", bestCount,
+			"ws_count", bestCount,
 			"available_workers", len(workerIDs))
 		return bestID, nil
 	}

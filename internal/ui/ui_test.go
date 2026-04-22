@@ -1898,6 +1898,9 @@ func TestOverviewTabWithActiveData(t *testing.T) {
 	srv.Sessions.Set("sess-1", session.Entry{WorkerID: "w-ov-1", UserSub: "owner", LastAccess: time.Now()})
 	srv.Sessions.Set("sess-2", session.Entry{WorkerID: "w-ov-2", UserSub: "owner", LastAccess: time.Now()})
 	srv.Sessions.Set("sess-3", session.Entry{WorkerID: "w-ov-2", UserSub: "other", LastAccess: time.Now()})
+	srv.WsConns.TryInc("w-ov-1", 1<<30)
+	srv.WsConns.TryInc("w-ov-2", 1<<30)
+	srv.WsConns.TryInc("w-ov-2", 1<<30)
 
 	// Seed DB sessions for view counts.
 	srv.DB.CreateSession("db-s1", app.ID, "w-ov-1", "owner")

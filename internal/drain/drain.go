@@ -134,7 +134,7 @@ func (d *Drainer) waitForIdle(maxWait time.Duration) {
 
 	for {
 		own := d.Srv.Workers.WorkersForServer(d.ServerID)
-		sessions := d.Srv.Sessions.CountForWorkers(own)
+		sessions := d.Srv.WsConns.CountForWorkers(own)
 		if sessions == 0 {
 			slog.Info("finish: session count reached zero",
 				"server_id", d.ServerID)

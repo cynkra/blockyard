@@ -51,12 +51,12 @@ func autoscaleTick(ctx context.Context, srv *server.Server) {
 		}
 	}
 
-	// Mark workers idle when their last session has been swept.
-	// Without this, HTTP-only workers whose sessions were removed above
-	// would never get their IdleSince set and would run forever.
+	// Mark workers idle when their last WebSocket has gone. A session
+	// is one active WS, so zero WS means nobody is currently using the
+	// worker — cookie pins alone don't keep it alive.
 	now := time.Now()
 	for _, wid := range srv.Workers.All() {
-		if srv.Sessions.CountForWorker(wid) == 0 {
+		if srv.WsConns.Count(wid) == 0 {
 			srv.Workers.SetIdleSinceIfZero(wid, now)
 		}
 	}
@@ -133,7 +133,7 @@ func reconcileWorkersByState(srv *server.Server) {
 		switch {
 		case w.Draining:
 			draining++
-		case srv.Sessions.CountForWorker(wid) > 0:
+		case srv.WsConns.Count(wid) > 0:
 			busy++
 		default:
 			idle++
@@ -172,12 +172,13 @@ func evictUnhealthy(ctx context.Context, srv *server.Server, workerIDs []string)
 func tryScaleUp(ctx context.Context, srv *server.Server, app *db.AppRow, workerIDs []string) {
 	maxSessions := app.MaxSessionsPerWorker
 
-	// Check if all workers are at capacity.
+	// Check if all workers are at capacity. Load is active WebSocket
+	// count — that's what max_sessions_per_worker gates.
 	for _, wid := range workerIDs {
-		count := srv.Sessions.CountForWorker(wid)
+		count := srv.WsConns.Count(wid)
 		slog.Log(ctx, config.LevelTrace, "autoscaler: worker load",
 			"app_id", app.ID, "worker_id", wid,
-			"sessions", count, "max_sessions", maxSessions)
+			"ws", count, "max_sessions", maxSessions)
 		if count < maxSessions {
 			return // at least one worker has room
 		}
@@ -241,11 +242,12 @@ func ensurePreWarmed(ctx context.Context, srv *server.Server, app *db.AppRow) {
 		maxSessions = 1
 	}
 
-	// Sum free session slots across non-draining workers.
+	// Sum free session slots across non-draining workers. A slot is
+	// "free" when no WebSocket is currently occupying it.
 	availableWorkers := srv.Workers.ForAppAvailable(app.ID)
 	freeSlots := 0
 	for _, wid := range availableWorkers {
-		count := srv.Sessions.CountForWorker(wid)
+		count := srv.WsConns.Count(wid)
 		free := maxSessions - count
 		if free > 0 {
 			freeSlots += free

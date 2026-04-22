@@ -32,8 +32,6 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID, reason strin
 		srv.Metrics.WorkersStopped.WithLabelValues(reason).Inc()
 		srv.Metrics.WorkersActive.Dec()
 	}
-	sessionCount := srv.Sessions.CountForWorkers([]string{workerID})
-
 	// End session records in the database.
 	if err := srv.DB.EndWorkerSessions(workerID); err != nil {
 		slog.Warn("evict: failed to end worker sessions",
@@ -42,8 +40,11 @@ func EvictWorker(ctx context.Context, srv *server.Server, workerID, reason strin
 
 	srv.Registry.Delete(workerID)
 	srv.Sessions.DeleteByWorker(workerID)
+	srv.WsConns.DeleteWorker(workerID)
 	srv.LogStore.MarkEnded(workerID)
-	srv.Metrics.SessionsActive.Sub(float64(sessionCount))
+	// SessionsActive is kept in sync by shuttleWS's TryInc/Dec; the
+	// shuttles backed by this worker will exit when the backend closes,
+	// decrementing the gauge on their own.
 
 	// Clean up worker library from the package store.
 	if srv.PkgStore != nil {
@@ -184,15 +185,15 @@ func appLabelForWorker(srv *server.Server, workerID string) string {
 }
 
 // evictDrainedWorkers checks draining workers and evicts those with
-// zero active sessions. Called from the health poller tick.
+// zero active WebSockets. Called from the health poller tick.
 func evictDrainedWorkers(ctx context.Context, srv *server.Server) {
 	for _, wid := range srv.Workers.All() {
 		w, ok := srv.Workers.Get(wid)
 		if !ok || !w.Draining {
 			continue
 		}
-		if srv.Sessions.CountForWorker(wid) == 0 {
-			slog.Info("evicting drained worker with zero sessions",
+		if srv.WsConns.Count(wid) == 0 {
+			slog.Info("evicting drained worker with zero ws",
 				"worker_id", wid, "app_id", w.AppID)
 			EvictWorker(ctx, srv, wid, telemetry.ReasonGraceful)
 		}
@@ -333,11 +334,11 @@ func drainAndEvictAll(ctx context.Context, srv *server.Server, workerIDs []strin
 		}
 	}
 
-	// Wait for sessions to end (up to half of shutdown timeout).
+	// Wait for sessions (active WebSockets) to end (up to half of shutdown timeout).
 	drainTimeout := srv.Config.Server.ShutdownTimeout.Duration / 2
 	deadline := time.Now().Add(drainTimeout)
 	for time.Now().Before(deadline) {
-		total := srv.Sessions.CountForWorkers(workerIDs)
+		total := srv.WsConns.CountForWorkers(workerIDs)
 		if total == 0 {
 			slog.Info("shutdown: all sessions drained")
 			break
@@ -397,7 +398,7 @@ func StopAppSync(srv *server.Server, appID string) {
 
 	deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
 	for {
-		remaining := srv.Sessions.CountForWorkers(workerIDs)
+		remaining := srv.WsConns.CountForWorkers(workerIDs)
 		if remaining == 0 || time.Now().After(deadline) {
 			break
 		}

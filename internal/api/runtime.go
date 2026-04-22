@@ -493,7 +493,7 @@ func DisableApp(srv *server.Server) http.HandlerFunc {
 			go func() { //nolint:gosec // G118: intentional background task, outlives request
 				deadline := time.Now().Add(srv.Config.Server.ShutdownTimeout.Duration)
 				for {
-					remaining := srv.Sessions.CountForWorkers(workerIDs)
+					remaining := srv.WsConns.CountForWorkers(workerIDs)
 					if remaining == 0 || time.Now().After(deadline) {
 						break
 					}
