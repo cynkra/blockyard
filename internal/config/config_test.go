@@ -1707,6 +1707,93 @@ func TestValidate_DataMountInvalidChars(t *testing.T) {
 	}
 }
 
+func TestValidate_SessionStoreUnknownValue(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	tomlContent := `
+[server]
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "` + dbPath + `"
+
+[proxy]
+session_store = "bogus"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "session_store") {
+		t.Errorf("expected session_store validation error, got: %v", err)
+	}
+}
+
+func TestValidate_SessionStoreLayeredRequiresPostgres(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	tomlContent := `
+[server]
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "` + dbPath + `"
+
+[redis]
+url = "redis://localhost:6379"
+
+[proxy]
+session_store = "layered"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "postgres") {
+		t.Errorf("expected postgres requirement error, got: %v", err)
+	}
+}
+
+func TestValidate_SessionStoreRedisRequiresRedisSection(t *testing.T) {
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "bundles")
+	dbPath := filepath.Join(tmpDir, "db", "blockyard.db")
+	tomlContent := `
+[server]
+
+[docker]
+image = "some-image"
+
+[storage]
+bundle_server_path = "` + bundlePath + `"
+
+[database]
+path = "` + dbPath + `"
+
+[proxy]
+session_store = "redis"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(tomlContent), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "[redis]") {
+		t.Errorf("expected redis requirement error, got: %v", err)
+	}
+}
+
 func TestValidate_DataMountValid(t *testing.T) {
 	err := validateDataMounts([]DataMountSource{
 		{Name: "models", Path: "/data/models"},

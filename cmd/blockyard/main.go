@@ -298,7 +298,6 @@ func main() {
 	// backend, so the process backend's allocators share it.
 	if rc != nil {
 		srv.RedisClient = rc
-		srv.Sessions = session.NewRedisStore(rc, cfg.Proxy.SessionIdleTTL.Duration)
 		registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
 		srv.Registry = registry.NewRedisRegistry(rc, registryTTL)
 		srv.Workers = server.NewRedisWorkerMap(rc, serverID)
@@ -307,6 +306,33 @@ func main() {
 			"prefix", cfg.Redis.KeyPrefix,
 			"server_id", serverID)
 	}
+
+	// Session store selection — see #286, parent #262. Postgres is the
+	// source of truth; Redis is an optional read-through cache so that
+	// Redis restarts don't cause session loss.
+	mode := resolveSessionStore(cfg)
+	idleTTL := cfg.Proxy.SessionIdleTTL.Duration
+	var pg *session.PostgresStore
+	switch mode {
+	case config.SessionStoreMemory:
+		srv.Sessions = session.NewMemoryStore()
+	case config.SessionStoreRedis:
+		srv.Sessions = session.NewRedisStore(rc, idleTTL)
+	case config.SessionStorePostgres:
+		pg = session.NewPostgresStore(database.DB, idleTTL)
+		srv.Sessions = pg
+	case config.SessionStoreLayered:
+		pg = session.NewPostgresStore(database.DB, idleTTL)
+		srv.Sessions = session.NewLayeredStore(pg, session.NewRedisStore(rc, idleTTL))
+	}
+	if pg != nil {
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			pg.RunExpiry(bgCtx, time.Minute)
+		}()
+	}
+	slog.Info("session store selected", "mode", mode)
 
 	// Deferred validation: session_secret must be present if OIDC is configured.
 	if cfg.OIDC != nil {
@@ -673,6 +699,32 @@ func randomNonceHex(n int) string {
 		return "fallback"
 	}
 	return hex.EncodeToString(b)
+}
+
+// resolveSessionStore picks the sticky-session backend. Honours an
+// explicit cfg.Proxy.SessionStore value; otherwise defaults to the
+// "best" available mode given which backends are configured.
+//
+//   - [redis] + postgres  → layered (PG primary, Redis cache). #286 target.
+//   - [redis] only        → redis. Legacy behavior.
+//   - postgres only       → postgres.
+//   - neither             → memory. Single-process only.
+func resolveSessionStore(cfg *config.Config) config.SessionStoreMode {
+	if cfg.Proxy.SessionStore != config.SessionStoreAuto {
+		return cfg.Proxy.SessionStore
+	}
+	hasRedis := cfg.Redis != nil
+	hasPG := cfg.Database.Driver == "postgres"
+	switch {
+	case hasRedis && hasPG:
+		return config.SessionStoreLayered
+	case hasRedis:
+		return config.SessionStoreRedis
+	case hasPG:
+		return config.SessionStorePostgres
+	default:
+		return config.SessionStoreMemory
+	}
 }
 
 // maskRedisPassword replaces the password in a Redis URL with "***".

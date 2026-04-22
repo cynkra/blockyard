@@ -166,7 +166,23 @@ type ProxyConfig struct {
 	MaxCPULimit        *float64 `toml:"max_cpu_limit"`
 	TransferTimeout    Duration `toml:"transfer_timeout"`    // default 60s when unset
 	SessionMaxLifetime Duration `toml:"session_max_lifetime"` // 0 = unlimited (default); hard cap on session duration
+	// SessionStore selects the sticky-session backend. Empty = "auto":
+	// "layered" when both [redis] and database.driver=postgres are set,
+	// "redis" when only [redis] is set, "postgres" when only postgres
+	// is configured, "memory" otherwise.
+	SessionStore SessionStoreMode `toml:"session_store"`
 }
+
+// SessionStoreMode is the selector for proxy.session_store.
+type SessionStoreMode string
+
+const (
+	SessionStoreAuto     SessionStoreMode = ""
+	SessionStoreMemory   SessionStoreMode = "memory"
+	SessionStoreRedis    SessionStoreMode = "redis"
+	SessionStorePostgres SessionStoreMode = "postgres"
+	SessionStoreLayered  SessionStoreMode = "layered"
+)
 
 type OidcConfig struct {
 	IssuerURL         string   `toml:"issuer_url"`
@@ -775,6 +791,21 @@ func validate(cfg *Config) error {
 		}
 	default:
 		return fmt.Errorf("config: database.driver must be \"sqlite\" or \"postgres\", got %q", cfg.Database.Driver)
+	}
+
+	switch cfg.Proxy.SessionStore {
+	case SessionStoreAuto, SessionStoreMemory, SessionStoreRedis, SessionStorePostgres, SessionStoreLayered:
+	default:
+		return fmt.Errorf("config: proxy.session_store must be one of memory|redis|postgres|layered, got %q", cfg.Proxy.SessionStore)
+	}
+	if cfg.Proxy.SessionStore == SessionStoreRedis && cfg.Redis == nil {
+		return fmt.Errorf("config: proxy.session_store = \"redis\" requires [redis]")
+	}
+	if (cfg.Proxy.SessionStore == SessionStorePostgres || cfg.Proxy.SessionStore == SessionStoreLayered) && cfg.Database.Driver != "postgres" {
+		return fmt.Errorf("config: proxy.session_store = %q requires database.driver = \"postgres\"", cfg.Proxy.SessionStore)
+	}
+	if cfg.Proxy.SessionStore == SessionStoreLayered && cfg.Redis == nil {
+		return fmt.Errorf("config: proxy.session_store = \"layered\" requires [redis]")
 	}
 
 	return nil
