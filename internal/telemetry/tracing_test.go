@@ -172,6 +172,63 @@ func TestTracingMiddlewarePreservesWebSocketUpgrade(t *testing.T) {
 	c.Close(websocket.StatusNormalClosure, "")
 }
 
+// unwrapOnlyWriter is a ResponseWriter wrapper that exposes Unwrap but
+// deliberately does not implement http.Hijacker. It mirrors the shape
+// of the requestLogger's responseCapture: present outermost in the
+// chain, it forces a Hijack implementation that walks Unwrap instead
+// of doing a one-shot type assertion.
+type unwrapOnlyWriter struct {
+	http.ResponseWriter
+}
+
+func (u *unwrapOnlyWriter) Unwrap() http.ResponseWriter { return u.ResponseWriter }
+
+func TestTracingMiddlewareWebSocketUpgradeThroughUnwrapOnlyWrapper(t *testing.T) {
+	// Regression test for #263: when an outer middleware wraps the
+	// ResponseWriter with an Unwrap-only shim (e.g. requestLogger's
+	// responseCapture), the tracing middleware's Hijack must still
+	// find the real Hijacker by walking Unwrap. Before the fix, a
+	// direct type assertion failed and coder/websocket's Accept
+	// wrote an HTTP 500 body after the 101 upgrade, corrupting the
+	// frame stream and producing "Invalid frame header" on the client.
+	shutdown, _ := InitTracing(context.Background(), "")
+	defer shutdown(context.Background())
+
+	mw := TracingMiddleware()
+	inner := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("websocket.Accept: %v", err)
+			return
+		}
+		if err := c.Write(r.Context(), websocket.MessageText, []byte("hello")); err != nil {
+			t.Errorf("Write: %v", err)
+		}
+		c.Close(websocket.StatusNormalClosure, "")
+	}))
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner.ServeHTTP(&unwrapOnlyWriter{ResponseWriter: w}, r)
+	})
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	wsURL := "ws" + srv.URL[len("http"):]
+	c, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket.Dial: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	typ, data, err := c.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if typ != websocket.MessageText || string(data) != "hello" {
+		t.Fatalf("unexpected message: typ=%v data=%q", typ, data)
+	}
+}
+
 func TestTracingMiddlewareWithoutRouteContext(t *testing.T) {
 	// Test that the middleware works even without chi's RouteContext
 	// (i.e., when used with a plain http.ServeMux).

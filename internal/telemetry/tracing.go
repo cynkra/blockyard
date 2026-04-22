@@ -3,7 +3,6 @@ package telemetry
 import (
 	"bufio"
 	"context"
-	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -106,25 +105,29 @@ func (w *statusWriter) WriteHeader(code int) {
 }
 
 // Hijack forwards to the underlying ResponseWriter so WebSocket
-// upgrades work when this middleware is in the chain. Without this,
-// wrapping ResponseWriter hides the Hijacker interface and upgrades
-// fail.
+// upgrades work when this middleware is in the chain. A direct
+// type assertion is not enough because the request logger wraps
+// with responseCapture, which exposes Unwrap but not Hijack —
+// http.NewResponseController walks the Unwrap chain and finds the
+// net/http Hijacker underneath.
 func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	h, ok := w.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, errors.New("telemetry: underlying ResponseWriter does not implement http.Hijacker")
-	}
 	if !w.wroteHeader {
 		w.status = http.StatusSwitchingProtocols
 		w.wroteHeader = true
 	}
-	return h.Hijack()
+	return http.NewResponseController(w.ResponseWriter).Hijack()
 }
 
 // Flush forwards to the underlying ResponseWriter so streaming
-// responses are not held up by the wrapper.
+// responses are not held up by the wrapper. Same unwrap-walking
+// reasoning as Hijack.
 func (w *statusWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Unwrap exposes the wrapped ResponseWriter so outer callers (e.g.
+// http.NewResponseController, coder/websocket's hijacker walk) can
+// descend past this middleware.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
