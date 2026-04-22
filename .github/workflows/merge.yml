@@ -52,12 +52,6 @@ jobs:
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 --build-arg "VERSION=$(git describe --always --dirty)" -f docker/server.Dockerfile .
-      - name: Build worker image from source
-        if: github.event_name != 'pull_request' && github.event_name != 'push'
-        # Tag matches what examples/*/blockyard.toml references; building
-        # locally keeps the PR's CI independent of whether the published
-        # ghcr.io/cynkra/blockyard-worker tag exists yet.
-        run: docker build -t ghcr.io/cynkra/blockyard-worker:4.4.3 --build-arg R_VERSION=4.4.3 -f docker/worker.Dockerfile .
       - name: Block cloud metadata endpoint for containers
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
@@ -149,10 +143,6 @@ jobs:
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 --build-arg "VERSION=$(git describe --always --dirty)" -f docker/server.Dockerfile .
-      - name: Build worker image from source
-        if: github.event_name != 'pull_request' && github.event_name != 'push'
-        # Tag matches what examples/hello-shiny/blockyard.toml references.
-        run: docker build -t ghcr.io/cynkra/blockyard-worker:4.4.3 --build-arg R_VERSION=4.4.3 -f docker/worker.Dockerfile .
       - name: Block cloud metadata endpoint
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || true
