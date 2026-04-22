@@ -1,15 +1,31 @@
 # Board Storage
 
-Board storage is a **blockr concern**, not a blockyard concern. Blockyard
-does not store, read, or mediate access to board data. Its role is limited
-to:
+Board storage is split across blockyard, PostgreSQL, and blockr along
+control-plane / data-plane lines:
 
-1. Authenticating users (OIDC)
-2. Injecting credentials into the R session (access token + env vars)
-3. Running the app
+- **Blockyard** owns the control plane: schema migrations, per-user
+  role provisioning, vault integration. It is not in the data path
+  at runtime.
+- **PostgreSQL** is the data store and the enforcement point: data
+  lives in PG, RLS policies filter by `current_user` at query time.
+- **Blockr** owns the R-side client API: DBI queries, sharing UI,
+  serialization.
 
-The choice of storage backend, the data model, the sharing semantics,
-and the path layout are all owned by blockr.
+Blockyard's responsibilities in the storage lifecycle:
+
+1. Authenticating users via OIDC.
+2. Provisioning the schema at deploy time (migrations shipped in
+   `internal/db/migrations/postgres/`) and per-user PG roles on
+   first login.
+3. Issuing credentials via vault and injecting references into
+   the R session.
+4. Running the app.
+
+At runtime, R talks directly to vault (for credential issuance
+and renewal) and PostgreSQL (for data operations); blockyard is
+not on that path. Blockr stays storage-agnostic at the rack API
+layer — it just happens to have a PostgreSQL-backed implementation
+of `rack_*` operations for this backend.
 
 ## Requirements
 
@@ -22,55 +38,74 @@ A board is a JSON string. The storage backend must support:
 - **Versioning.** Each save creates a new version; loading retrieves the
   most recent version.
 
-## Recommended Backend: PostgreSQL + PostgREST
+## Recommended Backend: PostgreSQL with Vault-issued Credentials
 
-PostgreSQL with Row-Level Security (RLS) enforced via PostgREST. Auth
-is mediated by vault's Identity OIDC provider — the R app uses its
-existing vault token to request PostgREST-scoped JWTs on demand.
-Blockyard is not in the data path or the auth path at runtime.
+PostgreSQL with Row-Level Security (RLS) enforced at the database
+level. Each user maps to a dedicated PG role (`user_<sub>`); RLS
+policies filter rows by `current_user`. The R app connects to
+PostgreSQL directly, using per-user credentials issued by vault's
+`database` secrets engine. No middleware sits between R and the
+database at runtime.
 
-Blockyard provisions the schema (via its own migration system —
-`golang-migrate` with embedded SQL files) and PostgREST roles. Vault
-issues JWTs containing the user's identity. PostgREST validates them
-against vault's JWKS endpoint. PostgreSQL evaluates RLS policies on
-every query.
+Blockyard's provisioning responsibilities for this backend:
 
-See [v2/phase-2-4.md](v2/phase-2-4.md) for the full implementation
-plan including migration files, vault setup, and example updates.
+1. Running the schema migrations (via `golang-migrate` with
+   embedded SQL files in `internal/db/migrations/postgres/`).
+2. Creating the per-user PG role on first login and registering it
+   with vault's `database` static-role feature for password rotation.
+3. Deactivating the role when the user is deactivated.
+
+At runtime, R talks directly to vault (for credential issuance and
+renewal) and PostgreSQL (for data operations); blockyard is
+neither in the data path nor the auth path.
+
+For installations that outgrow per-user PG connections (typically
+when `max_connections` becomes a bottleneck, beyond a few hundred
+concurrent sessions), see [Scaling Out](#scaling-out) below.
 
 ### Why This Combination
 
-- **Vault-issued JWTs.** The R app already has a vault token (existing
-  credential injection). It requests PostgREST JWTs from vault's
-  Identity OIDC provider on demand — no new headers, no token refresh
-  concerns. Direct OIDC access token pass-through is not viable because
-  Shiny's WebSocket architecture provides no mechanism to refresh HTTP
-  headers mid-session, and OIDC access tokens are short-lived (5–15 min).
-- **Database-enforced access control.** RLS policies are evaluated by
-  PostgreSQL itself, regardless of how the query arrives. A bug in blockr
-  or PostgREST cannot bypass them.
-- **No admin tokens in the hot path.** The R app sends its vault-issued
-  JWT as `Authorization: Bearer ...` to PostgREST. No shared database
-  password, no `SET` tricks, no impersonation risk.
-- **Sharing is native SQL.** A `board_shares` table with RLS policies
-  handles targeted per-user sharing. No storage-backend-specific ACL
-  APIs to learn.
-- **Blockyard not in the security path.** Auth is entirely between
-  vault (token issuance), PostgREST (token verification), and
-  PostgreSQL (access enforcement). Blockyard only provisions the schema.
+- **Vault-issued database credentials.** The R app already has a
+  vault token (existing credential injection). It requests PG
+  credentials from vault on demand and renews them before expiry.
+  Direct OIDC access token pass-through to a token-validating API
+  layer is not viable because Shiny's WebSocket architecture
+  provides no mechanism to refresh HTTP headers mid-session; pulling
+  credentials from vault sidesteps this entirely because R pulls
+  when it needs them.
+- **Database-enforced access control.** RLS policies are evaluated
+  by PostgreSQL against the connected role (`current_user`).
+  Authorization is PostgreSQL's responsibility — there is no
+  intermediate service to trust, no JWT validation layer to keep
+  hardened.
+- **Native rotation and TLS.** Vault's database engine handles
+  credential rotation. TLS from R to PostgreSQL is standard PG
+  client behavior. Both are well-worn paths, neither requires
+  sidecar proxies.
+- **Sharing is native SQL.** A `board_shares` table with RLS
+  policies handles targeted per-user sharing. No storage-backend-
+  specific ACL APIs to learn.
+- **Blockyard out of the runtime trust chain.** At runtime, auth
+  is between vault (credential issuance) and PostgreSQL (access
+  enforcement). A compromised blockyard affects new logins and
+  re-bootstraps, not data access on already-active sessions.
+- **Fewer moving parts.** No middleware service, no JWKS
+  distribution, no JWT validation code to maintain.
 
 ### Architecture
 
 ```mermaid
 graph TD
-    blockr["blockr (R app)"] -->|"1. Vault token (existing flow)<br>2. Request vault-signed JWT"| vault["OpenBao"]
-    blockr -->|"3. Bearer vault-issued JWT"| pgrst["PostgREST"]
-    pgrst -->|"JWKS"| vault
-    pgrst --> pg["PostgreSQL<br>(RLS enforces per-user scoping + sharing)"]
+    blockr["blockr (R app)"] -->|"1. Vault token (existing flow)<br>2. Request DB credentials"| vault["OpenBao"]
+    blockr -->|"3. Direct connection<br>(per-user creds)"| pg["PostgreSQL<br>(RLS filters by current_user)"]
+    vault -.->|"manages per-user roles<br>+ rotates passwords"| pg
 ```
 
 Blockyard is not in this path. The R app talks directly to vault
-(for JWT issuance) and PostgREST (for data operations).
+(for credential issuance and renewal) and PostgreSQL (for data
+operations). The vault↔PG link is used by vault's database engine
+to provision and rotate per-user credentials; it is not on the
+runtime query path.
 
 ### Schema
 
@@ -81,72 +116,69 @@ settings and tags are per-board, not per-version — sharing a board
 means sharing all its versions.
 
 ```sql
--- PostgREST roles
+-- Group role for board-storage access. Each per-user role
+-- (user_<sub>) is granted membership in this group at provisioning
+-- time by vault's database engine.
 CREATE ROLE blockr_user NOLOGIN;
 GRANT USAGE ON SCHEMA public TO blockr_user;
-CREATE ROLE anon NOLOGIN;
 
 -- Board identity and metadata
 CREATE TABLE boards (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_sub   TEXT NOT NULL,
+    owner       NAME NOT NULL DEFAULT current_user,
     board_id    TEXT NOT NULL,
     acl_type    TEXT NOT NULL DEFAULT 'private'
                 CHECK (acl_type IN ('private', 'public', 'restricted')),
     tags        TEXT[] DEFAULT '{}',
     created_at  TIMESTAMPTZ DEFAULT now(),
     updated_at  TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (owner_sub, board_id)
+    UNIQUE (owner, board_id)
 );
 
 -- Versioned board data
 CREATE TABLE board_versions (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_sub   TEXT NOT NULL,
+    owner       NAME NOT NULL DEFAULT current_user,
     board_id    TEXT NOT NULL,
     data        JSONB NOT NULL,
     metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ DEFAULT now(),
-    FOREIGN KEY (owner_sub, board_id)
-        REFERENCES boards(owner_sub, board_id) ON DELETE CASCADE
+    FOREIGN KEY (owner, board_id)
+        REFERENCES boards(owner, board_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_board_versions_lookup
-    ON board_versions(owner_sub, board_id, created_at DESC);
+    ON board_versions(owner, board_id, created_at DESC);
 
 -- Sharing (for restricted ACL)
 CREATE TABLE board_shares (
-    owner_sub       TEXT NOT NULL,
-    board_id        TEXT NOT NULL,
-    shared_with_sub TEXT NOT NULL,
-    created_at      TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (owner_sub, board_id, shared_with_sub),
-    FOREIGN KEY (owner_sub, board_id)
-        REFERENCES boards(owner_sub, board_id) ON DELETE CASCADE
+    owner        NAME NOT NULL DEFAULT current_user,
+    board_id     TEXT NOT NULL,
+    shared_with  NAME NOT NULL,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (owner, board_id, shared_with),
+    FOREIGN KEY (owner, board_id)
+        REFERENCES boards(owner, board_id) ON DELETE CASCADE
 );
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON boards, board_versions, board_shares
+    TO blockr_user;
 ```
+
+The `owner` column is typed `NAME` (PostgreSQL's internal identifier
+type, what `current_user` returns) and defaults to `current_user`,
+so every insert records the connecting role automatically. RLS
+policies compare `owner = current_user` — no claim extraction
+plumbing, no identity helper function.
 
 Three visibility modes via `acl_type`:
 
 | `acl_type` | Who can read |
 |---|---|
 | `private` | Owner only. Default. |
-| `public` | Anyone with a valid JWT. |
+| `public` | Any authenticated role (any `user_<sub>`). |
 | `restricted` | Owner + users listed in `board_shares`. |
-
-### Identity Helper
-
-PostgREST sets the JWT claims as a PostgreSQL session variable. A helper
-function extracts the original IdP subject from the `idp_sub`
-custom claim (vault's Identity OIDC provider hardcodes the standard
-`sub` to the vault entity ID, so the original IdP subject is emitted
-as a custom claim in the OIDC role's claims template):
-
-```sql
-CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-  SELECT current_setting('request.jwt.claims', true)::json->>'idp_sub'
-$$ LANGUAGE sql STABLE;
-```
 
 ### RLS Policies
 
@@ -155,8 +187,8 @@ $$ LANGUAGE sql STABLE;
 ALTER TABLE boards ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY owner_all ON boards
-  USING (owner_sub = current_sub())
-  WITH CHECK (owner_sub = current_sub());
+  USING (owner = current_user)
+  WITH CHECK (owner = current_user);
 
 CREATE POLICY public_read ON boards FOR SELECT
   USING (acl_type = 'public');
@@ -164,22 +196,22 @@ CREATE POLICY public_read ON boards FOR SELECT
 CREATE POLICY restricted_read ON boards FOR SELECT
   USING (acl_type = 'restricted' AND EXISTS (
       SELECT 1 FROM board_shares
-      WHERE board_shares.owner_sub = boards.owner_sub
+      WHERE board_shares.owner = boards.owner
       AND board_shares.board_id = boards.board_id
-      AND board_shares.shared_with_sub = current_sub()
+      AND board_shares.shared_with = current_user
   ));
 
 -- board_versions (inherits access from parent board)
 ALTER TABLE board_versions ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY version_owner ON board_versions
-  USING (owner_sub = current_sub())
-  WITH CHECK (owner_sub = current_sub());
+  USING (owner = current_user)
+  WITH CHECK (owner = current_user);
 
 CREATE POLICY version_public ON board_versions FOR SELECT
   USING (EXISTS (
       SELECT 1 FROM boards
-      WHERE boards.owner_sub = board_versions.owner_sub
+      WHERE boards.owner = board_versions.owner
       AND boards.board_id = board_versions.board_id
       AND boards.acl_type = 'public'
   ));
@@ -188,99 +220,108 @@ CREATE POLICY version_restricted ON board_versions FOR SELECT
   USING (EXISTS (
       SELECT 1 FROM boards b
       JOIN board_shares bs
-          ON b.owner_sub = bs.owner_sub AND b.board_id = bs.board_id
-      WHERE b.owner_sub = board_versions.owner_sub
+          ON b.owner = bs.owner AND b.board_id = bs.board_id
+      WHERE b.owner = board_versions.owner
       AND b.board_id = board_versions.board_id
       AND b.acl_type = 'restricted'
-      AND bs.shared_with_sub = current_sub()
+      AND bs.shared_with = current_user
   ));
 
 -- board_shares
 ALTER TABLE board_shares ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY shares_owner ON board_shares
-  USING (owner_sub = current_sub())
-  WITH CHECK (owner_sub = current_sub());
+  USING (owner = current_user)
+  WITH CHECK (owner = current_user);
 
 CREATE POLICY shares_see_own ON board_shares FOR SELECT
-  USING (shared_with_sub = current_sub());
-
--- Grant PostgREST access
-GRANT SELECT, INSERT, UPDATE, DELETE ON boards, board_versions, board_shares
-    TO blockr_user;
+  USING (shared_with = current_user);
 ```
 
 ### Operations from R
 
-The R app uses `httr2` to talk to PostgREST. The PostgREST JWT is
-obtained from vault's Identity OIDC provider using the existing vault
-token — no additional credential injection needed.
+The R app uses `DBI` + `RPostgres` to talk to PostgreSQL directly,
+with per-user credentials obtained from vault.
 
 ```
-Save:    POST   /boards          { owner_sub, board_id }
-                                 → creates board metadata (upsert)
-         POST   /board_versions  { owner_sub, board_id, data, metadata }
-                                 → creates versioned snapshot
-Load:    GET    /board_versions?owner_sub=eq.{sub}&board_id=eq.{id}
-                                 &order=created_at.desc&limit=1
-                                 → returns data + metadata
-List:    GET    /boards          (RLS filters automatically)
-Delete:  DELETE /boards?owner_sub=eq.{sub}&board_id=eq.{id}
-Share:   POST   /board_shares   { owner_sub, board_id, shared_with_sub }
-Tags:    PATCH  /boards?owner_sub=eq.{sub}&board_id=eq.{id}
-                                 { tags: ["analysis", "demo"] }
-Fork:    Load shared board, POST as new board with own owner_sub
+Save:    INSERT INTO boards (board_id, acl_type, tags) VALUES (...)
+         INSERT INTO board_versions (board_id, data, metadata) VALUES (...)
+Load:    SELECT data, metadata FROM board_versions
+         WHERE board_id = $id
+         ORDER BY created_at DESC LIMIT 1
+List:    SELECT * FROM boards            (RLS filters automatically)
+Delete:  DELETE FROM boards WHERE board_id = $id
+Share:   INSERT INTO board_shares (board_id, shared_with) VALUES (...)
+Tags:    UPDATE boards SET tags = $tags WHERE board_id = $id
+Fork:    SELECT from shared board; INSERT as new row
 ```
 
-### Obtaining the PostgREST JWT
+All inserts default `owner = current_user`, so the R app does not
+need to pass it. RLS scopes all reads to the current user's
+visible rows, so WHERE clauses can omit `owner` for own-data
+queries.
 
-The R app uses its existing vault token (from
-`X-Blockyard-Vault-Token`) to request PostgREST JWTs from vault's
-Identity OIDC provider on demand:
+### Obtaining DB Credentials from Vault
+
+The R app uses its existing vault token and assigned PG role name
+(both injected by blockyard) to fetch the current password from
+vault's `database` static-creds endpoint:
 
 ```r
 vault_token <- session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN
 vault_addr  <- Sys.getenv("VAULT_ADDR")
+pg_role     <- session$request$HTTP_X_BLOCKYARD_PG_ROLE
 
-# Request a PostgREST JWT from vault
-resp <- httr2::request(paste0(vault_addr, "/v1/identity/oidc/token/postgrest")) |>
+resp <- httr2::request(
+    paste0(vault_addr, "/v1/database/static-creds/", pg_role)
+  ) |>
   httr2::req_headers("X-Vault-Token" = vault_token) |>
   httr2::req_perform()
 
-postgrest_jwt <- httr2::resp_body_json(resp)$data$token
+creds <- httr2::resp_body_json(resp)$data
+# creds$username, creds$password, creds$ttl
+
+con <- DBI::dbConnect(
+    RPostgres::Postgres(),
+    host = Sys.getenv("PGHOST"), port = 5432, dbname = "blockyard",
+    user = creds$username, password = creds$password,
+    sslmode = "require"
+)
 ```
 
-The vault-issued JWT contains a `idp_sub` custom claim (the
-user's original IdP subject) and a `role` claim (`"blockr_user"`)
-for PostgREST role switching. Token TTL is configurable on the vault
-OIDC role (default 1h). When it expires, the R app requests a new
-one — no blockyard involvement.
+Vault rotates the password on its configured schedule (default 24h).
+When a connection fails due to a rotated password, R re-fetches
+credentials from vault and reconnects. The vault token itself is
+renewable by the R app via `POST /auth/token/renew-self`.
 
-The vault token itself is renewable by the R app via
-`POST /auth/token/renew-self`. For sessions shorter than the vault
-token TTL (default 1h), no renewal is needed.
+### Vault Database Engine Configuration
 
-### PostgREST Configuration
+One-time setup on vault:
 
-PostgREST needs:
-- The PostgreSQL connection string
-- The JWKS from vault's Identity OIDC provider
-- A database role for authenticated requests (`blockr_user`)
-- An anonymous role with no access (denies unauthenticated requests)
+- Enable the `database` secrets engine.
+- Configure a connection to PostgreSQL using a PG role with
+  `CREATEROLE` privileges (for managing `user_<sub>` roles).
+
+Per-user provisioning (blockyard, on first login):
+
+- `CREATE ROLE "user_<sub>" LOGIN PASSWORD '<temp>';`
+- `GRANT blockr_user TO "user_<sub>";`
+- Register the static role with vault, pointing at the PG username
+  and setting a rotation period (e.g. `24h`). Vault immediately
+  rotates to a fresh password.
+- Update the user's vault policy to allow reading that static-creds
+  endpoint only:
 
 ```
-db-uri = "postgres://authenticator:password@db:5432/blockyard"
-db-schemas = "public"
-db-anon-role = "anon"
-jwt-aud = "postgrest"
-jwt-secret = "@/path/to/vault-jwks.json"
-jwt-role-claim-key = ".role"
+path "database/static-creds/user_<sub>" {
+    capabilities = ["read"]
+}
 ```
 
-The JWKS file is downloaded from vault's unauthenticated endpoint
-(`/v1/identity/oidc/.well-known/keys`) during init. On vault key
-rotation (default 24h), a sidecar or cron job refreshes the file
-and sends `SIGUSR2` to PostgREST to reload.
+The `sub` identifier is normalized (lowercased, non-alphanumeric
+characters replaced) to form a valid PG role name. The normalized
+name is stored server-side and injected into the R session as
+`X-Blockyard-PG-Role`.
 
 ### Example Docker Compose Services
 
@@ -289,6 +330,7 @@ postgres:
   image: postgres:17
   environment:
     POSTGRES_DB: blockyard
+    POSTGRES_USER: blockyard
     POSTGRES_PASSWORD: dev-password
   volumes:
     - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -297,52 +339,80 @@ postgres:
     test: ["CMD", "pg_isready"]
     interval: 5s
     retries: 10
-
-postgrest:
-  image: postgrest/postgrest:v12
-  depends_on:
-    postgres:
-      condition: service_healthy
-  environment:
-    PGRST_DB_URI: postgres://authenticator:dev-password@postgres:5432/blockyard
-    PGRST_DB_SCHEMAS: public
-    PGRST_DB_ANON_ROLE: anon
-    PGRST_JWT_AUD: postgrest
-    PGRST_JWT_SECRET: "@/etc/postgrest/vault-jwks.json"
-    PGRST_JWT_ROLE_CLAIM_KEY: ".role"
-  volumes:
-    - jwks:/etc/postgrest:ro
-  ports:
-    - "3001:3000"
 ```
 
-The init container downloads vault's JWKS to a shared volume and
-configures the vault Identity OIDC provider (named key, role with
-claims template, policy updates). See
-[v2/phase-2-4.md](v2/phase-2-4.md) Steps 4–5 for the full setup.
+`init.sql` bootstraps the schema, the `blockr_user` group role,
+and RLS policies (the SQL shown earlier). Per-user PG roles are
+not created here — blockyard creates them on first login and
+registers them with vault.
+
+The init container configures vault's `database` secrets engine:
+connection to PostgreSQL with `CREATEROLE` privileges, and a
+policy template that grants each user read access to their own
+`static-creds/user_<sub>` path. No JWKS download, no Identity
+OIDC setup, no PostgREST container.
+
+## Scaling Out
+
+The vault-creds model establishes one PostgreSQL connection per
+active R session. PostgreSQL's `max_connections` is the ceiling —
+tunable to a few hundred in production, bounded ultimately by
+backend process memory (~10 MB per connection). On a single
+server, R worker memory hits the HW wall long before connection
+count does, so this ceiling rarely matters.
+
+For multi-node deployments (typically Kubernetes, hundreds to
+thousands of concurrent R sessions), the migration path is a thin
+API shim with a shared PG connection pool:
+
+- R authenticates to the shim with its vault token. The shim
+  verifies it via vault's `auth/token/lookup-self` and resolves
+  the user's PG role.
+- Shim opens one of its pooled PG connections, runs
+  `SET LOCAL ROLE "user_<sub>"` inside a transaction, and executes
+  the query. RLS still enforces via `current_user`.
+- No schema changes. No change to how R obtains its vault token.
+
+Alternative: `pgjwt` validation directly in the DB (shim passes a
+vault-issued JWT, `pgjwt` verifies against vault's JWKS, RLS reads
+claims from `current_setting`). Heavier migration — changes the
+role-identity story from native PG auth to claim-driven — but
+preserves the "DB is the single enforcement point" property
+without per-user PG connections.
+
+The vault-creds setup doesn't lock in either path; the shim is
+additive.
 
 ## Alternative Backends
 
-The PostgreSQL + PostgREST combination is recommended because it
-requires no provisioning and enforces access control at the database
-level. However, blockr is storage-agnostic. Any backend works if:
+The PostgreSQL + vault-creds combination is recommended because it
+keeps all auth enforcement inside PostgreSQL and requires no
+middleware service. However, blockr's rack API is storage-agnostic.
+Any backend works if:
 
-1. The R app can obtain credentials for it (typically from vault)
-2. The backend supports per-user scoping and sharing
+1. The R app can obtain credentials for it.
+2. The backend supports per-user scoping and sharing.
 
-For backends that require per-user credentials (S3, PocketBase, Gitea,
-etc.), the operator provisions credentials and stores them in OpenBao
-at `secret/data/users/{sub}/apikeys/{service}`. Blockyard's existing
-credential injection (vault token + `VAULT_ADDR`) delivers them to the
-R app at runtime. No blockyard code changes are needed.
+Two provisioning models are supported:
 
-| Backend               | Provisioning              | Sharing model             | Versioning  |
-|-----------------------|---------------------------|---------------------------|-------------|
-| PostgreSQL + PostgREST | Vault Identity OIDC setup | RLS + shares table        | Via schema  |
-| PocketBase            | User + token → vault      | Record-level rules        | Manual      |
-| S3 / MinIO            | Access key → vault        | Bucket policies (limited) | Via object versions |
-| Gitea                 | User + token → vault      | Collaborators (per-repo)  | Git history |
-| Vault KV v2           | None (existing token)     | Broadcast only (no targeted sharing) | Built-in |
+- **Blockyard auto-provisions** (the PostgreSQL + vault-creds flow
+  above): blockyard creates per-user roles on first login and
+  registers them with vault. Requires backend-specific code in
+  blockyard.
+- **Operator provisions out-of-band** (S3, PocketBase, Gitea,
+  etc.): credentials are created externally and stored in OpenBao
+  at `secret/data/users/{sub}/apikeys/{service}`. Blockyard's
+  existing credential injection (vault token + `VAULT_ADDR`)
+  delivers them to the R app at runtime — no blockyard code
+  changes needed.
+
+| Backend                  | Provisioning                      | Sharing model             | Versioning          |
+|--------------------------|-----------------------------------|---------------------------|---------------------|
+| PostgreSQL + vault-creds | Per-user role via vault DB engine | RLS + shares table        | Via schema          |
+| PocketBase               | User + token → vault              | Record-level rules        | Manual              |
+| S3 / MinIO               | Access key → vault                | Bucket policies (limited) | Via object versions |
+| Gitea                    | User + token → vault              | Collaborators (per-repo)  | Git history         |
+| Vault KV v2              | None (existing token)             | Broadcast only            | Built-in            |
 
 ## Rack API Contract
 
@@ -412,7 +482,7 @@ Examples of backend-specific shapes:
 | Pins (local) | name, version |
 | Pins (Connect) | user, name, version |
 | PocketBase | record_id, name |
-| PostgREST | owner_sub, board_id |
+| PostgreSQL | owner, board_id |
 
 Accessor generics on `rack_id`:
 
@@ -499,7 +569,7 @@ Backend storage:
 | Backend    | metadata storage                                    |
 |------------|-----------------------------------------------------|
 | Pins       | `pin_upload(..., metadata = list(format = "v1"))` — stored in pin metadata, read via `pin_meta(...)$user` |
-| PostgREST  | `metadata JSONB` column on `board_versions`         |
+| PostgreSQL | `metadata JSONB` column on `board_versions`         |
 | PocketBase | `metadata` JSON field on `board_versions` collection |
 
 ### Tags
@@ -518,7 +588,7 @@ Backend storage:
 | Backend    | tags storage                                        |
 |------------|-----------------------------------------------------|
 | Pins       | Pin tags (merged with blockr session marker tags)   |
-| PostgREST  | `tags TEXT[]` column on `boards` table              |
+| PostgreSQL | `tags TEXT[]` column on `boards` table              |
 | PocketBase | `tags` JSON field on `boards` collection            |
 
 Note: the pins backend uses special session marker tags
@@ -549,7 +619,7 @@ Backend implementation:
 
 | Backend    | Mechanism                                            |
 |------------|------------------------------------------------------|
-| PostgREST  | `acl_type` column on `boards`, enforced by RLS       |
+| PostgreSQL | `acl_type` column on `boards`, enforced by RLS       |
 | PocketBase | `acl_type` field on `boards`, enforced by record rules |
 | Connect    | Content access type via Connect API                  |
 | Local pins | Always private (not supported)                       |
@@ -570,7 +640,7 @@ Backend implementation:
 
 | Backend    | Share mechanism                                      |
 |------------|------------------------------------------------------|
-| PostgREST  | CRUD on `board_shares` table via REST                |
+| PostgreSQL | CRUD on `board_shares` table via direct SQL          |
 | PocketBase | PATCH `shared_with` multi-relation field on board    |
 | Connect    | `POST/DELETE /v1/content/{guid}/permissions`         |
 | Local pins | Not supported (error)                                |
@@ -589,12 +659,12 @@ to let users find others to share with.
 |------------|------------------------------------------------------|
 | Connect    | `GET /v1/users?prefix=...` — available to any authenticated user |
 | PocketBase | `GET /api/collections/users/records?filter=...`      |
-| PostgREST  | `GET /users?name=like.*query*` — self-populating table (users recorded on first interaction) |
+| PostgreSQL | `SELECT ... FROM users WHERE name ILIKE '%query%'` — rows recorded by blockyard on first login |
 | Local pins | Not supported                                        |
 
 ### Backend Summary
 
-| Feature        | Pins (local) | Pins (Connect) | PocketBase | PostgREST     |
+| Feature        | Pins (local) | Pins (Connect) | PocketBase | PostgreSQL    |
 |----------------|:---:|:---:|:---:|:---:|
 | Board CRUD     | ✓ | ✓ | ✓ | ✓ |
 | Versioning     | ✓ | ✓ | ✓ | ✓ |
@@ -660,21 +730,24 @@ two kinds of board data:
   search, forking, and restoring boards outside a live session.
 - **Dynamic sync state.** The live CRDT document used during
   collaborative editing. Stored as `BYTEA` (or in a separate system
-  entirely) and managed by the Yjs persistence layer, not PostgREST.
+  entirely) and managed by the Yjs persistence layer, not the
+  board-storage schema.
 
 Whether these live in the same table, separate tables, or separate
 systems is TBD. The key constraint: the `board_versions` table and
-PostgREST CRUD operations remain valid for single-user save/load.
-Real-time sync adds a parallel storage path, it does not replace the
-existing one.
+its CRUD operations remain valid for single-user save/load.
+Real-time sync adds a parallel storage path, it does not replace
+the existing one.
 
 ### Auth Integration
 
-The y-websocket server must verify the user's JWT and check board
-permissions (owner or shared-with) before granting access to a
-document. This likely requires a query against the `boards` /
-`board_shares` tables or a call to PostgREST. The `board_shares`
-model would also need to support write access, not just read.
+The y-websocket server must verify the user's identity and check
+board permissions (owner or shared-with) before granting access to
+a document. This likely requires a direct query against the
+`boards` / `board_shares` tables using the server's own PG role
+(which would have read access for permission checks). The
+`board_shares` model would also need to support write access, not
+just read.
 
 ### Open Conflict Semantics
 
