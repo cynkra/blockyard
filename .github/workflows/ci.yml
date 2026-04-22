@@ -285,13 +285,6 @@ jobs:
           phase: setup
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           token: ${{ secrets.DOCKERHUB_TOKEN }}
-      # pak_test reads docker.image from blockyard.toml via
-      # testutil.TOMLDockerImage (→ ghcr.io/cynkra/blockyard-worker:<ver>),
-      # which isn't on the registry until worker-publish.yml fires on
-      # main. Build it locally under the same tag so the tests can
-      # pull-from-local.
-      - name: Build worker image from source
-        run: docker build -t ghcr.io/cynkra/blockyard-worker:4.4.3 --build-arg R_VERSION=4.4.3 -f docker/worker.Dockerfile .
       - run: sudo GOCACHE=$(go env GOCACHE) GOMODCACHE=$(go env GOMODCACHE) go test -count=1 -v -tags pak_test -coverprofile=coverage-pak.out -coverpkg=./internal/...,./cmd/by/... ./internal/backend/docker/... ./internal/server/...
       - uses: actions/upload-artifact@v7
         with:
@@ -424,20 +417,16 @@ jobs:
     timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'process')
-    # Run inside rocker/r-ver so R is pre-installed at /usr/local/bin/R
-    # — same image blockyard.toml uses as the default worker image, so
-    # TestRSmokeBoot exercises R from the production path. --privileged
-    # is required for the unprivileged matrix leg to write
-    # kernel.apparmor_restrict_unprivileged_userns (a non-namespaced
-    # sysctl that the kernel enforces for container processes too).
-    # Tests still run as a non-root user for the setuid/unprivileged
-    # modes, so the capability matrix is preserved per-test.
-    # TODO(#191): flip to ghcr.io/cynkra/blockyard-worker:<r-version>
-    # once worker-publish.yml has fired on main and the tag exists on
-    # ghcr.io — this container line runs on pull_request, which can't
-    # reference a tag that hasn't been published yet.
+    # Run inside the production worker image so TestRSmokeBoot
+    # exercises R (/usr/local/bin/R) from the exact path blockyard.toml
+    # points at. --privileged is required for the unprivileged matrix
+    # leg to write kernel.apparmor_restrict_unprivileged_userns (a
+    # non-namespaced sysctl that the kernel enforces for container
+    # processes too). Tests still run as a non-root user for the
+    # setuid/unprivileged modes, so the capability matrix is preserved
+    # per-test.
     container:
-      image: ghcr.io/rocker-org/r-ver:4.4.3
+      image: ghcr.io/cynkra/blockyard-worker:4.4.3
       options: --privileged
     strategy:
       fail-fast: false
@@ -480,7 +469,7 @@ jobs:
           esac
       - name: Run process backend tests (${{ matrix.mode }})
         # /github/home (the HOME Actions sets inside container jobs)
-        # isn't writable as root in the rocker container, so go's
+        # isn't writable as root in the worker container, so go's
         # default module cache path blows up. Point GOCACHE/GOMODCACHE
         # at /tmp which is always world-writable. Same override used
         # for root and non-root test runs so the paths are symmetric.
