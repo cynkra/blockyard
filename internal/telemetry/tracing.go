@@ -13,15 +13,23 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
-// InitTracing sets up the OpenTelemetry trace provider. Returns a
-// shutdown function that flushes pending spans. If endpoint is empty,
-// tracing is not initialized (no-op provider is used).
+// InitTracing sets up the OpenTelemetry trace provider and installs
+// the W3C trace-context + baggage propagator as the global default.
+// Returns a shutdown function that flushes pending spans. If endpoint
+// is empty, no exporter is installed but the propagator is still set
+// so the proxy can forward inbound trace context to workers.
 func InitTracing(ctx context.Context, endpoint string) (func(context.Context) error, error) {
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
 	if endpoint == "" {
 		return func(context.Context) error { return nil }, nil
 	}

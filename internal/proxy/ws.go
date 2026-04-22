@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/server"
@@ -194,8 +196,13 @@ func shuttleWS(
 		backendURL := "ws://" + addr + backendPath
 		dialCtx, dialCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer dialCancel()
+		dialHeaders := forwardClientHeaders(r)
+		// Trace context rides only on the initial upgrade; individual WS
+		// frames are not traced.
+		otel.GetTextMapPropagator().Inject(r.Context(),
+			propagation.HeaderCarrier(dialHeaders))
 		backendConn, _, dialErr := websocket.Dial(dialCtx, backendURL, &websocket.DialOptions{
-			HTTPHeader: forwardClientHeaders(r),
+			HTTPHeader: dialHeaders,
 		})
 		if dialErr != nil {
 			slog.Warn("ws backend dial failed", //nolint:gosec // G706: slog structured logging handles this

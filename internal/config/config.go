@@ -96,6 +96,7 @@ type ServerConfig struct {
 	DefaultMemoryLimit   string   `toml:"default_memory_limit"`   // fallback memory limit for workers (e.g. "2g")
 	DefaultCPULimit      float64  `toml:"default_cpu_limit"`      // fallback CPU limit for workers (fractional vCPUs)
 	BootstrapToken       string   `toml:"bootstrap_token"`        // dev only: one-time token exchanged for a real PAT via POST /api/v1/bootstrap
+	WorkerEnv            map[string]string `toml:"worker_env"`  // extra env vars injected into every worker (e.g. OTEL_EXPORTER_OTLP_ENDPOINT)
 
 	// Deprecated; copied into SkipPreflight by migrateDeprecatedFields and
 	// removed in the next release.

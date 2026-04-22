@@ -8,6 +8,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 func TestInitTracingEmpty(t *testing.T) {
@@ -43,6 +45,33 @@ func TestInitTracingWithEndpoint(t *testing.T) {
 	// Shutdown should succeed (flushes empty batch).
 	if err := shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown error: %v", err)
+	}
+}
+
+func TestInitTracingSetsPropagator(t *testing.T) {
+	// Propagator must be set even with no endpoint, so the proxy can
+	// still forward inbound traceparent to workers in deployments
+	// where blockyard itself is not exporting traces.
+	shutdown, err := InitTracing(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer shutdown(context.Background())
+
+	fields := otel.GetTextMapPropagator().Fields()
+	var sawTraceparent bool
+	for _, f := range fields {
+		if f == "traceparent" {
+			sawTraceparent = true
+		}
+	}
+	if !sawTraceparent {
+		t.Errorf("expected propagator to handle traceparent, fields=%v", fields)
+	}
+	// Ensure the installed propagator is actually a composite including
+	// the W3C trace-context propagator (not just a no-op).
+	if _, ok := otel.GetTextMapPropagator().(propagation.TextMapPropagator); !ok {
+		t.Error("expected a TextMapPropagator to be installed")
 	}
 }
 

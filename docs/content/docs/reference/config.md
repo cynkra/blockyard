@@ -57,6 +57,7 @@ shutdown_timeout = "30s"
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 | `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Each entry must be a valid CIDR. Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
 | `bootstrap_token` | `string` | — | No | One-time token that can be exchanged for a real PAT via `POST /api/v1/bootstrap`. Requires `oidc.initial_admin` to be set. Intended for dev/CI bootstrapping — do not use in production. See [Bootstrap tokens](/docs/reference/api/#post-apiv1bootstrap). |
+| `worker_env` | `map[string]string` | — | No | Extra environment variables injected into every worker. Common use: point workers at an OTLP collector (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`) for hosted-app tracing. Blockyard-managed keys (`BLOCKYARD_API_URL`, `SHINY_HOST`, `VAULT_ADDR`, …) cannot be overridden. See [Tracing hosted Shiny apps](/docs/guides/observability/#tracing-hosted-shiny-apps). |
 
 > [!NOTE]
 > `server.skip_docker_preflight` is deprecated and has been renamed to

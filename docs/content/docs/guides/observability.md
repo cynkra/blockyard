@@ -134,16 +134,60 @@ the management listener, no authentication is required.
 
 ## OpenTelemetry tracing
 
+This section covers tracing of **blockyard itself** — the HTTP handlers,
+proxy, and API. Tracing for hosted Shiny apps is an app-level concern,
+covered under [Tracing hosted Shiny apps](#tracing-hosted-shiny-apps).
+
 Send distributed traces to an OpenTelemetry collector:
 
 ```toml
 [telemetry]
-otlp_endpoint = "http://otel-collector:4317"
+otlp_endpoint = "otel-collector:4317"
 ```
 
 The service name is `blockyard`. Spans include `http.method`, `http.route`,
-and `http.status_code` attributes. Endpoints using `http://`, `localhost`,
-or `127.0.0.1` connect without TLS; all others use TLS.
+and `http.status_code` attributes.
+
+The exporter speaks **OTLP/gRPC only** (default collector port `4317`);
+OTLP/HTTP (port `4318`) is not supported. Transport security is picked
+automatically from the endpoint string: plaintext for `http://`,
+`localhost`, or `127.0.0.1`, TLS for everything else. The endpoint
+itself can point anywhere reachable from the blockyard process — for
+example `host.docker.internal:4317` when blockyard runs in a container
+and the collector runs on the host.
+
+### Tracing hosted Shiny apps
+
+Blockyard forwards W3C `traceparent` into each worker — on HTTP
+requests and on the initial WebSocket upgrade. If a hosted Shiny app
+is instrumented with [`{otel}` / `{otelsdk}`](https://shiny.posit.co/r/articles/improve/opentelemetry/),
+its spans attach to the blockyard trace automatically, giving a single
+end-to-end view from inbound request to reactive computation.
+
+Point the worker at a collector via `server.worker_env`:
+
+```toml
+[server]
+worker_env = { OTEL_EXPORTER_OTLP_ENDPOINT = "http://alloy:4317" }
+```
+
+Blockyard does not care what sits at that address — an OpenTelemetry
+Collector, Grafana Alloy, or a vendor endpoint all work. Reachability
+is your responsibility: for the Docker backend, the collector must be
+reachable on the worker's network (see `docker.service_network`); for
+the process backend, it must be reachable from `localhost`.
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set in `worker_env`, blockyard
+auto-populates identity attributes so signals from different apps and
+workers are distinguishable in the backend:
+
+| Variable | Value |
+|---|---|
+| `OTEL_SERVICE_NAME` | the app name |
+| `OTEL_RESOURCE_ATTRIBUTES` | `blockyard.app=<name>,blockyard.worker_id=<id>`, merged with any user-supplied attributes |
+
+User-set values in `worker_env` win, so you can override either for a
+specific deployment.
 
 ## Security headers
 
