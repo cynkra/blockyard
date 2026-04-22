@@ -25,6 +25,19 @@ func storeImplementations(t *testing.T) map[string]storeFactory {
 			client := redisstate.TestClient(t, mr.Addr())
 			return NewRedisStore(client, time.Hour)
 		},
+		"Postgres": func(t *testing.T) Store {
+			t.Helper()
+			return NewPostgresStore(testPGDB(t), time.Hour)
+		},
+		"Layered": func(t *testing.T) Store {
+			t.Helper()
+			// Matches production wiring: Postgres primary + Redis cache.
+			mr := miniredis.RunT(t)
+			client := redisstate.TestClient(t, mr.Addr())
+			cache := NewRedisStore(client, time.Hour)
+			primary := NewPostgresStore(testPGDB(t), time.Hour)
+			return NewLayeredStore(primary, cache)
+		},
 	}
 }
 
