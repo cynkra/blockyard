@@ -7,21 +7,47 @@ import (
 	"testing"
 )
 
-// freeStartPort asks the OS for a free port, closes the listener, and
-// returns that port number so it can seed a memoryPortAllocator range.
-func freeStartPort(t *testing.T) int {
+// freeConsecutivePorts asks the OS for a free port and then verifies
+// that the next n-1 ports are also bindable right now, returning the
+// base port. Retries until it finds a window where all n binds
+// succeed, so callers can seed a memoryPortAllocator range without the
+// TOCTOU race that caused #278 (another process grabbing start+1 or
+// start+2 between probe and Reserve).
+//
+// There is still a residual window between the final Close here and
+// the caller's first Reserve, but it is bounded by test setup latency
+// and vastly smaller than before.
+func freeConsecutivePorts(t *testing.T, n int) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for attempt := 0; attempt < 100; attempt++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		start := ln.Addr().(*net.TCPAddr).Port
+		lns := []net.Listener{ln}
+		ok := true
+		for i := 1; i < n; i++ {
+			extra, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", start+i))
+			if err != nil {
+				ok = false
+				break
+			}
+			lns = append(lns, extra)
+		}
+		for _, l := range lns {
+			l.Close()
+		}
+		if ok {
+			return start
+		}
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
+	t.Fatalf("could not find %d consecutive free ports after 100 attempts", n)
+	return 0
 }
 
 func TestPortAllocator(t *testing.T) {
-	start := freeStartPort(t)
+	start := freeConsecutivePorts(t, 3)
 	p := newMemoryPortAllocator(start, start+2)
 
 	// Reserve all three ports.
@@ -66,7 +92,7 @@ func TestPortAllocator(t *testing.T) {
 }
 
 func TestPortAllocatorConcurrent(t *testing.T) {
-	start := freeStartPort(t)
+	start := freeConsecutivePorts(t, 1)
 	p := newMemoryPortAllocator(start, start+99)
 	var wg sync.WaitGroup
 	type result struct {
@@ -105,7 +131,7 @@ func TestPortAllocatorConcurrent(t *testing.T) {
 }
 
 func TestPortAllocatorInUse(t *testing.T) {
-	start := freeStartPort(t)
+	start := freeConsecutivePorts(t, 3)
 	p := newMemoryPortAllocator(start, start+2)
 	if p.InUse() != 0 {
 		t.Errorf("expected 0 in use, got %d", p.InUse())
@@ -154,7 +180,7 @@ func TestPortAllocatorSkipsExternallyBoundPort(t *testing.T) {
 // the new API exists for: a Reserve'd port cannot be bound by another
 // process until the caller closes the returned listener.
 func TestPortAllocatorReserveHoldsListener(t *testing.T) {
-	start := freeStartPort(t)
+	start := freeConsecutivePorts(t, 3)
 	p := newMemoryPortAllocator(start, start+2)
 	port, ln, err := p.Reserve()
 	if err != nil {
@@ -193,7 +219,7 @@ func TestNewPortAllocatorDefensiveNegativeRange(t *testing.T) {
 }
 
 func TestPortAllocatorReleaseOutOfRange(t *testing.T) {
-	start := freeStartPort(t)
+	start := freeConsecutivePorts(t, 1)
 	p := newMemoryPortAllocator(start, start+2)
 	p.Release(0)     // below range
 	p.Release(99999) // above range
