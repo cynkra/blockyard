@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -102,6 +103,30 @@ func requireHostUIDMapping(t *testing.T) {
 	}
 }
 
+// workerAccessibleTempDir wraps t.TempDir() and makes the returned
+// directory (and each tmpdir-prefixed ancestor) traversable by the
+// worker UID. t.TempDir mkdirs each segment 0700 owned by the caller
+// (root in the root-blockyard matrix); post-#305 workers run as
+// WorkerUIDStart inside the bwrap sandbox after a fork+setuid, so
+// bwrap's bind-mount of a 0700 root-owned BundlePath fails with
+// "Can't find source path". Production deployments put bundles in
+// world-readable storage; tests need to match that constraint.
+func workerAccessibleTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := dir
+	for {
+		if p == "/" || p == filepath.Clean(os.TempDir()) || !strings.HasPrefix(p, os.TempDir()+string(os.PathSeparator)) {
+			break
+		}
+		if err := os.Chmod(p, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", p, err)
+		}
+		p = filepath.Dir(p)
+	}
+	return dir
+}
+
 func TestSpawnAndStop(t *testing.T) {
 	requireHostUIDMapping(t)
 
@@ -126,7 +151,7 @@ func TestSpawnAndStop(t *testing.T) {
 	ctx := context.Background()
 	spec := backend.WorkerSpec{
 		WorkerID:    "test-worker-1",
-		BundlePath:  t.TempDir(),
+		BundlePath:  workerAccessibleTempDir(t),
 		WorkerMount: "/tmp/app",
 		ShinyPort:   3838,
 		Cmd:         []string{"/bin/sleep", "60"},
@@ -212,7 +237,7 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 	ctx := context.Background()
 	spec := backend.WorkerSpec{
 		WorkerID:    "stats-worker",
-		BundlePath:  t.TempDir(),
+		BundlePath:  workerAccessibleTempDir(t),
 		WorkerMount: "/tmp/app",
 		Cmd:         []string{"/bin/sleep", "60"},
 	}
@@ -304,7 +329,7 @@ func TestRSmokeBoot(t *testing.T) {
 	ctx := context.Background()
 	spec := backend.WorkerSpec{
 		WorkerID:    "r-smoke",
-		BundlePath:  t.TempDir(),
+		BundlePath:  workerAccessibleTempDir(t),
 		WorkerMount: "/tmp/app",
 		Cmd:         []string{rPath, "--version"},
 	}
