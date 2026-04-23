@@ -100,6 +100,34 @@ curl http://localhost:8080/healthz
 The `by` command-line client lets you deploy and manage apps from your
 terminal. See the [CLI Reference](/docs/reference/cli/) for the full command list.
 
+### Quick install (Linux, macOS)
+
+One-liner that downloads the matching release binary, marks it
+executable, and drops it into `/usr/local/bin`:
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh
+```
+
+Install a specific version or a custom directory:
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- \
+  --version v0.1.0 --install-dir "$HOME/.local/bin"
+```
+
+The same script installs the `blockyard` server binary when invoked with
+`--server` (Linux only — for other platforms run the container image):
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- --server
+```
+
+Environment variables `BLOCKYARD_VERSION`, `BLOCKYARD_INSTALL_DIR`, and
+`BLOCKYARD_BINARY` are honoured as alternatives to the flags. Piping to
+`sh` is optional — download the script first to inspect it if you
+prefer.
+
 ### Download a release binary
 
 Pick the asset that matches your platform:

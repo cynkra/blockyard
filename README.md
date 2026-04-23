@@ -79,6 +79,16 @@ go build -o blockyard ./cmd/blockyard
 go test ./...
 ```
 
+### Install the `by` CLI
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh
+```
+
+Pass `-s -- --server` to install the Linux `blockyard` server binary
+instead. See [Installation](docs/content/docs/getting-started/installation.md)
+for flags, environment variables, and manual download links.
+
 ### Dev Container
 
 A devcontainer configuration is included for VS Code / GitHub Codespaces:
