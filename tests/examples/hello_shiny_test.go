@@ -3,6 +3,7 @@
 package examples_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -98,6 +99,51 @@ func TestHelloShiny(t *testing.T) {
 		client *http.Client
 		token  string
 	)
+
+	// Exercise the bootstrap-token → PAT exchange end-to-end against a
+	// real server. Unit coverage lives in internal/api/bootstrap_test.go;
+	// this guards against router/middleware/config-wiring regressions
+	// the unit test cannot catch. Runs first so the token isn't burned
+	// by anything else in this stack.
+	t.Run("bootstrap_token_exchange", func(t *testing.T) {
+		req, _ := http.NewRequest("POST",
+			baseURL+"/api/v1/bootstrap",
+			strings.NewReader(`{"name":"bootstrap-e2e","expires_in":"1h"}`))
+		req.Header.Set("Authorization", "Bearer by_bootstrap_for_examples")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("bootstrap exchange: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			b, _ := io.ReadAll(resp.Body)
+			t.Fatalf("bootstrap status %d: %s", resp.StatusCode, b)
+		}
+		var got map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode bootstrap response: %v", err)
+		}
+		tok, _ := got["token"].(string)
+		if !strings.HasPrefix(tok, "by_") {
+			t.Fatalf("bootstrap token %q missing by_ prefix", tok)
+		}
+
+		// Second call must be rejected — the token is one-shot.
+		req2, _ := http.NewRequest("POST",
+			baseURL+"/api/v1/bootstrap",
+			strings.NewReader(`{}`))
+		req2.Header.Set("Authorization", "Bearer by_bootstrap_for_examples")
+		req2.Header.Set("Content-Type", "application/json")
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatalf("second bootstrap: %v", err)
+		}
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusGone {
+			t.Fatalf("second bootstrap status = %d, want 410", resp2.StatusCode)
+		}
+	})
 
 	t.Run("auth", func(t *testing.T) {
 		cookies := dexLogin(t, baseURL, dexURL, dexEmail1, dexPassword)

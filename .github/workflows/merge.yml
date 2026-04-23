@@ -202,8 +202,8 @@ jobs:
         if: always() && github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           name: coverage-e2e
-          path: coverage-e2e-*.out
-          if-no-files-found: ignore
+          path: coverage-e2e.out
+          if-no-files-found: error
           retention-days: 1
       - uses: actions/upload-artifact@v7
         if: failure()
@@ -286,6 +286,22 @@ jobs:
 
       - name: List coverage files
         run: ls -la coverage-*.out 2>/dev/null || echo "No coverage files found"
+
+      # Catch silent upload regressions (e.g. an artifact path that
+      # stops matching after a rename). Codecov's carryforward keeps
+      # showing stale data when a flag drops out, so the only signal
+      # is here. Annotates loudly but does not fail the queue —
+      # coverage reporting is not on the critical path.
+      - name: Verify expected coverage flags present
+        run: |
+          expected="unit cli docker idp openbao pak redis ui process-root process-setuid process-unprivileged examples e2e"
+          missing=""
+          for flag in $expected; do
+            [ -f "coverage-$flag.out" ] || missing="$missing $flag"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing coverage artifacts for flags:$missing"
+          fi
 
       # Merge all profiles and print total.
       - name: Merge coverage profiles

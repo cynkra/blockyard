@@ -29,3 +29,4 @@ flags:
 
 ignore:
   - "internal/testutil/**"          # test helpers only
+  - "internal/preflight/docker_checks.go"  # moved to internal/backend/docker/preflight.go in 207dd28; carryforward keeps the ghost report alive
