@@ -473,9 +473,15 @@ jobs:
         # default module cache path blows up. Point GOCACHE/GOMODCACHE
         # at /tmp which is always world-writable. Same override used
         # for root and non-root test runs so the paths are symmetric.
+        #
+        # BLOCKYARD_TEST_BWRAP_MODE is read by
+        # TestCheckBwrapHostUIDMapping so the test knows what bwrap
+        # capability profile to expect — reliably, rather than via a
+        # timing-racy re-probe of bwrap from within the test (#299).
         env:
           GOCACHE: /tmp/gocache
           GOMODCACHE: /tmp/gomodcache
+          BLOCKYARD_TEST_BWRAP_MODE: ${{ matrix.mode }}
         run: |
           mkdir -p "$GOCACHE" "$GOMODCACHE"
           case "${{ matrix.mode }}" in
@@ -495,6 +501,7 @@ jobs:
                 PATH="$PATH" \
                 GOCACHE="$GOCACHE" \
                 GOMODCACHE="$GOMODCACHE" \
+                BLOCKYARD_TEST_BWRAP_MODE="$BLOCKYARD_TEST_BWRAP_MODE" \
                 go test -count=1 -tags process_test \
                 -coverprofile=coverage-process-${{ matrix.mode }}.out \
                 -coverpkg=./internal/... \

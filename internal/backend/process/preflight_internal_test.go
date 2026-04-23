@@ -60,11 +60,25 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 	}
 }
 
-// probeBwrapModeInternal is the internal-package twin of the
-// detectBwrapMode helper in process_integration_test.go. We can't
-// share the helper because the integration tests live in
-// `package process_test` and this file lives in `package process`.
-// Returns "unavailable", "host-mapped", or "no-host-map".
+// probeBwrapModeInternal classifies the CI environment's bwrap
+// capability profile. Previous versions re-probed bwrap from within
+// the test by spawning a throwaway sandbox and inspecting /proc; that
+// race'd the kernel's uid_map write and classified slow runners
+// incorrectly, which is how #299 slipped through (helper saw
+// "host-mapped" while the real check was still snapshotting a partial
+// remap). The CI workflow already knows the mode — it just needs to
+// tell the test. We read BLOCKYARD_TEST_BWRAP_MODE, which the
+// `process (root|setuid|unprivileged)` matrix jobs set explicitly.
+//
+// When the env var is unset (running the tagged test outside the
+// matrix — e.g., a dev's laptop), fall back to the old probe so the
+// test still makes SOMETHING of the local environment. The fallback
+// can still flake, but it only runs off-CI where test failures don't
+// block merges.
+//
+// Returns "unavailable" (bwrap not installed / userns blocked),
+// "host-mapped" (root or setuid modes — check should return OK), or
+// "no-host-map" (unprivileged mode — check should return Error).
 func probeBwrapModeInternal(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("bwrap"); err != nil {
@@ -79,6 +93,14 @@ func probeBwrapModeInternal(t *testing.T) string {
 		"--", "/bin/true").Run(); err != nil {
 		return "unavailable"
 	}
+	switch os.Getenv("BLOCKYARD_TEST_BWRAP_MODE") {
+	case "root", "setuid":
+		return "host-mapped"
+	case "unprivileged":
+		return "no-host-map"
+	}
+	// Fallback: no CI hint, re-probe with the pre-#299 timing-based
+	// classifier. Not reliable under load — see the doc comment above.
 	probeUID := os.Getuid() + 12345
 	if probeUID == os.Getuid() {
 		probeUID++
