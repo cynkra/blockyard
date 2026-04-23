@@ -100,6 +100,47 @@ curl http://localhost:8080/healthz
 The `by` command-line client lets you deploy and manage apps from your
 terminal. See the [CLI Reference](/docs/reference/cli/) for the full command list.
 
+### Quick install (Linux, macOS)
+
+One-liner that downloads the matching release binary, marks it
+executable, and drops it into `/usr/local/bin`:
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh
+```
+
+Install a specific version or a custom directory:
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- \
+  --version v0.1.0 --install-dir "$HOME/.local/bin"
+```
+
+Switch to the rolling `main` channel (rebuilt on every push to `main`):
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- --channel main
+```
+
+`--channel stable` (default) tracks the latest tagged release. `--channel
+main` and `--version` are mutually exclusive — use one or the other.
+
+The same script installs the `blockyard` server binary when invoked with
+`--server` (Linux only — for other platforms run the container image):
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- --server
+```
+
+The main channel only publishes the `by` CLI; the rolling server is
+distributed as the `ghcr.io/cynkra/blockyard:main` container image, so
+`--channel main --server` is refused.
+
+Environment variables `BLOCKYARD_CHANNEL`, `BLOCKYARD_VERSION`,
+`BLOCKYARD_INSTALL_DIR`, and `BLOCKYARD_BINARY` seed the defaults;
+passing the matching flag still wins. Piping to `sh` is optional —
+download the script first to inspect it if you prefer.
+
 ### Download a release binary
 
 Pick the asset that matches your platform:

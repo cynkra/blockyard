@@ -31,6 +31,8 @@ jobs:
           hugo-version: "0.147.4"
           extended: true
       - run: hugo --minify --baseURL https://cynkra.github.io/blockyard/
+      - name: Publish install.sh (GH Pages only)
+        run: cp install.sh public/install.sh
       - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/public
