@@ -106,24 +106,36 @@ if [ "$VERSION" = "main" ] && [ "$BINARY" = "blockyard" ]; then
   die "--channel main does not ship a blockyard server binary; pull ghcr.io/cynkra/blockyard:main instead"
 fi
 
+# detect_os and detect_arch set the `os` and `arch` globals instead of
+# echoing through $(…), because die() inside a command substitution does
+# not propagate errexit in POSIX sh (e.g. dash) — the parent would keep
+# running with an empty value and confuse the user with a second error.
 detect_os() {
-  os=$(uname -s 2>/dev/null || echo unknown)
-  case "$os" in
-    Linux)   echo linux ;;
-    Darwin)  echo darwin ;;
+  uname_s=$(uname -s 2>/dev/null || echo unknown)
+  case "$uname_s" in
+    Linux)   os=linux ;;
+    Darwin)  os=darwin ;;
     MINGW*|MSYS*|CYGWIN*)
-      die "Windows is not supported by this script. Download by-windows-amd64.exe from ${BASE_URL}/latest/download/by-windows-amd64.exe."
+      if [ "$BINARY" = "blockyard" ]; then
+        die "the blockyard server is not published for Windows; run the ghcr.io/cynkra/blockyard container image instead"
+      fi
+      if [ "$VERSION" = "latest" ]; then
+        win_url="${BASE_URL}/latest/download/by-windows-amd64.exe"
+      else
+        win_url="${BASE_URL}/download/${VERSION}/by-windows-amd64.exe"
+      fi
+      die "Windows is not supported by this script. Download ${win_url} and place it on your PATH."
       ;;
-    *) die "unsupported operating system: $os" ;;
+    *) die "unsupported operating system: $uname_s" ;;
   esac
 }
 
 detect_arch() {
-  m=$(uname -m 2>/dev/null || echo unknown)
-  case "$m" in
-    x86_64|amd64)   echo amd64 ;;
-    arm64|aarch64)  echo arm64 ;;
-    *) die "unsupported architecture: $m" ;;
+  uname_m=$(uname -m 2>/dev/null || echo unknown)
+  case "$uname_m" in
+    x86_64|amd64)   arch=amd64 ;;
+    arm64|aarch64)  arch=arm64 ;;
+    *) die "unsupported architecture: $uname_m" ;;
   esac
 }
 
@@ -143,8 +155,8 @@ else
   die "neither curl nor wget is installed"
 fi
 
-os=$(detect_os)
-arch=$(detect_arch)
+detect_os    # sets $os
+detect_arch  # sets $arch
 
 # Server is built for Linux only (see .github/workflows/release.yml).
 if [ "$BINARY" = "blockyard" ] && [ "$os" != "linux" ]; then
