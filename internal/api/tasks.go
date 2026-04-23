@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -94,6 +95,11 @@ func TaskLogs(srv *server.Server) http.HandlerFunc {
 			notFound(w, "task "+taskID+" not found")
 			return
 		}
+
+		// Builds can run longer than the server's WriteTimeout; clear the
+		// per-response deadline so the stream stays open until the task
+		// finishes or the client disconnects.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")

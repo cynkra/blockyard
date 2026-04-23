@@ -1086,6 +1086,13 @@ func AppLogs(srv *server.Server) http.HandlerFunc {
 		streamParam := r.URL.Query().Get("stream")
 		noStream := streamParam == "false"
 
+		// Long-running workers can outlive the server's WriteTimeout;
+		// clear the per-response deadline so live tailing stays open
+		// until the worker exits or the client disconnects.
+		if !ended && !noStream {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+		}
+
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")
 
