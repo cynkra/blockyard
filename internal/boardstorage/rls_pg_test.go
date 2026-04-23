@@ -317,6 +317,38 @@ func TestRLS_LastVersionDeleteRaises(t *testing.T) {
 	}
 }
 
+// Cascade DELETE from boards must propagate through a single-version
+// board without the prevent_last_version_delete trigger firing. The
+// trigger's WHEN (pg_trigger_depth() = 0) clause gates the check to
+// direct deletes only; cascade paths run under RI at depth >= 1 and
+// bypass it.
+func TestRLS_PurgeCascadesThroughLastVersion(t *testing.T) {
+	fx := newRLSFixture(t)
+	// fx.bobPrivateID has exactly one version from seeding.
+	if _, err := fx.bobDB.Exec(
+		`DELETE FROM blockyard.boards WHERE id = $1`, fx.bobPrivateID,
+	); err != nil {
+		t.Fatalf("purge via parent delete: %v", err)
+	}
+	var boardRows, versionRows int
+	if err := fx.admin.QueryRow(
+		`SELECT COUNT(*) FROM blockyard.boards WHERE id = $1`,
+		fx.bobPrivateID,
+	).Scan(&boardRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.admin.QueryRow(
+		`SELECT COUNT(*) FROM blockyard.board_versions WHERE board_ref = $1`,
+		fx.bobPrivateID,
+	).Scan(&versionRows); err != nil {
+		t.Fatal(err)
+	}
+	if boardRows != 0 || versionRows != 0 {
+		t.Fatalf("rows remaining after purge: boards=%d versions=%d",
+			boardRows, versionRows)
+	}
+}
+
 // ---- Privilege escalation battery ----
 
 func TestRLS_UserCannotSetRoleBlockrUser(t *testing.T) {

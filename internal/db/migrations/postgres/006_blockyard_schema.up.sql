@@ -202,9 +202,18 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- WHEN (pg_trigger_depth() = 0) pins the check to direct DELETEs.
+-- Without this clause, cascade deletes from `boards` fire this
+-- trigger for every child row; the last surviving version hits
+-- count=1 and raises, aborting the whole parent DELETE. Cascade
+-- paths run inside PG's RI machinery at depth >= 1 and must bypass
+-- the check so rack_purge semantics work; rack_delete (direct prune
+-- of a single version) still raises at depth 0 when count=1.
 CREATE TRIGGER board_versions_prevent_last_delete
 BEFORE DELETE ON blockyard.board_versions
-FOR EACH ROW EXECUTE FUNCTION blockyard.prevent_last_version_delete();
+FOR EACH ROW
+WHEN (pg_trigger_depth() = 0)
+EXECUTE FUNCTION blockyard.prevent_last_version_delete();
 
 -- blockr_user grants for the new tables. GRANT USAGE on blockyard
 -- already covers schema-level visibility; these add object-level

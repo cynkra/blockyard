@@ -7,7 +7,8 @@ control-plane / data-plane lines:
   role provisioning, vault integration. It is not in the data path
   at runtime.
 - **PostgreSQL** is the data store and the enforcement point: data
-  lives in PG, RLS policies filter by `current_user` at query time.
+  lives in PG, RLS policies filter by caller identity (resolved via
+  `current_sub()` from the connecting role) at query time.
 - **Blockr** owns the R-side client API: DBI queries, sharing UI,
   serialization.
 
@@ -42,10 +43,11 @@ A board is a JSON string. The storage backend must support:
 
 PostgreSQL with Row-Level Security (RLS) enforced at the database
 level. Each user maps to a dedicated PG role (`user_<entity-id>`); RLS
-policies filter rows by `current_user`. The R app connects to
-PostgreSQL directly, using per-user credentials issued by vault's
-`database` secrets engine. No middleware sits between R and the
-database at runtime.
+policies filter rows by caller identity (resolved via `current_sub()`,
+see [RLS Policies](#rls-policies)). The R app connects to PostgreSQL
+directly, using per-user credentials issued by vault's `database`
+secrets engine. No middleware sits between R and the database at
+runtime.
 
 Blockyard's provisioning responsibilities for this backend:
 
@@ -74,10 +76,11 @@ concurrent sessions), see [Scaling Out](#scaling-out) below.
   credentials from vault sidesteps this entirely because R pulls
   when it needs them.
 - **Database-enforced access control.** RLS policies are evaluated
-  by PostgreSQL against the connected role (`current_user`).
-  Authorization is PostgreSQL's responsibility — there is no
-  intermediate service to trust, no JWT validation layer to keep
-  hardened.
+  by PostgreSQL against the caller's identity — `current_sub()` maps
+  the connecting role (`session_user`) back to an OIDC sub via
+  `users.pg_role`. Authorization is PostgreSQL's responsibility —
+  there is no intermediate service to trust, no JWT validation layer
+  to keep hardened.
 - **Native rotation and TLS.** Vault's database engine handles
   credential rotation. TLS from R to PostgreSQL is standard PG
   client behavior. Both are well-worn paths, neither requires
@@ -97,7 +100,7 @@ concurrent sessions), see [Scaling Out](#scaling-out) below.
 ```mermaid
 graph TD
     blockr["blockr (R app)"] -->|"1. Vault token (existing flow)<br>2. Request DB credentials"| vault["OpenBao"]
-    blockr -->|"3. Direct connection<br>(per-user creds)"| pg["PostgreSQL<br>(RLS filters by current_user)"]
+    blockr -->|"3. Direct connection<br>(per-user creds)"| pg["PostgreSQL<br>(RLS filters by current_sub())"]
     vault -.->|"manages per-user roles<br>+ rotates passwords"| pg
 ```
 
@@ -106,6 +109,60 @@ Blockyard is not in this path. The R app talks directly to vault
 operations). The vault↔PG link is used by vault's database engine
 to provision and rotate per-user credentials; it is not on the
 runtime query path.
+
+### Role Model
+
+Board storage uses four distinct PostgreSQL role kinds:
+
+| Role | Purpose | Attributes |
+|---|---|---|
+| `vault_db_admin` | Vault's `database` engine connection. Rotates per-user passwords. | `LOGIN`, `CREATEROLE`, `NOINHERIT`; `ADMIN OPTION` on each `user_<entity-id>` granted at provisioning time |
+| `blockyard_admin` | Convention role created at startup for blockyard's control-plane connection (see note below). | `NOLOGIN`, `NOINHERIT`, `CREATEROLE`; `ADMIN OPTION` on `blockr_user` with `INHERIT FALSE, SET FALSE` |
+| `blockr_user` | Group role holding data privileges on the board tables. | `NOLOGIN`; `SELECT`/`INSERT`/`UPDATE`/`DELETE` on board tables + `SELECT` on `users` |
+| `user_<entity-id>` | Per-user role for R session connections, created on first login. | `LOGIN`, member of `blockr_user` with `INHERIT TRUE, SET FALSE` |
+
+The separation is load-bearing:
+
+- `blockyard_admin` has role-creation power but no data access.
+  `NOINHERIT` blocks it from inheriting `blockr_user`; `SET FALSE`
+  on the group grant also blocks `SET ROLE blockr_user`. A
+  compromised admin connection can provision and deactivate user
+  roles, not read or write boards.
+- `user_<entity-id>` has data access but no role-creation power
+  and no `ADMIN OPTION` on anything. Its `blockr_user` grant uses
+  `SET FALSE` too — this blocks `SET ROLE blockr_user`, which
+  would otherwise let a user create rows owned by the shared
+  group role and break the `owner_sub = current_sub()` invariant
+  RLS depends on.
+- `vault_db_admin` has `CREATEROLE` for password rotation but is
+  never a member of `blockr_user`, so has no data path.
+
+User-side escalation attempts an R script connecting as
+`user_<entity-id>` might try — all denied:
+
+| Attempt | Result |
+|---|---|
+| `CREATE ROLE evil` | no `CREATEROLE` |
+| `GRANT pg_read_all_data TO "user_<entity-id>"` | no `ADMIN OPTION` on target |
+| `SET ROLE blockr_user` | `SET FALSE` on the grant |
+| `SET ROLE blockyard_admin` | not a member |
+| `ALTER ROLE "user_other" PASSWORD '…'` | no `ADMIN OPTION` on target |
+
+This scoping requires **PostgreSQL 16 or later**. On PG15 and
+earlier, `CREATEROLE` implied the power to alter any non-superuser
+role's password and grant itself arbitrary role memberships — the
+scoping above does not hold. Blockyard's preflight refuses to
+start when `database.board_storage = true` against a PG15 or older
+cluster.
+
+**Note on `blockyard_admin` usage.** Blockyard creates the role
+idempotently at startup but does not yet connect as it — the
+existing `database.url` / `database.vault_role` connection runs
+provisioning SQL directly. Those credentials must hold
+`CREATEROLE` and `ADMIN OPTION` on `blockr_user`. Operators who
+want to narrow blockyard's own privilege surface can `ALTER ROLE
+blockyard_admin LOGIN PASSWORD '…'` and repoint blockyard at it;
+automating this wiring is a follow-up.
 
 ### Schema
 
@@ -124,10 +181,19 @@ blockyard schema once 006 lands.
 
 ```sql
 -- Group role for board-storage access. Each per-user role
--- (user_<entity-id>) is granted membership in this group at provisioning
--- time (#284).
+-- (user_<entity-id>) is granted membership in this group at
+-- provisioning time.
 CREATE ROLE blockr_user NOLOGIN;
 GRANT USAGE ON SCHEMA blockyard TO blockr_user;
+
+-- Per-user role mapping. Populated by first-login provisioning;
+-- NULL for users who haven't yet been provisioned for board storage.
+-- current_sub() (below) resolves session_user → sub via this column.
+-- Partial unique index allows many NULLs but enforces one user per
+-- populated role name.
+ALTER TABLE users ADD COLUMN pg_role TEXT;
+CREATE UNIQUE INDEX idx_users_pg_role
+    ON users(pg_role) WHERE pg_role IS NOT NULL;
 
 -- Board identity and metadata
 CREATE TABLE boards (
@@ -234,15 +300,38 @@ Three visibility modes via `acl_type`:
 
 ### RLS Policies
 
-Policies look up identity via the `current_sub()` helper. In #283 it
-is a stub returning `NULL` (fail-closed); production identity
-resolution lands in #284, driven by `users.pg_role`.
+Policies look up identity via the `current_sub()` helper, which maps
+the connecting PG role (`session_user`) back to its OIDC sub via
+`users.pg_role`. Using `session_user` rather than `current_user` is
+load-bearing: it keeps the mapping stable across `SECURITY DEFINER`
+boundaries (where `current_user` flips to the function owner) and
+blocks `SET ROLE` from changing the effective identity.
 
 ```sql
--- Identity helper (stubbed in #283, wired in #284).
+-- Identity helper. NOLOGIN admin roles have no `users` row, so
+-- current_sub() returns NULL for them — which fail-closes every
+-- policy that traverses this function.
 CREATE FUNCTION current_sub() RETURNS TEXT AS $$
-    SELECT NULL::text
+    SELECT sub FROM users WHERE pg_role = session_user
 $$ LANGUAGE sql STABLE;
+
+-- Break the cycle between boards.restricted_read (which references
+-- board_shares) and board_shares.shares_owner (which would otherwise
+-- reference boards) — PG rejects such cycles at query time with
+-- "infinite recursion detected in policy". SECURITY DEFINER reads
+-- boards as the function owner (bypassing RLS on that table); the
+-- predicate is still locked to the caller via current_sub(), so the
+-- helper leaks nothing beyond "do I own this board id?", which the
+-- caller already knows from their own SELECTs. search_path is
+-- pinned to guard against schema-shadow attacks by callers with
+-- CREATE on other schemas.
+CREATE FUNCTION current_user_owns_board(b_id UUID) RETURNS BOOLEAN AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM boards
+        WHERE id = b_id AND owner_sub = current_sub()
+    );
+$$ LANGUAGE sql SECURITY DEFINER STABLE
+  SET search_path = blockyard, pg_catalog;
 
 -- boards
 ALTER TABLE boards ENABLE ROW LEVEL SECURITY;
@@ -293,20 +382,14 @@ CREATE POLICY version_restricted ON board_versions FOR SELECT
       AND bs.shared_with_sub = current_sub()
   ));
 
--- board_shares
+-- board_shares. Owner-side policy goes through current_user_owns_board
+-- instead of inlining an EXISTS against `boards`; inlining would
+-- close the cycle described above.
 ALTER TABLE board_shares ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY shares_owner ON board_shares
-  USING (EXISTS (
-      SELECT 1 FROM boards
-      WHERE boards.id = board_shares.board_ref
-      AND boards.owner_sub = current_sub()
-  ))
-  WITH CHECK (EXISTS (
-      SELECT 1 FROM boards
-      WHERE boards.id = board_shares.board_ref
-      AND boards.owner_sub = current_sub()
-  ));
+  USING (current_user_owns_board(board_ref))
+  WITH CHECK (current_user_owns_board(board_ref));
 
 CREATE POLICY shares_see_own ON board_shares FOR SELECT
   USING (shared_with_sub = current_sub());
@@ -315,92 +398,214 @@ CREATE POLICY shares_see_own ON board_shares FOR SELECT
 ### Operations from R
 
 The R app uses `DBI` + `RPostgres` to talk to PostgreSQL directly,
-with per-user credentials obtained from vault.
+with per-user credentials obtained from vault. See
+[`examples/hello-postgres/app/app.R`](../../examples/hello-postgres/app/app.R)
+for a runnable reference.
 
 ```
-Save:    INSERT INTO boards (board_id, acl_type, tags) VALUES (...)
-         INSERT INTO board_versions (board_id, data, metadata) VALUES (...)
-Load:    SELECT data, metadata FROM board_versions
-         WHERE board_id = $id
-         ORDER BY created_at DESC LIMIT 1
-List:    SELECT * FROM boards            (RLS filters automatically)
-Delete:  DELETE FROM boards WHERE board_id = $id
-Share:   INSERT INTO board_shares (board_id, shared_with) VALUES (...)
-Tags:    UPDATE boards SET tags = $tags WHERE board_id = $id
-Fork:    SELECT from shared board; INSERT as new row
+Save:    INSERT INTO boards (owner_sub, board_id, name) VALUES (
+             (SELECT sub FROM users WHERE pg_role = session_user),
+             $board_id, $name)
+         ON CONFLICT (owner_sub, board_id)
+             DO UPDATE SET name = EXCLUDED.name
+         RETURNING id;
+         INSERT INTO board_versions (board_ref, data, format)
+             VALUES ($board_uuid, $data, 'json');
+Load:    SELECT v.data FROM board_versions v
+         JOIN boards b ON b.id = v.board_ref
+         WHERE b.board_id = $board_id
+         ORDER BY v.created_at DESC LIMIT 1;
+List:    SELECT board_id, name, acl_type, owner_sub FROM boards
+         ORDER BY board_id;
+Delete:  DELETE FROM board_versions WHERE id = $version_uuid;
+Purge:   DELETE FROM boards        WHERE id = $board_uuid;
+Share:   INSERT INTO board_shares (board_ref, shared_with_sub)
+             VALUES ($board_uuid, $target_sub);
+Tags:    UPDATE boards SET tags = $tags WHERE id = $board_uuid;
+Fork:    Read source board + latest version, INSERT as a new
+         (owner_sub, board_id) tuple with owner_sub set via the
+         current_sub() subquery as in Save.
 ```
 
-All inserts default `owner = current_user`, so the R app does not
-need to pass it. RLS scopes all reads to the current user's
-visible rows, so WHERE clauses can omit `owner` for own-data
-queries.
+`boards.owner_sub` has no default, so inserts must set it explicitly.
+The `(SELECT sub FROM users WHERE pg_role = session_user)` subquery
+is the safe expression: it resolves identity the same way
+`current_sub()` does in RLS, keeping both sides in sync. RLS scopes
+all reads to visible rows (own + public + shared), so WHERE clauses
+don't need an explicit owner filter. The
+`prevent_last_version_delete` trigger refuses a `Delete` that would
+leave a board with zero versions — use `Purge` to drop the whole
+board instead.
 
 ### Obtaining DB Credentials from Vault
 
-The R app uses its existing vault token and assigned PG role name
-(both injected by blockyard) to fetch the current password from
-vault's `database` static-creds endpoint:
+Blockyard injects three pieces of per-session context:
+
+- `VAULT_ADDR` — deployment-level env var, where vault is reachable.
+- `BLOCKYARD_VAULT_DB_MOUNT` — deployment-level env var matching
+  `database.vault_mount` (default `"database"`). R assembles the
+  credential path from this; hardcoding `database/` would break
+  deployments that mount the engine elsewhere.
+- `X-Blockyard-Vault-Token` and `X-Blockyard-Pg-Role` — per-session
+  Shiny headers. The token carries the templated
+  `blockyard-user-template` policy (see [Vault Policy
+  Layout](#vault-policy-layout)); the role is
+  `user_<vault-entity-id>`, persisted on `users.pg_role`.
+
+R reads them, fetches creds from vault's static-creds endpoint, then
+opens a plain PG connection:
 
 ```r
 vault_token <- session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN
 vault_addr  <- Sys.getenv("VAULT_ADDR")
+vault_mount <- Sys.getenv("BLOCKYARD_VAULT_DB_MOUNT", unset = "database")
 pg_role     <- session$request$HTTP_X_BLOCKYARD_PG_ROLE
 
-resp <- httr2::request(
-    paste0(vault_addr, "/v1/database/static-creds/", pg_role)
-  ) |>
+url  <- sprintf("%s/v1/%s/static-creds/%s", vault_addr, vault_mount, pg_role)
+resp <- httr2::request(url) |>
   httr2::req_headers("X-Vault-Token" = vault_token) |>
   httr2::req_perform()
-
 creds <- httr2::resp_body_json(resp)$data
 # creds$username, creds$password, creds$ttl
 
 con <- DBI::dbConnect(
     RPostgres::Postgres(),
-    host = Sys.getenv("PGHOST"), port = 5432, dbname = "blockyard",
-    user = creds$username, password = creds$password,
-    sslmode = "require"
+    host     = Sys.getenv("BLOCKYARD_PG_HOST"),
+    port     = as.integer(Sys.getenv("BLOCKYARD_PG_PORT", unset = "5432")),
+    dbname   = Sys.getenv("BLOCKYARD_PG_DBNAME"),
+    user     = creds$username,
+    password = creds$password,
+    options  = "-c search_path=blockyard",
+    sslmode  = "require"
 )
 ```
 
-Vault rotates the password on its configured schedule (default 24h).
-When a connection fails due to a rotated password, R re-fetches
-credentials from vault and reconnects. The vault token itself is
-renewable by the R app via `POST /auth/token/renew-self`.
+The `search_path=blockyard` connection option pins unqualified
+references to the `blockyard` schema; without it, callers would have
+to schema-qualify every table name (`blockyard.boards`, …).
+
+Vault rotates the password on the schedule configured via
+`database.vault_rotation_period` (default `24h`). When a connection
+fails due to a rotated password, R re-fetches credentials from vault
+and reconnects. The vault token is renewable by the R app via
+`POST /auth/token/renew-self`.
 
 ### Vault Database Engine Configuration
 
-One-time setup on vault:
+One-time setup on vault (operator-owned, typically in a deploy
+script — see
+[`examples/hello-postgres/setup.sh`](../../examples/hello-postgres/setup.sh)):
 
-- Enable the `database` secrets engine.
-- Configure a connection to PostgreSQL using a PG role with
-  `CREATEROLE` privileges (for managing `user_<entity-id>` roles).
+1. Enable the `database` secrets engine at the path named in
+   `database.vault_mount` (default `database`).
+2. Register a PostgreSQL connection under that mount, named to match
+   `database.vault_db_connection`. The connection's admin identity
+   is `vault_db_admin` — its `CREATEROLE` + `NOINHERIT` attributes
+   are set out-of-band (see [`examples/hello-postgres/init.sql`](../../examples/hello-postgres/init.sql)).
+   Set `allowed_roles = ["user_*"]` so blockyard can only define
+   static roles in that namespace.
+3. Write the two policies below. Attach `blockyard-server` to
+   blockyard's own AppRole; attach `blockyard-user-template` to the
+   JWT/OIDC auth role that users log in through (so every
+   user-issued token carries it).
 
-Per-user provisioning (blockyard, on first login):
+#### Vault Policy Layout
 
-- `CREATE ROLE "user_<entity-id>" LOGIN PASSWORD '<temp>';`
-- `GRANT blockr_user TO "user_<entity-id>";`
-- Register the static role with vault, pointing at the PG username
-  and setting a rotation period (e.g. `24h`). Vault immediately
-  rotates to a fresh password.
-- Update the user's vault policy to allow reading that static-creds
-  endpoint only:
+Two policies on two tokens. This split is the "Blockyard out of the
+runtime trust chain" property made concrete: **no single token holds
+the union of permissions**.
 
+**`blockyard-server`** (attached to blockyard's AppRole token):
+
+```hcl
+# Define per-user DB static roles at first login.
+path "database/static-roles/user_*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
+# Read its own admin creds (via database.vault_role, if set).
+path "database/static-creds/<blockyard-admin-role>" {
+  capabilities = ["read"]
+}
+# Resolve an OIDC alias to an entity ID at provisioning time.
+path "identity/lookup/entity" {
+  capabilities = ["update"]
+}
+# One-time lookup of the OIDC mount accessor at startup.
+path "sys/auth" { capabilities = ["read"] }
 ```
+
+Crucially, `blockyard-server` does **not** include
+`database/static-creds/user_*`. Blockyard can define user-scoped
+static roles but cannot mint their credentials. A compromised
+blockyard token yields role-definition power, not DB-session power
+against any user.
+
+**`blockyard-user-template`** (attached to every user's token via
+the JWT auth role's `token_policies`):
+
+```hcl
 path "database/static-creds/user_{{identity.entity.id}}" {
-    capabilities = ["read"]
+  capabilities = ["read"]
 }
 ```
 
-The role name is derived from vault's entity UUID for the caller —
-the same identifier vault's templated policy above resolves at the
-ACL layer. Using vault's own identifier for both sides is load-
-bearing: it removes the normalization bridge that an earlier version
-of this design used, where blockyard hashed/folded the OIDC `sub`
-into a PG-valid identifier. The bridge was the place the two sides
-could silently disagree. The role name is stored on
-`blockyard.users.pg_role` and injected into the R session as
-`X-Blockyard-Pg-Role`.
+Templating is ACL-only — vault resolves
+`{{identity.entity.id}}` server-side from the token's own auth
+context. Each user's token can read exactly one static-creds path:
+its own. Even if R constructed a path for a different user, the
+policy check rejects it before the DB engine is consulted.
+
+#### Per-user Provisioning (first-login flow)
+
+On the first successful OIDC login for a user, blockyard (as
+`blockyard-server`, with the DB connection from `database.url`)
+runs:
+
+1. **Resolve the entity ID.** `POST identity/lookup/entity` with
+   `{ "alias_name": <sub>, "alias_mount_accessor": <oidc-accessor> }`
+   returns the vault entity UUID for this user. The OIDC mount
+   accessor is resolved once at startup (via `GET sys/auth`) and
+   cached on the provisioner. The PG role name is
+   `user_<entity-id>` — using vault's own identifier for both the
+   PG role and the templated policy resolution removes the
+   normalization bridge where the two sides could silently
+   disagree.
+2. **Create the PG role** (idempotent, guarded by
+   `SELECT EXISTS(…FROM pg_roles…)`):
+   ```sql
+   CREATE ROLE "user_<entity-id>" LOGIN PASSWORD '<random>';
+   GRANT blockr_user TO "user_<entity-id>"
+       WITH INHERIT TRUE, SET FALSE;
+   GRANT "user_<entity-id>" TO vault_db_admin WITH ADMIN OPTION;
+   ```
+   The `INHERIT TRUE, SET FALSE` on `blockr_user` is load-bearing
+   (see [Role Model](#role-model)). The `ADMIN OPTION` grant to
+   `vault_db_admin` is what PG16+ requires for vault to later
+   `ALTER ROLE user_<entity-id> PASSWORD '…'` on its rotation
+   schedule.
+3. **Register the static role with vault** —
+   `POST {mount}/static-roles/user_<entity-id>` with
+   `{ "username": "user_<entity-id>", "db_name": "<vault-db-connection>",
+     "rotation_period": "<vault_rotation_period>" }`. Vault
+   immediately rotates to a fresh password, which `vault_db_admin`
+   now has the `ADMIN OPTION` to apply.
+4. **Persist the role name.** Blockyard writes `pg_role =
+   user_<entity-id>` on the `users` row (the unique index on
+   `pg_role WHERE pg_role IS NOT NULL` both enforces the 1:1
+   mapping and durably signals that provisioning succeeded).
+   `users.pg_role` is injected into the R session on subsequent
+   logins as `X-Blockyard-Pg-Role`.
+
+Every step is idempotent and `users.pg_role` is written last, so a
+login interrupted between steps replays cleanly — the next login
+sees NULL `pg_role` and re-runs from step 1; `CREATE ROLE IF NOT
+EXISTS`, repeated GRANTs, and the vault upsert are all no-ops when
+state already matches.
+
+**Deactivation.** When an admin deactivates a user, blockyard runs
+`ALTER ROLE "user_<entity-id>" NOLOGIN` rather than dropping the
+role — dropping would fail once `boards.owner_sub` references it
+via the FK from `users(sub)`. Reactivation restores `LOGIN`.
 
 ### Example Docker Compose Services
 
@@ -426,16 +631,30 @@ postgres:
     retries: 10
 ```
 
-`init.sql` bootstraps the schema, the `blockr_user` group role,
-and RLS policies (the SQL shown earlier). Per-user PG roles are
-not created here — blockyard creates them on first login and
-registers them with vault.
+`init.sql` seeds only `vault_db_admin` — the PG identity vault's DB
+secrets engine uses to manage per-user passwords. Everything else
+is created by blockyard:
 
-The init container configures vault's `database` secrets engine:
-connection to PostgreSQL with `CREATEROLE` privileges, and a
-policy template that grants each user read access to their own
-`static-creds/user_<entity-id>` path. No JWKS download, no Identity
-OIDC setup, no PostgREST container.
+- `blockyard` schema, core tables relocation, `boards` /
+  `board_versions` / `board_shares`, `blockr_user` group role, RLS
+  policies, `current_sub()` helper, `current_user_owns_board`
+  SECURITY DEFINER helper, and `prevent_last_version_delete` trigger
+  all land via migration 006 when blockyard runs its migrations at
+  startup.
+- `blockyard_admin` is created by idempotent Go-side startup SQL,
+  guarded by the PG16+ preflight (the `GRANT … WITH INHERIT FALSE,
+  SET FALSE` syntax is PG16-only, so it can't live in a migration
+  that must stay PG13+ compatible).
+- `user_<entity-id>` roles are created by blockyard's first-login
+  provisioning flow and registered with vault's DB engine in the
+  same transaction (see
+  [Per-user Provisioning](#per-user-provisioning-first-login-flow)).
+
+The init container (`setup.sh`) configures vault: enables the
+`database` secrets engine, registers the PG connection, and writes
+the two policies (`blockyard-server`, `blockyard-user-template`)
+described in [Vault Policy Layout](#vault-policy-layout). No JWKS
+download, no Identity OIDC provider, no PostgREST container.
 
 ## Scaling Out
 
@@ -448,25 +667,31 @@ count does, so this ceiling rarely matters.
 
 For multi-node deployments (typically Kubernetes, hundreds to
 thousands of concurrent R sessions), the migration path is a thin
-API shim with a shared PG connection pool:
+API shim with a shared PG connection pool. A naive `SET LOCAL ROLE
+"user_<entity-id>"` on a pool connection does **not** work with
+the current identity model: `current_sub()` reads `session_user`
+(stable across DEFINER + `SET ROLE` boundaries by design), which
+stays as the pool role no matter what `SET ROLE` changes
+`current_user` to. RLS would fail closed for every pooled request.
 
-- R authenticates to the shim with its vault token. The shim
-  verifies it via vault's `auth/token/lookup-self` and resolves
-  the user's PG role.
-- Shim opens one of its pooled PG connections, runs
-  `SET LOCAL ROLE "user_<entity-id>"` inside a transaction, and executes
-  the query. RLS still enforces via `current_user`.
-- No schema changes. No change to how R obtains its vault token.
+Two shapes that do fit:
 
-Alternative: `pgjwt` validation directly in the DB (shim passes a
-vault-issued JWT, `pgjwt` verifies against vault's JWKS, RLS reads
-claims from `current_setting`). Heavier migration — changes the
-role-identity story from native PG auth to claim-driven — but
-preserves the "DB is the single enforcement point" property
-without per-user PG connections.
+- **Session-variable identity.** The shim opens a transaction,
+  runs `SET LOCAL blockyard.sub = '<user-sub>'`, and RLS reads it
+  via a modified `current_sub()` that falls back to
+  `current_setting('blockyard.sub', true)`. Shim validates the
+  vault token first; it's the shim's responsibility not to set
+  that variable on behalf of a user it hasn't authenticated.
+  Requires a small migration to add the fallback to `current_sub()`.
+- **`pgjwt` in the DB.** Shim passes a vault-issued JWT; `pgjwt`
+  verifies against vault's JWKS; `current_sub()` reads the claim
+  from `current_setting`. Heavier migration but keeps "DB is the
+  single enforcement point" without per-user PG connections.
 
-The vault-creds setup doesn't lock in either path; the shim is
-additive.
+Either path is additive — the vault-creds setup doesn't lock in a
+direction. Neither is implemented today; the practical ceiling
+on a single-node deployment is PG `max_connections` (typically
+high hundreds), which R worker memory hits first anyway.
 
 ## Alternative Backends
 
@@ -567,7 +792,7 @@ Examples of backend-specific shapes:
 | Pins (local) | name, version |
 | Pins (Connect) | user, name, version |
 | PocketBase | record_id, name |
-| PostgreSQL | owner, board_id |
+| PostgreSQL | UUID (`boards.id`); optional version UUID |
 
 Accessor generics on `rack_id`:
 
@@ -586,7 +811,7 @@ called.
 |------------------|------------------------------------------|
 | `versioning`     | Multiple versions per board              |
 | `tags`           | Per-board labels for filtering           |
-| `metadata`       | Per-version key-value pairs              |
+| `metadata`       | Per-board key-value pairs                |
 | `sharing`        | Grant/revoke per-user access             |
 | `visibility`     | ACL modes (private/restricted/public)    |
 | `user_discovery` | Search for users to share with           |
@@ -607,12 +832,15 @@ tag.
 
 `rack_save` dispatches on `backend`. Creates a new version of the
 board. The `metadata` parameter is a named list of arbitrary
-key-value pairs (see [Data and Metadata](#data-and-metadata)).
-Returns a `rack_id` with the newly created version.
+key-value pairs attached to the board (not the version — see
+[Data and Metadata](#data-and-metadata)). On first save, a board
+row is created with this metadata; subsequent saves add new
+versions under the same board. Returns a `rack_id` with the newly
+created version.
 
 `rack_load` dispatches on `id`. If the ID includes a version, loads
-that specific version. Otherwise loads the latest. Reads
-`metadata$format` to dispatch deserialization.
+that specific version. Otherwise loads the latest. Reads the
+version's `format` to dispatch deserialization.
 
 `rack_delete` dispatches on `id`. If the ID includes a version,
 deletes that version. If no version, deletes the most recent.
@@ -632,29 +860,28 @@ single-row data frame representing the current state.
 
 ### Data and Metadata
 
-Each version stores two things:
+Each version stores:
 
 - **data** — the board content, an opaque blob. Currently JSON;
   future formats (binary, CRDT) are possible. The rack layer
   handles serialization via `serialize_board()` / `restore_board()`.
-- **metadata** — a named list of arbitrary key-value pairs.
-  Open-ended so new keys can be added without schema changes.
+- **format** — the serialization format (e.g. `"json"`). Typed
+  column on PostgreSQL (`board_versions.format`), pin metadata on
+  the pins backend. Read by `rack_load` to dispatch
+  deserialization.
 
-Currently defined metadata keys:
-
-| Key      | Purpose                                           |
-|----------|---------------------------------------------------|
-| `format` | Serialization format (`"v1"`) for deserialization |
-
-Future keys (blockr version, description, author notes, etc.) slot
-in without backend changes.
+Per-board metadata (free-form key-value, open-ended so new keys
+can be added without schema changes) lives on `boards`, not
+`board_versions` — it applies to the board identity and carries
+across versions. Typical keys: description, author notes, blockr
+version.
 
 Backend storage:
 
 | Backend    | metadata storage                                    |
 |------------|-----------------------------------------------------|
 | Pins       | `pin_upload(..., metadata = list(format = "v1"))` — stored in pin metadata, read via `pin_meta(...)$user` |
-| PostgreSQL | `metadata JSONB` column on `board_versions`         |
+| PostgreSQL | `metadata JSONB` column on `boards` (board-level); `format TEXT` column on `board_versions` |
 | PocketBase | `metadata` JSON field on `board_versions` collection |
 
 ### Tags
