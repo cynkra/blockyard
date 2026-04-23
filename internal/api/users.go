@@ -375,7 +375,7 @@ func UpdateUser(srv *server.Server) http.HandlerFunc {
 		if body.Active != nil && srv.BoardStorage != nil {
 			if pgRole, perr := srv.DB.GetUserPgRole(r.Context(), sub); perr == nil && pgRole != "" {
 				if err := boardstorage.SetRoleLogin(r.Context(), srv.DB, pgRole, *body.Active); err != nil {
-					slog.Warn("failed to sync PG role LOGIN state",
+					slog.Warn("failed to sync PG role LOGIN state", //nolint:gosec // G706: slog structured logging handles this
 						"sub", sub, "role", pgRole, "active", *body.Active, "error", err)
 				}
 			}
