@@ -10,10 +10,11 @@ import (
 
 // MigrationVersion returns the current migration version and dirty flag.
 func (db *DB) MigrationVersion() (uint, bool, error) {
-	m, err := db.newMigrator()
+	m, cleanup, err := db.newMigrator()
 	if err != nil {
 		return 0, false, fmt.Errorf("migration version: %w", err)
 	}
+	defer cleanup()
 	ver, dirty, err := m.Version()
 	if err != nil {
 		return 0, false, fmt.Errorf("migration version: %w", err)
@@ -23,10 +24,11 @@ func (db *DB) MigrationVersion() (uint, bool, error) {
 
 // MigrateDown runs down migrations to the target version.
 func (db *DB) MigrateDown(targetVersion uint) error {
-	m, err := db.newMigrator()
+	m, cleanup, err := db.newMigrator()
 	if err != nil {
 		return fmt.Errorf("migrate down: %w", err)
 	}
+	defer cleanup()
 
 	currentVer, _, err := m.Version()
 	if err != nil {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,8 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -54,17 +58,50 @@ const (
 type DB struct {
 	*sqlx.DB
 	dialect  Dialect
-	tempPath string // non-empty when using a temp file for SQLite :memory:
-	connURL  string // original connection URL, set for PostgreSQL
+	tempPath string           // non-empty when using a temp file for SQLite :memory:
+	connURL  string           // original connection URL, set for PostgreSQL
+	pgPool   *pgxpool.Pool    // non-nil when dialect = DialectPostgres; closed separately from *sql.DB
+	creds    *pgCredsProvider // non-nil when dialect = DialectPostgres; empty when no rotator is wired
+}
+
+// openOptions collects Open customizations — currently the optional
+// vault-backed credentials rotator.
+type openOptions struct {
+	rotator CredsRotator
+}
+
+// OpenOption configures Open.
+type OpenOption func(*openOptions)
+
+// WithCredsRotator installs a CredsRotator that the Postgres pool
+// uses to obtain credentials. When set:
+//
+//   - Open fetches fresh creds from the rotator before the first
+//     connection and uses those (ignoring any user/password in the
+//     DSN).
+//   - Ping retries once on auth failure (SQLSTATE 28P01 or a
+//     "role ... does not exist" message) by rotating and resetting
+//     the pool — this lets the health poller self-heal when vault has
+//     rotated the static-role password out from under blockyard.
+//
+// No-op for SQLite. Intended for wiring `{mount}/static-creds/{role}`
+// via cfg.Database.VaultRole (#238).
+func WithCredsRotator(r CredsRotator) OpenOption {
+	return func(o *openOptions) { o.rotator = r }
 }
 
 // Open opens a database connection based on the config.
-func Open(cfg config.DatabaseConfig) (*DB, error) {
+func Open(cfg config.DatabaseConfig, opts ...OpenOption) (*DB, error) {
+	var options openOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	switch cfg.Driver {
 	case "sqlite":
 		return openSQLite(cfg.Path)
 	case "postgres":
-		return openPostgres(cfg.URL)
+		return openPostgres(cfg.URL, options)
 	default:
 		return nil, fmt.Errorf("unsupported database driver: %q", cfg.Driver)
 	}
@@ -112,8 +149,8 @@ func openSQLite(path string) (*DB, error) {
 	return d, nil
 }
 
-func openPostgres(url string) (*DB, error) {
-	connCfg, err := pgx.ParseConfig(url)
+func openPostgres(url string, options openOptions) (*DB, error) {
+	poolCfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres url: %w", err)
 	}
@@ -124,37 +161,152 @@ func openPostgres(url string) (*DB, error) {
 	// create their tables in the v0.0.3 layout. Once 006 lands the
 	// schema exists, blockyard resolves first, and subsequent runtime
 	// queries see the relocated objects.
-	if connCfg.RuntimeParams == nil {
-		connCfg.RuntimeParams = map[string]string{}
+	if poolCfg.ConnConfig.RuntimeParams == nil {
+		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
-	if _, set := connCfg.RuntimeParams["search_path"]; !set {
-		connCfg.RuntimeParams["search_path"] = pgSchema + ", public"
+	if _, set := poolCfg.ConnConfig.RuntimeParams["search_path"]; !set {
+		poolCfg.ConnConfig.RuntimeParams["search_path"] = pgSchema + ", public"
 	}
-	db := sqlx.NewDb(stdlib.OpenDB(*connCfg), "pgx")
+	// Pool defaults — override via connection string parameters
+	// (e.g. ?pool_max_conns=20) if needed.
+	if poolCfg.MaxConns == 0 {
+		poolCfg.MaxConns = 25
+	}
+	if poolCfg.MaxConnLifetime == 0 {
+		poolCfg.MaxConnLifetime = 5 * time.Minute
+	}
 
-	// Reasonable pool defaults — tune via connection string parameters
-	// if needed (e.g. ?pool_max_conns=20).
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	// BeforeConnect fires on every new low-level connection. When a
+	// rotator is wired, this hook injects the provider's current
+	// creds, so refreshing the provider transparently updates every
+	// subsequent connection without a pool rebuild. When no rotator
+	// is wired, the provider stays empty and the hook is a no-op —
+	// pgx falls back to the DSN's userinfo.
+	provider := newPgCredsProvider(options.rotator)
+	poolCfg.BeforeConnect = func(_ context.Context, cc *pgx.ConnConfig) error {
+		if u, p := provider.current(); u != "" {
+			cc.User = u
+			cc.Password = p
+		}
+		return nil
+	}
 
-	if err := db.Ping(); err != nil {
-		db.Close()
+	// Seed creds from vault before the first connection attempt. With
+	// a rotator installed, the DSN's userinfo is irrelevant — the
+	// operator may omit it entirely. Without a rotator, skip the
+	// fetch and let pgx use the DSN credentials.
+	if options.rotator != nil {
+		seedCtx, seedCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := provider.rotate(seedCtx)
+		seedCancel()
+		if err != nil {
+			return nil, fmt.Errorf("seed postgres creds from vault: %w", err)
+		}
+	}
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+
+	sx := sqlx.NewDb(stdlib.OpenDBFromPool(pool), "pgx")
+	d := &DB{
+		DB:      sx,
+		dialect: DialectPostgres,
+		connURL: url,
+		pgPool:  pool,
+		creds:   provider,
+	}
+
+	// Initial Ping goes through the rotate path: under a rotator,
+	// vault may have rotated the password between our seed fetch and
+	// the first real connect (unlikely but possible), so a 28P01 here
+	// deserves one retry with fresh creds.
+	if err := d.pingWithRotate(context.Background()); err != nil {
+		sx.Close()
+		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	d := &DB{DB: db, dialect: DialectPostgres, connURL: url}
 	if err := d.runMigrations(); err != nil {
-		db.Close()
+		sx.Close()
+		pool.Close()
 		return nil, err
 	}
 	return d, nil
 }
 
-func (db *DB) newMigrator() (*migrate.Migrate, error) {
-	var fsys fs.FS
-	var err error
+// pingWithRotate pings the pool and, on Postgres auth failure, rotates
+// creds and retries once. A no-op fallback to the naked Ping when no
+// rotator is wired. Callers on the hot path use Ping (below) instead.
+func (db *DB) pingWithRotate(ctx context.Context) error {
+	err := db.DB.PingContext(ctx)
+	if err == nil {
+		return nil
+	}
+	if db.creds == nil || !db.creds.hasRotator() || !isPostgresAuthError(err) {
+		return err
+	}
+	slog.Warn("postgres auth failed, refreshing credentials from vault", "error", err)
+	if rErr := db.creds.rotate(ctx); rErr != nil {
+		return fmt.Errorf("%w; rotate failed: %v", err, rErr)
+	}
+	// Reset the pool so any half-open conns that authenticated with
+	// stale creds are discarded; next Acquire triggers BeforeConnect
+	// with the refreshed pair.
+	db.pgPool.Reset()
+	return db.DB.PingContext(ctx)
+}
 
+// isPostgresAuthError reports whether err is a PostgreSQL auth
+// failure. Matches SQLSTATE 28P01 (invalid_password) and 28000
+// (invalid_authorization_specification), plus the "role ... does not
+// exist" variant that surfaces when the role has been dropped out
+// from under us.
+func isPostgresAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		if pgErr.Code == "28P01" || pgErr.Code == "28000" {
+			return true
+		}
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "SQLSTATE 28P01") || strings.Contains(msg, "SQLSTATE 28000") {
+		return true
+	}
+	if strings.Contains(msg, "role ") && strings.Contains(msg, "does not exist") {
+		return true
+	}
+	return false
+}
+
+func (db *DB) runMigrations() error {
+	m, cleanup, err := db.newMigrator()
+	if err != nil {
+		return fmt.Errorf("create migrator: %w", err)
+	}
+	defer cleanup()
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("run migrations: %w", err)
+	}
+	return nil
+}
+
+// newMigrator builds a migrate.Migrate for the active dialect and
+// returns a cleanup closure that releases any acquired resources
+// (notably, the *sql.Conn the Postgres driver hijacks for advisory
+// locking). Callers MUST defer the cleanup — pool.Close() at shutdown
+// blocks until every acquired conn is returned.
+func (db *DB) newMigrator() (*migrate.Migrate, func(), error) {
+	driver, cleanup, err := db.migrateDriver()
+	if err != nil {
+		return nil, nil, fmt.Errorf("migration driver: %w", err)
+	}
+
+	var fsys fs.FS
 	switch db.dialect {
 	case DialectSQLite:
 		fsys, err = fs.Sub(sqliteMigrations, "migrations/sqlite")
@@ -162,48 +314,65 @@ func (db *DB) newMigrator() (*migrate.Migrate, error) {
 		fsys, err = fs.Sub(postgresMigrations, "migrations/postgres")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("migration fs: %w", err)
+		cleanup()
+		return nil, nil, fmt.Errorf("migration fs: %w", err)
 	}
 
 	source, err := iofs.New(fsys, ".")
 	if err != nil {
-		return nil, fmt.Errorf("migration source: %w", err)
+		cleanup()
+		return nil, nil, fmt.Errorf("migration source: %w", err)
 	}
 
-	driver, err := db.migrateDriver()
+	m, err := migrate.NewWithInstance("iofs", source, db.driverName(), driver)
 	if err != nil {
-		return nil, fmt.Errorf("migration driver: %w", err)
+		cleanup()
+		return nil, nil, err
 	}
-
-	return migrate.NewWithInstance("iofs", source, db.driverName(), driver)
+	return m, cleanup, nil
 }
 
-func (db *DB) runMigrations() error {
-	m, err := db.newMigrator()
-	if err != nil {
-		return fmt.Errorf("create migrator: %w", err)
-	}
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("run migrations: %w", err)
-	}
-	return nil
-}
-
-func (db *DB) migrateDriver() (migratedb.Driver, error) {
+// migrateDriver returns a migration driver and a cleanup closure that
+// releases any hijacked resources.
+//
+// For Postgres, migrate's driver holds a dedicated *sql.Conn for the
+// advisory lock that serializes concurrent migrators across processes.
+// migratepostgres.WithInstance would keep that conn checked out until
+// its own Close() runs — fine against a standalone *sql.DB, but broken
+// against a pgxpool-backed one: pool.Close() at shutdown blocks on
+// conns that are still "acquired," and the caller never gets to invoke
+// migrate.Close(). Using WithConnection with an explicit
+// conn.Close() in cleanup lets the conn go back to the pool as soon
+// as migrations finish.
+func (db *DB) migrateDriver() (migratedb.Driver, func(), error) {
 	switch db.dialect {
 	case DialectPostgres:
+		ctx := context.Background()
+		conn, err := db.DB.DB.Conn(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
 		// Pin schema_migrations to public. v0.0.3 deployments already
-		// have the table there (migrate's default with an unset
-		// search_path); pinning explicitly keeps the bookkeeping table
-		// stable as search_path flips between `blockyard` and fallback
-		// resolution.
-		return migratepostgres.WithInstance(db.DB.DB, &migratepostgres.Config{
+		// have the table there; pinning explicitly keeps the
+		// bookkeeping table stable as search_path flips between
+		// `blockyard` and fallback resolution.
+		drv, err := migratepostgres.WithConnection(ctx, conn, &migratepostgres.Config{
 			SchemaName: "public",
 		})
+		if err != nil {
+			conn.Close()
+			return nil, nil, err
+		}
+		return drv, func() { _ = conn.Close() }, nil
 	default:
-		return migratesqlite.WithInstance(db.DB.DB, &migratesqlite.Config{
+		drv, err := migratesqlite.WithInstance(db.DB.DB, &migratesqlite.Config{
 			NoTxWrap: true,
 		})
+		if err != nil {
+			return nil, nil, err
+		}
+		// SQLite's WithInstance does not hijack a conn; nothing to release.
+		return drv, func() {}, nil
 	}
 }
 
@@ -231,8 +400,14 @@ func (db *DB) bindType() int {
 }
 
 // Close closes the database and removes any temp file created for :memory:.
+// For PostgreSQL, the underlying pgxpool is closed separately —
+// stdlib.OpenDBFromPool docs explicitly note that closing the *sql.DB
+// does not close the pool.
 func (db *DB) Close() error {
 	err := db.DB.Close()
+	if db.pgPool != nil {
+		db.pgPool.Close()
+	}
 	if db.tempPath != "" {
 		os.Remove(db.tempPath)
 	}
@@ -357,9 +532,28 @@ type DeploymentListOpts struct {
 	PerPage    int
 }
 
-// Ping verifies the database connection is alive.
+// Ping verifies the database connection is alive. For PostgreSQL,
+// a ping that fails with an auth error triggers a one-shot creds
+// refresh when a CredsRotator is wired — the health poller uses this
+// to self-heal after vault rotates the static-role password out from
+// under a pool holding stale creds.
 func (db *DB) Ping(ctx context.Context) error {
 	_, err := db.ExecContext(ctx, "SELECT 1")
+	if err == nil {
+		return nil
+	}
+	if db.dialect != DialectPostgres || db.creds == nil || !db.creds.hasRotator() {
+		return err
+	}
+	if !isPostgresAuthError(err) {
+		return err
+	}
+	slog.Warn("postgres ping auth failed, refreshing credentials from vault", "error", err)
+	if rErr := db.creds.rotate(ctx); rErr != nil {
+		return fmt.Errorf("%w; rotate failed: %v", err, rErr)
+	}
+	db.pgPool.Reset()
+	_, err = db.ExecContext(ctx, "SELECT 1")
 	return err
 }
 

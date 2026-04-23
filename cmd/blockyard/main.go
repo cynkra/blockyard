@@ -176,11 +176,97 @@ func main() {
 		defer rc.Close()
 	}
 
+	// Background goroutine context — used for vault token renewal and
+	// others. Declared up here so the token-renewer goroutine (started
+	// below, before db.Open) can enlist in bgWg.
+	bgCtx, bgCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: bgCancel is called by Drainer.Finish/Shutdown, not defer
+	var bgWg sync.WaitGroup
+
+	// ── Initialize OpenBao (before db.Open so the Postgres pool can
+	// seed creds from vault when database.vault_role is set, and
+	// before OIDC for vault reference resolution). ──
+	var (
+		vaultClient       *integration.Client
+		vaultAdminToken   func() string
+		vaultTokenHealthy func() bool
+		vaultTokenCache   *integration.VaultTokenCache
+	)
+
+	if cfg.Openbao != nil {
+		tokenFilePath := cfg.Openbao.TokenFile
+
+		if cfg.Openbao.RoleID != "" {
+			// AppRole auth flow.
+			token, ttl, err := integration.InitAppRole(context.Background(), cfg.Openbao.Address, cfg.Openbao.RoleID, tokenFilePath)
+			if err != nil {
+				slog.Error("vault authentication failed", "error", err)
+				os.Exit(1)
+			}
+
+			// Start token renewal goroutine.
+			renewer := integration.NewTokenRenewer(cfg.Openbao.Address, token, tokenFilePath)
+			vaultAdminToken = renewer.Token
+			vaultTokenHealthy = renewer.Healthy
+
+			bgWg.Add(1)
+			go func() {
+				defer bgWg.Done()
+				renewer.Run(bgCtx, ttl)
+			}()
+		} else {
+			// Deprecated static admin_token.
+			vaultAdminToken = cfg.Openbao.AdminToken.MustExpose
+		}
+
+		vaultClient = integration.NewClient(cfg.Openbao.Address, vaultAdminToken)
+		vaultTokenCache = integration.NewVaultTokenCache()
+
+		// Resolve vault references in config (e.g. "vault:path#key").
+		if err := config.ResolveSecrets(context.Background(), cfg, vaultClient); err != nil {
+			slog.Error("failed to resolve vault references in config", "error", err)
+			os.Exit(1)
+		}
+
+		// Auto-generate session_secret if empty and vault is available.
+		if cfg.OIDC != nil && (cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty()) {
+			secret, err := integration.ResolveSessionSecret(context.Background(), vaultClient)
+			if err != nil {
+				slog.Error("failed to resolve session_secret", "error", err)
+				os.Exit(1)
+			}
+			s := config.NewSecret(secret)
+			cfg.Server.SessionSecret = &s
+		}
+
+		// Bootstrap verification.
+		if err := integration.Bootstrap(context.Background(), vaultClient, cfg.Openbao.JWTAuthPath, cfg.Openbao.SkipPolicyScopeCheck); err != nil {
+			slog.Error("OpenBao bootstrap failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	// Database init happens BEFORE backend construction for the same
 	// reason as Redis above: the process backend's Postgres-primary
 	// port / UID allocators (#288) need the *sqlx.DB at construction
 	// time. The Docker backend factory ignores the database argument.
-	database, err := db.Open(cfg.Database)
+	//
+	// When cfg.Database.VaultRole is set, install a rotator that reads
+	// the admin PG creds from `{mount}/static-creds/{role}` (#238).
+	// The static-role lease is owned by vault itself, not by the
+	// caller's token, so the role survives blockyard restarts — the
+	// failure mode that caused the deploy-side cascade revoke.
+	var dbOpts []db.OpenOption
+	if vaultClient != nil && cfg.Database.VaultRole != "" {
+		mount := cfg.Database.VaultMount
+		role := cfg.Database.VaultRole
+		dbOpts = append(dbOpts, db.WithCredsRotator(db.RotatorFunc(
+			func(ctx context.Context) (string, string, error) {
+				u, p, _, err := vaultClient.DatabaseStaticCredsRead(ctx, mount, role)
+				return u, p, err
+			})))
+	}
+
+	database, err := db.Open(cfg.Database, dbOpts...)
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
@@ -231,6 +317,9 @@ func main() {
 	// /metrics HTTP endpoint (served by promhttp.Handler) can scrape them.
 	srv := server.NewServerWithDefaultMetrics(cfg, be, database)
 	srv.Version = version
+	srv.VaultClient = vaultClient
+	srv.VaultTokenHealthy = vaultTokenHealthy
+	srv.VaultTokenCache = vaultTokenCache
 	// Point the server at the same ErrorLog store the slog handler has
 	// been feeding since config load, so the admin panel sees startup
 	// warnings too (e.g. preflight errors).
@@ -268,67 +357,6 @@ func main() {
 	// Set operation hooks to avoid import cycles.
 	srv.EvictWorkerFn = ops.EvictWorker
 	srv.SpawnLogCaptureFn = ops.SpawnLogCapture
-
-	// Background goroutine context — used for vault token renewal and others.
-	bgCtx, bgCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: bgCancel is called by Drainer.Finish/Shutdown, not defer
-	var bgWg sync.WaitGroup
-
-	// ── Initialize OpenBao (must happen before OIDC for vault reference resolution) ──
-
-	if cfg.Openbao != nil {
-		tokenFilePath := cfg.Openbao.TokenFile
-
-		var adminTokenFunc func() string
-
-		if cfg.Openbao.RoleID != "" {
-			// AppRole auth flow.
-			token, ttl, err := integration.InitAppRole(context.Background(), cfg.Openbao.Address, cfg.Openbao.RoleID, tokenFilePath)
-			if err != nil {
-				slog.Error("vault authentication failed", "error", err)
-				os.Exit(1)
-			}
-
-			// Start token renewal goroutine.
-			renewer := integration.NewTokenRenewer(cfg.Openbao.Address, token, tokenFilePath)
-			adminTokenFunc = renewer.Token
-			srv.VaultTokenHealthy = renewer.Healthy
-
-			bgWg.Add(1)
-			go func() {
-				defer bgWg.Done()
-				renewer.Run(bgCtx, ttl)
-			}()
-		} else {
-			// Deprecated static admin_token.
-			adminTokenFunc = cfg.Openbao.AdminToken.MustExpose
-		}
-
-		srv.VaultClient = integration.NewClient(cfg.Openbao.Address, adminTokenFunc)
-		srv.VaultTokenCache = integration.NewVaultTokenCache()
-
-		// Resolve vault references in config (e.g. "vault:path#key").
-		if err := config.ResolveSecrets(context.Background(), cfg, srv.VaultClient); err != nil {
-			slog.Error("failed to resolve vault references in config", "error", err)
-			os.Exit(1)
-		}
-
-		// Auto-generate session_secret if empty and vault is available.
-		if cfg.OIDC != nil && (cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty()) {
-			secret, err := integration.ResolveSessionSecret(context.Background(), srv.VaultClient)
-			if err != nil {
-				slog.Error("failed to resolve session_secret", "error", err)
-				os.Exit(1)
-			}
-			s := config.NewSecret(secret)
-			cfg.Server.SessionSecret = &s
-		}
-
-		// Bootstrap verification.
-		if err := integration.Bootstrap(context.Background(), srv.VaultClient, cfg.Openbao.JWTAuthPath, cfg.Openbao.SkipPolicyScopeCheck); err != nil {
-			slog.Error("OpenBao bootstrap failed", "error", err)
-			os.Exit(1)
-		}
-	}
 
 	// Board-storage provisioner — constructed only when both vault
 	// and board storage are configured. Drives per-user PG role +
