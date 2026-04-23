@@ -6,10 +6,41 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
 )
+
+// bwrapSysProcAttr returns the SysProcAttr that must be set on every
+// bwrap invocation (Spawn, build, preflight probes). It combines:
+//
+//   - Pdeathsig: SIGKILL — so bwrap (and its sandboxed descendants) die
+//     when the blockyard server exits. bwrap's own --die-with-parent
+//     only kills the R child when bwrap exits; it does NOT kill bwrap
+//     when blockyard exits.
+//   - Credential{Uid, Gid} when blockyard runs as root — the forked
+//     child calls setgid(gid), setuid(uid) before exec(bwrap), so
+//     bwrap sees caller_uid == sandbox_uid (its --uid flag) and writes
+//     an identity uid_map `uid uid 1`. The sandboxed child's kuid in
+//     init_userns is therefore `uid`, and the operator's iptables
+//     `--uid-owner $uid` / `--gid-owner $gid` rules match worker
+//     traffic.
+//
+// Non-root blockyard: Credential is not set — the kernel would reject
+// setuid to a foreign uid. bwrap still writes uid_map `uid caller_uid 1`,
+// and the sandboxed child appears as blockyard's own kuid in
+// init_userns. The iptables owner-match mechanism does not work in
+// this mode; checkBwrapHostUIDMapping surfaces this as an explicit
+// preflight error that points operators at phase 3-9's --userns +
+// newuidmap path (or the Docker backend).
+func bwrapSysProcAttr(uid, gid int) *syscall.SysProcAttr {
+	spa := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if os.Getuid() == 0 {
+		spa.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)} //nolint:gosec // G115: uid/gid are validated config
+	}
+	return spa
+}
 
 // bwrapArgs constructs the bwrap command-line arguments for a worker.
 // uid is the host UID this worker runs as (allocated from the worker
@@ -21,8 +52,9 @@ import (
 // affecting blockyard or blocking the open internet.
 //
 // For the host UID/GID to actually take effect (so iptables owner
-// match works), blockyard must run as root or bwrap must be setuid.
-// Verified at startup by checkBwrapHostUIDMapping.
+// match works), blockyard must run as root — the spawn path then
+// fork+setuid's the child to uid before exec(bwrap), producing an
+// identity uid_map. See bwrapSysProcAttr and checkBwrapHostUIDMapping.
 func bwrapArgs(_ *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gid int) []string {
 	args := []string{
 		// Namespace isolation

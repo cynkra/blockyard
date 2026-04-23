@@ -190,37 +190,59 @@ func checkUserNamespacesAt(path string) preflight.Result {
 	}
 }
 
-// checkBwrapHostUIDMapping verifies that bwrap's --uid/--gid flags
-// produce a host-visible UID/GID, not just a namespace-local one.
-// This is load-bearing for decision #5: the operator's iptables
-// owner-match rules only fire if workers actually appear as the
-// configured worker UID/GID from the init namespace's perspective.
+// checkBwrapHostUIDMapping verifies that the spawn pipeline produces a
+// sandboxed child whose kuid/kgid in init_userns equal the worker's
+// host UID/GID — the precondition for iptables `--uid-owner $uid` /
+// `--gid-owner $gid` rules to match worker traffic (decision #5).
 //
-// The check works by spawning a bwrap child under a probe UID/GID
-// distinct from the caller's UID/GID, then reading the host-side
-// /proc/<child_pid>/status from the parent process. If the reported
-// Uid/Gid lines do not match what we asked for, bwrap is running in
-// unprivileged-userns mode and the mapping is local-only.
+// The mechanism is in bwrapSysProcAttr: when blockyard runs as root,
+// the forked child calls setgid(gid)+setuid(uid) before exec(bwrap),
+// so bwrap sees caller_uid == sandbox_uid and writes an identity
+// uid_map (`uid uid 1`). The sandboxed child's kuid in init_userns is
+// therefore `uid`. This check spawns a bwrap probe through the same
+// helper and reads /proc/<bwrap-pid>/status to confirm — with an
+// identity uid_map, the bwrap process itself is already at (uid, gid),
+// and the check can read the parent pid directly without chasing the
+// sandboxed grandchild through --info-fd.
 //
-// Remediation: run blockyard as root (typical containerized mode) or
-// install bwrap setuid on the host (`chmod u+s /usr/bin/bwrap`, or
-// equivalent via setcap). On Debian 12+/Ubuntu 24.04+ bwrap is no
-// longer shipped setuid by default.
+// When blockyard is non-root, setuid(W) is rejected by the kernel, so
+// bwrap's uid_map still maps sandbox_uid to blockyard's own uid; the
+// sandboxed child appears as blockyard in init_userns and operator
+// iptables owner-match rules do not fire. The check fails explicitly
+// and points operators at the remediation paths: run as root
+// (containerized deployment), use the Docker backend, or wait for
+// phase 3-9's --userns + newuidmap path which will give native
+// non-root deployments identity uid_maps without needing root.
 func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 	const name = "bwrap_host_uid_mapping"
 
-	// Probe UID/GID — must be distinct from any UID the caller might
-	// already have. The worker UID range start is a safe choice: it's
-	// outside the usual 0/1000 system range and matches the real
+	if os.Getuid() != 0 {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityError,
+			Message: "worker egress isolation requires blockyard to run as root " +
+				"(typical containerized deployment); non-root blockyard cannot setuid " +
+				"the bwrap child, so the uid_map bwrap writes maps the sandbox UID to " +
+				"blockyard's own host UID and operator iptables --uid-owner/--gid-owner " +
+				"rules do not match worker traffic. Remediations: run blockyard as root, " +
+				"use the Docker backend for per-worker network namespaces, or wait for " +
+				"phase 3-9 which adds a --userns + newuidmap path for native non-root " +
+				"deployments. Set server.skip_preflight=true to run anyway with no egress " +
+				"isolation.",
+			Category: "process",
+		}
+	}
+
+	// Probe UID/GID — must be distinct from blockyard's own (0). The
+	// worker UID range start is a safe choice: it matches the real
 	// worker mapping we care about.
 	probeUID := cfg.WorkerUIDStart
 	probeGID := cfg.WorkerGID
-	if probeUID == os.Getuid() {
-		// Caller already runs as WorkerUIDStart — pick any other value.
-		probeUID = cfg.WorkerUIDStart + 1
-	}
 
-	// Long-enough sleep that we have time to read /proc before exit.
+	// The bwrap monitor is itself (uid, gid) after our fork+setuid, so
+	// we can poll /proc/<bwrap-pid>/status directly — no need to chase
+	// the sandboxed grandchild through --info-fd. A long-enough sleep
+	// keeps the monitor alive past the read.
 	args := []string{
 		"--ro-bind", "/", "/",
 		"--tmpfs", "/tmp",
@@ -231,9 +253,10 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 		"--gid", strconv.Itoa(probeGID),
 		"--die-with-parent", "--new-session",
 		"--cap-drop", "ALL",
-		"--", "/bin/sleep", "2",
+		"--", "/bin/sleep", "3",
 	}
 	cmd := exec.Command(cfg.BwrapPath, args...) //nolint:gosec // G204
+	cmd.SysProcAttr = bwrapSysProcAttr(probeUID, probeGID)
 	if err := cmd.Start(); err != nil {
 		return preflight.Result{
 			Name:     name,
@@ -247,22 +270,12 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 		_ = cmd.Wait()
 	}()
 
-	// Poll the bwrap child's /proc/<pid>/status — the sandboxed sleep
-	// is a grandchild, but what matters for iptables is what the
-	// worker processes look like from the host. bwrap and its
-	// descendants all share the same host credentials set, so reading
-	// the bwrap pid is sufficient.
-	//
-	// The first successful read may catch bwrap before it has written
-	// uid_map/gid_map (the real UID still shows the caller's UID).
-	// bwrap writes uid_map and gid_map as two separate syscalls, so
-	// there is also a window where UID has been remapped but GID has
-	// not. Keep polling while EITHER UID or GID still reads as the
-	// caller's — namespace setup is still in progress. Fixes #233.
-	callerUID := os.Getuid()
-	callerGID := os.Getgid()
+	// Poll until the bwrap monitor's Uid/Gid settle at (probeUID, probeGID).
+	// The kernel applies the Credential via setgid+setuid before exec(bwrap),
+	// so this is usually already true on the first read — but we poll in
+	// case the kernel hasn't scheduled the exec'd process yet.
 	var uidLine, gidLine string
-	deadline := time.Now().Add(1 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
 		if err == nil {
@@ -278,15 +291,11 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 			if curUID != "" && curGID != "" {
 				hostUID, _ := parseStatusUID(curUID)
 				hostGID, _ := parseStatusUID(curGID)
-				if hostUID != callerUID && hostGID != callerGID {
-					uidLine = curUID
-					gidLine = curGID
-					break
-				}
-				// Still showing caller's UID or GID — namespace
-				// setup in progress, keep polling.
 				uidLine = curUID
 				gidLine = curGID
+				if hostUID == probeUID && hostGID == probeGID {
+					break
+				}
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -300,11 +309,6 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 		}
 	}
 
-	// /proc/<pid>/status Uid/Gid lines have the form:
-	//   Uid:\t<real>\t<effective>\t<saved>\t<fs>
-	// We check the real UID — that's what iptables --uid-owner matches
-	// against (filp->f_cred->fsuid == the fsuid, same value on a vanilla
-	// fork/exec).
 	realHostUID, err := parseStatusUID(uidLine)
 	if err != nil {
 		return preflight.Result{
@@ -329,13 +333,11 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 			Name:     name,
 			Severity: preflight.SeverityError,
 			Message: fmt.Sprintf(
-				"bwrap --uid/--gid do not affect the host view of the child: "+
-					"requested uid=%d gid=%d, host /proc sees uid=%d gid=%d. "+
-					"The operator's iptables --uid-owner/--gid-owner rules will not match "+
-					"worker traffic in this configuration. Either run blockyard as root "+
-					"(typical containerized deployment) or install bwrap setuid on the host "+
-					"(`sudo chmod u+s %s`). See backends.md for details.",
-				probeUID, probeGID, realHostUID, realHostGID, cfg.BwrapPath,
+				"bwrap host-side identity mismatch: requested uid=%d gid=%d, "+
+					"host /proc sees uid=%d gid=%d. This should not happen when "+
+					"blockyard runs as root — the spawn pipeline should fork+setuid "+
+					"before exec(bwrap). Investigate bwrapSysProcAttr wiring.",
+				probeUID, probeGID, realHostUID, realHostGID,
 			),
 			Category: "process",
 		}
@@ -530,6 +532,7 @@ func probeReachable(cfg *config.ProcessConfig, uid, gid int, target string) bool
 		self, "probe", "--tcp", target, "--timeout", "2s",
 	}
 	cmd := exec.Command(cfg.BwrapPath, args...) //nolint:gosec // G204
+	cmd.SysProcAttr = bwrapSysProcAttr(uid, gid)
 	err = cmd.Run()
 	return err == nil // exit 0 = connect succeeded
 }
