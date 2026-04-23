@@ -255,8 +255,17 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 		"--cap-drop", "ALL",
 		"--", "/bin/sleep", "3",
 	}
-	cmd := exec.Command(cfg.BwrapPath, args...) //nolint:gosec // G204
-	cmd.SysProcAttr = bwrapSysProcAttr(probeUID, probeGID)
+	prog, argv, err := bwrapExecSpec(cfg.BwrapPath, probeUID, probeGID, args)
+	if err != nil {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityError,
+			Message:  fmt.Sprintf("bwrap-exec shim unavailable: %v", err),
+			Category: "process",
+		}
+	}
+	cmd := exec.Command(prog, argv...) //nolint:gosec // G204
+	cmd.SysProcAttr = bwrapSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return preflight.Result{
 			Name:     name,
@@ -271,9 +280,10 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 	}()
 
 	// Poll until the bwrap monitor's Uid/Gid settle at (probeUID, probeGID).
-	// The kernel applies the Credential via setgid+setuid before exec(bwrap),
-	// so this is usually already true on the first read — but we poll in
-	// case the kernel hasn't scheduled the exec'd process yet.
+	// The bwrap-exec shim setuid+setgid's into (probeUID, probeGID)
+	// before exec(bwrap), so this is usually already true on the first
+	// read — but we poll in case the kernel hasn't scheduled the
+	// exec'd process yet.
 	var uidLine, gidLine string
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -531,8 +541,11 @@ func probeReachable(cfg *config.ProcessConfig, uid, gid int, target string) bool
 		"--",
 		self, "probe", "--tcp", target, "--timeout", "2s",
 	}
-	cmd := exec.Command(cfg.BwrapPath, args...) //nolint:gosec // G204
-	cmd.SysProcAttr = bwrapSysProcAttr(uid, gid)
-	err = cmd.Run()
-	return err == nil // exit 0 = connect succeeded
+	prog, argv, err := bwrapExecSpec(cfg.BwrapPath, uid, gid, args)
+	if err != nil {
+		return false
+	}
+	cmd := exec.Command(prog, argv...) //nolint:gosec // G204
+	cmd.SysProcAttr = bwrapSysProcAttr()
+	return cmd.Run() == nil // exit 0 = connect succeeded
 }

@@ -13,33 +13,55 @@ import (
 )
 
 // bwrapSysProcAttr returns the SysProcAttr that must be set on every
-// bwrap invocation (Spawn, build, preflight probes). It combines:
+// bwrap invocation (Spawn, build, preflight probes). The only field
+// set is Pdeathsig — the setuid into the worker (uid, gid) happens in
+// the `blockyard bwrap-exec` shim reached via bwrapExecSpec, not via
+// Go's SysProcAttr.Credential. Go's fork+exec does
+// setgroups+setgid+setuid but does not restore dumpable afterward, so
+// the child is non-dumpable; /proc/self/uid_map is then owned by
+// root (not the worker uid), and bwrap's unprivileged map write
+// fails with EPERM ("bwrap: setting up uid map: Permission denied").
+// The shim does the setuid + prctl(PR_SET_DUMPABLE, 1) sequence
+// itself, so bwrap runs dumpable and the identity uid_map write
+// succeeds.
 //
-//   - Pdeathsig: SIGKILL — so bwrap (and its sandboxed descendants) die
-//     when the blockyard server exits. bwrap's own --die-with-parent
-//     only kills the R child when bwrap exits; it does NOT kill bwrap
-//     when blockyard exits.
-//   - Credential{Uid, Gid} when blockyard runs as root — the forked
-//     child calls setgid(gid), setuid(uid) before exec(bwrap), so
-//     bwrap sees caller_uid == sandbox_uid (its --uid flag) and writes
-//     an identity uid_map `uid uid 1`. The sandboxed child's kuid in
-//     init_userns is therefore `uid`, and the operator's iptables
-//     `--uid-owner $uid` / `--gid-owner $gid` rules match worker
-//     traffic.
+// Pdeathsig: SIGKILL so bwrap (and its sandboxed descendants) die
+// when the blockyard server exits. bwrap's own --die-with-parent only
+// kills the R child when bwrap exits; it does NOT kill bwrap when
+// blockyard exits.
+func bwrapSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+}
+
+// bwrapExecSpec returns the program and argv to invoke bwrap with the
+// given worker (uid, gid). When blockyard runs as root the command is
+// routed through the `blockyard bwrap-exec` shim (same binary) so the
+// forked child drops into (uid, gid), restores dumpable via
+// prctl(PR_SET_DUMPABLE, 1), and execs bwrap — giving bwrap
+// `caller_uid == sandbox_uid` and therefore the identity uid_map
+// `uid uid 1` that makes `iptables --uid-owner $uid` rules match
+// worker traffic.
 //
-// Non-root blockyard: Credential is not set — the kernel would reject
-// setuid to a foreign uid. bwrap still writes uid_map `uid caller_uid 1`,
-// and the sandboxed child appears as blockyard's own kuid in
-// init_userns. The iptables owner-match mechanism does not work in
-// this mode; checkBwrapHostUIDMapping surfaces this as an explicit
-// preflight error that points operators at phase 3-9's --userns +
-// newuidmap path (or the Docker backend).
-func bwrapSysProcAttr(uid, gid int) *syscall.SysProcAttr {
-	spa := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-	if os.Getuid() == 0 {
-		spa.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)} //nolint:gosec // G115: uid/gid are validated config
+// Non-root blockyard: bwrap runs directly. Setuid to a foreign UID
+// fails without CAP_SETUID, and checkBwrapHostUIDMapping has already
+// flagged this deployment as unsupported for egress isolation until
+// phase 3-9 ships --userns + newuidmap.
+func bwrapExecSpec(bwrapPath string, uid, gid int, bwrapArgs []string) (prog string, argv []string, err error) {
+	if os.Getuid() != 0 {
+		return bwrapPath, bwrapArgs, nil
 	}
-	return spa
+	self, err := os.Executable()
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve blockyard binary for bwrap-exec shim: %w", err)
+	}
+	argv = make([]string, 0, 6+len(bwrapArgs))
+	argv = append(argv, "bwrap-exec",
+		"--uid", strconv.Itoa(uid),
+		"--gid", strconv.Itoa(gid),
+		"--", bwrapPath,
+	)
+	argv = append(argv, bwrapArgs...)
+	return self, argv, nil
 }
 
 // bwrapArgs constructs the bwrap command-line arguments for a worker.
@@ -220,19 +242,34 @@ func applySeccomp(cmd *exec.Cmd, profilePath string) ([]string, func(), error) {
 }
 
 // spliceBeforeSeparator inserts extra into cmd.Args just before the
-// "--" separator. cmd.Args[0] is the program name (set by exec.Command).
+// bwrap-level "--" separator (the one between bwrap flags and the
+// inner command bwrap executes inside the sandbox). cmd.Args[0] is
+// the program name set by exec.Command.
+//
+// We splice before the LAST "--" in cmd.Args: when blockyard routes
+// bwrap through the bwrap-exec shim there are two "--" tokens (the
+// shim's, separating shim flags from the bwrap invocation, and
+// bwrap's own, separating bwrap flags from the inner command).
+// seccomp args are bwrap flags, so they must go before bwrap's,
+// which is always the last "--" in the combined argv as long as the
+// inner command does not contain a literal "--" of its own.
+//
 // Falls back to appending if no separator is found, which shouldn't
 // happen with well-formed bwrap args.
 func spliceBeforeSeparator(cmd *exec.Cmd, extra []string) {
+	lastSep := -1
 	for i, arg := range cmd.Args {
 		if arg == "--" {
-			result := make([]string, 0, len(cmd.Args)+len(extra))
-			result = append(result, cmd.Args[:i]...)
-			result = append(result, extra...)
-			result = append(result, cmd.Args[i:]...)
-			cmd.Args = result
-			return
+			lastSep = i
 		}
 	}
-	cmd.Args = append(cmd.Args, extra...)
+	if lastSep < 0 {
+		cmd.Args = append(cmd.Args, extra...)
+		return
+	}
+	result := make([]string, 0, len(cmd.Args)+len(extra))
+	result = append(result, cmd.Args[:lastSep]...)
+	result = append(result, extra...)
+	result = append(result, cmd.Args[lastSep:]...)
+	cmd.Args = result
 }

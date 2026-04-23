@@ -77,6 +77,23 @@ func main() {
 		os.Exit(0)
 	}
 
+	// `blockyard bwrap-exec --uid W --gid G -- <bwrap> <args>` is the
+	// shim the process backend invokes instead of calling bwrap
+	// directly. It setuid+setgid's into the worker's (uid, gid),
+	// restores PR_SET_DUMPABLE so bwrap can write /proc/self/uid_map,
+	// then exec(bwrap). See cmd/blockyard/bwrapexec.go for the
+	// dumpable rationale.
+	if len(os.Args) > 1 && os.Args[1] == "bwrap-exec" {
+		if err := runBwrapExec(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		// runBwrapExec exec's into bwrap on success; reaching here
+		// means syscall.Exec returned without executing, which is
+		// always an error.
+		os.Exit(1)
+	}
+
 	configPath := flag.String("config", "blockyard.toml", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
