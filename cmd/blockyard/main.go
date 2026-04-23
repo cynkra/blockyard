@@ -295,6 +295,7 @@ func main() {
 	// "recover my own crashed state" need different identifiers.
 	hostname, _ := os.Hostname()
 	serverID := hostname + "-" + randomNonceHex(8)
+	srv.ServerID = serverID
 
 	// Shared-state backend selection — see #287, #286, parent #262.
 	// Postgres is the source of truth; Redis is an optional read-through

@@ -170,6 +170,39 @@ func TestPGOnly_SessionExpirySweep(t *testing.T) {
 	}
 }
 
+// TestPGOnly_MultipodWorkerIsolation pins the multi-pod safety that
+// #262 enables: two blockyard processes sharing a Postgres see the full
+// blockyard_workers table, but each must only touch its own workers.
+// ops.StartupCleanup / pollOnce / GracefulShutdown all scope to
+// Workers.WorkersForServer(ServerID) for exactly this reason — without
+// the filter, pod B's boot would wipe pod A's workers (every Workers.All()
+// entry would look stale against pod B's local backend).
+func TestPGOnly_MultipodWorkerIsolation(t *testing.T) {
+	db := testPGDB(t)
+	podA := NewPostgresWorkerMap(db, "server-A")
+	podB := NewPostgresWorkerMap(db, "server-B")
+
+	podA.Set("wa1", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+	podA.Set("wa2", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+	podB.Set("wb1", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+
+	gotA := podA.WorkersForServer("server-A")
+	if len(gotA) != 2 {
+		t.Errorf("podA sees %v, want its own two workers", gotA)
+	}
+	gotB := podB.WorkersForServer("server-B")
+	if len(gotB) != 1 || gotB[0] != "wb1" {
+		t.Errorf("podB sees %v, want [wb1]", gotB)
+	}
+
+	// Global view confirms the shared table holds all three — the
+	// filter is what makes scoped reconcile safe, not isolation of
+	// storage.
+	if n := podA.Count(); n != 3 {
+		t.Errorf("global Count = %d, want 3 (shared table)", n)
+	}
+}
+
 // TestPGOnly_RerouteAfterWorkerReplacement mirrors a rolling update:
 // sessions on w1 get rerouted onto w2, and the session store reports
 // the new worker for subsequent lookups. Runs end-to-end against

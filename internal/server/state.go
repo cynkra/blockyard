@@ -43,6 +43,13 @@ type Server struct {
 	ErrorLog *errorlog.Store
 	Metrics  *telemetry.Metrics
 
+	// ServerID uniquely identifies this process among peers sharing the
+	// same Postgres / Redis (see #262). Health-poll, startup-reconcile,
+	// and graceful-shutdown use it via Workers.WorkersForServer so they
+	// only act on workers this process owns — otherwise a sibling pod's
+	// boot would wipe this pod's workers from the shared table.
+	ServerID string
+
 	// Auth fields — nil when [oidc] is not configured (v0 compat).
 	OIDCClient   *auth.OIDCClient
 	SigningKey    *auth.SigningKey
