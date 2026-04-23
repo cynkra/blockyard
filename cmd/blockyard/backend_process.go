@@ -17,4 +17,5 @@ func init() {
 	backendFactories["process"] = func(_ context.Context, cfg *config.Config, rc *redisstate.Client, db *sqlx.DB, _ string) (backend.Backend, error) {
 		return process.New(cfg, rc, db)
 	}
+	runBwrapExecFn = process.RunBwrapExec
 }
