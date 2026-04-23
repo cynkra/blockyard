@@ -26,6 +26,19 @@ func workerMapImplementations(t *testing.T) map[string]workerMapFactory {
 			client := redisstate.TestClient(t, mr.Addr())
 			return NewRedisWorkerMap(client, "test-host")
 		},
+		"Postgres": func(t *testing.T) WorkerMap {
+			t.Helper()
+			return NewPostgresWorkerMap(testPGDB(t), "test-host")
+		},
+		"Layered": func(t *testing.T) WorkerMap {
+			t.Helper()
+			// Matches production wiring: Postgres primary + Redis cache.
+			mr := miniredis.RunT(t)
+			client := redisstate.TestClient(t, mr.Addr())
+			cache := NewRedisWorkerMap(client, "test-host")
+			primary := NewPostgresWorkerMap(testPGDB(t), "test-host")
+			return NewLayeredWorkerMap(primary, cache)
+		},
 	}
 }
 
