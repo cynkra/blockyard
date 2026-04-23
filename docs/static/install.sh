@@ -19,7 +19,7 @@
 #                         (Linux-only; server is typically run as a container)
 #   --help                Show this message
 #
-# Environment overrides (take precedence over flags):
+# Environment overrides (seed defaults; flags take precedence):
 #   BLOCKYARD_VERSION       Same as --version
 #   BLOCKYARD_INSTALL_DIR   Same as --install-dir
 #   BLOCKYARD_BINARY        Binary to install: `by` or `blockyard` (default: by)
@@ -37,7 +37,7 @@ warn() { printf '%s\n' "warning: $*" >&2; }
 die()  { printf '%s\n' "error: $*" >&2; exit 1; }
 
 usage() {
-  # Print the leading comment block (lines starting with `#`).
+  # Print the hard-coded usage/help text.
   cat <<'EOF'
 Blockyard installer.
 
@@ -78,7 +78,7 @@ detect_os() {
     Linux)   echo linux ;;
     Darwin)  echo darwin ;;
     MINGW*|MSYS*|CYGWIN*)
-      die "Windows is not supported by this script. Download by-windows-amd64.exe from ${BASE_URL}/latest."
+      die "Windows is not supported by this script. Download by-windows-amd64.exe from ${BASE_URL}/latest/download/by-windows-amd64.exe."
       ;;
     *) die "unsupported operating system: $os" ;;
   esac

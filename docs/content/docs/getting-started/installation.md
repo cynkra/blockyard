@@ -124,9 +124,9 @@ curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- --server
 ```
 
 Environment variables `BLOCKYARD_VERSION`, `BLOCKYARD_INSTALL_DIR`, and
-`BLOCKYARD_BINARY` are honoured as alternatives to the flags. Piping to
-`sh` is optional — download the script first to inspect it if you
-prefer.
+`BLOCKYARD_BINARY` seed the defaults; passing the matching flag still
+wins. Piping to `sh` is optional — download the script first to inspect
+it if you prefer.
 
 ### Download a release binary
 
