@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -41,12 +42,18 @@ func TestDocsServesHTML(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	// The stub at internal/docs/dist/index.html ships when Hugo
-	// hasn't run. Skip locally so `go test ./...` stays green without
-	// out-of-band setup; CI's unit job builds docs first, so a real
-	// regression still fires the bk-hero check below.
+	// Stub at internal/docs/dist/index.html indicates the Hugo build
+	// step was skipped. In CI this is a contract violation — the unit
+	// job's Hugo prep must run so TestDocsServesHTML exercises the
+	// real embed (the gap that let broken docs reach prod before).
+	// Locally, skip so `go test ./...` stays green without requiring
+	// every developer to run Hugo first.
 	if strings.Contains(body, "Documentation was not included in this build") {
-		t.Skip("docs stub served — run `hugo --minify --baseURL /docs/` from docs/ and copy public/ to internal/docs/dist/ to exercise this test (CI unit job does this automatically)")
+		const msg = "docs stub served — run `hugo --minify --baseURL /docs/` from docs/ and copy public/ to internal/docs/dist/ to exercise this test (CI unit job does this automatically)"
+		if os.Getenv("CI") != "" {
+			t.Fatal(msg)
+		}
+		t.Skip(msg)
 	}
 	// Marker from docs/layouts/index.html; only present when Hugo
 	// produced real output with the hugo-book theme submodule. Also
