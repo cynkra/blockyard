@@ -1244,10 +1244,14 @@ func TestEnvVarOverrideTelemetryOTLPEndpoint(t *testing.T) {
 	}
 }
 
-// --- Board storage config tests ---
+// --- Database vault / board-storage config tests ---
 
-// boardStorageTOML returns a valid config with board_storage, postgres, oidc, and openbao.
-func boardStorageTOML(t *testing.T) string {
+// databaseVaultTOML returns a config with the database section populated
+// per overrides. `overrides` is appended verbatim to [database]; other
+// sections (docker, storage, oidc, openbao) follow the happy-path shape
+// so validation fails only on the specific case under test.
+func databaseVaultTOML(t *testing.T, overrides string) string {
+	t.Helper()
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
 	return fmt.Sprintf(`
@@ -1263,6 +1267,7 @@ bundle_server_path = %q
 [database]
 driver = "postgres"
 url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+%s
 
 [oidc]
 issuer_url = "https://idp.example.com"
@@ -1272,35 +1277,65 @@ client_secret = "my-secret"
 [openbao]
 address = "https://bao.example.com"
 role_id = "blockyard-server"
-
-[board_storage]
-postgrest_url = "http://postgrest:3000"
-`, bundlePath)
+`, bundlePath, overrides)
 }
 
-func TestParseBoardStorageConfig(t *testing.T) {
-	cfg := loadFromString(t, boardStorageTOML(t))
-	if cfg.BoardStorage == nil {
-		t.Fatal("expected BoardStorage config to be parsed")
-	}
-	if cfg.BoardStorage.PostgrestURL != "http://postgrest:3000" {
-		t.Errorf("postgrest_url = %q", cfg.BoardStorage.PostgrestURL)
-	}
-}
-
-func TestParseConfigWithoutBoardStorage(t *testing.T) {
+func TestDatabaseVaultMountDefault(t *testing.T) {
 	cfg := loadFromString(t, minimalTOML)
-	if cfg.BoardStorage != nil {
-		t.Error("expected BoardStorage config to be nil when section is absent")
+	if cfg.Database.VaultMount != "database" {
+		t.Errorf("vault_mount default = %q, want %q", cfg.Database.VaultMount, "database")
 	}
 }
 
-func TestBoardStorageAutoConstructFromEnvVars(t *testing.T) {
+func TestDatabaseBoardStorageParsed(t *testing.T) {
+	cfg := loadFromString(t, databaseVaultTOML(t, `board_storage = true`))
+	if !cfg.Database.BoardStorage {
+		t.Error("expected database.board_storage = true")
+	}
+	if cfg.Database.VaultMount != "database" {
+		t.Errorf("vault_mount = %q, want default %q", cfg.Database.VaultMount, "database")
+	}
+}
+
+func TestDatabaseVaultRoleParsed(t *testing.T) {
+	cfg := loadFromString(t, databaseVaultTOML(t,
+		`vault_mount = "dbx"`+"\n"+
+			`vault_role = "blockyard_app"`))
+	if cfg.Database.VaultRole != "blockyard_app" {
+		t.Errorf("vault_role = %q", cfg.Database.VaultRole)
+	}
+	if cfg.Database.VaultMount != "dbx" {
+		t.Errorf("vault_mount = %q", cfg.Database.VaultMount)
+	}
+}
+
+// expectLoadError writes toml to a temp file, calls Load, and asserts
+// the returned error contains substr. Keeps the six validation cases
+// below to one-liners.
+func expectLoadError(t *testing.T, toml, substr string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	if err := os.WriteFile(path, []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), substr) {
+		t.Errorf("expected error containing %q, got: %v", substr, err)
+	}
+}
+
+// noOpenbaoTOML is databaseVaultTOML without the [openbao] section.
+// session_secret is set explicitly because the "oidc without openbao"
+// validation fires before the database-specific checks we want to hit.
+func noOpenbaoTOML(t *testing.T, overrides string) string {
+	t.Helper()
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
-	toml := fmt.Sprintf(`
+	return fmt.Sprintf(`
 [server]
-external_url = "https://example.com"
+external_url   = "https://example.com"
+session_secret = "test-session-secret"
 
 [docker]
 image = "ghcr.io/rocker-org/r-ver:latest"
@@ -1310,33 +1345,25 @@ bundle_server_path = %q
 
 [database]
 driver = "postgres"
-url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+url    = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
+%s
 
 [oidc]
-issuer_url = "https://idp.example.com"
-client_id = "my-client"
+issuer_url    = "https://idp.example.com"
+client_id     = "my-client"
 client_secret = "my-secret"
-
-[openbao]
-address = "https://bao.example.com"
-role_id = "blockyard-server"
-`, bundlePath)
-
-	t.Setenv("BLOCKYARD_BOARD_STORAGE_POSTGREST_URL", "http://postgrest:3000")
-	cfg := loadFromString(t, toml)
-	if cfg.BoardStorage == nil {
-		t.Fatal("expected BoardStorage section to be auto-constructed from env vars")
-	}
-	if cfg.BoardStorage.PostgrestURL != "http://postgrest:3000" {
-		t.Errorf("postgrest_url = %q, want http://postgrest:3000", cfg.BoardStorage.PostgrestURL)
-	}
+`, bundlePath, overrides)
 }
 
-func TestValidationRejectsBoardStorageWithoutPostgres(t *testing.T) {
+// sqliteVaultTOML is a non-postgres config with the overrides injected
+// under [database]. [openbao] is present so the check under test fires
+// on driver, not on openbao.
+func sqliteVaultTOML(t *testing.T, overrides string) string {
+	t.Helper()
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
-	toml := fmt.Sprintf(`
+	return fmt.Sprintf(`
 [server]
 external_url = "https://example.com"
 
@@ -1348,6 +1375,7 @@ bundle_server_path = %q
 
 [database]
 path = %q
+%s
 
 [oidc]
 issuer_url = "https://idp.example.com"
@@ -1357,84 +1385,93 @@ client_secret = "my-secret"
 [openbao]
 address = "https://bao.example.com"
 role_id = "blockyard-server"
+`, bundlePath, dbPath, overrides)
+}
 
-[board_storage]
-postgrest_url = "http://postgrest:3000"
-`, bundlePath, dbPath)
-	cfgDir := t.TempDir()
-	path := filepath.Join(cfgDir, "blockyard.toml")
-	os.WriteFile(path, []byte(toml), 0o644)
-	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "board_storage requires database.driver") {
-		t.Errorf("expected board_storage requires postgres error, got: %v", err)
-	}
+func TestValidationRejectsVaultRoleWithoutOpenbao(t *testing.T) {
+	expectLoadError(t,
+		noOpenbaoTOML(t, `vault_role = "blockyard_app"`),
+		"database.vault_role requires [openbao]")
+}
+
+func TestValidationRejectsVaultRoleWithoutPostgres(t *testing.T) {
+	expectLoadError(t,
+		sqliteVaultTOML(t, `vault_role = "blockyard_app"`),
+		`database.vault_role requires database.driver = "postgres"`)
 }
 
 func TestValidationRejectsBoardStorageWithoutOpenbao(t *testing.T) {
+	expectLoadError(t,
+		noOpenbaoTOML(t, `board_storage = true`),
+		"database.board_storage requires [openbao]")
+}
+
+func TestValidationRejectsBoardStorageWithoutPostgres(t *testing.T) {
+	expectLoadError(t,
+		sqliteVaultTOML(t, `board_storage = true`),
+		`database.board_storage requires database.driver = "postgres"`)
+}
+
+// validDatabaseConfigForVault returns a Config that passes validate()
+// except for whatever the caller modifies afterwards — specifically
+// used to exercise validation paths the Load() pipeline cannot reach
+// because applyDefaults overwrites an empty vault_mount.
+func validDatabaseConfigForVault(t *testing.T) *Config {
+	t.Helper()
 	dir := t.TempDir()
-	bundlePath := filepath.Join(dir, "bundles")
-	toml := fmt.Sprintf(`
-[server]
-
-[docker]
-image = "ghcr.io/rocker-org/r-ver:latest"
-
-[storage]
-bundle_server_path = %q
-
-[database]
-driver = "postgres"
-url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
-
-[board_storage]
-postgrest_url = "http://postgrest:3000"
-`, bundlePath)
-	cfgDir := t.TempDir()
-	path := filepath.Join(cfgDir, "blockyard.toml")
-	os.WriteFile(path, []byte(toml), 0o644)
-	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "board_storage requires [openbao]") {
-		t.Errorf("expected board_storage requires openbao error, got: %v", err)
+	return &Config{
+		Server: ServerConfig{
+			Backend:       "docker",
+			Bind:          ":8080",
+			ExternalURL:   "https://example.com",
+			SessionSecret: secretPtr("test"),
+		},
+		Docker:  DockerConfig{Image: "ghcr.io/rocker-org/r-ver:latest"},
+		Storage: StorageConfig{BundleServerPath: filepath.Join(dir, "bundles")},
+		Database: DatabaseConfig{
+			Driver:     "postgres",
+			URL:        "postgres://u:p@h/d",
+			VaultMount: "database",
+		},
+		OIDC: &OidcConfig{
+			IssuerURL:    "https://idp.example.com",
+			ClientID:     "c",
+			ClientSecret: NewSecret("s"),
+			DefaultRole:  "viewer",
+		},
+		Openbao: &OpenbaoConfig{
+			Address: "https://bao.example.com",
+			RoleID:  "blockyard-server",
+		},
 	}
 }
 
-func TestValidationRejectsBoardStorageEmptyURL(t *testing.T) {
-	dir := t.TempDir()
-	bundlePath := filepath.Join(dir, "bundles")
-	toml := fmt.Sprintf(`
-[server]
-external_url = "https://example.com"
+func secretPtr(s string) *Secret { v := NewSecret(s); return &v }
 
-[docker]
-image = "ghcr.io/rocker-org/r-ver:latest"
-
-[storage]
-bundle_server_path = %q
-
-[database]
-driver = "postgres"
-url = "postgres://blockyard:blockyard@localhost:5432/blockyard?sslmode=disable"
-
-[oidc]
-issuer_url = "https://idp.example.com"
-client_id = "my-client"
-client_secret = "my-secret"
-
-[openbao]
-address = "https://bao.example.com"
-role_id = "blockyard-server"
-
-[board_storage]
-postgrest_url = ""
-`, bundlePath)
-	cfgDir := t.TempDir()
-	path := filepath.Join(cfgDir, "blockyard.toml")
-	os.WriteFile(path, []byte(toml), 0o644)
-	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "board_storage.postgrest_url must not be empty") {
-		t.Errorf("expected empty postgrest_url error, got: %v", err)
-	}
+// TestValidateEmptyVaultMount exercises the two empty-vault_mount cases
+// directly against validate() because applyDefaults always rewrites an
+// empty vault_mount to "database" when going through Load().
+func TestValidateEmptyVaultMount(t *testing.T) {
+	t.Run("vault_role", func(t *testing.T) {
+		cfg := validDatabaseConfigForVault(t)
+		cfg.Database.VaultRole = "blockyard_app"
+		cfg.Database.VaultMount = ""
+		err := validate(cfg)
+		if err == nil || !strings.Contains(err.Error(), "database.vault_role requires database.vault_mount") {
+			t.Errorf("want vault_role-requires-vault_mount, got: %v", err)
+		}
+	})
+	t.Run("board_storage", func(t *testing.T) {
+		cfg := validDatabaseConfigForVault(t)
+		cfg.Database.BoardStorage = true
+		cfg.Database.VaultMount = ""
+		err := validate(cfg)
+		if err == nil || !strings.Contains(err.Error(), "database.board_storage requires database.vault_mount") {
+			t.Errorf("want board_storage-requires-vault_mount, got: %v", err)
+		}
+	})
 }
+
 
 func TestParseLogLevel(t *testing.T) {
 	tests := []struct {

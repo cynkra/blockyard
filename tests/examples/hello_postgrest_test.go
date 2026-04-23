@@ -12,6 +12,14 @@ import (
 )
 
 func TestHelloPostgrest(t *testing.T) {
+	// Skipped per #283 ACs: the board-storage control plane moved
+	// off PostgREST, so this example's runtime is broken end-to-end
+	// (migration 007 drops public.boards, PostgREST returns 404 for
+	// /boards). The example itself is replaced by hello-postgres
+	// (direct PG + vault creds) in #285; this test is either
+	// rewritten or removed alongside it.
+	t.Skip("hello-postgrest example is broken after #283; rewritten in #285")
+
 	composeUp(t, "../../examples/hello-postgrest/docker-compose.yml")
 
 	baseURL := "http://localhost:8080"

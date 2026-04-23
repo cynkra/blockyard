@@ -112,65 +112,117 @@ runtime query path.
 Board identity and access control are separated from versioned data.
 The `boards` table holds metadata and sharing semantics; the
 `board_versions` table holds immutable snapshots. This ensures ACL
-settings and tags are per-board, not per-version — sharing a board
-means sharing all its versions.
+settings, tags, and board-level metadata are per-board, not
+per-version — sharing a board means sharing all its versions.
+
+All blockyard-owned objects live in a dedicated `blockyard` schema
+(see #283). Runtime connections set `search_path` to
+`blockyard, public`; the schema is created by migration 006, which
+also moves the core tables (apps, bundles, users, …) over via
+`ALTER TABLE … SET SCHEMA`. The tables below are all in the
+blockyard schema once 006 lands.
 
 ```sql
 -- Group role for board-storage access. Each per-user role
 -- (user_<sub>) is granted membership in this group at provisioning
--- time by vault's database engine.
+-- time (#284).
 CREATE ROLE blockr_user NOLOGIN;
-GRANT USAGE ON SCHEMA public TO blockr_user;
+GRANT USAGE ON SCHEMA blockyard TO blockr_user;
 
 -- Board identity and metadata
 CREATE TABLE boards (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner       NAME NOT NULL DEFAULT current_user,
-    board_id    TEXT NOT NULL,
-    acl_type    TEXT NOT NULL DEFAULT 'private'
-                CHECK (acl_type IN ('private', 'public', 'restricted')),
-    tags        TEXT[] DEFAULT '{}',
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (owner, board_id)
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_sub  TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE,
+    board_id   TEXT NOT NULL
+               CHECK (board_id ~ '^[a-z0-9][a-z0-9-]*[a-z0-9]$'
+                      AND length(board_id) <= 63),
+    name       TEXT NOT NULL
+               CHECK (length(name) BETWEEN 1 AND 255),
+    acl_type   TEXT NOT NULL DEFAULT 'private'
+               CHECK (acl_type IN ('private', 'public', 'restricted')),
+    tags       TEXT[] NOT NULL DEFAULT '{}',
+    metadata   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (owner_sub, board_id)
 );
+CREATE INDEX idx_boards_tags ON boards USING GIN (tags);
 
 -- Versioned board data
 CREATE TABLE board_versions (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner       NAME NOT NULL DEFAULT current_user,
-    board_id    TEXT NOT NULL,
-    data        JSONB NOT NULL,
-    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    FOREIGN KEY (owner, board_id)
-        REFERENCES boards(owner, board_id) ON DELETE CASCADE
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    board_ref  UUID NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+    data       JSONB NOT NULL,
+    format     TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
 CREATE INDEX idx_board_versions_lookup
-    ON board_versions(owner, board_id, created_at DESC);
+    ON board_versions(board_ref, created_at DESC);
 
 -- Sharing (for restricted ACL)
 CREATE TABLE board_shares (
-    owner        NAME NOT NULL DEFAULT current_user,
-    board_id     TEXT NOT NULL,
-    shared_with  NAME NOT NULL,
-    created_at   TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (owner, board_id, shared_with),
-    FOREIGN KEY (owner, board_id)
-        REFERENCES boards(owner, board_id) ON DELETE CASCADE
+    board_ref       UUID NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+    shared_with_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (board_ref, shared_with_sub)
 );
+CREATE INDEX idx_board_shares_shared_with ON board_shares(shared_with_sub);
+
+-- Invariant: a board always has >= 1 version. Deleting the last
+-- version raises `restrict_violation` rather than auto-purging —
+-- keeps rack_delete (prune one version) and rack_purge (drop the
+-- board) semantically distinct at the DB level.
+CREATE FUNCTION prevent_last_version_delete() RETURNS TRIGGER AS $$
+BEGIN
+    IF (SELECT count(*) FROM board_versions
+        WHERE board_ref = OLD.board_ref) = 1 THEN
+        RAISE EXCEPTION
+            'cannot delete the last version of board %; purge the board instead',
+            OLD.board_ref
+            USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER board_versions_prevent_last_delete
+BEFORE DELETE ON board_versions
+FOR EACH ROW EXECUTE FUNCTION prevent_last_version_delete();
 
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON boards, board_versions, board_shares
     TO blockr_user;
+GRANT SELECT ON users TO blockr_user;
 ```
 
-The `owner` column is typed `NAME` (PostgreSQL's internal identifier
-type, what `current_user` returns) and defaults to `current_user`,
-so every insert records the connecting role automatically. RLS
-policies compare `owner = current_user` — no claim extraction
-plumbing, no identity helper function.
+Key shape choices:
+
+- **Surrogate UUID PK on `boards`** with composite `UNIQUE (owner_sub,
+  board_id)`. The UUID is the FK target for children; the composite
+  is the owner-scoped uniqueness constraint. Reserves rename
+  flexibility (rename a `board_id` without cascading into child
+  rows) even though rename isn't implemented yet.
+- **`board_id` + `name` split.** `board_id` is the URL-safe slug
+  (lowercase alphanumeric + internal hyphens, length ≤ 63); `name`
+  is the free-form display label (length 1..255). No uniqueness on
+  `name` — two "Analysis" boards are fine.
+- **UUID FK on children** (`board_ref`). No denormalized `owner_sub`
+  on `board_versions` or `board_shares` — ownership is a board-level
+  fact, reached via EXISTS lookups in RLS.
+- **`boards.owner_sub → users(sub) ON DELETE CASCADE`**. User
+  deletion cascades into their boards, which cascade into versions
+  and shares.
+- **`board_shares.shared_with_sub → users(sub) ON DELETE CASCADE`**.
+  Target must exist; enforced by the user-discovery flow (shares go
+  to users who have logged in).
+- **No `created_at` / `updated_at` on `boards`.** Both are derivable
+  from `MIN`/`MAX(board_versions.created_at)`. The R API's
+  `last_saved()` already uses the version timestamp.
+- **`metadata` on `boards`, not `board_versions`.** Avoids the
+  "which version's `description` is canonical?" inconsistency.
+  Board-level metadata is board-level.
+- **Typed `format` on `board_versions`.** The one genuinely
+  version-intrinsic field gets a real column rather than a JSONB
+  key. Future version-intrinsic fields (e.g. `notes TEXT`) follow
+  the same pattern.
 
 Three visibility modes via `acl_type`:
 
@@ -182,13 +234,22 @@ Three visibility modes via `acl_type`:
 
 ### RLS Policies
 
+Policies look up identity via the `current_sub()` helper. In #283 it
+is a stub returning `NULL` (fail-closed); production identity
+resolution lands in #284, driven by `users.pg_role`.
+
 ```sql
+-- Identity helper (stubbed in #283, wired in #284).
+CREATE FUNCTION current_sub() RETURNS TEXT AS $$
+    SELECT NULL::text
+$$ LANGUAGE sql STABLE;
+
 -- boards
 ALTER TABLE boards ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY owner_all ON boards
-  USING (owner = current_user)
-  WITH CHECK (owner = current_user);
+  USING (owner_sub = current_sub())
+  WITH CHECK (owner_sub = current_sub());
 
 CREATE POLICY public_read ON boards FOR SELECT
   USING (acl_type = 'public');
@@ -196,46 +257,59 @@ CREATE POLICY public_read ON boards FOR SELECT
 CREATE POLICY restricted_read ON boards FOR SELECT
   USING (acl_type = 'restricted' AND EXISTS (
       SELECT 1 FROM board_shares
-      WHERE board_shares.owner = boards.owner
-      AND board_shares.board_id = boards.board_id
-      AND board_shares.shared_with = current_user
+      WHERE board_shares.board_ref = boards.id
+      AND board_shares.shared_with_sub = current_sub()
   ));
 
--- board_versions (inherits access from parent board)
+-- board_versions — ownership is a board-level fact, reached via
+-- EXISTS against `boards`.
 ALTER TABLE board_versions ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY version_owner ON board_versions
-  USING (owner = current_user)
-  WITH CHECK (owner = current_user);
+  USING (EXISTS (
+      SELECT 1 FROM boards
+      WHERE boards.id = board_versions.board_ref
+      AND boards.owner_sub = current_sub()
+  ))
+  WITH CHECK (EXISTS (
+      SELECT 1 FROM boards
+      WHERE boards.id = board_versions.board_ref
+      AND boards.owner_sub = current_sub()
+  ));
 
 CREATE POLICY version_public ON board_versions FOR SELECT
   USING (EXISTS (
       SELECT 1 FROM boards
-      WHERE boards.owner = board_versions.owner
-      AND boards.board_id = board_versions.board_id
+      WHERE boards.id = board_versions.board_ref
       AND boards.acl_type = 'public'
   ));
 
 CREATE POLICY version_restricted ON board_versions FOR SELECT
   USING (EXISTS (
       SELECT 1 FROM boards b
-      JOIN board_shares bs
-          ON b.owner = bs.owner AND b.board_id = bs.board_id
-      WHERE b.owner = board_versions.owner
-      AND b.board_id = board_versions.board_id
+      JOIN board_shares bs ON bs.board_ref = b.id
+      WHERE b.id = board_versions.board_ref
       AND b.acl_type = 'restricted'
-      AND bs.shared_with = current_user
+      AND bs.shared_with_sub = current_sub()
   ));
 
 -- board_shares
 ALTER TABLE board_shares ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY shares_owner ON board_shares
-  USING (owner = current_user)
-  WITH CHECK (owner = current_user);
+  USING (EXISTS (
+      SELECT 1 FROM boards
+      WHERE boards.id = board_shares.board_ref
+      AND boards.owner_sub = current_sub()
+  ))
+  WITH CHECK (EXISTS (
+      SELECT 1 FROM boards
+      WHERE boards.id = board_shares.board_ref
+      AND boards.owner_sub = current_sub()
+  ));
 
 CREATE POLICY shares_see_own ON board_shares FOR SELECT
-  USING (shared_with = current_user);
+  USING (shared_with_sub = current_sub());
 ```
 
 ### Operations from R

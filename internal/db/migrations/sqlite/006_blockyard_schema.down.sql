@@ -1,0 +1,2 @@
+-- no-op: paired with 006.up.sql (also no-op) — SQLite has nothing
+-- to relocate.

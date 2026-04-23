@@ -1,0 +1,8 @@
+-- irreversible: 007 drops empty legacy public.boards/board_versions/
+-- board_shares and the `anon` role — state that nothing pre-1.0
+-- populated. A down that rebuilt those tables would duplicate
+-- structure 006 now owns under the blockyard schema and leave a
+-- v0.0.3-era server unable to talk to them anyway (runtime never
+-- targeted them). To unwind this PR, use 006.down — it drops the
+-- blockyard schema entirely, then 001.down (re-)drops the legacy
+-- tables via IF EXISTS.

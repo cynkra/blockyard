@@ -269,21 +269,6 @@ func TestWorkerEnv_WithOpenbao(t *testing.T) {
 	}
 }
 
-func TestWorkerEnv_WithBoardStorage(t *testing.T) {
-	srv := &Server{
-		Config: &config.Config{
-			Server: config.ServerConfig{Bind: ":8080"},
-			BoardStorage: &config.BoardStorageConfig{
-				PostgrestURL: "http://postgrest:3000",
-			},
-		},
-	}
-	env := WorkerEnv(srv)
-	if env["POSTGREST_URL"] != "http://postgrest:3000" {
-		t.Errorf("POSTGREST_URL = %q, want %q", env["POSTGREST_URL"], "http://postgrest:3000")
-	}
-}
-
 func TestInternalAPIURL_ServiceNetwork(t *testing.T) {
 	srv := &Server{
 		Config: &config.Config{
@@ -520,31 +505,6 @@ func TestWorkerEnv_OpenbaoNoServices(t *testing.T) {
 	}
 	if _, ok := env["BLOCKYARD_VAULT_SERVICES"]; ok {
 		t.Error("should not set BLOCKYARD_VAULT_SERVICES when no services")
-	}
-}
-
-func TestWorkerEnv_NoBoardStorage(t *testing.T) {
-	srv := &Server{
-		Config: &config.Config{
-			Server: config.ServerConfig{Bind: ":8080"},
-		},
-	}
-	env := WorkerEnv(srv)
-	if _, ok := env["POSTGREST_URL"]; ok {
-		t.Error("should not set POSTGREST_URL when no board storage")
-	}
-}
-
-func TestWorkerEnv_BoardStorageEmptyURL(t *testing.T) {
-	srv := &Server{
-		Config: &config.Config{
-			Server:       config.ServerConfig{Bind: ":8080"},
-			BoardStorage: &config.BoardStorageConfig{PostgrestURL: ""},
-		},
-	}
-	env := WorkerEnv(srv)
-	if _, ok := env["POSTGREST_URL"]; ok {
-		t.Error("should not set POSTGREST_URL when URL is empty")
 	}
 }
 

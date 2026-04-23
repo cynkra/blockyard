@@ -1,0 +1,4 @@
+-- phase: expand
+-- no-op: SQLite has no schema concept. The blockyard-schema
+-- relocation (see #283) is PostgreSQL-only; this slot exists so
+-- migration numbering stays aligned across dialects.
