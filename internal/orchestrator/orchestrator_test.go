@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -746,6 +748,150 @@ func TestRollbackActivateFailsNoMigration(t *testing.T) {
 	}
 	if !killed.Load() {
 		t.Error("instance must be killed")
+	}
+}
+
+func TestRollbackUnsupportedFactory(t *testing.T) {
+	factory := &fakeServerFactory{supportsRollback: false}
+	o, _ := newTestOrchestrator(t, factory, &mockChecker{})
+	sender := newSender(t)
+
+	err := o.Rollback(context.Background(), sender, func() {
+		t.Fatal("shutdownFn must not be called when factory rejects")
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported factory")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("error %q should mention 'not supported'", err.Error())
+	}
+}
+
+func TestRollbackMalformedBackupMeta(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Write a *.meta.json with invalid JSON to force the non-ErrNoBackup
+	// read-error branch.
+	bad := filepath.Join(dir, "20260101T000000Z.meta.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	factory := &fakeServerFactory{supportsRollback: true}
+	o, _ := newTestOrchestrator(t, factory, &mockChecker{})
+	o.db = database
+	o.cfg.Database.Path = dbPath
+	sender := newSender(t)
+
+	err = o.Rollback(context.Background(), sender, func() {
+		t.Fatal("shutdownFn must not be called before any side effects")
+	})
+	if err == nil {
+		t.Fatal("expected error for malformed metadata")
+	}
+	if !strings.Contains(err.Error(), "read backup metadata") {
+		t.Errorf("error %q should mention 'read backup metadata'", err.Error())
+	}
+}
+
+func TestRollbackPreUpdateFails(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	if _, err := database.BackupWithMeta(context.Background(), "v1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	factory := &fakeServerFactory{
+		supportsRollback: true,
+		preUpdateErr:     errors.New("image pull denied"),
+	}
+
+	var shutdownCalled bool
+	o, tracker := newTestOrchestrator(t, factory, &mockChecker{})
+	o.db = database
+	o.cfg.Database.Path = dbPath
+	sender := newSender(t)
+
+	err = o.Rollback(context.Background(), sender, func() { shutdownCalled = true })
+	if err == nil {
+		t.Fatal("expected error when PreUpdate fails")
+	}
+	if !strings.Contains(err.Error(), "pull old image") {
+		t.Errorf("error %q should mention 'pull old image'", err.Error())
+	}
+	// PreUpdate runs before any down-migration → not fatal.
+	if shutdownCalled {
+		t.Error("shutdownFn must not be called before down-migration")
+	}
+	if tracker.drained.Load() != 0 {
+		t.Error("drain must not be called when rollback fails before activation")
+	}
+}
+
+func TestRollbackWaitReadyTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	database, err := db.Open(config.DatabaseConfig{Driver: "sqlite", Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	if _, err := database.BackupWithMeta(context.Background(), "v1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Address with no listener → /readyz never returns 200.
+	deadAddr := "127.0.0.1:1" // port 1 reliably refuses connections
+
+	killed := atomic.Bool{}
+	factory := &fakeServerFactory{
+		supportsRollback: true,
+		createInstanceFn: func(context.Context, string, []string, task.Sender) (newServerInstance, error) {
+			return &fakeInstance{
+				id:     "rollback-instance",
+				addr:   deadAddr,
+				killFn: func(context.Context) { killed.Store(true) },
+			}, nil
+		},
+	}
+
+	o, tracker := newTestOrchestrator(t, factory, &mockChecker{})
+	o.db = database
+	o.cfg.Database.Path = dbPath
+	// Tight deadline so the test doesn't hang on the 1s ticker.
+	o.cfg.Proxy.WorkerStartTimeout = config.Duration{Duration: 100 * time.Millisecond}
+	sender := newSender(t)
+
+	var shutdownCalled bool
+	err = o.Rollback(context.Background(), sender, func() { shutdownCalled = true })
+	if err == nil {
+		t.Fatal("expected error when waitReady times out")
+	}
+	if !strings.Contains(err.Error(), "never became ready") {
+		t.Errorf("error %q should mention 'never became ready'", err.Error())
+	}
+	if !killed.Load() {
+		t.Error("the failed instance must be killed")
+	}
+	// No migration ran → not fatal, drain not called.
+	if shutdownCalled {
+		t.Error("shutdownFn must not be called when no migration ran")
+	}
+	if tracker.drained.Load() != 0 {
+		t.Error("drain must not be called when waitReady fails")
 	}
 }
 
