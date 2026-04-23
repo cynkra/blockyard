@@ -508,6 +508,42 @@ func TestWorkerEnv_OpenbaoNoServices(t *testing.T) {
 	}
 }
 
+func TestWorkerEnv_BoardStorageDBMount(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: ":8080"},
+			Database: config.DatabaseConfig{
+				Driver:       "postgres",
+				VaultMount:   "db-engine-42",
+				BoardStorage: true,
+			},
+		},
+	}
+	env := WorkerEnv(srv)
+	if env["BLOCKYARD_VAULT_DB_MOUNT"] != "db-engine-42" {
+		t.Errorf("BLOCKYARD_VAULT_DB_MOUNT = %q, want %q",
+			env["BLOCKYARD_VAULT_DB_MOUNT"], "db-engine-42")
+	}
+}
+
+func TestWorkerEnv_BoardStorageDisabledNoDBMount(t *testing.T) {
+	srv := &Server{
+		Config: &config.Config{
+			Server: config.ServerConfig{Bind: ":8080"},
+			Database: config.DatabaseConfig{
+				Driver:     "postgres",
+				VaultMount: "database",
+				// BoardStorage is false
+			},
+		},
+	}
+	env := WorkerEnv(srv)
+	if _, ok := env["BLOCKYARD_VAULT_DB_MOUNT"]; ok {
+		t.Errorf("BLOCKYARD_VAULT_DB_MOUNT set with board_storage disabled: %q",
+			env["BLOCKYARD_VAULT_DB_MOUNT"])
+	}
+}
+
 func TestWorkerEnv_ShinyHostDocker(t *testing.T) {
 	srv := &Server{
 		Config: &config.Config{

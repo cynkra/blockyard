@@ -174,6 +174,52 @@ func (c *Client) SecretExists(ctx context.Context, path string) (bool, error) {
 	return true, nil
 }
 
+// DatabaseStaticRoleCreate registers (or updates) a static DB role on
+// vault's `database` secrets engine. Called from blockyard's
+// first-login flow for board storage (#284): after the per-user PG
+// role user_<sub> exists, this tells vault to adopt it and start
+// rotating its password on the given period. Vault immediately
+// rotates the temporary password set at creation time; subsequent
+// reads of `{mount}/static-creds/{name}` return the current one.
+//
+// Idempotent: vault returns 200/204 on update of an existing role.
+//
+// Uses the admin AppRole token configured via [openbao].
+// POST {addr}/v1/{mount}/static-roles/{name}
+func (c *Client) DatabaseStaticRoleCreate(
+	ctx context.Context,
+	mount, name, username, dbName, rotationPeriod string,
+) error {
+	payload, err := json.Marshal(map[string]any{
+		"username":        username,
+		"db_name":         dbName,
+		"rotation_period": rotationPeriod,
+	})
+	if err != nil {
+		return fmt.Errorf("openbao db static-role create: marshal: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1/%s/static-roles/%s", c.addr, mount, name)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("openbao db static-role create: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("openbao db static-role create: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("openbao db static-role create %s: status %d", name, resp.StatusCode)
+	}
+	return nil
+}
+
 // kvReadResponse is the relevant subset of OpenBao's KV v2 read response.
 type kvReadResponse struct {
 	Data struct {

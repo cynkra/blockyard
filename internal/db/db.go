@@ -802,13 +802,19 @@ func (db *DB) FailStaleBuilds() (int64, error) {
 // --- Users ---
 
 // UserRow represents a row from the users table.
+//
+// PgRole is populated only on PostgreSQL when board storage is
+// enabled and the user has gone through first-login provisioning.
+// Column is absent on SQLite deployments (migration 006 is a no-op
+// there), so the pointer is always nil when scanning from SQLite.
 type UserRow struct {
-	Sub       string `db:"sub" json:"sub"`
-	Email     string `db:"email" json:"email"`
-	Name      string `db:"name" json:"name"`
-	Role      string `db:"role" json:"role"`
-	Active    bool   `db:"active" json:"active"`
-	LastLogin string `db:"last_login" json:"last_login"`
+	Sub       string  `db:"sub" json:"sub"`
+	Email     string  `db:"email" json:"email"`
+	Name      string  `db:"name" json:"name"`
+	Role      string  `db:"role" json:"role"`
+	Active    bool    `db:"active" json:"active"`
+	LastLogin string  `db:"last_login" json:"last_login"`
+	PgRole    *string `db:"pg_role" json:"pg_role,omitempty"`
 }
 
 // UpsertUser creates or updates a user record on OIDC login.
@@ -974,6 +980,41 @@ func (db *DB) UpdateUser(sub string, u UserUpdate) (*UserRow, error) {
 	}
 
 	return db.GetUser(sub)
+}
+
+// GetUserPgRole returns the per-user PG role name from users.pg_role,
+// or empty string when unset. Postgres-only: the column is added by
+// migration 006 which is a no-op on SQLite, so callers must not
+// invoke this outside board-storage code paths. Returns ("", nil)
+// for a missing row rather than an error — the caller's provisioner
+// treats that the same as "not yet provisioned".
+func (db *DB) GetUserPgRole(ctx context.Context, sub string) (string, error) {
+	var s sql.NullString
+	err := db.QueryRowContext(ctx,
+		`SELECT pg_role FROM blockyard.users WHERE sub = $1`, sub,
+	).Scan(&s)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get users.pg_role: %w", err)
+	}
+	return s.String, nil
+}
+
+// SetUserPgRole persists the normalized PG role on the user row. The
+// final step of first-login provisioning — leaving it until last so
+// interrupted flows replay cleanly (pg_role is the durable signal
+// that provisioning completed). Postgres-only.
+func (db *DB) SetUserPgRole(ctx context.Context, sub, pgRole string) error {
+	_, err := db.ExecContext(ctx,
+		`UPDATE blockyard.users SET pg_role = $1 WHERE sub = $2`,
+		pgRole, sub,
+	)
+	if err != nil {
+		return fmt.Errorf("set users.pg_role: %w", err)
+	}
+	return nil
 }
 
 // --- App access (ACL) ---

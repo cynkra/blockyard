@@ -23,6 +23,7 @@ import (
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/boardstorage"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/drain"
@@ -170,6 +171,17 @@ func main() {
 			slog.Error("board storage preflight failed", "error", err)
 			os.Exit(1)
 		}
+
+		// blockyard_admin bootstrap (#284). Uses PG16-only GRANT
+		// syntax; the preflight above is what makes this safe to run
+		// unconditionally here.
+		adminCtx, adminCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = boardstorage.EnsureBlockyardAdmin(adminCtx, database)
+		adminCancel()
+		if err != nil {
+			slog.Error("board storage admin bootstrap failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Initialize backend via the tag-gated factory map.
@@ -287,6 +299,19 @@ func main() {
 		if err := integration.Bootstrap(context.Background(), srv.VaultClient, cfg.Openbao.JWTAuthPath, cfg.Openbao.SkipPolicyScopeCheck); err != nil {
 			slog.Error("OpenBao bootstrap failed", "error", err)
 			os.Exit(1)
+		}
+	}
+
+	// Board-storage provisioner — constructed only when both vault
+	// and board storage are configured. Drives per-user PG role +
+	// vault static-role setup from the OIDC callback and from the
+	// admin deactivate/reactivate path (#284).
+	if cfg.Database.BoardStorage {
+		srv.BoardStorage = &boardstorage.Provisioner{
+			DB:              database,
+			Vault:           srv.VaultClient,
+			VaultMount:      cfg.Database.VaultMount,
+			VaultDBConnName: cfg.Database.VaultDBConnection,
 		}
 	}
 

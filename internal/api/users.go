@@ -14,6 +14,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
+	"github.com/cynkra/blockyard/internal/boardstorage"
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 	"github.com/cynkra/blockyard/internal/server"
@@ -363,6 +364,21 @@ func UpdateUser(srv *server.Server) http.HandlerFunc {
 		if user == nil {
 			notFound(w, "user not found")
 			return
+		}
+
+		// Mirror the active flag onto the per-user PG role (#284).
+		// DROP would fail once `boards.owner_sub` references the role
+		// by name; NOLOGIN blocks the user without breaking ownership.
+		// Only runs when board storage is enabled AND this user has
+		// been provisioned — unprovisioned users have no PG role to
+		// flip.
+		if body.Active != nil && srv.BoardStorage != nil {
+			if pgRole, perr := srv.DB.GetUserPgRole(r.Context(), sub); perr == nil && pgRole != "" {
+				if err := boardstorage.SetRoleLogin(r.Context(), srv.DB, pgRole, *body.Active); err != nil {
+					slog.Warn("failed to sync PG role LOGIN state", //nolint:gosec // G706: slog structured logging handles this
+						"sub", sub, "role", pgRole, "active", *body.Active, "error", err)
+				}
+			}
 		}
 
 		if srv.AuditLog != nil {
