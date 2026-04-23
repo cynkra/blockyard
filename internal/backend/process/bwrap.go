@@ -46,9 +46,20 @@ func bwrapSysProcAttr() *syscall.SysProcAttr {
 // fails without CAP_SETUID, and checkBwrapHostUIDMapping has already
 // flagged this deployment as unsupported for egress isolation until
 // phase 3-9 ships --userns + newuidmap.
+//
+// The bwrap path is always resolved to an absolute path via $PATH
+// before being passed on: the shim path uses syscall.Exec which does
+// not do PATH lookup, and callers routinely pass a bare "bwrap" from
+// the default config. The non-shim path would also accept a bare
+// name (exec.Command handles PATH lookup itself), but resolving here
+// keeps the two branches symmetric.
 func bwrapExecSpec(bwrapPath string, uid, gid int, bwrapArgs []string) (prog string, argv []string, err error) {
+	resolvedBwrap, err := exec.LookPath(bwrapPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve bwrap binary %q: %w", bwrapPath, err)
+	}
 	if os.Getuid() != 0 {
-		return bwrapPath, bwrapArgs, nil
+		return resolvedBwrap, bwrapArgs, nil
 	}
 	self, err := os.Executable()
 	if err != nil {
@@ -58,7 +69,7 @@ func bwrapExecSpec(bwrapPath string, uid, gid int, bwrapArgs []string) (prog str
 	argv = append(argv, "bwrap-exec",
 		"--uid", strconv.Itoa(uid),
 		"--gid", strconv.Itoa(gid),
-		"--", bwrapPath,
+		"--", resolvedBwrap,
 	)
 	argv = append(argv, bwrapArgs...)
 	return self, argv, nil

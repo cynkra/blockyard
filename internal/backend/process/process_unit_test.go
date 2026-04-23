@@ -20,10 +20,16 @@ import (
 // — the real New verifies bwrap is on PATH, which is not guaranteed in
 // every environment. Tests that only exercise pure helpers or the
 // methods that don't fork bwrap use this.
+//
+// BwrapPath is set to /bin/true (a real binary on every Linux test
+// host) so Spawn's path-resolve step in bwrapExecSpec succeeds — the
+// unit tests that do call Spawn expect a LATER error (seccomp file
+// missing, pools exhausted, etc.) and would false-positive here if
+// the resolve step failed first.
 func newFakeBackend(t *testing.T) *ProcessBackend {
 	t.Helper()
 	cfg := &config.ProcessConfig{
-		BwrapPath:      "/nonexistent/bwrap",
+		BwrapPath:      "/bin/true",
 		RPath:          "/bin/sh",
 		PortRangeStart: 20000,
 		PortRangeEnd:   20099,
