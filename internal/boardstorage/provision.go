@@ -1,3 +1,8 @@
+// Package boardstorage hosts the control-plane side of the board-storage
+// feature (see #283/#284/#285): startup SQL, per-user PG role
+// provisioning, vault static-role registration. Runtime data access
+// happens directly between the R worker and PostgreSQL/vault; nothing
+// in this package is on that path.
 package boardstorage
 
 import (
@@ -6,36 +11,49 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/db"
 	"github.com/cynkra/blockyard/internal/integration"
 )
 
-// defaultRotationPeriod is the static-role rotation cadence registered
-// with vault. Matches the value in the #284 spec; not currently
-// operator-configurable.
-const defaultRotationPeriod = "24h"
-
 // Provisioner orchestrates the per-user side-effects at OIDC first
-// login: create the PG role, register it with vault's database
-// secrets engine, persist the normalized role on the users row.
+// login: resolve the vault entity ID for the user's sub, create the
+// PG role named `user_<entity-id>`, register it with vault's database
+// secrets engine, persist the role on the users row.
 //
 // Every step is idempotent, and `users.pg_role` is written last —
 // so a login interrupted between steps replays cleanly next time
 // (CREATE ROLE IF NOT EXISTS, GRANT is a no-op when already granted,
 // vault POST is upsert). The durable signal that provisioning
 // completed is users.pg_role being non-NULL.
+//
+// Entity-ID-based role naming (#285) replaces the earlier sub-
+// normalization scheme: the templated per-user vault policy resolves
+// `user_{{identity.entity.id}}` from the user's own token context,
+// which only agrees with blockyard's role name if blockyard also uses
+// the entity ID. Bridging two identifier spaces is how we'd get
+// silent mismatches; using vault's own identifier for both sides
+// removes the bridge.
 type Provisioner struct {
-	DB              *db.DB
-	Vault           *integration.Client
-	VaultMount      string // cfg.Database.VaultMount
-	VaultDBConnName string // cfg.Database.VaultDBConnection
+	DB                  *db.DB
+	Vault               *integration.Client
+	VaultMount          string        // cfg.Database.VaultMount
+	VaultDBConnName     string        // cfg.Database.VaultDBConnection
+	VaultRotationPeriod time.Duration // cfg.Database.VaultRotationPeriod
+
+	// MountAccessor is the opaque accessor of the OIDC/JWT auth mount
+	// blockyard users log in through. Required for the entity lookup
+	// below; resolved once at startup via AuthMountAccessor and
+	// passed in at construction time.
+	MountAccessor string
 }
 
 // ProvisionUser runs the first-login flow for `sub`. Fast-path:
 // returns nil immediately if users.pg_role is already populated.
-// Otherwise executes the four-step provisioning and, on success,
-// writes pg_role to the users row.
+// Otherwise resolves the vault entity for this sub, derives the PG
+// role name `user_<entity-id>`, executes the provisioning steps,
+// and writes pg_role to the users row.
 //
 // On any error, leaves users.pg_role NULL so the next login retries
 // from scratch. Partial state (an orphan PG role or a vault static
@@ -50,7 +68,12 @@ func (p *Provisioner) ProvisionUser(ctx context.Context, sub string) error {
 		return nil
 	}
 
-	roleName := NormalizePgRole(sub)
+	entityID, err := p.Vault.IdentityLookupEntityByAlias(ctx, sub, p.MountAccessor)
+	if err != nil {
+		return fmt.Errorf("lookup vault entity for %s: %w", sub, err)
+	}
+	roleName := "user_" + entityID
+
 	password, err := randomPassword()
 	if err != nil {
 		return err
@@ -62,7 +85,7 @@ func (p *Provisioner) ProvisionUser(ctx context.Context, sub string) error {
 
 	if err := p.Vault.DatabaseStaticRoleCreate(
 		ctx, p.VaultMount, roleName, roleName,
-		p.VaultDBConnName, defaultRotationPeriod,
+		p.VaultDBConnName, p.VaultRotationPeriod.String(),
 	); err != nil {
 		return fmt.Errorf("register vault static role %s: %w", roleName, err)
 	}
@@ -145,10 +168,10 @@ func randomPassword() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// pgIdent wraps s as a double-quoted PG identifier. NormalizePgRole
-// already constrains its output to [a-z0-9_], so quoting is for
-// consistency rather than safety. Embedded double quotes are
-// escaped per PG rules.
+// pgIdent wraps s as a double-quoted PG identifier. Role names
+// derived from vault entity UUIDs are [a-f0-9-]+ so quoting is for
+// consistency rather than safety. Embedded double quotes are escaped
+// per PG rules.
 func pgIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }

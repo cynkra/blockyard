@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Deploy the hello-postgrest app to blockyard (PostgREST board storage).
+# Deploy the hello-postgres app to blockyard (direct PostgreSQL board
+# storage with per-user vault-managed credentials).
 #
 # Prerequisites:
 #   - docker compose up -d --wait
@@ -10,7 +11,7 @@ set -euo pipefail
 
 export BLOCKYARD_URL="${BLOCKYARD_URL:-http://localhost:8080}"
 BOOTSTRAP_TOKEN="${BLOCKYARD_BOOTSTRAP_TOKEN:-by_bootstrap_for_examples}"
-APP_NAME="hello-postgrest"
+APP_NAME="hello-postgres"
 DEX_EMAIL="demo@example.com"
 DEX_PASSWORD="password"
 
@@ -40,9 +41,10 @@ echo ""
 echo "  User 1:  ${DEX_EMAIL} / ${DEX_PASSWORD}"
 echo "  User 2:  demo2@example.com / ${DEX_PASSWORD}"
 echo ""
-echo "Board storage uses PostgREST backed by PostgreSQL with RLS."
-echo "Auth tokens are issued by vault's Identity OIDC provider."
+echo "Board storage talks directly to PostgreSQL with RLS; per-user"
+echo "DB credentials are minted and rotated by vault. Blockyard is not"
+echo "in the runtime auth or data path."
 echo ""
-echo "  PostgREST API: http://localhost:3001/"
-echo "  PostgreSQL:    postgres://blockyard:dev-password@localhost:5432/blockyard"
+echo "  PostgreSQL: postgres://<user_entity-id>:<rotated>@localhost:5432/blockyard"
+echo "  OpenBao:    http://localhost:8200"
 echo ""

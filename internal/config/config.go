@@ -166,13 +166,21 @@ type DatabaseConfig struct {
 	// is true. Passed verbatim as the `db_name` field of
 	// `POST {mount}/static-roles/{name}`.
 	//
+	// VaultRotationPeriod is passed as the `rotation_period` field
+	// when registering per-user static roles. Vault auto-rotates
+	// each user's PG password on this cadence. No vault-native
+	// operator knob exists for this — it's a per-static-role setting
+	// passed at creation time, which is blockyard's job. Applies
+	// only when BoardStorage = true; ignored otherwise. Default 24h.
+	//
 	// BoardStorage enables the board-storage feature: adds a PG16+
 	// preflight at startup and (in #284) drives per-user role
 	// provisioning. Requires driver = "postgres" and [openbao].
-	VaultMount        string `toml:"vault_mount"`
-	VaultRole         string `toml:"vault_role"`
-	VaultDBConnection string `toml:"vault_db_connection"`
-	BoardStorage      bool   `toml:"board_storage"`
+	VaultMount          string   `toml:"vault_mount"`
+	VaultRole           string   `toml:"vault_role"`
+	VaultDBConnection   string   `toml:"vault_db_connection"`
+	VaultRotationPeriod Duration `toml:"vault_rotation_period"`
+	BoardStorage        bool     `toml:"board_storage"`
 }
 
 type ProxyConfig struct {
@@ -187,6 +195,12 @@ type ProxyConfig struct {
 	MaxCPULimit        *float64 `toml:"max_cpu_limit"`
 	TransferTimeout    Duration `toml:"transfer_timeout"`    // default 60s when unset
 	SessionMaxLifetime Duration `toml:"session_max_lifetime"` // 0 = unlimited (default); hard cap on session duration
+	// AuthRateLimitPerMinute caps the per-IP request rate on the
+	// /login, /callback, and /logout endpoints. Default 10/min —
+	// tight enough to slow password guessing, loose enough for
+	// normal interactive use. Bump in e2e stacks where multiple
+	// Playwright tests each drive a full OIDC round-trip.
+	AuthRateLimitPerMinute int `toml:"auth_rate_limit_per_minute"`
 	// SessionStore selects the sticky-session backend. Empty = "auto":
 	// "layered" when both [redis] and database.driver=postgres are set,
 	// "redis" when only [redis] is set, "postgres" when only postgres
@@ -364,6 +378,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Database.VaultMount == "" {
 		cfg.Database.VaultMount = "database"
 	}
+	if cfg.Database.VaultRotationPeriod.Duration == 0 {
+		cfg.Database.VaultRotationPeriod.Duration = 24 * time.Hour
+	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"
 	}
@@ -384,6 +401,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Proxy.MaxWorkers == 0 {
 		cfg.Proxy.MaxWorkers = 100
+	}
+	if cfg.Proxy.AuthRateLimitPerMinute == 0 {
+		cfg.Proxy.AuthRateLimitPerMinute = 10
 	}
 	if cfg.Proxy.LogRetention.Duration == 0 {
 		cfg.Proxy.LogRetention.Duration = 1 * time.Hour

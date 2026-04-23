@@ -1,4 +1,0 @@
-Package: app
-Version: 0.1.0
-Imports:
-    blockr

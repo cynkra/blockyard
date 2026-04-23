@@ -25,4 +25,13 @@ log_retention        = "1h"
 idle_worker_timeout  = "5m"
 
 # Database, OIDC, OpenBao, and board_storage settings are provided
-# via environment variables in docker-compose.yml.
+# via environment variables in docker-compose.yml:
+#
+#   BLOCKYARD_DATABASE_DRIVER              = "postgres"
+#   BLOCKYARD_DATABASE_URL                 = "postgres://…"
+#   BLOCKYARD_DATABASE_BOARD_STORAGE       = "true"
+#   BLOCKYARD_DATABASE_VAULT_DB_CONNECTION = "blockyard"  # matches setup.sh
+#
+# Optional defaults (uncomment to override):
+#   # BLOCKYARD_DATABASE_VAULT_MOUNT           = "database"
+#   # BLOCKYARD_DATABASE_VAULT_ROTATION_PERIOD = "24h"
