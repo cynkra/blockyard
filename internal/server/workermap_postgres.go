@@ -282,4 +282,51 @@ func (m *PostgresWorkerMap) execUpdate(query, op string, args ...any) {
 	}
 }
 
+// RunReaper deletes blockyard_workers rows whose last_heartbeat has been
+// stale for longer than `threshold`, every `interval`. Blocks until
+// ctx is cancelled. Caller runs it in a goroutine.
+//
+// Motivation: Redis workermap entries had implicit TTLs that cleaned up
+// after a pod died without graceful shutdown. Postgres doesn't expire
+// rows, so without this sweep a crashed pod's workers linger in the
+// shared blockyard_workers table — Registry.Get hides them via its own
+// last_heartbeat filter, but WorkerMap's Count / ForApp / IdleWorkers /
+// AppIDs would keep reporting ghosts and skew scheduler decisions.
+//
+// Pick a threshold well above registryTTL so a transient network blip
+// (heartbeat writes briefly blocked) doesn't reap a worker the health
+// poller will resume updating seconds later. cmd/blockyard/main.go
+// uses 5 × registryTTL, giving 60 s of recovery slack on top of the
+// 15 s "Registry considers dead" signal with default health intervals.
+func (m *PostgresWorkerMap) RunReaper(ctx context.Context, threshold, interval time.Duration) {
+	if threshold <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.reapStale(ctx, threshold)
+		}
+	}
+}
+
+func (m *PostgresWorkerMap) reapStale(ctx context.Context, threshold time.Duration) {
+	cutoff := time.Now().Add(-threshold)
+	res, err := m.db.ExecContext(ctx,
+		`DELETE FROM blockyard_workers WHERE last_heartbeat < $1`, cutoff,
+	)
+	if err != nil {
+		slog.Error("postgres worker reaper", "error", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		slog.Info("postgres worker reaper: removed stale rows",
+			"count", n, "cutoff", cutoff)
+	}
+}
+
 var _ WorkerMap = (*PostgresWorkerMap)(nil)
