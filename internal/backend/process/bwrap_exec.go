@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"syscall"
 )
 
@@ -65,26 +64,6 @@ func RunBwrapExec(args []string) error {
 	// PR_SET_DUMPABLE = 4 (linux/prctl.h), value 1 = SUID_DUMP_USER.
 	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, 4, 1, 0); errno != 0 {
 		return fmt.Errorf("bwrap-exec: prctl(PR_SET_DUMPABLE, 1): %w", errno)
-	}
-
-	// Diagnostic dump — helps debug "bwrap: setting up uid map:
-	// Permission denied" when the shim appears to complete but bwrap
-	// still fails. Dumps the relevant /proc/self state right before
-	// execve.
-	if status, err := os.ReadFile("/proc/self/status"); err == nil {
-		for _, l := range strings.Split(string(status), "\n") {
-			if strings.HasPrefix(l, "Uid:") || strings.HasPrefix(l, "Gid:") || strings.HasPrefix(l, "Groups:") {
-				fmt.Fprintf(os.Stderr, "bwrap-exec DEBUG: %s\n", l)
-			}
-		}
-	}
-	if d, _, e := syscall.RawSyscall(syscall.SYS_PRCTL, 3, 0, 0); e == 0 {
-		fmt.Fprintf(os.Stderr, "bwrap-exec DEBUG: dumpable=%d\n", d)
-	}
-	if fi, err := os.Stat("/proc/self/uid_map"); err == nil {
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-			fmt.Fprintf(os.Stderr, "bwrap-exec DEBUG: /proc/self/uid_map owner=%d:%d mode=%o\n", st.Uid, st.Gid, fi.Mode().Perm())
-		}
 	}
 
 	argv := append([]string{bwrapPath}, bwrapArgs...)
