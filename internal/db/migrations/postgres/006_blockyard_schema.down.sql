@@ -18,7 +18,11 @@ REVOKE SELECT ON blockyard.users FROM blockr_user;
 DROP TABLE IF EXISTS blockyard.board_shares CASCADE;
 DROP TABLE IF EXISTS blockyard.board_versions CASCADE;
 DROP TABLE IF EXISTS blockyard.boards CASCADE;
+DROP FUNCTION IF EXISTS blockyard.current_user_owns_board(UUID);
 DROP FUNCTION IF EXISTS blockyard.current_sub();
+
+DROP INDEX IF EXISTS blockyard.idx_users_pg_role;
+ALTER TABLE blockyard.users DROP COLUMN IF EXISTS pg_role;
 
 ALTER TABLE blockyard.apps                   SET SCHEMA public;
 ALTER TABLE blockyard.bundles                SET SCHEMA public;

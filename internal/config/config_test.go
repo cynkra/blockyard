@@ -1288,13 +1288,24 @@ func TestDatabaseVaultMountDefault(t *testing.T) {
 }
 
 func TestDatabaseBoardStorageParsed(t *testing.T) {
-	cfg := loadFromString(t, databaseVaultTOML(t, `board_storage = true`))
+	cfg := loadFromString(t, databaseVaultTOML(t,
+		`board_storage = true`+"\n"+
+			`vault_db_connection = "postgresql"`))
 	if !cfg.Database.BoardStorage {
 		t.Error("expected database.board_storage = true")
 	}
 	if cfg.Database.VaultMount != "database" {
 		t.Errorf("vault_mount = %q, want default %q", cfg.Database.VaultMount, "database")
 	}
+	if cfg.Database.VaultDBConnection != "postgresql" {
+		t.Errorf("vault_db_connection = %q", cfg.Database.VaultDBConnection)
+	}
+}
+
+func TestValidationRejectsBoardStorageWithoutVaultDBConnection(t *testing.T) {
+	expectLoadError(t,
+		databaseVaultTOML(t, `board_storage = true`),
+		"database.board_storage requires database.vault_db_connection")
 }
 
 func TestDatabaseVaultRoleParsed(t *testing.T) {

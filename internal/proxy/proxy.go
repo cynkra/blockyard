@@ -303,6 +303,7 @@ func Handler(srv *server.Server) http.Handler {
 func injectCredentials(r *http.Request, srv *server.Server, appID, workerID string, maxSessionsPerWorker int) {
 	r.Header.Del("X-Blockyard-Vault-Token")
 	r.Header.Del("X-Blockyard-Session-Token")
+	r.Header.Del("X-Blockyard-Pg-Role")
 
 	if srv.VaultClient == nil {
 		return
@@ -311,6 +312,18 @@ func injectCredentials(r *http.Request, srv *server.Server, appID, workerID stri
 	user := auth.UserFromContext(r.Context())
 	if user == nil || user.AccessToken == "" {
 		return
+	}
+
+	// Board-storage per-user PG role name (#284). Independent of the
+	// vault token / session-token paths below — if the feature is
+	// enabled and this user has been provisioned, R constructs the
+	// `static-creds/<role>` path from this header plus the
+	// BLOCKYARD_VAULT_DB_MOUNT env var. Absent when unprovisioned so
+	// R can detect "not ready" deterministically.
+	if srv.Config.Database.BoardStorage {
+		if pgRole, err := srv.DB.GetUserPgRole(r.Context(), user.Sub); err == nil && pgRole != "" {
+			r.Header.Set("X-Blockyard-Pg-Role", pgRole)
+		}
 	}
 
 	if maxSessionsPerWorker > 1 {

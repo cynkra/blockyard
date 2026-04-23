@@ -10,6 +10,7 @@ import (
 	"github.com/cynkra/blockyard/internal/audit"
 	"github.com/cynkra/blockyard/internal/auth"
 	"github.com/cynkra/blockyard/internal/backend"
+	"github.com/cynkra/blockyard/internal/boardstorage"
 	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/config"
@@ -61,6 +62,12 @@ type Server struct {
 	// OpenBao — nil when [openbao] is not configured.
 	VaultClient     *integration.Client
 	VaultTokenCache *integration.VaultTokenCache
+
+	// Board-storage provisioner — non-nil only when
+	// database.board_storage is enabled. Drives first-login
+	// provisioning from the OIDC callback and deactivation/reactivation
+	// from the admin update-user endpoint.
+	BoardStorage *boardstorage.Provisioner
 
 	// VaultTokenHealthy reports whether the vault token is valid.
 	// Non-nil only when AppRole auth is used (token renewal active).
@@ -260,7 +267,7 @@ func NewServerWithDefaultMetrics(cfg *config.Config, be backend.Backend, databas
 // Used by the router to wire auth handlers and middleware without a
 // circular import.
 func (srv *Server) AuthDeps() *auth.Deps {
-	return &auth.Deps{
+	deps := &auth.Deps{
 		Config:       srv.Config,
 		OIDCClient:   srv.OIDCClient,
 		SigningKey:    srv.SigningKey,
@@ -268,6 +275,10 @@ func (srv *Server) AuthDeps() *auth.Deps {
 		AuditLog:     srv.AuditLog,
 		DB:           srv.DB,
 	}
+	if srv.BoardStorage != nil {
+		deps.BoardStorageProvisioner = srv.BoardStorage.ProvisionUser
+	}
+	return deps
 }
 
 // ActiveWorker represents a running worker tracked by the server.

@@ -40,6 +40,16 @@ func WorkerEnv(srv *Server) map[string]string {
 		}
 	}
 
+	// Board storage discovery (#284): R assembles
+	//   {VAULT_ADDR}/v1/{BLOCKYARD_VAULT_DB_MOUNT}/static-creds/{role}
+	// at runtime. Role is delivered per-session via the
+	// X-Blockyard-Pg-Role header; mount is deployment-level so it
+	// ships as env alongside VAULT_ADDR. Unset when the feature is
+	// disabled so workers never pick up a stale value after a flip.
+	if srv.Config.Database.BoardStorage {
+		env["BLOCKYARD_VAULT_DB_MOUNT"] = srv.Config.Database.VaultMount
+	}
+
 	return env
 }
 

@@ -159,12 +159,20 @@ type DatabaseConfig struct {
 	// startup instead of using a static Database.URL password.
 	// Requires [openbao].
 	//
+	// VaultDBConnection names the vault database-engine connection
+	// blockyard targets when registering per-user static roles
+	// (#284) — the `{name}` from `{VaultMount}/config/{name}` the
+	// operator created at deploy time. Required when BoardStorage
+	// is true. Passed verbatim as the `db_name` field of
+	// `POST {mount}/static-roles/{name}`.
+	//
 	// BoardStorage enables the board-storage feature: adds a PG16+
 	// preflight at startup and (in #284) drives per-user role
 	// provisioning. Requires driver = "postgres" and [openbao].
-	VaultMount   string `toml:"vault_mount"`
-	VaultRole    string `toml:"vault_role"`
-	BoardStorage bool   `toml:"board_storage"`
+	VaultMount        string `toml:"vault_mount"`
+	VaultRole         string `toml:"vault_role"`
+	VaultDBConnection string `toml:"vault_db_connection"`
+	BoardStorage      bool   `toml:"board_storage"`
 }
 
 type ProxyConfig struct {
@@ -810,6 +818,9 @@ func validate(cfg *Config) error {
 		}
 		if cfg.Database.VaultMount == "" {
 			return fmt.Errorf("config: database.board_storage requires database.vault_mount")
+		}
+		if cfg.Database.VaultDBConnection == "" {
+			return fmt.Errorf("config: database.board_storage requires database.vault_db_connection")
 		}
 	}
 

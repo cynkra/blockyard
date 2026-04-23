@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -40,6 +41,15 @@ type Deps struct {
 	UserSessions *UserSessionStore
 	AuditLog     *audit.Log
 	DB           *db.DB
+
+	// BoardStorageProvisioner, when non-nil, runs the per-user PG
+	// role / vault static-role provisioning after a successful OIDC
+	// login. Wired in from main.go only when database.board_storage
+	// is enabled. A failure aborts the login with 502 so the user
+	// does not start a session with missing credentials; a retry on
+	// next login replays cleanly because every provisioning step is
+	// idempotent.
+	BoardStorageProvisioner func(ctx context.Context, sub string) error
 }
 
 // defaultUserRole returns the role to assign to a brand-new OIDC user.
@@ -263,6 +273,20 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 			if dbUser != nil && !dbUser.Active {
 				slog.Warn("deactivated user attempted login", "sub", subClaim)
 				http.Error(w, "account deactivated", http.StatusForbidden)
+				return
+			}
+		}
+
+		// 5b. Board-storage first-login provisioning. Runs after the
+		// users row exists so SetUserPgRole (the final step inside the
+		// provisioner) has a row to update. Failure aborts the login
+		// with 502 — no session cookie is issued, and retrying on the
+		// next login replays cleanly because every step is idempotent.
+		if deps.BoardStorageProvisioner != nil {
+			if err := deps.BoardStorageProvisioner(r.Context(), subClaim); err != nil {
+				slog.Error("board storage provisioning failed",
+					"sub", subClaim, "error", err)
+				http.Error(w, "bad gateway", http.StatusBadGateway)
 				return
 			}
 		}

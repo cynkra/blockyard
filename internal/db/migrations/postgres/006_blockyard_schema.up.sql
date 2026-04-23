@@ -43,6 +43,15 @@ ALTER TABLE public.blockyard_workers      SET SCHEMA blockyard;
 ALTER TABLE public.blockyard_ports        SET SCHEMA blockyard;
 ALTER TABLE public.blockyard_uids         SET SCHEMA blockyard;
 
+-- Per-user PG role mapping. Populated by #284's first-login
+-- provisioning; NULL for users who never had board storage enabled.
+-- current_sub() below resolves current_user → sub via this column.
+-- Partial unique index allows many NULLs but enforces one user per
+-- populated role name.
+ALTER TABLE blockyard.users ADD COLUMN pg_role TEXT;
+CREATE UNIQUE INDEX idx_users_pg_role
+    ON blockyard.users(pg_role) WHERE pg_role IS NOT NULL;
+
 -- New board-storage tables in the finalized shape. Created
 -- schema-qualified so the rest of the migration is independent of
 -- whichever search_path resolution migrate picks.
@@ -84,13 +93,38 @@ CREATE TABLE blockyard.board_shares (
 CREATE INDEX idx_board_shares_shared_with
     ON blockyard.board_shares(shared_with_sub);
 
--- Identity stub for RLS. Returns NULL until #284 wires the real
--- users.pg_role resolution — policies below are fail-closed in the
--- interim. Co-located with the new schema; the legacy public
--- counterpart is dropped by 007.
+-- Identity resolution for RLS. Maps the PG role that opened this
+-- session (session_user, not current_user) back to the OIDC sub
+-- via users.pg_role. Using session_user is load-bearing: it keeps
+-- the mapping stable across SECURITY DEFINER boundaries — where
+-- current_user flips to the function owner — so the same helper
+-- works both in invoker-scoped policy bodies and inside the
+-- DEFINER-scoped helpers below. NOLOGIN admin connections
+-- (blockyard_admin) have no users row and therefore resolve to
+-- NULL, which fail-closes the policies they traverse.
 CREATE FUNCTION blockyard.current_sub() RETURNS TEXT AS $$
-    SELECT NULL::text
+    SELECT sub FROM blockyard.users WHERE pg_role = session_user
 $$ LANGUAGE sql STABLE;
+
+-- RLS policies on `boards` reference `board_shares`, and the
+-- owner-side policy on `board_shares` would otherwise need to
+-- reference `boards` — creating a cross-table policy cycle that PG
+-- rejects at query time ("infinite recursion detected in policy").
+--
+-- SECURITY DEFINER helper breaks the cycle: it reads `boards` as
+-- the function owner (migration user), bypassing RLS on that table.
+-- The predicate is locked to the caller's own identity via
+-- current_sub() (which uses session_user, unchanged across the
+-- SECURITY DEFINER boundary), so the helper leaks nothing beyond
+-- "do I own this board ID?" — which the caller already learns from
+-- their own SELECTs. search_path is pinned to guard against
+-- schema-shadow attacks by callers with CREATE on other schemas.
+CREATE FUNCTION blockyard.current_user_owns_board(b_id UUID) RETURNS BOOLEAN AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM blockyard.boards
+        WHERE id = b_id AND owner_sub = blockyard.current_sub()
+    );
+$$ LANGUAGE sql SECURITY DEFINER STABLE SET search_path = blockyard, pg_catalog;
 
 -- RLS policies. Ownership is a board-level fact, so policies on
 -- children dereference via EXISTS against blockyard.boards.
@@ -142,17 +176,12 @@ CREATE POLICY version_restricted ON blockyard.board_versions FOR SELECT
 
 ALTER TABLE blockyard.board_shares ENABLE ROW LEVEL SECURITY;
 
+-- Owner-side policy uses the SECURITY DEFINER helper rather than
+-- inlining `EXISTS (… FROM blockyard.boards …)` to avoid the policy
+-- cycle with boards.restricted_read (which references board_shares).
 CREATE POLICY shares_owner ON blockyard.board_shares
-    USING (EXISTS (
-        SELECT 1 FROM blockyard.boards
-        WHERE boards.id = board_shares.board_ref
-        AND boards.owner_sub = blockyard.current_sub()
-    ))
-    WITH CHECK (EXISTS (
-        SELECT 1 FROM blockyard.boards
-        WHERE boards.id = board_shares.board_ref
-        AND boards.owner_sub = blockyard.current_sub()
-    ));
+    USING (blockyard.current_user_owns_board(board_ref))
+    WITH CHECK (blockyard.current_user_owns_board(board_ref));
 
 CREATE POLICY shares_see_own ON blockyard.board_shares FOR SELECT
     USING (shared_with_sub = blockyard.current_sub());

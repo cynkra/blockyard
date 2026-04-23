@@ -93,6 +93,7 @@ func TestInjectCredentials_StripsExistingHeaders(t *testing.T) {
 	r := httptest.NewRequest("GET", "/app/test-app/", nil)
 	r.Header.Set("X-Blockyard-Vault-Token", "spoofed-vault")
 	r.Header.Set("X-Blockyard-Session-Token", "spoofed-session")
+	r.Header.Set("X-Blockyard-Pg-Role", "spoofed-role")
 
 	injectCredentials(r, srv, "app-1", "worker-1", 1)
 
@@ -101,6 +102,22 @@ func TestInjectCredentials_StripsExistingHeaders(t *testing.T) {
 	}
 	if got := r.Header.Get("X-Blockyard-Session-Token"); got != "" {
 		t.Errorf("expected spoofed session header to be stripped, got %q", got)
+	}
+	if got := r.Header.Get("X-Blockyard-Pg-Role"); got != "" {
+		t.Errorf("expected spoofed pg-role header to be stripped, got %q", got)
+	}
+}
+
+func TestInjectCredentials_NoPgRoleWhenBoardStorageDisabled(t *testing.T) {
+	client := mockJWTLogin(t, "s.token", 3600)
+	srv := vaultServer(t, client)
+	// BoardStorage defaults to false on the Config built by vaultServer.
+
+	r := requestWithUser("user-1", "my-access-token")
+	injectCredentials(r, srv, "app-1", "worker-1", 1)
+
+	if got := r.Header.Get("X-Blockyard-Pg-Role"); got != "" {
+		t.Errorf("X-Blockyard-Pg-Role set with board_storage=false: %q", got)
 	}
 }
 
