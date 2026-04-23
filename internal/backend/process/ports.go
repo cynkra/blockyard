@@ -8,11 +8,13 @@ import (
 )
 
 // portAllocator manages a fixed range of localhost ports for workers.
-// Two implementations exist: memoryPortAllocator (used when Redis is
-// not configured; single-node only) and redisPortAllocator (used when
-// Redis is configured; coordinates across blockyard peers during
-// rolling-update overlap). Both share the same interface so the rest
-// of the backend does not care which is live.
+// Four implementations exist, picked by config.ResolveSessionStoreMode:
+// memoryPortAllocator (single-node, no shared state), redisPortAllocator
+// (peer coordination via SETNX, fails open on Redis blip),
+// postgresPortAllocator (peer coordination via INSERT … ON CONFLICT,
+// the new source-of-truth path from #288), and layeredPortAllocator
+// (PG primary + Redis mirror for cheaper InUse reads). All share the
+// same interface so the rest of the backend does not care which is live.
 type portAllocator interface {
 	// Reserve picks a free port, holds a listener on it, and returns
 	// (port, listener, nil). The caller MUST close the listener

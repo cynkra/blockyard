@@ -147,6 +147,16 @@ func main() {
 		defer rc.Close()
 	}
 
+	// Database init happens BEFORE backend construction for the same
+	// reason as Redis above: the process backend's Postgres-primary
+	// port / UID allocators (#288) need the *sqlx.DB at construction
+	// time. The Docker backend factory ignores the database argument.
+	database, err := db.Open(cfg.Database)
+	if err != nil {
+		slog.Error("failed to open database", "error", err)
+		os.Exit(1)
+	}
+
 	// Initialize backend via the tag-gated factory map.
 	factory, ok := backendFactories[cfg.Server.Backend]
 	if !ok {
@@ -155,17 +165,10 @@ func main() {
 			"available", availableBackends())
 		os.Exit(1)
 	}
-	be, err := factory(context.Background(), cfg, rc, version)
+	be, err := factory(context.Background(), cfg, rc, database.DB, version)
 	if err != nil {
 		slog.Error("failed to create backend",
 			"backend", cfg.Server.Backend, "error", err)
-		os.Exit(1)
-	}
-
-	// Initialize database
-	database, err := db.Open(cfg.Database)
-	if err != nil {
-		slog.Error("failed to open database", "error", err)
 		os.Exit(1)
 	}
 	// Build shared state and router. Use NewServerWithDefaultMetrics so
@@ -299,7 +302,7 @@ func main() {
 	// drives all three stores (registry, worker map, session store)
 	// because their durability requirements are identical — operators
 	// rarely want asymmetric modes.
-	mode := resolveSessionStore(cfg)
+	mode := config.ResolveSessionStoreMode(cfg)
 	registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
 	idleTTL := cfg.Proxy.SessionIdleTTL.Duration
 	var pgSessions *session.PostgresStore
@@ -712,32 +715,6 @@ func randomNonceHex(n int) string {
 		return "fallback"
 	}
 	return hex.EncodeToString(b)
-}
-
-// resolveSessionStore picks the sticky-session backend. Honours an
-// explicit cfg.Proxy.SessionStore value; otherwise defaults to the
-// "best" available mode given which backends are configured.
-//
-//   - [redis] + postgres  → layered (PG primary, Redis cache). #286 target.
-//   - [redis] only        → redis. Legacy behavior.
-//   - postgres only       → postgres.
-//   - neither             → memory. Single-process only.
-func resolveSessionStore(cfg *config.Config) config.SessionStoreMode {
-	if cfg.Proxy.SessionStore != config.SessionStoreAuto {
-		return cfg.Proxy.SessionStore
-	}
-	hasRedis := cfg.Redis != nil
-	hasPG := cfg.Database.Driver == "postgres"
-	switch {
-	case hasRedis && hasPG:
-		return config.SessionStoreLayered
-	case hasRedis:
-		return config.SessionStoreRedis
-	case hasPG:
-		return config.SessionStorePostgres
-	default:
-		return config.SessionStoreMemory
-	}
 }
 
 // maskRedisPassword replaces the password in a Redis URL with "***".

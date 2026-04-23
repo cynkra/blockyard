@@ -173,7 +173,12 @@ type ProxyConfig struct {
 	SessionStore SessionStoreMode `toml:"session_store"`
 }
 
-// SessionStoreMode is the selector for proxy.session_store.
+// SessionStoreMode is the selector for proxy.session_store. Despite
+// the "Session" name, the same value also drives the worker registry,
+// worker map, and process-backend port/UID allocators (see #286, #287,
+// #288, parent #262) — operators rarely want asymmetric durability
+// across these stores, so the resolver below picks one mode for all of
+// them.
 type SessionStoreMode string
 
 const (
@@ -183,6 +188,36 @@ const (
 	SessionStorePostgres SessionStoreMode = "postgres"
 	SessionStoreLayered  SessionStoreMode = "layered"
 )
+
+// ResolveSessionStoreMode picks the shared-state backend. Honours an
+// explicit cfg.Proxy.SessionStore value; otherwise defaults to the
+// "best" available mode given which backends are configured.
+//
+//   - [redis] + postgres  → layered (PG primary, Redis cache)
+//   - [redis] only        → redis
+//   - postgres only       → postgres
+//   - neither             → memory (single-process only)
+//
+// Lives in the config package so both cmd/blockyard/main.go and the
+// process backend's allocator selection can reach it without importing
+// each other.
+func ResolveSessionStoreMode(cfg *Config) SessionStoreMode {
+	if cfg.Proxy.SessionStore != SessionStoreAuto {
+		return cfg.Proxy.SessionStore
+	}
+	hasRedis := cfg.Redis != nil
+	hasPG := cfg.Database.Driver == "postgres"
+	switch {
+	case hasRedis && hasPG:
+		return SessionStoreLayered
+	case hasRedis:
+		return SessionStoreRedis
+	case hasPG:
+		return SessionStorePostgres
+	default:
+		return SessionStoreMemory
+	}
+}
 
 type OidcConfig struct {
 	IssuerURL         string   `toml:"issuer_url"`

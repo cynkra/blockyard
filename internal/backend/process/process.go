@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jmoiron/sqlx"
+
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/preflight"
@@ -63,13 +65,15 @@ type ProcessBackend struct {
 // the egress probe and the server-level resource-limit fields for
 // the warning check.
 //
-// When rc is non-nil the backend uses Redis-backed port and UID
-// allocators to coordinate with concurrent peers during rolling-
-// update overlap. When rc is nil (single-node deployment without
-// [redis]) it falls back to in-memory bitset allocators, which are
-// correct because without the cutover window there are no cross-
-// server collisions.
-func New(fullCfg *config.Config, rc *redisstate.Client) (*ProcessBackend, error) {
+// rc and db are the shared connection pools opened by main.go before
+// the backend factory runs. The allocator implementation is picked by
+// config.ResolveSessionStoreMode(cfg) — the same selector that drives
+// session, registry, and worker-map storage — so a deployment that
+// asks for Postgres-primary sessions also gets Postgres-primary
+// allocators. The allocator path is the only place this backend touches
+// rc/db; both can be nil in test/single-process configurations and the
+// memory allocators take over.
+func New(fullCfg *config.Config, rc *redisstate.Client, db *sqlx.DB) (*ProcessBackend, error) {
 	cfg := fullCfg.Process
 	if cfg == nil {
 		return nil, fmt.Errorf("process backend: [process] config section is required")
@@ -82,18 +86,7 @@ func New(fullCfg *config.Config, rc *redisstate.Client) (*ProcessBackend, error)
 		return nil, err
 	}
 
-	var (
-		ports portAllocator
-		uids  uidAllocator
-	)
-	if rc != nil {
-		hostname, _ := os.Hostname()
-		ports = newRedisPortAllocator(rc, cfg.PortRangeStart, cfg.PortRangeEnd, hostname)
-		uids = newRedisUIDAllocator(rc, cfg.WorkerUIDStart, cfg.WorkerUIDEnd, hostname)
-	} else {
-		ports = newMemoryPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
-		uids = newMemoryUIDAllocator(cfg.WorkerUIDStart, cfg.WorkerUIDEnd)
-	}
+	ports, uids := selectAllocators(fullCfg, rc, db)
 
 	return &ProcessBackend{
 		cfg:     cfg,
@@ -102,6 +95,39 @@ func New(fullCfg *config.Config, rc *redisstate.Client) (*ProcessBackend, error)
 		uids:    uids,
 		workers: make(map[string]*workerProc),
 	}, nil
+}
+
+// selectAllocators returns the allocator pair appropriate for the
+// resolved SessionStore mode (#288, parent #262). Postgres is the new
+// source-of-truth path; Redis stays available as a standalone or as a
+// best-effort cache layer in front of Postgres. The Memory fallback
+// covers tests and single-process deployments without [redis] or
+// postgres.
+func selectAllocators(fullCfg *config.Config, rc *redisstate.Client, db *sqlx.DB) (portAllocator, uidAllocator) {
+	pCfg := fullCfg.Process
+	portFirst, portLast := pCfg.PortRangeStart, pCfg.PortRangeEnd
+	uidFirst, uidLast := pCfg.WorkerUIDStart, pCfg.WorkerUIDEnd
+	hostname, _ := os.Hostname()
+	switch config.ResolveSessionStoreMode(fullCfg) {
+	case config.SessionStoreRedis:
+		return newRedisPortAllocator(rc, portFirst, portLast, hostname),
+			newRedisUIDAllocator(rc, uidFirst, uidLast, hostname)
+	case config.SessionStorePostgres:
+		return newPostgresPortAllocator(db, portFirst, portLast, hostname),
+			newPostgresUIDAllocator(db, uidFirst, uidLast, hostname)
+	case config.SessionStoreLayered:
+		return newLayeredPortAllocator(
+				newPostgresPortAllocator(db, portFirst, portLast, hostname),
+				newRedisPortAllocator(rc, portFirst, portLast, hostname),
+			),
+			newLayeredUIDAllocator(
+				newPostgresUIDAllocator(db, uidFirst, uidLast, hostname),
+				newRedisUIDAllocator(rc, uidFirst, uidLast, hostname),
+			)
+	default:
+		return newMemoryPortAllocator(portFirst, portLast),
+			newMemoryUIDAllocator(uidFirst, uidLast)
+	}
 }
 
 // ensureBundleMountPoint guarantees that bwrap will be able to bind
