@@ -12,15 +12,20 @@ import (
 // Cache-failure behavior for LayeredStore (see #262). The whole point of
 // making Postgres the primary is that Redis can go away — be restarted
 // for cert rotation, evicted, partitioned — without user-visible impact.
-// These tests pair an in-process MemoryStore (stand-in for Postgres)
-// with a real RedisStore whose miniredis is poisoned via SetError, then
-// assert every Store method still returns the correct primary answer.
+// These tests pair a real PostgresStore primary with a real RedisStore
+// cache whose miniredis is poisoned via SetError, then assert every
+// Store method still returns the correct primary answer. Using the
+// production primary (not MemoryStore) ensures the SQL path behaves
+// correctly when the cache fails mid-operation.
+//
+// Skips when BLOCKYARD_TEST_POSTGRES_URL is not set. CI's `unit` job
+// always provides one.
 
-func newLayeredWithErroringCache(t *testing.T) (*LayeredStore, *MemoryStore, *miniredis.Miniredis) {
+func newLayeredWithErroringCache(t *testing.T) (*LayeredStore, *PostgresStore, *miniredis.Miniredis) {
 	t.Helper()
+	primary := NewPostgresStore(testPGDB(t), time.Hour)
 	mr := miniredis.RunT(t)
 	client := redisstate.TestClient(t, mr.Addr())
-	primary := NewMemoryStore()
 	cache := NewRedisStore(client, time.Hour)
 	return NewLayeredStore(primary, cache), primary, mr
 }
@@ -90,8 +95,8 @@ func TestLayeredStore_CacheErrors_DeleteByWorkerReturnsPrimaryCount(t *testing.T
 
 func TestLayeredStore_CacheErrors_CountAggregatesFromPrimary(t *testing.T) {
 	s, primary, mr := newLayeredWithErroringCache(t)
-	primary.Set("sess-1", Entry{WorkerID: "w1"})
-	primary.Set("sess-2", Entry{WorkerID: "w1"})
+	primary.Set("sess-1", Entry{WorkerID: "w1", LastAccess: time.Now()})
+	primary.Set("sess-2", Entry{WorkerID: "w1", LastAccess: time.Now()})
 
 	mr.SetError("READONLY simulated failure")
 
@@ -118,14 +123,14 @@ func TestLayeredStore_CacheErrors_RerouteRunsAgainstPrimary(t *testing.T) {
 	}
 }
 
-// TestLayeredStore_CacheRestartRewarms simulates the parent DoD:
-// Redis goes away (miniredis.Close via mr.FastForward + SetError),
-// then comes back empty, and subsequent reads repopulate the cache
-// from the primary without user-visible impact.
+// TestLayeredStore_CacheRestartRewarms simulates the parent DoD: Redis
+// "restarts" (miniredis FlushAll wipes the dataset), and subsequent
+// reads repopulate the cache from the Postgres primary without
+// user-visible impact.
 func TestLayeredStore_CacheRestartRewarms(t *testing.T) {
+	primary := NewPostgresStore(testPGDB(t), time.Hour)
 	mr := miniredis.RunT(t)
 	client := redisstate.TestClient(t, mr.Addr())
-	primary := NewMemoryStore()
 	cache := NewRedisStore(client, time.Hour)
 	s := NewLayeredStore(primary, cache)
 

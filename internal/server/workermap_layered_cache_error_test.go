@@ -9,21 +9,24 @@ import (
 	"github.com/cynkra/blockyard/internal/redisstate"
 )
 
-// Cache-failure behavior for LayeredWorkerMap (see #262). MemoryWorkerMap
-// stands in for the Postgres primary; a real RedisWorkerMap is wrapped
-// around a miniredis that we poison via SetError. Every method must
-// still surface the primary answer — that's the whole point of making
-// Postgres source-of-truth.
+// Cache-failure behavior for LayeredWorkerMap (see #262). Pairs a real
+// PostgresWorkerMap primary with a real RedisWorkerMap cache whose
+// miniredis is poisoned via SetError. Using the production primary
+// (not MemoryWorkerMap) ensures the SQL path behaves correctly when
+// the cache fails mid-operation.
 //
 // The per-method degradation of RedisWorkerMap itself is covered in
 // workermap_redis_error_test.go; this file pins the *Layered* contract:
 // errors on the cache side don't corrupt the primary view.
+//
+// Skips when BLOCKYARD_TEST_POSTGRES_URL is not set. CI's `unit` job
+// always provides one.
 
-func newLayeredWorkerMapWithErroringCache(t *testing.T) (*LayeredWorkerMap, *MemoryWorkerMap, *miniredis.Miniredis) {
+func newLayeredWorkerMapWithErroringCache(t *testing.T) (*LayeredWorkerMap, *PostgresWorkerMap, *miniredis.Miniredis) {
 	t.Helper()
+	primary := NewPostgresWorkerMap(testPGDB(t), "test-host")
 	mr := miniredis.RunT(t)
 	client := redisstate.TestClient(t, mr.Addr())
-	primary := NewMemoryWorkerMap()
 	cache := NewRedisWorkerMap(client, "test-host")
 	return NewLayeredWorkerMap(primary, cache), primary, mr
 }
@@ -53,7 +56,7 @@ func TestLayeredWorkerMap_CacheErrors_SetPersistsPrimary(t *testing.T) {
 
 func TestLayeredWorkerMap_CacheErrors_DeleteClearsPrimary(t *testing.T) {
 	m, primary, mr := newLayeredWorkerMapWithErroringCache(t)
-	primary.Set("w1", ActiveWorker{AppID: "app1"})
+	primary.Set("w1", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
 
 	mr.SetError("READONLY simulated failure")
 
@@ -65,9 +68,9 @@ func TestLayeredWorkerMap_CacheErrors_DeleteClearsPrimary(t *testing.T) {
 
 func TestLayeredWorkerMap_CacheErrors_AggregatesReflectPrimary(t *testing.T) {
 	m, primary, mr := newLayeredWorkerMapWithErroringCache(t)
-	primary.Set("w1", ActiveWorker{AppID: "app1"})
-	primary.Set("w2", ActiveWorker{AppID: "app1"})
-	primary.Set("w3", ActiveWorker{AppID: "app2"})
+	primary.Set("w1", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+	primary.Set("w2", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+	primary.Set("w3", ActiveWorker{AppID: "app2", BundleID: "b2", StartedAt: time.Now()})
 
 	mr.SetError("READONLY simulated failure")
 
@@ -84,7 +87,7 @@ func TestLayeredWorkerMap_CacheErrors_AggregatesReflectPrimary(t *testing.T) {
 
 func TestLayeredWorkerMap_CacheErrors_MarkDrainingUpdatesPrimary(t *testing.T) {
 	m, primary, mr := newLayeredWorkerMapWithErroringCache(t)
-	primary.Set("w1", ActiveWorker{AppID: "app1"})
+	primary.Set("w1", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
 
 	mr.SetError("READONLY simulated failure")
 
@@ -100,11 +103,11 @@ func TestLayeredWorkerMap_CacheErrors_MarkDrainingUpdatesPrimary(t *testing.T) {
 
 // TestLayeredWorkerMap_CacheRestartRewarms simulates the DoD: Redis
 // comes back empty and subsequent reads backfill the cache from the
-// primary without user-visible impact.
+// Postgres primary without user-visible impact.
 func TestLayeredWorkerMap_CacheRestartRewarms(t *testing.T) {
+	primary := NewPostgresWorkerMap(testPGDB(t), "test-host")
 	mr := miniredis.RunT(t)
 	client := redisstate.TestClient(t, mr.Addr())
-	primary := NewMemoryWorkerMap()
 	cache := NewRedisWorkerMap(client, "test-host")
 	m := NewLayeredWorkerMap(primary, cache)
 

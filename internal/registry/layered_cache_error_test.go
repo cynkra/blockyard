@@ -9,17 +9,20 @@ import (
 	"github.com/cynkra/blockyard/internal/redisstate"
 )
 
-// Cache-failure behavior for LayeredRegistry (see #262). MemoryRegistry
-// stands in for the Postgres primary; a real RedisRegistry is wrapped
-// around a miniredis that we poison via SetError. Every method must
-// still surface the primary answer — that's the whole point of making
-// Postgres source-of-truth.
+// Cache-failure behavior for LayeredRegistry (see #262). Pairs a real
+// PostgresRegistry primary with a real RedisRegistry cache whose
+// miniredis is poisoned via SetError. Using the production primary
+// (not MemoryRegistry) ensures the SQL path behaves correctly when
+// the cache fails mid-operation.
+//
+// Skips when BLOCKYARD_TEST_POSTGRES_URL is not set. CI's `unit` job
+// always provides one.
 
-func newLayeredRegistryWithErroringCache(t *testing.T) (*LayeredRegistry, *MemoryRegistry, *miniredis.Miniredis) {
+func newLayeredRegistryWithErroringCache(t *testing.T) (*LayeredRegistry, *PostgresRegistry, *miniredis.Miniredis) {
 	t.Helper()
+	primary := NewPostgresRegistry(testPGDB(t), time.Hour)
 	mr := miniredis.RunT(t)
 	client := redisstate.TestClient(t, mr.Addr())
-	primary := NewMemoryRegistry()
 	cache := NewRedisRegistry(client, time.Hour)
 	return NewLayeredRegistry(primary, cache), primary, mr
 }
@@ -63,11 +66,11 @@ func TestLayeredRegistry_CacheErrors_DeleteClearsPrimary(t *testing.T) {
 
 // TestLayeredRegistry_CacheRestartRewarms simulates the DoD: Redis
 // comes back empty and the next read backfills the cache from the
-// primary without user-visible impact.
+// Postgres primary without user-visible impact.
 func TestLayeredRegistry_CacheRestartRewarms(t *testing.T) {
+	primary := NewPostgresRegistry(testPGDB(t), time.Hour)
 	mr := miniredis.RunT(t)
 	client := redisstate.TestClient(t, mr.Addr())
-	primary := NewMemoryRegistry()
 	cache := NewRedisRegistry(client, time.Hour)
 	r := NewLayeredRegistry(primary, cache)
 
