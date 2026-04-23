@@ -116,6 +116,15 @@ curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- \
   --version v0.1.0 --install-dir "$HOME/.local/bin"
 ```
 
+Switch to the rolling `main` channel (rebuilt on every push to `main`):
+
+```bash
+curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- --channel main
+```
+
+`--channel stable` (default) tracks the latest tagged release. `--channel
+main` and `--version` are mutually exclusive — use one or the other.
+
 The same script installs the `blockyard` server binary when invoked with
 `--server` (Linux only — for other platforms run the container image):
 
@@ -123,10 +132,14 @@ The same script installs the `blockyard` server binary when invoked with
 curl -fsSL https://cynkra.github.io/blockyard/install.sh | sh -s -- --server
 ```
 
-Environment variables `BLOCKYARD_VERSION`, `BLOCKYARD_INSTALL_DIR`, and
-`BLOCKYARD_BINARY` seed the defaults; passing the matching flag still
-wins. Piping to `sh` is optional — download the script first to inspect
-it if you prefer.
+The main channel only publishes the `by` CLI; the rolling server is
+distributed as the `ghcr.io/cynkra/blockyard:main` container image, so
+`--channel main --server` is refused.
+
+Environment variables `BLOCKYARD_CHANNEL`, `BLOCKYARD_VERSION`,
+`BLOCKYARD_INSTALL_DIR`, and `BLOCKYARD_BINARY` seed the defaults;
+passing the matching flag still wins. Piping to `sh` is optional —
+download the script first to inspect it if you prefer.
 
 ### Download a release binary
 
