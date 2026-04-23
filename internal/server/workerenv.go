@@ -40,11 +40,6 @@ func WorkerEnv(srv *Server) map[string]string {
 		}
 	}
 
-	// Board storage: inject PostgREST URL so R apps can discover it.
-	if srv.Config.BoardStorage != nil && srv.Config.BoardStorage.PostgrestURL != "" {
-		env["POSTGREST_URL"] = srv.Config.BoardStorage.PostgrestURL
-	}
-
 	return env
 }
 

@@ -14,6 +14,8 @@ import (
 	"testing/fstest"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 
 	"github.com/cynkra/blockyard/internal/config"
@@ -46,17 +48,23 @@ func dumpSQLiteSchema(t *testing.T, db *DB) string {
 	return strings.Join(stmts, "\n")
 }
 
+// dumpSchemas are the schemas the app owns. The dump queries below
+// cover both so post-006 objects in `blockyard` are included in the
+// roundtrip comparison and pre-006 objects (still in `public`
+// mid-migration) are caught on either side.
+const dumpSchemas = "'public', 'blockyard'"
+
 func dumpPostgresSchema(t *testing.T, db *DB) string {
 	t.Helper()
 
 	// Tables and columns
 	rows, err := db.Query(`
-		SELECT table_name, column_name, data_type,
+		SELECT table_schema, table_name, column_name, data_type,
 		       column_default, is_nullable
 		FROM information_schema.columns
-		WHERE table_schema = 'public'
+		WHERE table_schema IN (` + dumpSchemas + `)
 		  AND table_name != 'schema_migrations'
-		ORDER BY table_name, column_name`)
+		ORDER BY table_schema, table_name, column_name`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,74 +72,76 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
 
 	var lines []string
 	for rows.Next() {
-		var tbl, col, dtype, nullable string
+		var schema, tbl, col, dtype, nullable string
 		var dflt *string
-		if err := rows.Scan(&tbl, &col, &dtype, &dflt, &nullable); err != nil {
+		if err := rows.Scan(&schema, &tbl, &col, &dtype, &dflt, &nullable); err != nil {
 			t.Fatal(err)
 		}
 		d := "NULL"
 		if dflt != nil {
 			d = *dflt
 		}
-		lines = append(lines, fmt.Sprintf("%s.%s %s default=%s nullable=%s",
-			tbl, col, dtype, d, nullable))
+		lines = append(lines, fmt.Sprintf("%s.%s.%s %s default=%s nullable=%s",
+			schema, tbl, col, dtype, d, nullable))
 	}
 
 	// Indexes
 	idxRows, err := db.Query(`
-		SELECT tablename, indexname, indexdef
+		SELECT schemaname, tablename, indexname, indexdef
 		FROM pg_indexes
-		WHERE schemaname = 'public'
+		WHERE schemaname IN (` + dumpSchemas + `)
 		  AND tablename != 'schema_migrations'
-		ORDER BY tablename, indexname`)
+		ORDER BY schemaname, tablename, indexname`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer idxRows.Close()
 
 	for idxRows.Next() {
-		var tbl, name, def string
-		if err := idxRows.Scan(&tbl, &name, &def); err != nil {
+		var schema, tbl, name, def string
+		if err := idxRows.Scan(&schema, &tbl, &name, &def); err != nil {
 			t.Fatal(err)
 		}
-		lines = append(lines, fmt.Sprintf("INDEX %s: %s", name, def))
+		lines = append(lines, fmt.Sprintf("INDEX %s.%s: %s", schema, name, def))
 	}
 
 	// CHECK constraints (exclude system-generated NOT NULL constraints whose
 	// names contain OIDs that change across drop/create cycles)
 	chkRows, err := db.Query(`
-		SELECT tc.table_name, cc.constraint_name, cc.check_clause
+		SELECT tc.table_schema, tc.table_name, cc.constraint_name, cc.check_clause
 		FROM information_schema.check_constraints cc
 		JOIN information_schema.table_constraints tc
 		    ON cc.constraint_name = tc.constraint_name
 		   AND cc.constraint_schema = tc.constraint_schema
-		WHERE tc.table_schema = 'public'
+		WHERE tc.table_schema IN (` + dumpSchemas + `)
 		  AND tc.table_name != 'schema_migrations'
 		  AND cc.constraint_name NOT LIKE '%_not_null'
-		ORDER BY tc.table_name, cc.constraint_name`)
+		ORDER BY tc.table_schema, tc.table_name, cc.constraint_name`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer chkRows.Close()
 
 	for chkRows.Next() {
-		var tbl, name, clause string
-		if err := chkRows.Scan(&tbl, &name, &clause); err != nil {
+		var schema, tbl, name, clause string
+		if err := chkRows.Scan(&schema, &tbl, &name, &clause); err != nil {
 			t.Fatal(err)
 		}
-		lines = append(lines, fmt.Sprintf("CHECK %s.%s: %s", tbl, name, clause))
+		lines = append(lines, fmt.Sprintf("CHECK %s.%s.%s: %s", schema, tbl, name, clause))
 	}
 
 	// Foreign key constraints — use pg_catalog for deterministic column
 	// ordering (information_schema.constraint_column_usage cross-joins
 	// on composite FKs).
 	fkRows, err := db.Query(`
-		SELECT c.conrelid::regclass AS table_name,
+		SELECT n.nspname AS schema_name,
+		       c.conrelid::regclass AS table_name,
 		       c.conname,
 		       a1.attname AS column_name,
 		       c.confrelid::regclass AS ref_table,
 		       a2.attname AS ref_column
 		FROM pg_constraint c
+		JOIN pg_namespace n ON c.connamespace = n.oid
 		JOIN LATERAL unnest(c.conkey, c.confkey)
 		     WITH ORDINALITY AS u(attnum, refattnum, ord) ON true
 		JOIN pg_attribute a1
@@ -139,82 +149,83 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
 		JOIN pg_attribute a2
 		     ON a2.attrelid = c.confrelid AND a2.attnum = u.refattnum
 		WHERE c.contype = 'f'
-		  AND c.connamespace = 'public'::regnamespace
-		ORDER BY c.conrelid::regclass::text, c.conname, u.ord`)
+		  AND n.nspname IN (` + dumpSchemas + `)
+		ORDER BY n.nspname, c.conrelid::regclass::text, c.conname, u.ord`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fkRows.Close()
 
 	for fkRows.Next() {
-		var tbl, name, col, refTbl, refCol string
-		if err := fkRows.Scan(&tbl, &name, &col, &refTbl, &refCol); err != nil {
+		var schema, tbl, name, col, refTbl, refCol string
+		if err := fkRows.Scan(&schema, &tbl, &name, &col, &refTbl, &refCol); err != nil {
 			t.Fatal(err)
 		}
-		lines = append(lines, fmt.Sprintf("FK %s.%s: %s -> %s.%s",
-			tbl, name, col, refTbl, refCol))
+		lines = append(lines, fmt.Sprintf("FK %s.%s.%s: %s -> %s.%s",
+			schema, tbl, name, col, refTbl, refCol))
 	}
 
 	// Functions (excludes internal/system functions)
 	fnRows, err := db.Query(`
-		SELECT p.proname, pg_get_functiondef(p.oid)
+		SELECT n.nspname, p.proname, pg_get_functiondef(p.oid)
 		FROM pg_proc p
 		JOIN pg_namespace n ON p.pronamespace = n.oid
-		WHERE n.nspname = 'public'
-		ORDER BY p.proname`)
+		WHERE n.nspname IN (` + dumpSchemas + `)
+		ORDER BY n.nspname, p.proname`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fnRows.Close()
 
 	for fnRows.Next() {
-		var name, def string
-		if err := fnRows.Scan(&name, &def); err != nil {
+		var schema, name, def string
+		if err := fnRows.Scan(&schema, &name, &def); err != nil {
 			t.Fatal(err)
 		}
-		lines = append(lines, fmt.Sprintf("FUNC %s: %s", name, def))
+		lines = append(lines, fmt.Sprintf("FUNC %s.%s: %s", schema, name, def))
 	}
 
 	// Triggers
 	trgRows, err := db.Query(`
-		SELECT tgname, pg_get_triggerdef(t.oid)
+		SELECT n.nspname, c.relname, tgname, pg_get_triggerdef(t.oid)
 		FROM pg_trigger t
 		JOIN pg_class c ON t.tgrelid = c.oid
 		JOIN pg_namespace n ON c.relnamespace = n.oid
-		WHERE n.nspname = 'public'
+		WHERE n.nspname IN (` + dumpSchemas + `)
 		  AND NOT t.tgisinternal
-		ORDER BY c.relname, t.tgname`)
+		ORDER BY n.nspname, c.relname, t.tgname`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer trgRows.Close()
 
 	for trgRows.Next() {
-		var name, def string
-		if err := trgRows.Scan(&name, &def); err != nil {
+		var schema, tbl, name, def string
+		if err := trgRows.Scan(&schema, &tbl, &name, &def); err != nil {
 			t.Fatal(err)
 		}
-		lines = append(lines, fmt.Sprintf("TRIGGER %s: %s", name, def))
+		lines = append(lines, fmt.Sprintf("TRIGGER %s.%s.%s: %s", schema, tbl, name, def))
 	}
 
 	// RLS policies
 	polRows, err := db.Query(`
-		SELECT pol.polname, c.relname, pg_get_expr(pol.polqual, pol.polrelid) AS using_expr,
+		SELECT n.nspname, pol.polname, c.relname,
+		       pg_get_expr(pol.polqual, pol.polrelid) AS using_expr,
 		       pg_get_expr(pol.polwithcheck, pol.polrelid) AS check_expr
 		FROM pg_policy pol
 		JOIN pg_class c ON pol.polrelid = c.oid
 		JOIN pg_namespace n ON c.relnamespace = n.oid
-		WHERE n.nspname = 'public'
-		ORDER BY c.relname, pol.polname`)
+		WHERE n.nspname IN (` + dumpSchemas + `)
+		ORDER BY n.nspname, c.relname, pol.polname`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer polRows.Close()
 
 	for polRows.Next() {
-		var name, tbl string
+		var schema, name, tbl string
 		var usingExpr, checkExpr *string
-		if err := polRows.Scan(&name, &tbl, &usingExpr, &checkExpr); err != nil {
+		if err := polRows.Scan(&schema, &name, &tbl, &usingExpr, &checkExpr); err != nil {
 			t.Fatal(err)
 		}
 		u, c := "NULL", "NULL"
@@ -224,8 +235,8 @@ func dumpPostgresSchema(t *testing.T, db *DB) string {
 		if checkExpr != nil {
 			c = *checkExpr
 		}
-		lines = append(lines, fmt.Sprintf("POLICY %s.%s: USING(%s) CHECK(%s)",
-			tbl, name, u, c))
+		lines = append(lines, fmt.Sprintf("POLICY %s.%s.%s: USING(%s) CHECK(%s)",
+			schema, tbl, name, u, c))
 	}
 
 	return strings.Join(lines, "\n")
@@ -858,11 +869,20 @@ func openRawPostgres(t *testing.T) *DB {
 	}
 	admin.Close()
 
+	// Mirror openPostgres: pin connections' search_path to
+	// `blockyard, public`. The blockyard schema is created by
+	// migration 006, not by this helper; earlier migrations bootstrap
+	// through the public fallback.
 	testURL := replaceDBName(pgBaseURL, dbName)
-	rawDB, err := sqlx.Open("pgx", testURL)
+	connCfg, err := pgx.ParseConfig(testURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if connCfg.RuntimeParams == nil {
+		connCfg.RuntimeParams = map[string]string{}
+	}
+	connCfg.RuntimeParams["search_path"] = pgSchema + ", public"
+	rawDB := sqlx.NewDb(stdlib.OpenDB(*connCfg), "pgx")
 	rawDB.SetMaxOpenConns(5)
 
 	t.Cleanup(func() {

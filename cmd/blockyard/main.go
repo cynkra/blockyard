@@ -157,6 +157,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Board-storage PG16+ preflight (#283). Hard gate: startup aborts
+	// if the connected server is older than PG16 because #284's
+	// per-user role provisioning uses PG16-only GRANT-with-INHERIT
+	// syntax. Runs only when the feature is enabled; SQLite and
+	// disabled-feature deployments stay on PG13+ compatibility.
+	if cfg.Database.BoardStorage {
+		pfCtx, pfCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := database.EnsurePostgresVersion(pfCtx, db.PostgresMinVersion16)
+		pfCancel()
+		if err != nil {
+			slog.Error("board storage preflight failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	// Initialize backend via the tag-gated factory map.
 	factory, ok := backendFactories[cfg.Server.Backend]
 	if !ok {

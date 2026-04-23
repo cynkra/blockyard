@@ -1,0 +1,1 @@
+-- no-op: paired with 007.up.sql (also no-op).

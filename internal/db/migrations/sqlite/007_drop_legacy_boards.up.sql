@@ -1,0 +1,10 @@
+-- phase: expand
+-- no-op: SQLite never had the legacy public.boards/board_versions/
+-- board_shares tables or the `anon` role — those lived only in
+-- 001's postgres branch. Kept here to preserve cross-dialect
+-- migration numbering.
+--
+-- Tagged `expand` (not `contract`) because the convention check
+-- requires contract migrations to reference an existing sqlite
+-- expand in released.txt, and there is no sqlite-side counterpart
+-- to contract against.

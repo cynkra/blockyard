@@ -1,2 +1,4 @@
 # Managed by the release process. Do not edit manually.
 # Format: NNN vX.Y.Z
+001 v0.0.3
+002 v0.0.3

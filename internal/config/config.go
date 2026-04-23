@@ -25,7 +25,6 @@ type Config struct {
 	Redis        *RedisConfig        `toml:"redis"`         // nil when not configured
 	OIDC         *OidcConfig         `toml:"oidc"`          // nil when not configured
 	Openbao      *OpenbaoConfig      `toml:"openbao"`       // nil when not configured
-	BoardStorage *BoardStorageConfig `toml:"board_storage"` // nil when not configured
 	Audit        *AuditConfig        `toml:"audit"`         // nil when not configured
 	Telemetry    *TelemetryConfig    `toml:"telemetry"`     // nil when not configured
 	Update       *UpdateConfig       `toml:"update"`        // nil when not configured
@@ -40,10 +39,6 @@ type Config struct {
 type RedisConfig struct {
 	URL       string `toml:"url"`        // redis://[:password@]host:port[/db]
 	KeyPrefix string `toml:"key_prefix"` // default: "blockyard:"
-}
-
-type BoardStorageConfig struct {
-	PostgrestURL string `toml:"postgrest_url"`
 }
 
 type AuditConfig struct {
@@ -152,6 +147,24 @@ type DatabaseConfig struct {
 	Driver string `toml:"driver"` // "sqlite" (default) or "postgres"
 	Path   string `toml:"path"`   // used when driver = "sqlite"
 	URL    string `toml:"url"`    // PostgreSQL connection string; used when driver = "postgres"
+
+	// Vault DB secrets engine integration (postgres only).
+	//
+	// VaultMount names the secrets engine mount path. Shared between
+	// admin credential issuance (#238) and per-user board-storage
+	// credentials (#283, #284). Default "database".
+	//
+	// VaultRole, when set, routes the admin connection through vault:
+	// blockyard reads `{VaultMount}/static-creds/{VaultRole}` at
+	// startup instead of using a static Database.URL password.
+	// Requires [openbao].
+	//
+	// BoardStorage enables the board-storage feature: adds a PG16+
+	// preflight at startup and (in #284) drives per-user role
+	// provisioning. Requires driver = "postgres" and [openbao].
+	VaultMount   string `toml:"vault_mount"`
+	VaultRole    string `toml:"vault_role"`
+	BoardStorage bool   `toml:"board_storage"`
 }
 
 type ProxyConfig struct {
@@ -340,6 +353,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = "/data/db/blockyard.db"
 	}
+	if cfg.Database.VaultMount == "" {
+		cfg.Database.VaultMount = "database"
+	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"
 	}
@@ -483,11 +499,6 @@ func applyEnvOverrides(cfg *Config) {
 	if cfg.Redis == nil && envPrefixExists("BLOCKYARD_REDIS_") {
 		cfg.Redis = &RedisConfig{}
 		redisDefaults(cfg.Redis)
-	}
-
-	// Auto-construct [board_storage] section if any BLOCKYARD_BOARD_STORAGE_* env var is set.
-	if cfg.BoardStorage == nil && envPrefixExists("BLOCKYARD_BOARD_STORAGE_") {
-		cfg.BoardStorage = &BoardStorageConfig{}
 	}
 
 	// Auto-construct [audit] section if any BLOCKYARD_AUDIT_* env var is set.
@@ -778,15 +789,27 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("config: [redis] section present but url is empty")
 	}
 
-	if cfg.BoardStorage != nil {
-		if cfg.BoardStorage.PostgrestURL == "" {
-			return fmt.Errorf("config: board_storage.postgrest_url must not be empty")
+	if cfg.Database.VaultRole != "" {
+		if cfg.Openbao == nil {
+			return fmt.Errorf("config: database.vault_role requires [openbao]")
 		}
 		if cfg.Database.Driver != "postgres" {
-			return fmt.Errorf("config: board_storage requires database.driver = \"postgres\"")
+			return fmt.Errorf("config: database.vault_role requires database.driver = \"postgres\"")
 		}
+		if cfg.Database.VaultMount == "" {
+			return fmt.Errorf("config: database.vault_role requires database.vault_mount")
+		}
+	}
+
+	if cfg.Database.BoardStorage {
 		if cfg.Openbao == nil {
-			return fmt.Errorf("config: board_storage requires [openbao] for vault Identity OIDC")
+			return fmt.Errorf("config: database.board_storage requires [openbao]")
+		}
+		if cfg.Database.Driver != "postgres" {
+			return fmt.Errorf("config: database.board_storage requires database.driver = \"postgres\"")
+		}
+		if cfg.Database.VaultMount == "" {
+			return fmt.Errorf("config: database.board_storage requires database.vault_mount")
 		}
 	}
 

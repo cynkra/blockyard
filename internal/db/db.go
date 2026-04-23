@@ -21,9 +21,17 @@ import (
 
 	"github.com/cynkra/blockyard/internal/config"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
+
+// pgSchema is the PostgreSQL schema all blockyard objects live in
+// post-migration-006. Runtime connections set search_path to
+// `<pgSchema>, public` so unqualified queries resolve here once the
+// schema exists, while still reaching public-schema tables during
+// early-migration bootstrap.
+const pgSchema = "blockyard"
 
 //go:embed migrations/sqlite/*.sql
 var sqliteMigrations embed.FS
@@ -105,10 +113,24 @@ func openSQLite(path string) (*DB, error) {
 }
 
 func openPostgres(url string) (*DB, error) {
-	db, err := sqlx.Open("pgx", url)
+	connCfg, err := pgx.ParseConfig(url)
 	if err != nil {
-		return nil, fmt.Errorf("open postgres: %w", err)
+		return nil, fmt.Errorf("parse postgres url: %w", err)
 	}
+	// Pin every pooled connection's search_path to `blockyard, public`.
+	// The blockyard schema is created by migration 006; PG silently
+	// skips missing schemas in the path, so on a fresh or pre-006
+	// database queries resolve through public and 001–005 can still
+	// create their tables in the v0.0.3 layout. Once 006 lands the
+	// schema exists, blockyard resolves first, and subsequent runtime
+	// queries see the relocated objects.
+	if connCfg.RuntimeParams == nil {
+		connCfg.RuntimeParams = map[string]string{}
+	}
+	if _, set := connCfg.RuntimeParams["search_path"]; !set {
+		connCfg.RuntimeParams["search_path"] = pgSchema + ", public"
+	}
+	db := sqlx.NewDb(stdlib.OpenDB(*connCfg), "pgx")
 
 	// Reasonable pool defaults — tune via connection string parameters
 	// if needed (e.g. ?pool_max_conns=20).
@@ -170,7 +192,14 @@ func (db *DB) runMigrations() error {
 func (db *DB) migrateDriver() (migratedb.Driver, error) {
 	switch db.dialect {
 	case DialectPostgres:
-		return migratepostgres.WithInstance(db.DB.DB, &migratepostgres.Config{})
+		// Pin schema_migrations to public. v0.0.3 deployments already
+		// have the table there (migrate's default with an unset
+		// search_path); pinning explicitly keeps the bookkeeping table
+		// stable as search_path flips between `blockyard` and fallback
+		// resolution.
+		return migratepostgres.WithInstance(db.DB.DB, &migratepostgres.Config{
+			SchemaName: "public",
+		})
 	default:
 		return migratesqlite.WithInstance(db.DB.DB, &migratesqlite.Config{
 			NoTxWrap: true,
@@ -208,6 +237,35 @@ func (db *DB) Close() error {
 		os.Remove(db.tempPath)
 	}
 	return err
+}
+
+// PostgresMinVersion16 is server_version_num for PG16.0 (board storage
+// requires PG16+ scoped-grant syntax; see #283).
+const PostgresMinVersion16 = 160000
+
+// EnsurePostgresVersion returns nil if the connected server reports
+// server_version_num >= minVersion, or an error describing the observed
+// version otherwise. Returns an error if the connection is not
+// postgres — callers gate this on driver before invoking. The error
+// message is human-readable for operator diagnostics.
+func (db *DB) EnsurePostgresVersion(ctx context.Context, minVersion int) error {
+	if db.dialect != DialectPostgres {
+		return fmt.Errorf("postgres version check requires postgres driver")
+	}
+	var (
+		num int
+		ver string
+	)
+	const q = `SELECT current_setting('server_version_num')::int,
+	                  current_setting('server_version')`
+	if err := db.QueryRowContext(ctx, q).Scan(&num, &ver); err != nil {
+		return fmt.Errorf("query server_version_num: %w", err)
+	}
+	if num < minVersion {
+		return fmt.Errorf("postgres %d or later required; server reports %s",
+			minVersion/10000, ver)
+	}
+	return nil
 }
 
 // --- Row types ---
