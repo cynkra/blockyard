@@ -18,11 +18,22 @@ type Client struct {
 }
 
 // New parses the config, connects, and verifies with a PING.
+//
+// Redis is a best-effort cache layer under the Postgres-primary stores
+// (see #262) — requests block on Postgres, not Redis. A sluggish or
+// unreachable Redis must fail fast so mirror writes / cache reads don't
+// hold a request for the go-redis default (3s write, 3s read, 5s dial).
+// 500 ms is long enough for a healthy local Redis and short enough that
+// a 30 s restart adds ≤ 500 ms per affected operation.
 func New(ctx context.Context, cfg *config.RedisConfig) (*Client, error) {
 	opts, err := redis.ParseURL(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse redis url: %w", err)
 	}
+	opts.DialTimeout = 500 * time.Millisecond
+	opts.ReadTimeout = 500 * time.Millisecond
+	opts.WriteTimeout = 500 * time.Millisecond
+	opts.PoolTimeout = 500 * time.Millisecond
 
 	rdb := redis.NewClient(opts)
 

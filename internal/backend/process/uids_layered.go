@@ -3,6 +3,7 @@ package process
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // layeredUIDAllocator pairs a Postgres-primary allocator with a Redis
@@ -36,12 +37,16 @@ func (u *layeredUIDAllocator) InUse() int {
 	return u.cache.InUse()
 }
 
+// CleanupOwnedOrphans cleans the primary (correctness). The cache mirror
+// is cleaned best-effort: a Redis outage at startup must not block
+// recovery of orphaned Postgres rows. See ports_layered.go for the
+// matching reasoning.
 func (u *layeredUIDAllocator) CleanupOwnedOrphans(ctx context.Context) error {
 	if err := u.primary.CleanupOwnedOrphans(ctx); err != nil {
 		return fmt.Errorf("primary: %w", err)
 	}
 	if err := u.cache.CleanupOwnedOrphans(ctx); err != nil {
-		return fmt.Errorf("cache: %w", err)
+		slog.Warn("layered uid cleanup: cache best-effort", "error", err)
 	}
 	return nil
 }

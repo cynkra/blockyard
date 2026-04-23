@@ -137,9 +137,13 @@ func StartupCleanup(ctx context.Context, srv *server.Server, passive bool) error
 			"count", count)
 	}
 
-	// Reconcile Redis worker map against containers still running.
-	// With in-memory stores this is a no-op (All() returns empty).
-	workerIDs := srv.Workers.All()
+	// Reconcile the worker map against containers still running on this
+	// process's backend. Scoped to this ServerID so a sibling pod's boot
+	// doesn't wipe our workers — Backend.ListManaged only sees locally
+	// managed resources, so comparing against a global Workers.All()
+	// would flag every peer's worker as stale. With in-memory stores
+	// WorkersForServer falls back to All(), which is empty on first boot.
+	workerIDs := srv.Workers.WorkersForServer(srv.ServerID)
 	if len(workerIDs) > 0 {
 		remaining, _ := srv.Backend.ListManaged(ctx)
 		alive := make(map[string]bool, len(remaining))
@@ -201,7 +205,10 @@ func evictDrainedWorkers(ctx context.Context, srv *server.Server) {
 }
 
 func pollOnce(ctx context.Context, srv *server.Server, misses map[string]int) {
-	workerIDs := srv.Workers.All()
+	// Only health-check workers owned by this process — Backend.HealthCheck
+	// can't reach a sibling pod's workers, and issuing the probe against
+	// them would yield spurious eviction misses.
+	workerIDs := srv.Workers.WorkersForServer(srv.ServerID)
 	if len(workerIDs) == 0 {
 		return
 	}
@@ -365,7 +372,9 @@ func drainAndEvictAll(ctx context.Context, srv *server.Server, workerIDs []strin
 // fails in-progress builds. Called after HTTP server drain and background
 // goroutine cancellation.
 func GracefulShutdown(ctx context.Context, srv *server.Server) {
-	workerIDs := srv.Workers.All()
+	// Only tear down workers this process owns — a peer's workers live
+	// on and must not be evicted by our shutdown.
+	workerIDs := srv.Workers.WorkersForServer(srv.ServerID)
 	if len(workerIDs) > 0 {
 		drainAndEvictAll(ctx, srv, workerIDs)
 	}

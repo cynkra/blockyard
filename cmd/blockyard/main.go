@@ -295,6 +295,7 @@ func main() {
 	// "recover my own crashed state" need different identifiers.
 	hostname, _ := os.Hostname()
 	serverID := hostname + "-" + randomNonceHex(8)
+	srv.ServerID = serverID
 
 	// Shared-state backend selection — see #287, #286, parent #262.
 	// Postgres is the source of truth; Redis is an optional read-through
@@ -306,6 +307,7 @@ func main() {
 	registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
 	idleTTL := cfg.Proxy.SessionIdleTTL.Duration
 	var pgSessions *session.PostgresStore
+	var pgWorkers *server.PostgresWorkerMap
 	switch mode {
 	case config.SessionStoreMemory:
 		srv.Registry = registry.NewMemoryRegistry()
@@ -317,7 +319,8 @@ func main() {
 		srv.Sessions = session.NewRedisStore(rc, idleTTL)
 	case config.SessionStorePostgres:
 		srv.Registry = registry.NewPostgresRegistry(database.DB, registryTTL)
-		srv.Workers = server.NewPostgresWorkerMap(database.DB, serverID)
+		pgWorkers = server.NewPostgresWorkerMap(database.DB, serverID)
+		srv.Workers = pgWorkers
 		pgSessions = session.NewPostgresStore(database.DB, idleTTL)
 		srv.Sessions = pgSessions
 	case config.SessionStoreLayered:
@@ -325,8 +328,9 @@ func main() {
 			registry.NewPostgresRegistry(database.DB, registryTTL),
 			registry.NewRedisRegistry(rc, registryTTL),
 		)
+		pgWorkers = server.NewPostgresWorkerMap(database.DB, serverID)
 		srv.Workers = server.NewLayeredWorkerMap(
-			server.NewPostgresWorkerMap(database.DB, serverID),
+			pgWorkers,
 			server.NewRedisWorkerMap(rc, serverID),
 		)
 		pgSessions = session.NewPostgresStore(database.DB, idleTTL)
@@ -346,6 +350,19 @@ func main() {
 		go func() {
 			defer bgWg.Done()
 			pgSessions.RunExpiry(bgCtx, time.Minute)
+		}()
+	}
+	if pgWorkers != nil {
+		// Reap rows whose last_heartbeat has been stale for 5× the
+		// registry TTL. Registry.Get already filters stale rows at
+		// registryTTL, so reaping a bit later keeps the WorkerMap /
+		// Registry views converged without racing a transient
+		// heartbeat blip. Sweeps once a minute — low volume, bounded
+		// blast radius per sweep.
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			pgWorkers.RunReaper(bgCtx, 5*registryTTL, time.Minute)
 		}()
 	}
 	slog.Info("shared state store selected", "mode", mode)

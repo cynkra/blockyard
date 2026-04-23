@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -149,6 +150,62 @@ func TestPostgresWorkerMapIdleSinceNullRoundTrip(t *testing.T) {
 	}
 	if !w.IdleSince.IsZero() {
 		t.Errorf("IdleSince = %v, want zero value", w.IdleSince)
+	}
+}
+
+// TestPostgresWorkerMapReaper covers the crashed-pod cleanup path: a
+// worker whose last_heartbeat falls past the reaper threshold gets its
+// row deleted so WorkerMap aggregate queries don't report a ghost.
+// Mirrors the session RunExpiry contract but operates on the shared
+// blockyard_workers table instead of a dedicated sessions table.
+func TestPostgresWorkerMapReaper(t *testing.T) {
+	db := testPGDB(t)
+	m := NewPostgresWorkerMap(db, "test-host")
+
+	m.Set("w-alive", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+	m.Set("w-dead", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+
+	// Push w-dead's heartbeat past the reaper threshold. w-alive's stays
+	// fresh (now()).
+	if _, err := db.Exec(
+		`UPDATE blockyard_workers SET last_heartbeat = now() - interval '10 minutes' WHERE id = $1`,
+		"w-dead",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	m.reapStale(context.Background(), 5*time.Minute)
+
+	if _, ok := m.Get("w-dead"); ok {
+		t.Error("stale worker should be reaped")
+	}
+	if _, ok := m.Get("w-alive"); !ok {
+		t.Error("fresh worker must survive the reaper")
+	}
+}
+
+// TestPostgresWorkerMapReaperZeroThresholdIsNoOp pins the
+// "disable reaper via threshold=0" contract — callers that skip the
+// reaper (e.g. single-pod debug runs) shouldn't have to not-schedule
+// it, they can schedule it with 0 and get a cheap early-return.
+func TestPostgresWorkerMapReaperZeroThresholdIsNoOp(t *testing.T) {
+	db := testPGDB(t)
+	m := NewPostgresWorkerMap(db, "test-host")
+
+	m.Set("w1", ActiveWorker{AppID: "app1", BundleID: "b1", StartedAt: time.Now()})
+	if _, err := db.Exec(
+		`UPDATE blockyard_workers SET last_heartbeat = now() - interval '1 hour' WHERE id = $1`,
+		"w1",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // RunReaper returns immediately on threshold <= 0
+	m.RunReaper(ctx, 0, time.Millisecond)
+
+	if _, ok := m.Get("w1"); !ok {
+		t.Error("threshold=0 should leave stale rows alone")
 	}
 }
 
