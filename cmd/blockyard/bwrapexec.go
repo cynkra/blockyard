@@ -64,8 +64,11 @@ func runBwrapExec(args []string) error {
 	}
 
 	// execve replaces the process; args[0] is conventionally the
-	// program name for downstream ps/logging.
+	// program name for downstream ps/logging. bwrapPath comes in
+	// over our own argv from the process backend, which only calls
+	// this shim with the validated cfg.BwrapPath — same trust
+	// boundary as the other bwrap exec.Command sites.
 	argv := append([]string{bwrapPath}, bwrapArgs...)
-	return syscall.Exec(bwrapPath, argv, os.Environ())
+	return syscall.Exec(bwrapPath, argv, os.Environ()) //nolint:gosec // G204: bwrapPath is from the validated process config
 }
 
