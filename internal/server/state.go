@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -276,7 +277,28 @@ func (srv *Server) AuthDeps() *auth.Deps {
 		DB:           srv.DB,
 	}
 	if srv.BoardStorage != nil {
-		deps.BoardStorageProvisioner = srv.BoardStorage.ProvisionUser
+		deps.BoardStorageProvisioner = func(ctx context.Context, sub, accessToken string) error {
+			// JWTLogin has the side effect of creating the user's
+			// vault entity + alias the first time — without which
+			// Provisioner.ProvisionUser's identity/lookup/entity
+			// call returns not-found and #285's entity-ID-based PG
+			// role naming has nothing to derive from. Warming
+			// VaultTokenCache on the same call avoids a second
+			// round-trip on the first proxy request.
+			token, ttl, err := srv.VaultClient.JWTLogin(
+				ctx, srv.Config.Openbao.JWTAuthPath, accessToken,
+			)
+			if err != nil {
+				return fmt.Errorf("vault JWT login for %s: %w", sub, err)
+			}
+			if ttl == 0 {
+				ttl = srv.Config.Openbao.TokenTTL.Duration
+			}
+			if srv.VaultTokenCache != nil {
+				srv.VaultTokenCache.Set(sub, token, ttl)
+			}
+			return srv.BoardStorage.ProvisionUser(ctx, sub)
+		}
 	}
 	return deps
 }

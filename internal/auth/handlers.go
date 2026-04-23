@@ -49,7 +49,12 @@ type Deps struct {
 	// does not start a session with missing credentials; a retry on
 	// next login replays cleanly because every provisioning step is
 	// idempotent.
-	BoardStorageProvisioner func(ctx context.Context, sub string) error
+	//
+	// Takes the OAuth access token alongside sub so the wiring can
+	// first do a vault JWTLogin — that's what causes vault to create
+	// the user's entity + alias on first login, which provisioning
+	// then looks up to derive the PG role name.
+	BoardStorageProvisioner func(ctx context.Context, sub, accessToken string) error
 }
 
 // defaultUserRole returns the role to assign to a brand-new OIDC user.
@@ -283,7 +288,7 @@ func CallbackHandler(deps *Deps) http.HandlerFunc {
 		// with 502 — no session cookie is issued, and retrying on the
 		// next login replays cleanly because every step is idempotent.
 		if deps.BoardStorageProvisioner != nil {
-			if err := deps.BoardStorageProvisioner(r.Context(), subClaim); err != nil {
+			if err := deps.BoardStorageProvisioner(r.Context(), subClaim, oauth2Token.AccessToken); err != nil {
 				slog.Error("board storage provisioning failed",
 					"sub", subClaim, "error", err)
 				http.Error(w, "bad gateway", http.StatusBadGateway)
