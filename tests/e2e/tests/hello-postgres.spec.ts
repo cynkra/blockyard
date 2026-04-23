@@ -26,13 +26,17 @@ async function dexLogin(page: Page, email: string, password: string) {
 // openApp navigates to the hello-postgres app and waits for Shiny to
 // finish handshake. Shiny marks the body busy during connect; the
 // #save button is disabled until `server` has run at least once.
+//
+// First-worker cold start includes pak installing DBI, RPostgres,
+// httr and jsonlite against the blockyard-worker image's R library —
+// that can run 2-3 minutes on a cold pak cache (fresh CI runner or a
+// freshly-booted sandbox). Give it a generous budget. Once one worker
+// is warm the subsequent tests hit sub-second openApp times.
 async function openApp(page: Page) {
-  await page.goto(APP);
-  // Shiny inputs render eagerly but bindings only wire after WS is up.
-  // Wait for the action button to be visible + enabled before proceeding.
+  await page.goto(APP, { timeout: 180_000 });
   const save = page.locator("#save");
-  await expect(save).toBeVisible({ timeout: 60_000 });
-  await expect(save).toBeEnabled({ timeout: 60_000 });
+  await expect(save).toBeVisible({ timeout: 180_000 });
+  await expect(save).toBeEnabled({ timeout: 30_000 });
 }
 
 async function loginAndOpen(
@@ -63,6 +67,12 @@ async function listBoards(page: Page): Promise<string> {
 }
 
 test.describe.serial("hello-postgres RLS isolation", () => {
+  // The beforeAll below does a cold-start worker spawn (pak install
+  // of DBI, RPostgres, httr, jsonlite). Give each test in the group
+  // a 4-minute budget so beforeAll's openApp has headroom on a fresh
+  // pak cache.
+  test.setTimeout(240_000);
+
   let ctx1: BrowserContext;
   let ctx2: BrowserContext;
   let page1: Page;

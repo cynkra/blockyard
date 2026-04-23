@@ -214,7 +214,7 @@ func NewRouter(srv *server.Server, startBG func(), orch *orchestrator.Orchestrat
 
 	// Auth endpoints — strict rate limit to prevent brute-force.
 	r.Group(func(r chi.Router) {
-		r.Use(httprate.LimitByIP(10, time.Minute))
+		r.Use(httprate.LimitByIP(srv.Config.Proxy.AuthRateLimitPerMinute, time.Minute))
 		r.Get("/login", auth.LoginHandler(authDeps))
 		r.Get("/callback", auth.CallbackHandler(authDeps))
 		r.Get("/logout", auth.LogoutHandler(authDeps))

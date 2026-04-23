@@ -117,6 +117,10 @@ services:
       BLOCKYARD_DATABASE_URL: postgres://blockyard:dev-password@postgres:5432/blockyard?sslmode=disable
       BLOCKYARD_DATABASE_BOARD_STORAGE: "true"
       BLOCKYARD_DATABASE_VAULT_DB_CONNECTION: blockyard
+      # The e2e suite drives two users + multiple login flows per run;
+      # the 10/min default trips on cumulative /login and /callback
+      # hits across login.spec.ts + hello-postgres.spec.ts.
+      BLOCKYARD_PROXY_AUTH_RATE_LIMIT_PER_MINUTE: "60"
     cap_add:
       - NET_ADMIN
     healthcheck:
