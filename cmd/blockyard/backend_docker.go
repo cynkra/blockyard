@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 
+	"github.com/jmoiron/sqlx"
+
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/backend/docker"
 	"github.com/cynkra/blockyard/internal/config"
@@ -12,7 +14,7 @@ import (
 )
 
 func init() {
-	backendFactories["docker"] = func(ctx context.Context, cfg *config.Config, _ *redisstate.Client, version string) (backend.Backend, error) {
+	backendFactories["docker"] = func(ctx context.Context, cfg *config.Config, _ *redisstate.Client, _ *sqlx.DB, version string) (backend.Backend, error) {
 		return docker.New(ctx, cfg, cfg.Storage.BundleServerPath, version)
 	}
 }

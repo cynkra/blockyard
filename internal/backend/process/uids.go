@@ -6,10 +6,11 @@ import (
 	"sync"
 )
 
-// uidAllocator manages a fixed range of host UIDs for workers. Two
-// implementations exist: memoryUIDAllocator (used when Redis is not
-// configured; single-node only) and redisUIDAllocator (used when
-// Redis is configured; coordinates across blockyard peers). Both
+// uidAllocator manages a fixed range of host UIDs for workers. Four
+// implementations exist, picked by config.ResolveSessionStoreMode:
+// memoryUIDAllocator (single-node), redisUIDAllocator (SETNX),
+// postgresUIDAllocator (INSERT … ON CONFLICT, source of truth from
+// #288), and layeredUIDAllocator (PG primary + Redis mirror). All
 // share the same interface so the rest of the backend does not care
 // which is live.
 type uidAllocator interface {

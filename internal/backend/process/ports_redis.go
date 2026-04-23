@@ -158,6 +158,20 @@ func (p *redisPortAllocator) luaAlloc(skipFrom int) (int, error) {
 	return res, nil
 }
 
+// mirrorClaim writes the claim key unconditionally for a specific
+// port. Used by the layered allocator after Postgres has already
+// arbitrated ownership — no SETNX needed because the primary mutex
+// guarantees only one peer reaches this point with this port. Errors
+// are logged here (matching the rest of this store's best-effort
+// pattern) so callers don't have to repeat the slog dance.
+func (p *redisPortAllocator) mirrorClaim(port int) {
+	ctx := context.Background()
+	key := p.client.Prefix() + "port:" + strconv.Itoa(port)
+	if err := p.client.Redis().Set(ctx, key, p.hostname, 0).Err(); err != nil {
+		slog.Warn("redis port mirror", "port", port, "error", err)
+	}
+}
+
 func (p *redisPortAllocator) luaRelease(port int) error {
 	ctx := context.Background()
 	key := p.client.Prefix() + "port:" + strconv.Itoa(port)

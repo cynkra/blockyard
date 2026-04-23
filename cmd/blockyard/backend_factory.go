@@ -4,21 +4,24 @@ import (
 	"context"
 	"sort"
 
+	"github.com/jmoiron/sqlx"
+
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/redisstate"
 )
 
-// backendFactory constructs a Backend from the already-parsed config
-// and a (possibly nil) shared Redis client. The process backend uses
-// rc for Redis-backed allocators when non-nil and falls back to
-// in-memory allocators otherwise. The Docker backend ignores rc —
-// its Redis awareness is limited to reading the URL string from
-// cfg.Redis.URL for its preflight check.
+// backendFactory constructs a Backend from the already-parsed config,
+// a (possibly nil) shared Redis client, and the open database handle.
+// The process backend uses rc for Redis-backed allocators and database
+// for Postgres-backed allocators (#288), picking based on the
+// resolved SessionStore mode. The Docker backend ignores both rc and
+// database — its Redis awareness is limited to reading the URL string
+// from cfg.Redis.URL for its preflight check.
 //
 // version is threaded through because docker.New needs it for the
 // orchestrator's version-comparison path.
-type backendFactory func(ctx context.Context, cfg *config.Config, rc *redisstate.Client, version string) (backend.Backend, error)
+type backendFactory func(ctx context.Context, cfg *config.Config, rc *redisstate.Client, db *sqlx.DB, version string) (backend.Backend, error)
 
 // backendFactories maps [server] backend = "..." values to factories.
 // Populated by init() in the tag-gated backend_docker.go /

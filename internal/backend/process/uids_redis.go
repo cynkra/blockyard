@@ -116,6 +116,17 @@ func (u *redisUIDAllocator) InUse() int {
 	return n
 }
 
+// mirrorClaim writes the claim key unconditionally for a specific
+// UID. Used by the layered allocator after Postgres has already
+// arbitrated ownership. Errors are logged here (best-effort).
+func (u *redisUIDAllocator) mirrorClaim(uid int) {
+	ctx := context.Background()
+	key := u.client.Prefix() + "uid:" + strconv.Itoa(uid)
+	if err := u.client.Redis().Set(ctx, key, u.hostname, 0).Err(); err != nil {
+		slog.Warn("redis uid mirror", "uid", uid, "error", err)
+	}
+}
+
 // CleanupOwnedOrphans scans the UID key namespace and deletes entries
 // owned by this hostname. The process backend's workers from a
 // previous run are dead (Pdeathsig), so all owned keys at startup
