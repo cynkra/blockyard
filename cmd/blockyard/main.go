@@ -306,12 +306,26 @@ func main() {
 	// and board storage are configured. Drives per-user PG role +
 	// vault static-role setup from the OIDC callback and from the
 	// admin deactivate/reactivate path (#284).
+	//
+	// The OIDC mount accessor is resolved once here and cached on the
+	// provisioner: identity/lookup/entity (#285) needs the accessor
+	// but operators configure the mount by path, so blockyard bridges
+	// the two at startup.
 	if cfg.Database.BoardStorage {
+		accCtx, accCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		accessor, err := srv.VaultClient.AuthMountAccessor(accCtx, cfg.Openbao.JWTAuthPath)
+		accCancel()
+		if err != nil {
+			slog.Error("board storage: resolve OIDC mount accessor", "error", err)
+			os.Exit(1)
+		}
 		srv.BoardStorage = &boardstorage.Provisioner{
-			DB:              database,
-			Vault:           srv.VaultClient,
-			VaultMount:      cfg.Database.VaultMount,
-			VaultDBConnName: cfg.Database.VaultDBConnection,
+			DB:                  database,
+			Vault:               srv.VaultClient,
+			VaultMount:          cfg.Database.VaultMount,
+			VaultDBConnName:     cfg.Database.VaultDBConnection,
+			VaultRotationPeriod: cfg.Database.VaultRotationPeriod.Duration,
+			MountAccessor:       accessor,
 		}
 	}
 

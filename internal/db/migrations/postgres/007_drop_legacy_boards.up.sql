@@ -6,12 +6,12 @@
 -- populated them) and replaced by the blockyard-schema versions
 -- introduced in 006.
 --
--- The `anon` role (also introduced by 001 for PostgREST) is NOT
--- dropped here. The hello-postgrest example's init.sql still creates
--- and depends on it, and that example is being rewritten in #285 —
--- removing anon now breaks the example's merge-group test for no
--- operational benefit. #285 drops the role when it removes the
--- example.
+-- Also drop the `anon` role (created by 001 for PostgREST). The
+-- hello-postgrest example is replaced by hello-postgres in #285, so
+-- nothing still needs it. DROP ROLE IF EXISTS is idempotent against
+-- both "anon exists from 001" and "anon was never created"
+-- deployments. Edited in place rather than added in a new migration
+-- because 007 is not released yet (see migrations/released.txt).
 --
 -- This migration is explicitly named in released.txt-controlled
 -- contract references (001 v0.0.3). Rolling back past 006 via
@@ -32,3 +32,6 @@ DROP TABLE IF EXISTS public.board_versions CASCADE;
 DROP TABLE IF EXISTS public.boards CASCADE;
 
 DROP FUNCTION IF EXISTS public.current_sub();
+
+-- atlas:nolint DS101
+DROP ROLE IF EXISTS anon;

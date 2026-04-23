@@ -1300,6 +1300,19 @@ func TestDatabaseBoardStorageParsed(t *testing.T) {
 	if cfg.Database.VaultDBConnection != "postgresql" {
 		t.Errorf("vault_db_connection = %q", cfg.Database.VaultDBConnection)
 	}
+	if cfg.Database.VaultRotationPeriod.Duration != 24*time.Hour {
+		t.Errorf("vault_rotation_period default = %v, want 24h", cfg.Database.VaultRotationPeriod.Duration)
+	}
+}
+
+func TestDatabaseVaultRotationPeriodParsed(t *testing.T) {
+	cfg := loadFromString(t, databaseVaultTOML(t,
+		`board_storage = true`+"\n"+
+			`vault_db_connection = "postgresql"`+"\n"+
+			`vault_rotation_period = "72h"`))
+	if cfg.Database.VaultRotationPeriod.Duration != 72*time.Hour {
+		t.Errorf("vault_rotation_period = %v, want 72h", cfg.Database.VaultRotationPeriod.Duration)
+	}
 }
 
 func TestValidationRejectsBoardStorageWithoutVaultDBConnection(t *testing.T) {

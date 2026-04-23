@@ -13,7 +13,7 @@ on:
           - ""
           - TestHelloShiny
           - TestHelloPocketbase
-          - TestHelloPostgrest
+          - TestHelloPostgres
 
 permissions:
   contents: read
@@ -29,8 +29,8 @@ jobs:
         include: ${{ fromJSON(
           inputs.test == 'TestHelloShiny'       && '[{"example":"hello-shiny","test":"TestHelloShiny"}]' ||
           inputs.test == 'TestHelloPocketbase'  && '[{"example":"hello-pocketbase","test":"TestHelloPocketbase"}]' ||
-          inputs.test == 'TestHelloPostgrest'   && '[{"example":"hello-postgrest","test":"TestHelloPostgrest"}]' ||
-          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-pocketbase","test":"TestHelloPocketbase"},{"example":"hello-postgrest","test":"TestHelloPostgrest"}]'
+          inputs.test == 'TestHelloPostgres'    && '[{"example":"hello-postgres","test":"TestHelloPostgres"}]' ||
+          '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-pocketbase","test":"TestHelloPocketbase"},{"example":"hello-postgres","test":"TestHelloPostgres"}]'
           ) }}
     steps:
       - uses: actions/checkout@v6

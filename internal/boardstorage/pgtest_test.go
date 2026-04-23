@@ -2,7 +2,9 @@ package boardstorage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"net/url"
 	"os"
 	"strings"
@@ -146,12 +148,18 @@ func dbNameFromURL(t *testing.T, d *db.DB) string {
 }
 
 // provisionUserRoleSQL runs the three SQL statements the provisioner
-// would emit, but with a caller-chosen password so tests can
-// connect as the new role. Skips the vault step. Returns the
-// normalized role name.
+// would emit, but with a caller-chosen password so tests can connect
+// as the new role. Skips the vault call chain (entity lookup +
+// static-role registration). Returns the role name.
+//
+// Production derives the role name from vault's entity ID
+// (`user_<uuid>`) — tests don't have a vault talking to a real OIDC
+// auth mount, so we synthesize a stable pseudo-entity-ID from the sub
+// instead. The shape ("user_" + opaque id) is what matters downstream
+// for RLS / grant-chain assertions.
 func provisionUserRoleSQL(t *testing.T, d *db.DB, sub, password string) string {
 	t.Helper()
-	roleName := NormalizePgRole(sub)
+	roleName := syntheticRoleName(sub)
 	if err := ensureUserRole(context.Background(), d, roleName, password); err != nil {
 		t.Fatalf("ensureUserRole: %v", err)
 	}
@@ -169,6 +177,14 @@ func provisionUserRoleSQL(t *testing.T, d *db.DB, sub, password string) string {
 		t.Fatalf("SetUserPgRole: %v", err)
 	}
 	return roleName
+}
+
+// syntheticRoleName mimics the production `user_<entity-id>` shape
+// using a sha256 slice of the sub instead of a real vault entity UUID.
+// Only used by helpers that bypass the vault entity lookup.
+func syntheticRoleName(sub string) string {
+	h := sha256.Sum256([]byte(sub))
+	return "user_" + hex.EncodeToString(h[:8])
 }
 
 // bootstrapAdmin ensures blockyard_admin exists. Separate helper so

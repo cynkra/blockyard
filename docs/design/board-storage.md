@@ -41,7 +41,7 @@ A board is a JSON string. The storage backend must support:
 ## Recommended Backend: PostgreSQL with Vault-issued Credentials
 
 PostgreSQL with Row-Level Security (RLS) enforced at the database
-level. Each user maps to a dedicated PG role (`user_<sub>`); RLS
+level. Each user maps to a dedicated PG role (`user_<entity-id>`); RLS
 policies filter rows by `current_user`. The R app connects to
 PostgreSQL directly, using per-user credentials issued by vault's
 `database` secrets engine. No middleware sits between R and the
@@ -124,7 +124,7 @@ blockyard schema once 006 lands.
 
 ```sql
 -- Group role for board-storage access. Each per-user role
--- (user_<sub>) is granted membership in this group at provisioning
+-- (user_<entity-id>) is granted membership in this group at provisioning
 -- time (#284).
 CREATE ROLE blockr_user NOLOGIN;
 GRANT USAGE ON SCHEMA blockyard TO blockr_user;
@@ -229,7 +229,7 @@ Three visibility modes via `acl_type`:
 | `acl_type` | Who can read |
 |---|---|
 | `private` | Owner only. Default. |
-| `public` | Any authenticated role (any `user_<sub>`). |
+| `public` | Any authenticated role (any `user_<entity-id>`). |
 | `restricted` | Owner + users listed in `board_shares`. |
 
 ### RLS Policies
@@ -374,12 +374,12 @@ One-time setup on vault:
 
 - Enable the `database` secrets engine.
 - Configure a connection to PostgreSQL using a PG role with
-  `CREATEROLE` privileges (for managing `user_<sub>` roles).
+  `CREATEROLE` privileges (for managing `user_<entity-id>` roles).
 
 Per-user provisioning (blockyard, on first login):
 
-- `CREATE ROLE "user_<sub>" LOGIN PASSWORD '<temp>';`
-- `GRANT blockr_user TO "user_<sub>";`
+- `CREATE ROLE "user_<entity-id>" LOGIN PASSWORD '<temp>';`
+- `GRANT blockr_user TO "user_<entity-id>";`
 - Register the static role with vault, pointing at the PG username
   and setting a rotation period (e.g. `24h`). Vault immediately
   rotates to a fresh password.
@@ -387,17 +387,28 @@ Per-user provisioning (blockyard, on first login):
   endpoint only:
 
 ```
-path "database/static-creds/user_<sub>" {
+path "database/static-creds/user_{{identity.entity.id}}" {
     capabilities = ["read"]
 }
 ```
 
-The `sub` identifier is normalized (lowercased, non-alphanumeric
-characters replaced) to form a valid PG role name. The normalized
-name is stored server-side and injected into the R session as
-`X-Blockyard-PG-Role`.
+The role name is derived from vault's entity UUID for the caller —
+the same identifier vault's templated policy above resolves at the
+ACL layer. Using vault's own identifier for both sides is load-
+bearing: it removes the normalization bridge that an earlier version
+of this design used, where blockyard hashed/folded the OIDC `sub`
+into a PG-valid identifier. The bridge was the place the two sides
+could silently disagree. The role name is stored on
+`blockyard.users.pg_role` and injected into the R session as
+`X-Blockyard-Pg-Role`.
 
 ### Example Docker Compose Services
+
+A runnable end-to-end stack lives at
+[`examples/hello-postgres/`](../../examples/hello-postgres/) — the
+snippets below are excerpts for context; the example has the full
+compose file, `setup.sh`, `init.sql`, and R app.
+
 
 ```yaml
 postgres:
@@ -423,7 +434,7 @@ registers them with vault.
 The init container configures vault's `database` secrets engine:
 connection to PostgreSQL with `CREATEROLE` privileges, and a
 policy template that grants each user read access to their own
-`static-creds/user_<sub>` path. No JWKS download, no Identity
+`static-creds/user_<entity-id>` path. No JWKS download, no Identity
 OIDC setup, no PostgREST container.
 
 ## Scaling Out
@@ -443,7 +454,7 @@ API shim with a shared PG connection pool:
   verifies it via vault's `auth/token/lookup-self` and resolves
   the user's PG role.
 - Shim opens one of its pooled PG connections, runs
-  `SET LOCAL ROLE "user_<sub>"` inside a transaction, and executes
+  `SET LOCAL ROLE "user_<entity-id>"` inside a transaction, and executes
   the query. RLS still enforces via `current_user`.
 - No schema changes. No change to how R obtains its vault token.
 

@@ -2,29 +2,42 @@ package boardstorage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cynkra/blockyard/internal/integration"
 )
 
-// mockVault stubs vault's POST {mount}/static-roles/{name} endpoint.
-// Records every call so tests can assert the payload, and lets tests
-// simulate vault-down by setting fail = true.
+// mockVault stubs the two endpoints ProvisionUser hits:
+//
+//   - POST /v1/identity/lookup/entity  → returns a synthetic entity ID
+//     deterministically derived from the alias name, so callers can
+//     predict `user_<id>` without pre-registering mappings.
+//   - POST /v1/{mount}/static-roles/{name} → records the call and
+//     acknowledges.
+//
+// Tests can flip `fail` to simulate vault-down for the static-role
+// step; the entity lookup stays available so partial-failure
+// scenarios are reachable.
 type mockVault struct {
-	mu     sync.Mutex
-	calls  []mockVaultCall
-	server *httptest.Server
-	fail   bool
+	mu      sync.Mutex
+	calls   []mockVaultCall
+	server  *httptest.Server
+	fail    bool
 }
 
 type mockVaultCall struct {
-	path string
-	body string
+	method string
+	path   string
+	body   string
 }
 
 func newMockVault(t *testing.T) *mockVault {
@@ -33,9 +46,28 @@ func newMockVault(t *testing.T) *mockVault {
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		m.mu.Lock()
-		m.calls = append(m.calls, mockVaultCall{path: r.URL.Path, body: string(body)})
+		m.calls = append(m.calls, mockVaultCall{
+			method: r.Method, path: r.URL.Path, body: string(body),
+		})
 		fail := m.fail
 		m.mu.Unlock()
+
+		// identity/lookup/entity is always available (production also
+		// answers it independently of the DB secrets engine). Returning
+		// a synthetic entity ID per alias keeps tests deterministic.
+		if r.URL.Path == "/v1/identity/lookup/entity" {
+			var req struct {
+				AliasName string `json:"alias_name"`
+			}
+			_ = json.Unmarshal(body, &req)
+			resp := map[string]any{
+				"data": map[string]any{"id": mockEntityID(req.AliasName)},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// static-roles path — honour the fail flag here.
 		if fail {
 			http.Error(w, "forced failure", http.StatusInternalServerError)
 			return
@@ -46,19 +78,41 @@ func newMockVault(t *testing.T) *mockVault {
 	return m
 }
 
+// mockEntityID produces a deterministic, UUID-shaped string from an
+// alias name so tests can predict `user_<id>` without pre-registering
+// vault state. Not cryptographic; the sha256 slice is just a
+// convenient stable bytestream.
+func mockEntityID(alias string) string {
+	h := sha256.Sum256([]byte(alias))
+	b := h[:16]
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// mockRoleName returns the role name ProvisionUser will derive for a
+// given alias, given the mock's entity-ID synthesis.
+func mockRoleName(alias string) string {
+	return "user_" + mockEntityID(alias)
+}
+
 func (m *mockVault) callCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.calls)
 }
 
-func (m *mockVault) lastCall() (mockVaultCall, bool) {
+// staticRoleCalls returns only the calls that targeted the
+// static-roles endpoint, i.e. excludes identity lookup housekeeping.
+func (m *mockVault) staticRoleCalls() []mockVaultCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.calls) == 0 {
-		return mockVaultCall{}, false
+	var out []mockVaultCall
+	for _, c := range m.calls {
+		if strings.Contains(c.path, "/static-roles/") {
+			out = append(out, c)
+		}
 	}
-	return m.calls[len(m.calls)-1], true
+	return out
 }
 
 func (m *mockVault) setFail(fail bool) {
@@ -71,64 +125,81 @@ func newVaultClient(m *mockVault) *integration.Client {
 	return integration.NewClient(m.server.URL, func() string { return "mock-admin-token" })
 }
 
+// newProvisioner wires a Provisioner against the mock vault with the
+// defaults every test in this file shares.
+func newProvisioner(m *mockVault, _ string) *Provisioner {
+	return &Provisioner{
+		// DB intentionally left nil here; callers pass their own.
+		Vault:               newVaultClient(m),
+		VaultMount:          "database",
+		VaultDBConnName:     "postgresql",
+		VaultRotationPeriod: 24 * time.Hour,
+		MountAccessor:       "auth_jwt_mock",
+	}
+}
+
 func TestProvisionUser_HappyPath(t *testing.T) {
 	d := boardStoragePgDB(t)
 	bootstrapAdmin(t, d)
 	m := newMockVault(t)
 
+	const sub = "alice"
 	// users row must exist before ProvisionUser runs — matches the
 	// CallbackHandler sequence (upsert user, then provision).
 	_, err := d.ExecContext(context.Background(),
 		`INSERT INTO blockyard.users (sub, email, name, last_login)
          VALUES ($1, $2, $3, now())`,
-		"alice", "alice@example.com", "Alice")
+		sub, "alice@example.com", "Alice")
 	if err != nil {
 		t.Fatalf("insert users: %v", err)
 	}
 
-	p := &Provisioner{
-		DB:              d,
-		Vault:           newVaultClient(m),
-		VaultMount:      "database",
-		VaultDBConnName: "postgresql",
-	}
-	if err := p.ProvisionUser(context.Background(), "alice"); err != nil {
+	p := newProvisioner(m, sub)
+	p.DB = d
+	if err := p.ProvisionUser(context.Background(), sub); err != nil {
 		t.Fatalf("ProvisionUser: %v", err)
 	}
+
+	wantRole := mockRoleName(sub)
 
 	// PG role exists with LOGIN.
 	var canLogin bool
 	err = d.QueryRowContext(context.Background(),
-		`SELECT rolcanlogin FROM pg_roles WHERE rolname = 'user_alice'`,
+		`SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, wantRole,
 	).Scan(&canLogin)
 	if err != nil {
-		t.Fatalf("query user_alice: %v", err)
+		t.Fatalf("query %s: %v", wantRole, err)
 	}
 	if !canLogin {
-		t.Error("user_alice should have LOGIN")
+		t.Errorf("%s should have LOGIN", wantRole)
 	}
 
-	// Vault received exactly one call to the expected path.
-	if got, want := m.callCount(), 1; got != want {
-		t.Fatalf("vault call count = %d, want %d", got, want)
+	// Vault received one static-roles call to the expected path.
+	sc := m.staticRoleCalls()
+	if len(sc) != 1 {
+		t.Fatalf("static-role call count = %d, want 1", len(sc))
 	}
-	call, _ := m.lastCall()
-	if call.path != "/v1/database/static-roles/user_alice" {
-		t.Errorf("vault path = %q", call.path)
+	wantPath := "/v1/database/static-roles/" + wantRole
+	if sc[0].path != wantPath {
+		t.Errorf("vault path = %q, want %q", sc[0].path, wantPath)
 	}
-	for _, needle := range []string{`"username":"user_alice"`, `"db_name":"postgresql"`, `"rotation_period":"24h"`} {
-		if !strings.Contains(call.body, needle) {
-			t.Errorf("vault body missing %q: %s", needle, call.body)
+	for _, needle := range []string{
+		`"username":"` + wantRole + `"`,
+		`"db_name":"postgresql"`,
+		`"rotation_period":"24h0m0s"`,
+	} {
+		if !strings.Contains(sc[0].body, needle) {
+			t.Errorf("vault body missing %q: %s", needle, sc[0].body)
 		}
 	}
 
 	// users.pg_role persisted.
-	pgRole, err := d.GetUserPgRole(context.Background(), "alice")
+	pgRole, err := d.GetUserPgRole(context.Background(), sub)
 	if err != nil {
 		t.Fatalf("GetUserPgRole: %v", err)
 	}
-	if pgRole != "user_alice" {
-		t.Errorf("pg_role = %q, want %q", pgRole, "user_alice")
+	if pgRole != wantRole {
+		t.Errorf("pg_role = %q, want %q", pgRole, wantRole)
 	}
 }
 
@@ -136,26 +207,23 @@ func TestProvisionUser_IdempotentAcrossLogins(t *testing.T) {
 	d := boardStoragePgDB(t)
 	bootstrapAdmin(t, d)
 	m := newMockVault(t)
+	const sub = "bob"
 	_, err := d.ExecContext(context.Background(),
 		`INSERT INTO blockyard.users (sub, email, name, last_login)
          VALUES ($1, $2, $3, now())`,
-		"bob", "bob@example.com", "Bob")
+		sub, "bob@example.com", "Bob")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &Provisioner{
-		DB:              d,
-		Vault:           newVaultClient(m),
-		VaultMount:      "database",
-		VaultDBConnName: "postgresql",
-	}
-	if err := p.ProvisionUser(context.Background(), "bob"); err != nil {
+	p := newProvisioner(m, sub)
+	p.DB = d
+	if err := p.ProvisionUser(context.Background(), sub); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	first := m.callCount()
 	// Second login: pg_role is already set, fast-path kicks in, no
 	// vault or SQL work at all.
-	if err := p.ProvisionUser(context.Background(), "bob"); err != nil {
+	if err := p.ProvisionUser(context.Background(), sub); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	if got := m.callCount(); got != first {
@@ -168,26 +236,23 @@ func TestProvisionUser_VaultFailureLeavesNoPersistedState(t *testing.T) {
 	bootstrapAdmin(t, d)
 	m := newMockVault(t)
 	m.setFail(true)
+	const sub = "carol"
 	_, err := d.ExecContext(context.Background(),
 		`INSERT INTO blockyard.users (sub, email, name, last_login)
          VALUES ($1, $2, $3, now())`,
-		"carol", "carol@example.com", "Carol")
+		sub, "carol@example.com", "Carol")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &Provisioner{
-		DB:              d,
-		Vault:           newVaultClient(m),
-		VaultMount:      "database",
-		VaultDBConnName: "postgresql",
-	}
-	err = p.ProvisionUser(context.Background(), "carol")
+	p := newProvisioner(m, sub)
+	p.DB = d
+	err = p.ProvisionUser(context.Background(), sub)
 	if err == nil {
 		t.Fatal("expected provisioning to fail with vault down")
 	}
 
 	// users.pg_role must NOT be persisted.
-	pgRole, gerr := d.GetUserPgRole(context.Background(), "carol")
+	pgRole, gerr := d.GetUserPgRole(context.Background(), sub)
 	if gerr != nil {
 		t.Fatal(gerr)
 	}
@@ -198,12 +263,12 @@ func TestProvisionUser_VaultFailureLeavesNoPersistedState(t *testing.T) {
 	// Retry after vault recovers must succeed and leave the system
 	// in the same end state as a clean first login.
 	m.setFail(false)
-	if err := p.ProvisionUser(context.Background(), "carol"); err != nil {
+	if err := p.ProvisionUser(context.Background(), sub); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	pgRole, _ = d.GetUserPgRole(context.Background(), "carol")
-	if pgRole != "user_carol" {
-		t.Errorf("pg_role after retry = %q", pgRole)
+	pgRole, _ = d.GetUserPgRole(context.Background(), sub)
+	if pgRole != mockRoleName(sub) {
+		t.Errorf("pg_role after retry = %q, want %q", pgRole, mockRoleName(sub))
 	}
 }
 

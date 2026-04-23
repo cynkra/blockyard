@@ -166,13 +166,21 @@ type DatabaseConfig struct {
 	// is true. Passed verbatim as the `db_name` field of
 	// `POST {mount}/static-roles/{name}`.
 	//
+	// VaultRotationPeriod is passed as the `rotation_period` field
+	// when registering per-user static roles. Vault auto-rotates
+	// each user's PG password on this cadence. No vault-native
+	// operator knob exists for this — it's a per-static-role setting
+	// passed at creation time, which is blockyard's job. Applies
+	// only when BoardStorage = true; ignored otherwise. Default 24h.
+	//
 	// BoardStorage enables the board-storage feature: adds a PG16+
 	// preflight at startup and (in #284) drives per-user role
 	// provisioning. Requires driver = "postgres" and [openbao].
-	VaultMount        string `toml:"vault_mount"`
-	VaultRole         string `toml:"vault_role"`
-	VaultDBConnection string `toml:"vault_db_connection"`
-	BoardStorage      bool   `toml:"board_storage"`
+	VaultMount          string   `toml:"vault_mount"`
+	VaultRole           string   `toml:"vault_role"`
+	VaultDBConnection   string   `toml:"vault_db_connection"`
+	VaultRotationPeriod Duration `toml:"vault_rotation_period"`
+	BoardStorage        bool     `toml:"board_storage"`
 }
 
 type ProxyConfig struct {
@@ -363,6 +371,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Database.VaultMount == "" {
 		cfg.Database.VaultMount = "database"
+	}
+	if cfg.Database.VaultRotationPeriod.Duration == 0 {
+		cfg.Database.VaultRotationPeriod.Duration = 24 * time.Hour
 	}
 	if cfg.Storage.BundleWorkerPath == "" {
 		cfg.Storage.BundleWorkerPath = "/app"

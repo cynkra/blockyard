@@ -220,6 +220,115 @@ func (c *Client) DatabaseStaticRoleCreate(
 	return nil
 }
 
+// AuthMountAccessor returns the opaque accessor of the auth method
+// mounted at `path` (e.g. "jwt"). Accessors are vault-internal
+// identifiers distinct from mount paths; the alias lookup below
+// requires them and operators rarely know them out-of-band.
+//
+// Called once at startup from board-storage provisioning (#285) to
+// cache the OIDC mount accessor — identity/lookup/entity expects it
+// whereas operators configure the mount by path.
+// GET {addr}/v1/sys/auth
+func (c *Client) AuthMountAccessor(ctx context.Context, path string) (string, error) {
+	url := fmt.Sprintf("%s/v1/sys/auth", c.addr)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("openbao sys/auth: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("openbao sys/auth: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("openbao sys/auth: status %d", resp.StatusCode)
+	}
+
+	// Mount paths in sys/auth are keyed with a trailing slash.
+	key := strings.TrimSuffix(path, "/") + "/"
+	var result map[string]struct {
+		Accessor string `json:"accessor"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("openbao sys/auth: decode: %w", err)
+	}
+	entry, ok := result[key]
+	if !ok {
+		return "", fmt.Errorf("openbao sys/auth: no auth method at %q", path)
+	}
+	if entry.Accessor == "" {
+		return "", fmt.Errorf("openbao sys/auth: accessor missing at %q", path)
+	}
+	return entry.Accessor, nil
+}
+
+// IdentityLookupEntityByAlias resolves the vault entity ID for the
+// given (aliasName, aliasMountAccessor) pair. Vault assigns entity
+// UUIDs the first time it sees an alias (e.g. on OIDC first login),
+// so this call is well-defined only after the user has logged in
+// through the given auth mount at least once.
+//
+// Used by board-storage provisioning (#285) to derive a stable PG role
+// name `user_<entity-id>` — the entity ID is the same identifier the
+// templated per-user vault policy resolves at the ACL layer, so the
+// two sides agree without blockyard writing anything on vault's
+// identity side.
+// POST {addr}/v1/identity/lookup/entity
+func (c *Client) IdentityLookupEntityByAlias(
+	ctx context.Context, aliasName, aliasMountAccessor string,
+) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"alias_name":           aliasName,
+		"alias_mount_accessor": aliasMountAccessor,
+	})
+	if err != nil {
+		return "", fmt.Errorf("openbao identity lookup: marshal: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1/identity/lookup/entity", c.addr)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
+	if err != nil {
+		return "", fmt.Errorf("openbao identity lookup: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("openbao identity lookup: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("openbao identity lookup: alias %q: %w", aliasName, ErrNotFound)
+	}
+	// Vault returns 204 No Content when the alias is unknown (no
+	// entity exists yet). Treat as not-found for caller clarity.
+	if resp.StatusCode == http.StatusNoContent {
+		return "", fmt.Errorf("openbao identity lookup: alias %q: %w", aliasName, ErrNotFound)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("openbao identity lookup: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("openbao identity lookup: decode: %w", err)
+	}
+	if result.Data.ID == "" {
+		return "", fmt.Errorf("openbao identity lookup: alias %q: empty entity id", aliasName)
+	}
+	return result.Data.ID, nil
+}
+
 // kvReadResponse is the relevant subset of OpenBao's KV v2 read response.
 type kvReadResponse struct {
 	Data struct {
