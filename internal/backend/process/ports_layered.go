@@ -3,6 +3,7 @@ package process
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 )
 
@@ -47,14 +48,17 @@ func (p *layeredPortAllocator) InUse() int {
 	return p.cache.InUse()
 }
 
-// CleanupOwnedOrphans cleans both layers — primary first (correctness),
-// then cache (mirror).
+// CleanupOwnedOrphans cleans the primary (correctness). The cache mirror
+// is cleaned best-effort: a Redis outage at startup must not block
+// recovery of orphaned Postgres rows, and any stale cache keys will
+// naturally churn as live workers reclaim their slots. Matches the
+// primary/cache contract in ports_layered.go's header.
 func (p *layeredPortAllocator) CleanupOwnedOrphans(ctx context.Context) error {
 	if err := p.primary.CleanupOwnedOrphans(ctx); err != nil {
 		return fmt.Errorf("primary: %w", err)
 	}
 	if err := p.cache.CleanupOwnedOrphans(ctx); err != nil {
-		return fmt.Errorf("cache: %w", err)
+		slog.Warn("layered port cleanup: cache best-effort", "error", err)
 	}
 	return nil
 }
