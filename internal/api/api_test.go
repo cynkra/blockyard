@@ -32,6 +32,13 @@ import (
 const testPAT = "by_testtoken000000000000000000000000000000000"
 
 func testServer(t *testing.T) (*server.Server, *httptest.Server) {
+	return testServerWithWriteTimeout(t, 0)
+}
+
+// testServerWithWriteTimeout is testServer but applies the given
+// WriteTimeout to the underlying http.Server. A zero value leaves the
+// httptest default in place.
+func testServerWithWriteTimeout(t *testing.T, writeTimeout time.Duration) (*server.Server, *httptest.Server) {
 	t.Helper()
 	tmp := t.TempDir()
 
@@ -60,7 +67,11 @@ func testServer(t *testing.T) (*server.Server, *httptest.Server) {
 	var wg sync.WaitGroup
 	srv.RestoreWG = &wg
 	handler := NewRouter(srv, func() {}, nil, context.Background())
-	ts := httptest.NewServer(handler)
+	ts := httptest.NewUnstartedServer(handler)
+	if writeTimeout > 0 {
+		ts.Config.WriteTimeout = writeTimeout
+	}
+	ts.Start()
 	t.Cleanup(ts.Close)
 	// Wait for restore goroutines before DB/TempDir cleanup (LIFO order).
 	t.Cleanup(wg.Wait)
@@ -938,6 +949,42 @@ func TestTaskLogsRunningTaskCompletes(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "live line") {
 		t.Errorf("expected live line in output, got %q", body)
+	}
+}
+
+// Regression test for #306: a long-running build must not be cut by the
+// server's WriteTimeout. The handler clears the per-response deadline so
+// the stream can outlive WriteTimeout.
+func TestTaskLogsOutlivesWriteTimeout(t *testing.T) {
+	const writeTimeout = 100 * time.Millisecond
+	srv, ts := testServerWithWriteTimeout(t, writeTimeout)
+
+	sender := srv.Tasks.Create("task-logs-slow", "")
+	sender.Write("buffered line")
+
+	go func() {
+		// Sleep well past WriteTimeout before emitting the final line.
+		time.Sleep(3 * writeTimeout)
+		sender.Write("late line")
+		sender.Complete(task.Completed)
+	}()
+
+	req := authReq("GET", ts.URL+"/api/v1/tasks/task-logs-slow/logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), "late line") {
+		t.Errorf("expected late line after WriteTimeout, got %q", body)
 	}
 }
 
