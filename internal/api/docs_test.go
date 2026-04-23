@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -41,13 +42,18 @@ func TestDocsServesHTML(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	// Guard against the "docs not included" stub at
-	// internal/docs/dist/index.html being served because the Hugo
-	// build step was skipped. The stub is valid HTML, so status +
-	// content-type alone passes silently — that gap is exactly how
-	// broken docs reached production before.
+	// Stub at internal/docs/dist/index.html indicates the Hugo build
+	// step was skipped. In CI this is a contract violation — the unit
+	// job's Hugo prep must run so TestDocsServesHTML exercises the
+	// real embed (the gap that let broken docs reach prod before).
+	// Locally, skip so `go test ./...` stays green without requiring
+	// every developer to run Hugo first.
 	if strings.Contains(body, "Documentation was not included in this build") {
-		t.Fatal("served the docs stub placeholder — run `hugo --minify --baseURL /docs/` from docs/ and copy public/ to internal/docs/dist/ before testing (CI unit job does this automatically)")
+		const msg = "docs stub served — run `hugo --minify --baseURL /docs/` from docs/ and copy public/ to internal/docs/dist/ to exercise this test (CI unit job does this automatically)"
+		if os.Getenv("CI") != "" {
+			t.Fatal(msg)
+		}
+		t.Skip(msg)
 	}
 	// Marker from docs/layouts/index.html; only present when Hugo
 	// produced real output with the hugo-book theme submodule. Also
