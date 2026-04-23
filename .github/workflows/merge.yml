@@ -139,7 +139,7 @@ jobs:
           token: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Pull compose images
         if: github.event_name == 'push'
-        run: docker compose -f examples/hello-shiny/docker-compose.yml pull --ignore-pull-failures
+        run: docker compose -f examples/hello-postgres/docker-compose.yml pull --ignore-pull-failures
       - name: Build blockyard image from source
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: docker build -t ghcr.io/cynkra/blockyard:latest -t ghcr.io/cynkra/blockyard:main --build-arg COVER=1 --build-arg "VERSION=$(git describe --always --dirty)" -f docker/server.Dockerfile .
@@ -153,14 +153,14 @@ jobs:
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: |
           E2E_GOCOVERDIR=/tmp/playwright-coverage \
-          docker compose -f examples/hello-shiny/docker-compose.yml \
+          docker compose -f examples/hello-postgres/docker-compose.yml \
                          -f tests/examples/docker-compose.cover.yml \
                          up -d --wait
       - uses: actions/setup-go@v6
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           go-version-file: go.mod
-      - name: Build CLI and deploy hello app
+      - name: Build CLI and deploy hello-postgres app
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         run: |
           go build -o /tmp/by ./cmd/by
@@ -177,7 +177,14 @@ jobs:
           rm -f "$COOKIE_JAR"
 
           BLOCKYARD_URL=http://localhost:8080 BLOCKYARD_TOKEN="$TOKEN" \
-            /tmp/by deploy examples/hello-shiny/app --yes --wait --name hello
+            /tmp/by deploy examples/hello-postgres/app --yes --wait --name hello-postgres
+
+          # Open the app to logged-in users so demo2 can reach it without
+          # an explicit grant. The spec drives both demo users concurrently.
+          BLOCKYARD_URL=http://localhost:8080 BLOCKYARD_TOKEN="$TOKEN" \
+            /tmp/by access set-type hello-postgres logged_in
+          BLOCKYARD_URL=http://localhost:8080 BLOCKYARD_TOKEN="$TOKEN" \
+            /tmp/by enable hello-postgres
       - name: Install Playwright
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         working-directory: tests/e2e
@@ -190,7 +197,7 @@ jobs:
         run: npx playwright test
       - name: Stop services and flush coverage
         if: always() && github.event_name != 'pull_request' && github.event_name != 'push'
-        run: docker compose -f examples/hello-shiny/docker-compose.yml stop blockyard
+        run: docker compose -f examples/hello-postgres/docker-compose.yml stop blockyard
       - name: Convert coverage data
         if: always() && github.event_name != 'pull_request' && github.event_name != 'push'
         run: |
@@ -218,8 +225,8 @@ jobs:
       - name: Dump compose logs on failure
         if: failure() && github.event_name != 'pull_request'
         run: |
-          docker compose -f examples/hello-shiny/docker-compose.yml logs --no-color 2>/dev/null || true
-          docker compose -f examples/hello-shiny/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
+          docker compose -f examples/hello-postgres/docker-compose.yml logs --no-color 2>/dev/null || true
+          docker compose -f examples/hello-postgres/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
 
   examples:
     if: always() && github.event_name != 'push'
