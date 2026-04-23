@@ -87,22 +87,6 @@ func RunBwrapExec(args []string) error {
 		}
 	}
 
-	// Probe: can the shim itself do what bwrap is failing at? If the
-	// shim can unshare and self-map, the failure is something
-	// bwrap-specific; if the shim fails too, the failure is about
-	// the post-setuid process state (apparmor, caps, etc.).
-	if err := syscall.Unshare(syscall.CLONE_NEWUSER); err != nil {
-		fmt.Fprintf(os.Stderr, "bwrap-exec DEBUG: shim unshare(CLONE_NEWUSER) failed: %v\n", err)
-	} else {
-		fmt.Fprintf(os.Stderr, "bwrap-exec DEBUG: shim unshare OK; trying uid_map write\n")
-		mapline := fmt.Sprintf("%d %d 1\n", *uid, *uid)
-		if err := os.WriteFile("/proc/self/uid_map", []byte(mapline), 0); err != nil {
-			fmt.Fprintf(os.Stderr, "bwrap-exec DEBUG: shim uid_map write FAILED: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "bwrap-exec DEBUG: shim uid_map write OK\n")
-		}
-	}
-
 	argv := append([]string{bwrapPath}, bwrapArgs...)
 	return syscall.Exec(bwrapPath, argv, os.Environ()) //nolint:gosec // G204: bwrapPath is from the validated process config
 }
