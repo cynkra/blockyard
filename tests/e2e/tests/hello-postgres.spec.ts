@@ -115,8 +115,12 @@ test.describe.serial("hello-postgres RLS isolation", () => {
     await page1.click("#load");
     await expect(page1.locator("#status")).toContainText(`loaded ${board1}`);
     const got = await page1.locator("#data").inputValue();
-    expect(got).toContain(`"owner":"user1"`);
-    expect(got).toContain(`"stamp":"${stamp}"`);
+    // Postgres stores jsonb canonically and returns it with spaces
+    // around colons on text-cast, so substring-matching the literal
+    // JSON payload is brittle. Parse and assert on values.
+    const parsed = JSON.parse(got);
+    expect(parsed.owner).toBe("user1");
+    expect(parsed.stamp).toBe(stamp);
   });
 
   test("user2 loading user1's board id returns not-visible", async () => {
