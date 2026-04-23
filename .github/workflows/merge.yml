@@ -320,9 +320,13 @@ jobs:
       - name: Upload coverage to Codecov
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          # Pin codecov-cli to avoid races on the `latest/` endpoint,
+          # where a release rolling between the two curl calls left us
+          # with a binary and checksum from different versions.
+          CODECOV_CLI_VERSION: v11.2.8
         run: |
-          curl -fsSL https://cli.codecov.io/latest/linux/codecov -o ./codecov
-          curl -fsSL https://cli.codecov.io/latest/linux/codecov.SHA256SUM -o ./codecov.SHA256SUM
+          curl -fsSL "https://cli.codecov.io/${CODECOV_CLI_VERSION}/linux/codecov" -o ./codecov
+          curl -fsSL "https://cli.codecov.io/${CODECOV_CLI_VERSION}/linux/codecov.SHA256SUM" -o ./codecov.SHA256SUM
           sha256sum -c codecov.SHA256SUM
           chmod +x ./codecov
           for f in coverage-*.out; do
