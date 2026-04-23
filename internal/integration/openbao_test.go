@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -194,6 +195,150 @@ func TestKVRead_NotFound(t *testing.T) {
 	_, err := client.KVRead(context.Background(), "no/such/path", "token")
 	if err == nil {
 		t.Fatal("expected error for not found")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got %v", err)
+	}
+}
+
+// sysAuthFlatBody mirrors vault's real /v1/sys/auth response: mount
+// entries keyed with a trailing slash, mixed with top-level metadata
+// fields that are strings, numbers, nulls, and objects. Covers the
+// decoder regression from #285 where a strictly-typed map decoded
+// straight from the body failed on the metadata fields.
+const sysAuthFlatBody = `{
+  "request_id": "abc-123",
+  "lease_id": "",
+  "lease_duration": 0,
+  "renewable": false,
+  "wrap_info": null,
+  "warnings": null,
+  "auth": null,
+  "jwt/": {
+    "accessor": "auth_jwt_abc123",
+    "type": "jwt",
+    "description": ""
+  },
+  "token/": {
+    "accessor": "auth_token_def456",
+    "type": "token"
+  }
+}`
+
+// sysAuthNestedBody is the alternate shape where auth methods live
+// under "data". The decoder must fall back to that on miss.
+const sysAuthNestedBody = `{
+  "request_id": "xyz-789",
+  "data": {
+    "jwt/": {"accessor": "auth_jwt_nested", "type": "jwt"}
+  }
+}`
+
+func TestAuthMountAccessor_FlatShape(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sys/auth" || r.Method != "GET" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(sysAuthFlatBody))
+	}))
+
+	got, err := client.AuthMountAccessor(context.Background(), "jwt")
+	if err != nil {
+		t.Fatalf("AuthMountAccessor: %v", err)
+	}
+	if got != "auth_jwt_abc123" {
+		t.Errorf("accessor = %q, want %q", got, "auth_jwt_abc123")
+	}
+
+	// Caller may pass the path with or without the trailing slash.
+	got2, err := client.AuthMountAccessor(context.Background(), "jwt/")
+	if err != nil {
+		t.Fatalf("AuthMountAccessor (trailing slash): %v", err)
+	}
+	if got2 != "auth_jwt_abc123" {
+		t.Errorf("accessor = %q with trailing slash", got2)
+	}
+}
+
+func TestAuthMountAccessor_NestedShape(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(sysAuthNestedBody))
+	}))
+
+	got, err := client.AuthMountAccessor(context.Background(), "jwt")
+	if err != nil {
+		t.Fatalf("AuthMountAccessor: %v", err)
+	}
+	if got != "auth_jwt_nested" {
+		t.Errorf("accessor = %q, want %q", got, "auth_jwt_nested")
+	}
+}
+
+func TestAuthMountAccessor_MissingMount(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(sysAuthFlatBody))
+	}))
+
+	_, err := client.AuthMountAccessor(context.Background(), "oidc")
+	if err == nil {
+		t.Fatal("expected error for missing auth method")
+	}
+	if !strings.Contains(err.Error(), "no auth method") {
+		t.Errorf("expected 'no auth method' in error, got %v", err)
+	}
+}
+
+func TestAuthMountAccessor_EmptyAccessor(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"jwt/": {"type": "jwt"}}`)
+	}))
+
+	_, err := client.AuthMountAccessor(context.Background(), "jwt")
+	if err == nil {
+		t.Fatal("expected error for empty accessor")
+	}
+}
+
+func TestIdentityLookupEntityByAlias_Success(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/identity/lookup/entity" || r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		var req map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if req["alias_name"] != "alice" {
+			t.Errorf("alias_name = %q, want alice", req["alias_name"])
+		}
+		if req["alias_mount_accessor"] != "auth_jwt_abc123" {
+			t.Errorf("alias_mount_accessor = %q", req["alias_mount_accessor"])
+		}
+		fmt.Fprint(w, `{"data":{"id":"entity-uuid-1"}}`)
+	}))
+
+	got, err := client.IdentityLookupEntityByAlias(context.Background(),
+		"alice", "auth_jwt_abc123")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if got != "entity-uuid-1" {
+		t.Errorf("entity id = %q", got)
+	}
+}
+
+func TestIdentityLookupEntityByAlias_UnknownAlias(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Vault answers unknown aliases with 204 No Content.
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	_, err := client.IdentityLookupEntityByAlias(context.Background(),
+		"nobody", "auth_jwt_abc123")
+	if err == nil {
+		t.Fatal("expected error for unknown alias")
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' in error, got %v", err)

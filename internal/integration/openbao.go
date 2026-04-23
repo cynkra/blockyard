@@ -248,17 +248,37 @@ func (c *Client) AuthMountAccessor(ctx context.Context, path string) (string, er
 		return "", fmt.Errorf("openbao sys/auth: status %d", resp.StatusCode)
 	}
 
-	// Mount paths in sys/auth are keyed with a trailing slash.
-	key := strings.TrimSuffix(path, "/") + "/"
-	var result map[string]struct {
-		Accessor string `json:"accessor"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Vault's sys/auth response mixes two shapes: mount-path entries
+	// keyed like "jwt/" alongside top-level metadata fields
+	// (request_id, lease_id, renewable, wrap_info, warnings, auth,
+	// data). Decoding straight into map[string]struct{Accessor} fails
+	// because the metadata fields aren't objects. Hold the whole
+	// envelope as RawMessage and only decode the one entry we need.
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return "", fmt.Errorf("openbao sys/auth: decode: %w", err)
 	}
-	entry, ok := result[key]
+
+	key := strings.TrimSuffix(path, "/") + "/"
+	entryRaw, ok := raw[key]
 	if !ok {
-		return "", fmt.Errorf("openbao sys/auth: no auth method at %q", path)
+		// Some vault versions also nest the auth methods under
+		// "data". Fall back to that shape before declaring missing.
+		if data, dataOk := raw["data"]; dataOk {
+			var nested map[string]json.RawMessage
+			if err := json.Unmarshal(data, &nested); err == nil {
+				entryRaw, ok = nested[key]
+			}
+		}
+		if !ok {
+			return "", fmt.Errorf("openbao sys/auth: no auth method at %q", path)
+		}
+	}
+	var entry struct {
+		Accessor string `json:"accessor"`
+	}
+	if err := json.Unmarshal(entryRaw, &entry); err != nil {
+		return "", fmt.Errorf("openbao sys/auth: decode %s: %w", path, err)
 	}
 	if entry.Accessor == "" {
 		return "", fmt.Errorf("openbao sys/auth: accessor missing at %q", path)
