@@ -103,7 +103,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       packages: read
-      security-events: write
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/scan-image
@@ -112,6 +111,19 @@ jobs:
           variant: ${{ matrix.variant }}
           ghcr-username: ${{ github.actor }}
           ghcr-token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-sarif:
+    needs: scan-image
+    if: ${{ always() && needs.scan-image.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/upload-sarif-merged
+        with:
+          category: trivy-server
 
   manifest:
     needs: [server-image, scan-image]

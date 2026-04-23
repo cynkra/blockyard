@@ -1,16 +1,18 @@
 name: Trivy image scan
 description: >
   Scan a ghcr.io container image for CVEs, filter through
-  .trivyignore.rego, and upload the SARIF to the GitHub Security tab.
-  Shared between publish.yml (continuous main) and release.yml (tagged
-  releases) so both apply the same severity threshold and ignore policy.
+  .trivyignore.rego, tag each result with the variant name, and
+  upload the SARIF as a workflow artifact. A later aggregation job
+  (actions/upload-sarif-merged) dedupes across variants before
+  pushing to the Security tab, so a CVE shared by multiple images
+  surfaces as a single alert listing every affected variant.
 
 inputs:
   image-ref:
     description: Full image reference (e.g. ghcr.io/cynkra/blockyard:build-linux-amd64).
     required: true
   variant:
-    description: Variant name (docker | process | everything) — used for the SARIF category and output filename.
+    description: Variant name (docker | process | everything | worker) — appears in merged SARIF alerts to identify affected images.
     required: true
   ghcr-username:
     description: GHCR username for pulling the image.
@@ -51,11 +53,25 @@ runs:
         TRIVY_USERNAME: ${{ inputs.ghcr-username }}
         TRIVY_PASSWORD: ${{ inputs.ghcr-token }}
 
-    - name: Upload Trivy results to GitHub Security tab
+    # Stamp the variant on every result so the downstream merge step
+    # can aggregate "affects: docker, process, everything" into a
+    # single alert. Runs on Trivy failure too so fail-on-findings
+    # still produces a taggable SARIF for the Security tab.
+    - name: Tag SARIF results with variant
       if: always()
-      uses: github/codeql-action/upload-sarif@v4
+      shell: bash
+      run: |
+        f=trivy-results-${{ inputs.variant }}.sarif
+        [ -f "$f" ] || exit 0
+        jq --arg v "${{ inputs.variant }}" '
+          .runs[].results[]?.properties.variant = $v
+        ' "$f" > "$f.tagged" && mv "$f.tagged" "$f"
+
+    - name: Upload Trivy SARIF as artifact
+      if: always()
+      uses: actions/upload-artifact@v7
       with:
-        sarif_file: trivy-results-${{ inputs.variant }}.sarif
-        # Per-variant category so the three scans don't overwrite each
-        # other's alerts in the Security tab.
-        category: trivy-${{ inputs.variant }}
+        name: sarif-${{ inputs.variant }}
+        path: trivy-results-${{ inputs.variant }}.sarif
+        retention-days: 1
+        if-no-files-found: warn

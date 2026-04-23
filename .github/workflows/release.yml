@@ -32,7 +32,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       packages: read
-      security-events: write
     strategy:
       # Scan amd64 only — arch-specific CVE delta is typically zero
       # and doubling the matrix doubles CI cost. Trivy per variant
@@ -56,6 +55,21 @@ jobs:
           ghcr-username: ${{ github.actor }}
           ghcr-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-findings: "true"
+
+  # Runs even when scan-image fails (fail-on-findings=true on release)
+  # so CVEs that block the release still surface in the Security tab.
+  upload-sarif:
+    needs: scan-image
+    if: ${{ always() && needs.scan-image.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/upload-sarif-merged
+        with:
+          category: trivy-server
 
   server-manifest:
     needs: scan-image
