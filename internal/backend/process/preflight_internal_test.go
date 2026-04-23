@@ -3,13 +3,10 @@
 package process
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/preflight"
@@ -23,17 +20,18 @@ import (
 // `package process`; the external integration tests stay in
 // `package process_test`.
 //
-// The test is strict per deployment mode: when bwrap can write a
-// host-effective uid_map (mode a or b — root caller or setuid bwrap)
-// the check must return OK; when bwrap can spawn but cannot write a
-// foreign uid_map (mode c — unprivileged caller without setuid) the
-// check MUST return Error and the message must mention the requested
-// vs observed UID. Both modes are valid CI configurations and we want
-// to catch regressions in either one.
+// The check's contract since #305: host-effective worker UIDs require
+// blockyard to run as root so the spawn path can fork+setuid(W) before
+// exec(bwrap), giving bwrap caller_uid == sandbox_uid and therefore an
+// identity uid_map. When blockyard is root the check returns OK; when
+// it is non-root (CI's `setuid` and `unprivileged` matrices, Debian
+// 12+/Ubuntu 24.04+ native deployments) the check returns Error and
+// the message must reference the phase-3-9 newuidmap follow-up so
+// operators have a remediation path beyond "run as root or use
+// Docker".
 func TestCheckBwrapHostUIDMapping(t *testing.T) {
-	mode := probeBwrapModeInternal(t)
-	if mode == "unavailable" {
-		t.Skip("bwrap not available or unprivileged userns disabled")
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
 	}
 
 	cfg := &config.ProcessConfig{
@@ -45,85 +43,21 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 
 	result := checkBwrapHostUIDMapping(cfg)
 
-	switch mode {
-	case "host-mapped":
+	if os.Getuid() == 0 {
 		if result.Severity != preflight.SeverityOK {
-			t.Errorf("mode=host-mapped: severity = %v, want OK; message: %s", result.Severity, result.Message)
+			t.Errorf("root blockyard: severity = %v, want OK; message: %s", result.Severity, result.Message)
 		}
-	case "no-host-map":
-		if result.Severity != preflight.SeverityError {
-			t.Errorf("mode=no-host-map: severity = %v, want Error; message: %s", result.Severity, result.Message)
+		return
+	}
+	if result.Severity != preflight.SeverityError {
+		t.Errorf("non-root blockyard: severity = %v, want Error; message: %s", result.Severity, result.Message)
+	}
+	// The message must flag the deployment-mode constraint and point
+	// at the phase-3-9 remediation, otherwise operators have no
+	// actionable next step beyond "Docker backend".
+	for _, want := range []string{"root", "phase 3-9"} {
+		if !strings.Contains(result.Message, want) {
+			t.Errorf("error message missing %q: %s", want, result.Message)
 		}
-		if !strings.Contains(result.Message, "requested uid") {
-			t.Errorf("error message missing requested uid context: %q", result.Message)
-		}
 	}
-}
-
-// probeBwrapModeInternal is the internal-package twin of the
-// detectBwrapMode helper in process_integration_test.go. We can't
-// share the helper because the integration tests live in
-// `package process_test` and this file lives in `package process`.
-// Returns "unavailable", "host-mapped", or "no-host-map".
-func probeBwrapModeInternal(t *testing.T) string {
-	t.Helper()
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		return "unavailable"
-	}
-	if err := exec.Command("bwrap",
-		"--ro-bind", "/", "/",
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--unshare-pid", "--unshare-user", "--unshare-uts",
-		"--die-with-parent", "--new-session",
-		"--", "/bin/true").Run(); err != nil {
-		return "unavailable"
-	}
-	probeUID := os.Getuid() + 12345
-	if probeUID == os.Getuid() {
-		probeUID++
-	}
-	cmd := exec.Command("bwrap",
-		"--ro-bind", "/", "/",
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--unshare-pid", "--unshare-user", "--unshare-uts",
-		"--uid", strconv.Itoa(probeUID),
-		"--gid", "65534",
-		"--die-with-parent", "--new-session",
-		"--", "/bin/sleep", "0.5")
-	if err := cmd.Start(); err != nil {
-		return "no-host-map"
-	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}()
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
-		if err != nil {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if !strings.HasPrefix(line, "Uid:") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				return "no-host-map"
-			}
-			realUID, perr := strconv.Atoi(fields[1])
-			if perr != nil {
-				return "no-host-map"
-			}
-			if realUID == probeUID {
-				return "host-mapped"
-			}
-			return "no-host-map"
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return "no-host-map"
 }

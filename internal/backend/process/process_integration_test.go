@@ -4,10 +4,9 @@ package process_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,28 +17,22 @@ import (
 	"github.com/cynkra/blockyard/internal/config"
 )
 
-// bwrapMode classifies the bwrap deployment mode the current test
-// process is running under. The three modes correspond directly to
-// the deployment modes documented in backends.md / phase-3-7.md:
+// bwrapMode classifies what the current test process can reasonably
+// exercise. Since #305, host-effective worker UIDs only happen when
+// blockyard runs as root: the spawn path fork+setuid's the child to
+// the worker UID before exec(bwrap), giving bwrap caller_uid ==
+// sandbox_uid and therefore an identity uid_map. Non-root blockyard
+// (CI's `setuid` and `unprivileged` matrices) cannot do this, so the
+// sandboxed child's kuid in init_userns stays at blockyard's own UID;
+// lifecycle tests that assume workers appear as distinct host UIDs
+// have to skip.
 //
-//   - bwrapHostMapped — bwrap can write a uid_map that gives the
-//     sandboxed child a host-effective UID different from the
-//     caller's UID. This is what happens when blockyard runs as
-//     root (containerized mode) or when bwrap is setuid root
-//     (Fedora/RHEL default). Both spawn lifecycle tests and the
-//     uid-mapping preflight check should succeed.
-//
-//   - bwrapNoHostMap — bwrap can spawn but cannot write a uid_map
-//     to a foreign UID. The unprivileged kernel.userns_clone path
-//     where workers all end up running as the caller's host UID,
-//     defeating the iptables --uid-owner egress isolation. The
-//     preflight check is supposed to *catch* this — tests assert
-//     it does — and lifecycle tests skip because every spawn
-//     would fail with "setting up uid map: Permission denied".
-//
-//   - bwrapUnavailable — bwrap is missing, or bwrap can't even
-//     create a user namespace (no unprivileged userns at all).
-//     All process_test integration tests skip.
+//   - bwrapHostMapped: blockyard is root, fork+setuid path works.
+//   - bwrapNoHostMap: blockyard is non-root; iptables owner-match
+//     isolation is unavailable until phase 3-9 lands --userns +
+//     newuidmap.
+//   - bwrapUnavailable: bwrap is missing or can't create a user
+//     namespace at all; every process_test integration test skips.
 type bwrapMode int
 
 const (
@@ -68,9 +61,6 @@ func probeBwrapMode() bwrapMode {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		return bwrapUnavailable
 	}
-	// Step 1: can bwrap even create a user namespace? Without --uid,
-	// bwrap maps the caller's UID to itself in the new namespace,
-	// which works on every kernel that allows unprivileged userns.
 	if err := exec.Command("bwrap",
 		"--ro-bind", "/", "/",
 		"--proc", "/proc",
@@ -80,57 +70,10 @@ func probeBwrapMode() bwrapMode {
 		"--", "/bin/true").Run(); err != nil {
 		return bwrapUnavailable
 	}
-	// Step 2: can bwrap write a uid_map to a UID distinct from the
-	// caller's? Pick a probe UID guaranteed to differ.
-	probeUID := os.Getuid() + 12345
-	if probeUID == os.Getuid() { // overflow guard, never happens in practice
-		probeUID++
-	}
-	cmd := exec.Command("bwrap",
-		"--ro-bind", "/", "/",
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--unshare-pid", "--unshare-user", "--unshare-uts",
-		"--uid", strconv.Itoa(probeUID),
-		"--gid", "65534",
-		"--die-with-parent", "--new-session",
-		"--", "/bin/sleep", "0.5")
-	if err := cmd.Start(); err != nil {
+	if os.Getuid() != 0 {
 		return bwrapNoHostMap
 	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}()
-	// Read /proc/<pid>/status from the parent's view to confirm the
-	// host-effective UID matches what we asked for.
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
-		if err != nil {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if !strings.HasPrefix(line, "Uid:") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				return bwrapNoHostMap
-			}
-			realUID, perr := strconv.Atoi(fields[1])
-			if perr != nil {
-				return bwrapNoHostMap
-			}
-			if realUID == probeUID {
-				return bwrapHostMapped
-			}
-			return bwrapNoHostMap
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return bwrapNoHostMap
+	return bwrapHostMapped
 }
 
 // requireBwrap skips the test if bwrap is missing or can't even
@@ -143,19 +86,45 @@ func requireBwrap(t *testing.T) {
 	}
 }
 
-// requireHostUIDMapping skips the test unless bwrap can produce a
-// host-effective UID different from the caller's. Lifecycle tests
-// that spawn workers via the configured WorkerUID range need this;
-// in mode (c) every spawn would fail with "setting up uid map:
-// Permission denied".
+// requireHostUIDMapping skips the test unless the spawn path can
+// produce a sandboxed child whose kuid in init_userns matches the
+// requested worker UID. Post-#305 this requires blockyard to run as
+// root (fork+setuid before exec(bwrap) → identity uid_map). Non-root
+// blockyard keeps sandboxed children at blockyard's own kuid, which
+// makes any test that depends on per-worker host identity
+// meaningless.
 func requireHostUIDMapping(t *testing.T) {
 	t.Helper()
 	switch detectBwrapMode(t) {
 	case bwrapUnavailable:
 		t.Skip("bwrap not available")
 	case bwrapNoHostMap:
-		t.Skip("bwrap cannot write a host-effective uid_map (run as root, install bwrap setuid, or set up subuid ranges)")
+		t.Skip("non-root blockyard: spawn path cannot produce identity uid_map until phase 3-9 ships --userns+newuidmap")
 	}
+}
+
+// workerAccessibleTempDir wraps t.TempDir() and makes the returned
+// directory (and each tmpdir-prefixed ancestor) traversable by the
+// worker UID. t.TempDir mkdirs each segment 0700 owned by the caller
+// (root in the root-blockyard matrix); post-#305 workers run as
+// WorkerUIDStart inside the bwrap sandbox after a fork+setuid, so
+// bwrap's bind-mount of a 0700 root-owned BundlePath fails with
+// "Can't find source path". Production deployments put bundles in
+// world-readable storage; tests need to match that constraint.
+func workerAccessibleTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := dir
+	for {
+		if p == "/" || p == filepath.Clean(os.TempDir()) || !strings.HasPrefix(p, os.TempDir()+string(os.PathSeparator)) {
+			break
+		}
+		if err := os.Chmod(p, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", p, err)
+		}
+		p = filepath.Dir(p)
+	}
+	return dir
 }
 
 func TestSpawnAndStop(t *testing.T) {
@@ -182,7 +151,7 @@ func TestSpawnAndStop(t *testing.T) {
 	ctx := context.Background()
 	spec := backend.WorkerSpec{
 		WorkerID:    "test-worker-1",
-		BundlePath:  t.TempDir(),
+		BundlePath:  workerAccessibleTempDir(t),
 		WorkerMount: "/tmp/app",
 		ShinyPort:   3838,
 		Cmd:         []string{"/bin/sleep", "60"},
@@ -268,7 +237,7 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 	ctx := context.Background()
 	spec := backend.WorkerSpec{
 		WorkerID:    "stats-worker",
-		BundlePath:  t.TempDir(),
+		BundlePath:  workerAccessibleTempDir(t),
 		WorkerMount: "/tmp/app",
 		Cmd:         []string{"/bin/sleep", "60"},
 	}
@@ -360,7 +329,7 @@ func TestRSmokeBoot(t *testing.T) {
 	ctx := context.Background()
 	spec := backend.WorkerSpec{
 		WorkerID:    "r-smoke",
-		BundlePath:  t.TempDir(),
+		BundlePath:  workerAccessibleTempDir(t),
 		WorkerMount: "/tmp/app",
 		Cmd:         []string{rPath, "--version"},
 	}

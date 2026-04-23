@@ -304,18 +304,19 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	}
 
 	args := bwrapArgs(b.cfg, spec, port, uid, b.cfg.WorkerGID)
+	prog, argv, err := bwrapExecSpec(b.cfg.BwrapPath, uid, b.cfg.WorkerGID, args)
+	if err != nil {
+		b.ports.Release(port)
+		b.uids.Release(uid)
+		return fmt.Errorf("process backend: bwrap-exec shim: %w", err)
+	}
 
 	// exec.Command, not exec.CommandContext — the ctx passed to Spawn is
 	// typically a request context that cancels when the handler returns.
 	// CommandContext would SIGKILL the worker on cancellation. Worker
 	// lifecycle is managed by Stop() and --die-with-parent, not by ctx.
-	cmd := exec.Command(b.cfg.BwrapPath, args...) //nolint:gosec // G204: args from validated config
-
-	// Kill bwrap if the blockyard server dies. --die-with-parent inside
-	// bwrap only kills R when bwrap exits — it does NOT kill bwrap when
-	// blockyard exits. Without Pdeathsig on the bwrap process itself,
-	// a server crash would leave orphaned bwrap+R processes.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	cmd := exec.Command(prog, argv...) //nolint:gosec // G204: args from validated config
+	cmd.SysProcAttr = bwrapSysProcAttr()
 
 	releaseSlots := func() {
 		b.ports.Release(port)
@@ -579,10 +580,14 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 	defer b.uids.Release(uid)
 
 	args := bwrapBuildArgs(b.cfg, spec, uid, b.cfg.WorkerGID)
+	prog, argv, err := bwrapExecSpec(b.cfg.BwrapPath, uid, b.cfg.WorkerGID, args)
+	if err != nil {
+		return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
+	}
 	// Context is appropriate here — builds are bounded, run-to-completion
 	// tasks. If the caller cancels, the build should stop.
-	cmd := exec.CommandContext(ctx, b.cfg.BwrapPath, args...) //nolint:gosec // G204: args from validated config
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	cmd := exec.CommandContext(ctx, prog, argv...) //nolint:gosec // G204: args from validated config
+	cmd.SysProcAttr = bwrapSysProcAttr()
 
 	secArgs, secCleanup, err := applySeccomp(cmd, b.cfg.SeccompProfile)
 	if err != nil {

@@ -834,6 +834,50 @@ Deployment artifacts and documentation for the process backend.
    external supervisor — `by admin update` is the single entry point
    for both Docker and process backends.
 
+### Phase 3-9: Native Non-Root Egress Isolation (`--userns` + newuidmap)
+
+Complete the egress-isolation story for native non-root blockyard
+deployments. Phase 3-7 / 3-8 give containerized (root-blockyard)
+deployments identity uid_maps via fork+setuid before `exec(bwrap)`.
+Native non-root deployments (Debian 12+/Ubuntu 24.04+, and Fedora/RHEL
+operators who don't want to run blockyard as root) currently get an
+explicit `checkBwrapHostUIDMapping` error with no remediation beyond
+"run as root, use the Docker backend, or set
+`server.skip_preflight=true`". This phase adds the newuidmap path so
+those deployments regain per-worker host-effective UIDs.
+
+See phase-3-9.md for the full design. Short version:
+
+- Admin-side: add a subuid/subgid range for blockyard's user in
+  `/etc/subuid` / `/etc/subgid`. Blockyard is told the range via a
+  new `[process] worker_subuid_range_start / end` config, or derives
+  it from `getsubids(3)`.
+- Spawn-side: instead of `--uid N --gid G`, blockyard pre-unshares a
+  user namespace, invokes `newuidmap`/`newgidmap` to write the
+  uid_map/gid_map with outside IDs in the subuid range, and passes
+  the namespace fd to bwrap via `--userns N`. Workers' kuid in
+  init_userns is then a subuid — distinct from blockyard's own UID
+  and from other workers' subuids.
+- Preflight: `checkBwrapHostUIDMapping` gains a non-root branch that
+  returns OK when a subuid range is configured and `newuidmap` is
+  available; still returns Error when those prerequisites are
+  missing (with install instructions rather than the current
+  "upgrade to phase 3-9" placeholder).
+- Docs: operator guidance on subuid range sizing (≥ worker UID range
+  width), `/etc/subuid` hygiene, and the iptables rule shape (the
+  target UID is now a subuid, not `worker_uid`).
+
+**Deliverables:** new `internal/backend/process/userns.go` that
+wraps `newuidmap`/`newgidmap` and exposes a `prepareUserns` helper
+the spawn path calls before `exec(bwrap)`; `[process]` config
+extension; `checkBwrapHostUIDMapping` non-root branch; integration
+tests for the native non-root mode (skipped when no subuid range is
+provisioned).
+
+**Dependencies:** phases 3-7 and 3-8. Can ship independently once
+the subuid invariant is designed; containerized-mode deployments
+are unaffected.
+
 ## Build Order and Dependency Graph
 
 ```
@@ -866,6 +910,11 @@ Phase 3-7: Process Backend Core
 Phase 3-8: Process Backend Packaging & Deployment
   └── depends on: phase 3-7 (needs the backend implementation)
 
+Phase 3-9: Native Non-Root Egress Isolation
+  └── depends on: phases 3-7 and 3-8
+  └── unlocks: native non-root deployments on Debian/Ubuntu without
+              Docker or setuid bwrap
+
 ```
 
 **Recommended order:**
@@ -874,6 +923,8 @@ Phase 3-8: Process Backend Packaging & Deployment
 2. Phase 3-2 → 3-3 → 3-4 → 3-5 (operations track, sequential)
 3. Phase 3-6 (per-app config) — in parallel with operations track
 4. Phase 3-7 → 3-8 (process backend, sequential)
+5. Phase 3-9 (native non-root isolation) — follows 3-8; optional
+   until native non-root deployments are supported
 
 Phases 3-6 and 3-7 are independent of each other and of the
 operations track. They can be developed in parallel.

@@ -44,6 +44,14 @@ import (
 
 var version = "dev"
 
+// runBwrapExecFn is the bwrap-exec shim entry point. Default returns
+// an error for builds that don't include the process backend (e.g.,
+// minimal,docker_backend); backend_process.go's init() overrides it
+// with process.RunBwrapExec when the process backend is compiled in.
+var runBwrapExecFn = func(_ []string) error {
+	return fmt.Errorf("bwrap-exec: not available in this build (process backend disabled)")
+}
+
 // runProbe is the `blockyard probe --tcp host:port --timeout dur` mode
 // used by the process backend's worker-egress preflight check. Spawned
 // inside a bwrap sandbox configured exactly like a real worker; exits
@@ -75,6 +83,26 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+
+	// `blockyard bwrap-exec --uid W --gid G -- <bwrap> <args>` is the
+	// shim the process backend invokes instead of calling bwrap
+	// directly. It setuid+setgid's into the worker's (uid, gid),
+	// restores PR_SET_DUMPABLE so bwrap can write /proc/self/uid_map,
+	// then exec(bwrap). See internal/backend/process/bwrap_exec.go
+	// for the dumpable rationale. runBwrapExecFn is wired to
+	// process.RunBwrapExec by backend_process.go's init() when the
+	// process backend is built in; minimal-docker builds land on the
+	// default stub below.
+	if len(os.Args) > 1 && os.Args[1] == "bwrap-exec" {
+		if err := runBwrapExecFn(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		// The function exec's into bwrap on success; reaching here
+		// means syscall.Exec returned without executing, which is
+		// always an error.
+		os.Exit(1)
 	}
 
 	configPath := flag.String("config", "blockyard.toml", "path to config file")

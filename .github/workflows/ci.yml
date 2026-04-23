@@ -450,21 +450,29 @@ jobs:
           chmod -R a+rx /opt/hostedtoolcache/go || true
       - name: Configure mode (${{ matrix.mode }})
         run: |
+          # All three matrix modes need the AppArmor restriction on
+          # unprivileged userns disabled so that the non-root workers
+          # our fork+setuid shim produces can call unshare(CLONE_NEWUSER)
+          # inside bwrap. Ubuntu 24.04's default
+          # kernel.apparmor_restrict_unprivileged_userns=1 blocks this
+          # for processes that aren't in an AppArmor profile granting
+          # the userns capability; --privileged disables AppArmor
+          # inside the container but the sysctl is a host-level check
+          # tied to the process's profile state and still fires. `|| true`
+          # because the file is absent on kernels that don't ship the
+          # restriction at all.
+          sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           case "${{ matrix.mode }}" in
             root)
-              : # nothing extra; test process runs as container root
+              : # nothing extra; blockyard runs as container root and
+                # the spawn path fork+setuid's into the worker UID
+                # before exec(bwrap).
               ;;
             setuid)
               chmod u+s /usr/bin/bwrap
               ;;
             unprivileged)
-              # Disable the AppArmor restriction on unprivileged
-              # userns creation so bwrap can CREATE the namespace;
-              # the test still fails at uid_map write time (the
-              # blockyard-runner user has no subuid range), which
-              # is the silent-failure path the preflight check is
-              # meant to detect.
-              sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+              : # sysctl already set above.
               ;;
           esac
       - name: Run process backend tests (${{ matrix.mode }})

@@ -29,6 +29,21 @@ var pgTestBaseURL string
 const pgAllocatorsTemplate = "blockyard_allocators_test_template"
 
 func TestMain(m *testing.M) {
+	// When the integration-test binary is re-invoked as the bwrap-exec
+	// shim (os.Executable() returns the test binary rather than the
+	// production blockyard binary), intercept before flag parsing and
+	// dispatch to RunBwrapExec directly. Otherwise the test runner
+	// would ignore the unrecognised positional args and re-run every
+	// test, which recurses through Spawn → bwrap-exec → test binary
+	// until CI times out.
+	if len(os.Args) > 1 && os.Args[1] == "bwrap-exec" {
+		if err := RunBwrapExec(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(1) // RunBwrapExec execves on success
+	}
+
 	pgTestBaseURL = os.Getenv("BLOCKYARD_TEST_POSTGRES_URL")
 	if pgTestBaseURL != "" {
 		if err := setupAllocatorsTemplate(pgTestBaseURL); err != nil {

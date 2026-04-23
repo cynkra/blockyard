@@ -417,3 +417,23 @@ func TestSpliceBeforeSeparatorEmptyExtra(t *testing.T) {
 		}
 	}
 }
+
+// TestSpliceBeforeSeparatorWithShim covers the shape the process
+// backend produces when blockyard routes bwrap through the
+// `blockyard bwrap-exec` shim (root mode): cmd.Args contains two
+// "--" separators — the shim's and bwrap's. Seccomp args are bwrap
+// flags, so they must go before bwrap's separator (the last one),
+// not the shim's (the first one).
+func TestSpliceBeforeSeparatorWithShim(t *testing.T) {
+	cmd := exec.Command("blockyard", "bwrap-exec", "--uid", "60000", "--gid", "65534", "--", "bwrap", "--ro-bind", "/", "/", "--", "/bin/sh")
+	spliceBeforeSeparator(cmd, []string{"--seccomp", "3"})
+	want := []string{"blockyard", "bwrap-exec", "--uid", "60000", "--gid", "65534", "--", "bwrap", "--ro-bind", "/", "/", "--seccomp", "3", "--", "/bin/sh"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("wrong length:\n got %v\nwant %v", cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Errorf("arg[%d] = %q, want %q", i, cmd.Args[i], want[i])
+		}
+	}
+}

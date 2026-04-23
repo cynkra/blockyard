@@ -88,9 +88,17 @@ can be integrated later.
    (workers can still reach external APIs, download data, etc.).
    Implemented via a `uidAllocator` (parallel to the port allocator)
    and `--uid <N> --gid <G>` flags in `bwrapArgs`. For the host UID
-   mapping to actually take effect, blockyard must run as root or
-   bwrap must be setuid — verified by `checkBwrapHostUIDMapping`
-   (see deliverable #8).
+   mapping to actually take effect (so iptables owner-match rules
+   fire on worker traffic), blockyard must run as root: the spawn
+   path then fork+setuid's the child into `(uid, gid)` before
+   `exec(bwrap)`, so bwrap sees `caller_uid == sandbox_uid` and
+   writes an identity uid_map `uid uid 1`. A non-root caller — even
+   with setuid bwrap on the host — would see bwrap write
+   `sandbox_uid caller_uid 1`, so the sandboxed child's kuid in
+   init_userns equals blockyard's own UID and iptables owner-match
+   does not fire. Verified at startup by
+   `checkBwrapHostUIDMapping` (see deliverable #8); native non-root
+   deployments get the newuidmap-based path in phase 3-9.
 10. **`blockyard probe` subcommand** — small TCP-connectivity probe
     used by `checkWorkerEgress`. Dispatched early in `main.go` based
     on `os.Args[1]`. ~30 lines, no external tools required, runs
@@ -385,28 +393,44 @@ decision #5 for the threat model and limitations.
 
 **Deployment modes and the UID mapping requirement.** The iptables
 `--uid-owner`/`--gid-owner` match works on the process's *host*
-UID/GID as the kernel sees it, not on the namespace-local UID inside
-the sandbox. For bwrap's `--uid N --gid G` flags to actually produce
-a host-visible UID/GID of N/G (so the iptables rules match), one of
-the following must hold:
+UID/GID (the kuid/kgid the kernel sees in init_userns), not on the
+namespace-local UID inside the sandbox. For bwrap's `--uid N --gid G`
+flags to actually produce a host-visible UID/GID of N/G, bwrap must
+write an **identity uid_map** of the form `N N 1` — i.e., inside-ns
+UID N maps to outside-ns UID N. bwrap only writes that map when
+`caller_uid == sandbox_uid`; with any other caller_uid it writes
+`N caller_uid 1`, so the sandboxed child's kuid in init_userns
+equals the caller's UID, not N.
+
+The recommended deployment satisfies this constraint by running
+blockyard as root and letting the spawn path fork+setuid into
+`(uid, gid)` before `exec(bwrap)`:
 
 - **Blockyard runs as root** (typical containerized deployment, where
-  blockyard is PID 1 root inside a container). bwrap inherits root
-  and can set up any uid_map. This is the recommended mode and works
-  with a distro-default bwrap.
-- **bwrap is setuid root** on the host (`chmod u+s /usr/bin/bwrap`).
-  This is the default on Fedora/RHEL but *not* on Debian 12+ or
-  Ubuntu 24.04+, which ship bwrap relying on unprivileged user
-  namespaces. On those distros a native non-root blockyard deployment
-  needs an operator-installed setuid bwrap.
+  blockyard is PID 1 root inside a container). The Spawn code calls
+  `SysProcAttr.Credential{Uid: uid, Gid: gid}`, so the forked child
+  executes bwrap with `real_uid == euid == uid` and `real_gid ==
+  egid == gid`. bwrap then writes the identity uid_map and gid_map,
+  and iptables owner-match fires on worker traffic. Works with a
+  distro-default (non-setuid) bwrap.
+- **Blockyard runs as a non-root user** (native deployment on
+  Debian 12+/Ubuntu 24.04+, or Fedora/RHEL without switching to the
+  containerized mode). `setuid(uid)` is rejected by the kernel
+  without CAP_SETUID, so the spawn path skips the Credential. bwrap
+  runs as the caller's UID and writes `uid caller_uid 1` — a
+  non-identity map. Workers appear as blockyard's own UID in
+  init_userns and iptables owner-match rules do not fire, even if
+  bwrap is setuid-root (setuid-bwrap moves the bwrap monitor's UID
+  but does not change the uid_map format). **Phase 3-9** will add
+  a `--userns` + `newuidmap` path so native non-root deployments
+  can map to subuid ranges and regain identity-style kuid values in
+  init_userns.
 
-Running native non-root with an unprivileged bwrap produces a silent
-failure mode: workers start fine but all run under blockyard's own
-host UID/GID, so the per-worker isolation collapses and the iptables
-rules match nothing. `process.RunPreflight` catches this explicitly
-via `checkBwrapHostUIDMapping` (step 7) — it spawns bwrap with a
-distinct sandbox UID and verifies the child's *host-side*
-`/proc/<pid>/status` reports the requested UID, not the caller's UID.
+`process.RunPreflight` catches non-root deployments explicitly via
+`checkBwrapHostUIDMapping` (step 7): when `os.Getuid() != 0` it
+returns `Error` and points operators at the remediation paths (run
+as root, use the Docker backend, wait for phase 3-9, or set
+`server.skip_preflight=true` to run without egress isolation).
 
 The UID range must be at least as large as the port range, since each
 worker consumes one port and one UID. Defaults: 60000-60999 (1000
@@ -2970,20 +2994,27 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
 
    **Host UID mapping is load-bearing.** iptables `--uid-owner` and
    `--gid-owner` match on the *host-side* UID/GID of the process that
-   created the socket, not on the namespace-local UID inside the
-   sandbox. For bwrap's `--uid N --gid G` flags to produce a
-   host-visible UID/GID of N/G, either blockyard must run as root
-   (typical containerized mode — bwrap inherits root and can set up
-   arbitrary uid_map) or bwrap must be setuid on the host (the default
-   on Fedora/RHEL, *not* the default on Debian 12+ / Ubuntu 24.04+
-   which rely on unprivileged user namespaces). A native non-root
-   blockyard deployment with a distro-default bwrap silently fails:
-   workers start fine but all run under blockyard's own host UID, so
-   the iptables owner-match rules never fire. The
-   `checkBwrapHostUIDMapping` preflight check catches this by spawning
-   a bwrap child with a distinct sandbox UID and reading the child's
-   host-side `/proc/<pid>/status` to verify the requested UID
-   actually took effect.
+   created the socket (the kuid/kgid in init_userns), not on the
+   namespace-local UID inside the sandbox. bwrap only produces a
+   host-visible UID/GID matching its `--uid`/`--gid` flags when the
+   caller's UID/GID already equal those values — bwrap then writes an
+   identity uid_map/gid_map, and the sandboxed child's kuid/kgid in
+   init_userns match. With any other caller UID/GID (including setuid
+   bwrap on the host — setuid moves the bwrap monitor's UID but does
+   not change the uid_map format), bwrap writes
+   `sandbox_uid caller_uid 1`, so the sandboxed child's kuid equals
+   blockyard's own UID and owner-match never fires.
+
+   The spawn path handles the root-blockyard case by setting
+   `SysProcAttr.Credential{Uid, Gid}` on every bwrap invocation, so
+   the forked child setuid's into the worker UID/GID before
+   `exec(bwrap)`. Non-root blockyard cannot do this (the kernel
+   rejects setuid without CAP_SETUID); the
+   `checkBwrapHostUIDMapping` preflight check detects `os.Getuid() != 0`
+   and returns `Error` with a pointer to the phase-3-9
+   `--userns`+`newuidmap` follow-up, the Docker backend, or
+   `server.skip_preflight=true` for operators willing to run without
+   egress isolation.
 
    **Limitations.** This model gives worker-vs-host-services
    isolation but not cross-worker isolation: two workers in the same
