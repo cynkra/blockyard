@@ -38,3 +38,79 @@ flags:
 ignore:
   - "internal/testutil/**"          # test helpers only
   - "internal/preflight/docker_checks.go"  # moved to internal/backend/docker/preflight.go in 207dd28; carryforward keeps the ghost report alive
+
+# Components mirror the commit-message scopes in AGENTS.md so coverage
+# attribution follows the same mental model as commits. Paths that
+# don't map to any listed scope (internal/config, internal/appname,
+# cmd/coverage-check) still count in the repo total but aren't
+# attributed to a component.
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+        informational: true
+  individual_components:
+    - component_id: proxy
+      name: proxy
+      paths:
+        - internal/api/**
+        - internal/proxy/**
+        - internal/server/**
+        - internal/ops/**
+    - component_id: ui
+      name: ui
+      paths:
+        - internal/ui/**
+        - internal/docs/**
+    - component_id: auth
+      name: auth
+      paths:
+        - internal/auth/**
+        - internal/authz/**
+        - internal/session/**
+        - internal/audit/**
+        - internal/integration/**
+    - component_id: cli
+      name: cli
+      paths:
+        - cmd/by/**
+        - cmd/by-builder/**
+        - internal/apiclient/**
+        - internal/cliconfig/**
+        - internal/deploy/**
+        - internal/update/**
+    - component_id: db
+      name: db
+      paths:
+        - internal/db/**
+        - internal/registry/**
+        - internal/redisstate/**
+        - internal/boardstorage/**
+        - internal/logstore/**
+    - component_id: process
+      name: process
+      paths:
+        - cmd/blockyard/**
+        - cmd/seccomp-compile/**
+        - cmd/seccomp-merge/**
+        - internal/backend/**
+        - internal/build/**
+        - internal/buildercache/**
+        - internal/bundle/**
+        - internal/detect/**
+        - internal/drain/**
+        - internal/manifest/**
+        - internal/mount/**
+        - internal/orchestrator/**
+        - internal/pakcache/**
+        - internal/pkgstore/**
+        - internal/preflight/**
+        - internal/seccomp/**
+        - internal/task/**
+        - internal/units/**
+    - component_id: telemetry
+      name: telemetry
+      paths:
+        - internal/telemetry/**
+        - internal/errorlog/**
