@@ -36,20 +36,14 @@ func TestCheckRedisAuthTLS(t *testing.T) {
 	}
 }
 
-// TestCheckRedisAuthParseFail — malformed URL reports Info, not a
-// spurious OK that would mask a real config mistake.
+// TestCheckRedisAuthParseFail — a URL that TCPAddrFromRedisURL
+// cannot extract a host:port from must report Info, not a spurious
+// OK that would mask a real config mistake. Uses a raw control
+// character, which url.Parse rejects outright.
 func TestCheckRedisAuthParseFail(t *testing.T) {
-	res := CheckRedisAuth(&config.RedisConfig{URL: "http://oops:6379"})
-	// http:// is accepted by url.Parse but TCPAddrFromRedisURL just
-	// extracts host:port; this test confirms the path is safe.
-	if res.Severity != SeverityError && res.Severity != SeverityInfo {
-		// Actually this will dial http://oops:6379 — which fails DNS.
-		// Depending on how fast DNS resolves, we might see Info
-		// ("not reachable"). Any severity is acceptable except OK
-		// (we never reached a real PONG).
-	}
+	res := CheckRedisAuth(&config.RedisConfig{URL: "redis://\x7f:6379"})
 	if res.Severity == SeverityOK {
-		t.Errorf("malformed URL should not produce OK; got: %q", res.Message)
+		t.Errorf("unparseable URL should not produce OK; got: %q", res.Message)
 	}
 }
 

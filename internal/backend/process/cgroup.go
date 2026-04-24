@@ -74,7 +74,7 @@ func detectCgroupDelegation() (string, error) {
 		}
 		return "", fmt.Errorf("probe subcgroup: %w", err)
 	}
-	_ = os.Remove(probe)
+	_ = os.Remove(probe) //nolint:gosec // G703: path rooted at /sys/fs/cgroup + cgroup from /proc/self/cgroup
 	return fullPath, nil
 }
 
