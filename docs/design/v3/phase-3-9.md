@@ -85,9 +85,14 @@ mechanics; phase 3-9 only adds around them.
 1. **`internal/apparmor/blockyard`** — shipped AppArmor profile granting
    `userns` to blockyard and inheriting the profile through its
    subprocesses (`bwrap`, `blockyard bwrap-exec`, the worker R process,
-   etc.). Authored against AppArmor 4.0's ABI (Ubuntu 24.04+ baseline)
-   and pinned via `abi <abi/4.0>,`. Non-goal: earlier AppArmor
-   releases whose userns rule language differs.
+   etc.). Uses only core AppArmor rule syntax (no `abi <abi/N.N>,`
+   pragma) so the profile parses on any AppArmor release that knows
+   the `userns` rule, from Ubuntu 23.10's 3.x backport through
+   AppArmor 4.x on 24.04+. The `by admin install-apparmor` CLI runs
+   a post-write syntax check via `apparmor_parser --preprocess` so
+   version-specific parse failures surface at install time with the
+   parser's error message, not at load time as a cryptic
+   `apparmor_parser -r` failure.
 
 2. **`internal/apparmor/` Go package** — `//go:embed blockyard` into
    `var Profile []byte`. Exported `DefaultInstallPath` constant
@@ -101,18 +106,30 @@ mechanics; phase 3-9 only adds around them.
    (`sudo apparmor_parser -r <target>` to load). Part of the same
    subcommand group added in phase 3-5.
 
+3b. **`blockyard bwrap-smoke`** — a narrow subcommand on the server
+   binary that exec's `bwrap --unshare-user --ro-bind / / -- /bin/true`
+   and exits 0 on success, non-zero on failure. Used by the standalone
+   `apparmor-smoke` CI job (Step 7) and by operators who want to
+   verify a production host's AppArmor profile actually unblocks
+   rootless bwrap. Tiny: no config parsing, no logging setup, just
+   `exec.Command(bwrap, …).Run()`. The existing `#305 bwrap-exec`
+   shim is orthogonal and stays unchanged.
+
 4. **Release-asset upload** — `release.yml`'s publishing jobs upload
    `internal/apparmor/blockyard` as a GitHub release asset named
    `blockyard-apparmor` alongside the existing seccomp profiles. No
    new workflow; just an additional file in the existing
    `seccomp-blob` job's upload list.
 
-5. **Docker image bundling** — the `blockyard-process` and `blockyard`
-   variant Dockerfiles (phase 3-8) `COPY internal/apparmor/blockyard`
-   to `/etc/blockyard/apparmor/blockyard`. Operators using the images
-   on Ubuntu 23.10+ can extract the profile via
-   `docker run --rm --entrypoint cat IMAGE /etc/blockyard/apparmor/blockyard`,
-   matching the existing seccomp extraction pattern.
+5. **Docker image bundling** — the bwrap-capable variant Dockerfiles
+   (`docker/server-process.Dockerfile` for `blockyard-process` and
+   `docker/server-everything.Dockerfile` for `blockyard`) `COPY
+   internal/apparmor/blockyard` to `/etc/blockyard/apparmor/blockyard`.
+   The Docker-backend-only variant (`docker/server.Dockerfile` →
+   `blockyard-docker`) does not ship bwrap and omits the profile.
+   Operators extract the profile via `docker run --rm --entrypoint cat
+   IMAGE /etc/blockyard/apparmor/blockyard`, matching the existing
+   seccomp extraction pattern.
 
 6. **Cgroup-v2 delegation detection and worker subgroup**
    (`internal/backend/process/cgroup.go`, new). Startup:
@@ -169,17 +186,22 @@ mechanics; phase 3-9 only adds around them.
     or (c) use the Docker backend." The placeholder "wait for phase
     3-9" text is removed.
 
-11. **CI matrix update** (`.github/workflows/ci.yml` process job).
-    Retire the `setuid` leg (setuid-bwrap was incorrectly documented
-    as a valid isolation mode in phase 3-7 and never delivered per-
-    worker host kuids; this is a correctness retirement). Retire the
-    `unprivileged` leg (subsumed by the new `rootless` leg below).
-    Keep the `root` leg as-is with the sysctl override — documents
-    the operator fallback on AppArmor-restricted hosts. Add a
-    `rootless` leg that loads the shipped AppArmor profile, keeps
-    `apparmor_restrict_unprivileged_userns=1`, and runs the
-    process-backend integration tests as a non-root user; asserts
-    that layers 1–5 work without the sysctl workaround.
+11. **CI coverage update** (`.github/workflows/ci.yml`).
+    Retire the `setuid` leg from the `process` matrix (setuid-bwrap was
+    incorrectly documented as a valid isolation mode in phase 3-7 and
+    never delivered per-worker host kuids; this is a correctness
+    retirement). Keep `root` and `unprivileged` — both still exercise
+    distinct production code paths inside the `--privileged` CI
+    container (root spawn with fork+setuid shim vs. non-root spawn).
+    Add a new standalone `apparmor-smoke` job that runs directly on
+    the Ubuntu 24.04 VM (no `container:`) because `--privileged`
+    bypasses AppArmor enforcement inside the container and cannot
+    faithfully test the profile. The standalone job installs the
+    profile, keeps `apparmor_restrict_unprivileged_userns=1`, and
+    invokes `blockyard bwrap-smoke` as a non-root user to validate
+    that the profile actually unblocks rootless `unshare(CLONE_NEWUSER)`.
+    Also asserts the negative: with the profile unloaded, the same
+    invocation fails.
 
 12. **Documentation** — `docs/design/backends.md` gains a
     deployment-mode × isolation-layer matrix (see Step 7). The
@@ -218,11 +240,14 @@ committed to the repo, embedded into a Go package for CLI install,
 uploaded as a release asset, and `COPY`ed into the variant Docker
 images.
 
-Profile shape (target: AppArmor 4.0 on Ubuntu 24.04+):
+Profile shape. The profile uses only core rule syntax — no
+`abi <abi/N.N>,` pragma — so it parses on any AppArmor release that
+knows the `userns` rule. That covers Ubuntu 23.10's 3.x backport and
+Ubuntu 24.04's 4.x baseline; older AppArmor (pre-23.10) that lacks
+the `userns` rule entirely also lacks the restriction this profile
+exists to lift, so it doesn't need one.
 
 ```
-abi <abi/4.0>,
-
 include <tunables/global>
 
 profile blockyard /usr/{bin,local/bin}/blockyard
@@ -306,61 +331,113 @@ writes the file.
 ### Step 3: `by admin install-apparmor`
 
 New subcommand in `cmd/by/admin.go` (the `by admin` group landed in
-phase 3-5). Mirrors `by admin install-seccomp`:
+phase 3-5). Mirrors `by admin install-seccomp` — same
+`installApparmorProfile(target)` helper pattern, same `MkdirAll` on
+the parent directory, same `0o644` file mode, same default-when-empty
+handling.
 
 ```go
-func newInstallApparmorCmd() *cobra.Command {
-    var target string
+func adminInstallApparmorCmd() *cobra.Command {
     cmd := &cobra.Command{
         Use:   "install-apparmor",
-        Short: "Write the shipped AppArmor profile to disk",
-        Long:  `Writes the AppArmor profile granting userns permission
-to the blockyard binary. After installing, load it with
-'sudo apparmor_parser -r <target>' and verify with
-'sudo aa-status'.`,
+        Short: "Write the blockyard AppArmor profile to disk",
+        Long: `Write the embedded AppArmor profile to a target path so
+operators on AppArmor-enforcing hosts (Ubuntu 23.10+ by default) can
+load it with 'sudo apparmor_parser -r <target>'. The profile grants
+the 'userns' permission narrowly to blockyard and its subprocesses,
+enabling rootless bwrap to create its sandbox user namespace without
+disabling kernel.apparmor_restrict_unprivileged_userns host-wide.`,
+        Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, _ []string) error {
+            target, _ := cmd.Flags().GetString("target")
             if target == "" {
                 target = apparmor.DefaultInstallPath
             }
-            if err := os.WriteFile(target, apparmor.Profile, 0o644); err != nil {
-                return fmt.Errorf("write profile: %w", err)
+            if err := installApparmorProfile(target); err != nil {
+                return err
             }
-            fmt.Fprintf(cmd.OutOrStdout(),
-                "Wrote AppArmor profile to %s\n"+
-                "Load with: sudo apparmor_parser -r %s\n",
-                target, target)
+            fmt.Printf("Wrote AppArmor profile to %s\n", target)
+            if err := validateApparmorProfile(target); err != nil {
+                // Non-fatal: surface the parse error and guidance, but
+                // the file is already written — operators can inspect
+                // it or try a different AppArmor version.
+                fmt.Fprintf(os.Stderr,
+                    "Warning: apparmor_parser rejected the profile: %v\n"+
+                        "On AppArmor versions without the 'userns' rule, use "+
+                        "sysctl kernel.apparmor_restrict_unprivileged_userns=0 "+
+                        "as a host-wide fallback instead.\n", err)
+                return nil
+            }
+            fmt.Println("Load with: sudo apparmor_parser -r " + target)
             return nil
         },
     }
-    cmd.Flags().StringVar(&target, "target", "",
-        "destination path (default: /etc/apparmor.d/blockyard)")
+    cmd.Flags().String("target", "",
+        `output path (default: /etc/apparmor.d/blockyard)`)
     return cmd
+}
+
+// validateApparmorProfile runs apparmor_parser in preprocess-only
+// mode to catch version-specific parse failures at install time.
+// Preprocess doesn't require root and doesn't load the profile — it
+// just exercises the parser. Missing apparmor_parser is not an error;
+// the host simply isn't configured for AppArmor and the load step is
+// a no-op anyway.
+func validateApparmorProfile(target string) error {
+    parser, err := exec.LookPath("apparmor_parser")
+    if err != nil {
+        return nil
+    }
+    out, err := exec.Command(parser, "--preprocess", target).CombinedOutput()
+    if err != nil {
+        return fmt.Errorf("%s: %w (output: %s)",
+            parser, err, strings.TrimSpace(string(out)))
+    }
+    return nil
 }
 ```
 
 ### Step 4: Release asset + Docker image COPY
 
-`release.yml`'s existing `seccomp-blob` job (or its renamed
-successor) uploads two additional assets:
+Release workflow. The existing `seccomp-blob` job in `release.yml`
+(which already uploads `blockyard-bwrap-seccomp.bpf` and
+`blockyard-outer.json` artifacts) gains a third upload step for
+the AppArmor profile, and the downstream `github-release` job adds
+the artifact to its download+release list:
 
 ```yaml
-- name: Upload AppArmor profile
-  uses: softprops/action-gh-release@v2
+# In seccomp-blob job:
+- uses: actions/upload-artifact@v7
   with:
-    files: internal/apparmor/blockyard
-    tag_name: ${{ github.ref_name }}
+    name: apparmor-profile
+    path: internal/apparmor/blockyard
+    retention-days: 1
+
+# In github-release job:
+- uses: actions/download-artifact@v8
+  with:
+    name: apparmor-profile
+    path: .
+# …and add `blockyard-apparmor` (the renamed artifact file) to the
+# softprops/action-gh-release `files:` list.
 ```
 
-Rename the job to `security-artifacts` if the seccomp-specific naming
-is now misleading; the job is a simple `gh release upload` step so
-the rename is cosmetic.
+The published release asset filename is `blockyard-apparmor` (no
+extension — matches `blockyard-bwrap-seccomp.bpf` /
+`blockyard-outer.json` style). Renaming the job from `seccomp-blob`
+to `security-artifacts` is cosmetic and can be a follow-up.
 
-Each of the `blockyard-process` and `blockyard` Dockerfiles
-(phase 3-8) adds:
+Dockerfile COPY. Add to the two bwrap-capable variants only —
+`docker/server-process.Dockerfile` and
+`docker/server-everything.Dockerfile`:
 
 ```dockerfile
 COPY internal/apparmor/blockyard /etc/blockyard/apparmor/blockyard
 ```
+
+`docker/server.Dockerfile` (the Docker-backend-only variant) does
+not ship bwrap, so the profile is irrelevant there and is not
+copied.
 
 Operators extract via:
 
@@ -601,10 +678,14 @@ func CheckRedisAuth(cfg *config.RedisConfig) Result {
                 "read/modify session state, flush the registry, or DoS the service. " +
                 "Configure `requirepass` in redis.conf or enable ACLs.",
             Category: "redis"}
-    case strings.HasPrefix(reply, "-NOAUTH"), strings.HasPrefix(reply, "-ERR"):
+    case strings.HasPrefix(reply, "-NOAUTH"), strings.HasPrefix(reply, "-WRONGPASS"),
+         strings.HasPrefix(reply, "-NOPERM"):
         return Result{Name: name, Severity: SeverityOK,
             Message: "Redis requires authentication", Category: "redis"}
     default:
+        // Includes generic `-ERR ...` (protocol errors, MAXCLIENTS,
+        // etc.) — unclear state, surface as Info so the operator can
+        // investigate rather than a false OK.
         return Result{Name: name, Severity: SeverityInfo,
             Message: fmt.Sprintf("Redis responded with unexpected reply to unauthenticated PING: %q", reply),
             Category: "redis"}
@@ -612,11 +693,19 @@ func CheckRedisAuth(cfg *config.RedisConfig) Result {
 }
 ```
 
-Called from the existing Redis preflight entry point in
-`internal/redisstate/preflight.go` (or wherever phase 3-3 landed the
-Redis checks). Runs regardless of backend selection — Redis without
-AUTH is a footgun for the Docker backend too, though the Docker
-backend's network topology mitigates it.
+Wiring: `preflight.CheckRedisAuth(fullCfg.Redis)` is called
+explicitly from both backends' `RunPreflight` — 
+`internal/backend/process/preflight.go:RunPreflight` and
+`internal/backend/docker/preflight.go:RunPreflight` — alongside
+their respective backend-specific checks. There is no existing
+cross-backend Redis entry point to plug into (phase 3-3's
+`checkRedisOnServiceNetwork` is docker-specific, uses Docker's
+NetworkInspect). Two call sites is small enough not to warrant a
+registry abstraction; if a future phase adds a third backend, the
+call moves to a shared helper at that point. The check itself is
+identical across backends — unauth'd Redis is a footgun either way,
+even though the Docker backend's per-worker bridge network mitigates
+worker-to-Redis reachability.
 
 `checkCgroupDelegation` lives in
 `internal/backend/process/preflight.go` since it's process-backend
@@ -631,7 +720,7 @@ func checkCgroupDelegation(b *ProcessBackend) preflight.Result {
             Message: "cgroup-v2 delegation unavailable. Per-worker egress " +
                 "isolation via `iptables -m cgroup --path` is not available " +
                 "on this host. Root deployments can use `iptables -m owner " +
-                "--gid-owner` instead (see checkBwrapHostUIDMapping). " +
+                "--gid-owner` rules on the per-worker host kuids instead. " +
                 "For non-root deployments wanting per-worker egress: enable " +
                 "cgroup delegation (systemd: Delegate=yes on the unit) or " +
                 "use the Docker backend.",
@@ -675,59 +764,79 @@ return preflight.Result{
 }
 ```
 
-### Step 7: CI matrix update
+### Step 7: CI coverage update
 
-`.github/workflows/ci.yml` process job matrix:
+Two changes. First, `.github/workflows/ci.yml`'s `process` job matrix
+drops the `setuid` leg (correctness — never delivered per-worker host
+kuids, was mis-documented as a valid isolation mode in phase 3-7).
+`root` and `unprivileged` remain, unchanged: both exercise distinct
+production spawn paths inside the `--privileged` CI container, and
+the existing `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`
+preamble is still needed because bwrap's post-setuid (root leg) and
+direct non-root (unprivileged leg) userns unshare calls fire the
+restriction regardless of AppArmor enforcement state.
 
-Remove `setuid` and `unprivileged`. The setuid-bwrap branch was
-mis-documented as a valid isolation mode in phase 3-7's ops docs; it
-was never implemented to produce per-worker host kuids and doesn't
-need a CI matrix leg. The unprivileged branch is subsumed by the new
-`rootless` leg below, which exercises the same non-root spawn path
-but additionally loads the AppArmor profile.
+Why the matrix can't host an "apparmor-enforced" leg: GitHub
+Actions `container:` jobs with `options: --privileged` mount the
+container with `--security-opt apparmor=unconfined` effectively.
+An AppArmor profile loaded on the host VM doesn't attach to
+processes inside the privileged container, so the rootless-with-
+profile behaviour can't be observed there.
 
-Keep `root`. Its sysctl override stays: on Ubuntu 23.10+ the
-post-setuid `unshare(CLONE_NEWUSER)` inside bwrap still fires the
-AppArmor restriction, and CI's `--privileged` container can't load
-AppArmor profiles in a way that covers the test binary's runtime
-path. The sysctl override is the CI-environment workaround;
-production operators running root blockyard on Ubuntu 23.10+ load
-the shipped AppArmor profile instead.
-
-Add `rootless`:
+Second, add a standalone `apparmor-smoke` job on the VM directly:
 
 ```yaml
-- name: Rootless process-backend tests
-  run: |
-    apt-get install -y --no-install-recommends apparmor apparmor-utils
-    install -m 644 internal/apparmor/blockyard /etc/apparmor.d/blockyard
-    apparmor_parser -r /etc/apparmor.d/blockyard
-    # Verify the profile is loaded and the sysctl is at its
-    # default restrictive setting.
-    aa-status | grep -q '^  blockyard$' || { echo "profile not loaded"; exit 1; }
-    [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1 ] || {
-        echo "sysctl expected to be 1 for rootless test"; exit 1; }
-    chown -R blockyard-runner:blockyard-runner $PWD $GOCACHE $GOMODCACHE
-    runuser -u blockyard-runner -- env PATH=$PATH GOCACHE=$GOCACHE GOMODCACHE=$GOMODCACHE \
-      go test -count=1 -tags process_test \
-      -coverprofile=coverage-process-rootless.out \
-      -coverpkg=./internal/... \
-      ./internal/backend/process/... \
-      ./internal/orchestrator/...
+apparmor-smoke:
+  runs-on: ubuntu-24.04
+  timeout-minutes: 10
+  needs: [unit]
+  if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'apparmor-smoke')
+  # Runs directly on the Ubuntu 24.04 VM — not inside a container —
+  # so the host AppArmor profile actually attaches to processes that
+  # match its path. The CI runner's VM image ships AppArmor 4.x and
+  # has kernel.apparmor_restrict_unprivileged_userns=1 by default.
+  steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+    - name: Install bubblewrap + apparmor utils
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends bubblewrap apparmor apparmor-utils
+    - name: Build and install blockyard to /usr/local/bin
+      run: |
+        go build -o /tmp/blockyard ./cmd/blockyard
+        sudo install -m 755 /tmp/blockyard /usr/local/bin/blockyard
+    - name: Assert baseline — profile unloaded, rootless bwrap blocked
+      run: |
+        sudo useradd -m -u 2000 blockyard-runner
+        [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1 ] \
+          || { echo "sysctl expected to be 1 on the runner"; exit 1; }
+        # Expected to fail: no profile grants userns, sysctl=1 blocks.
+        if sudo -u blockyard-runner /usr/local/bin/blockyard bwrap-smoke; then
+          echo "FAIL: rootless bwrap succeeded without the profile — test is not exercising the restriction"
+          exit 1
+        fi
+    - name: Load profile, assert rootless bwrap unblocked
+      run: |
+        sudo install -m 644 internal/apparmor/blockyard /etc/apparmor.d/blockyard
+        sudo apparmor_parser -r /etc/apparmor.d/blockyard
+        sudo aa-status | grep -q 'blockyard' \
+          || { echo "profile did not load"; exit 1; }
+        sudo -u blockyard-runner /usr/local/bin/blockyard bwrap-smoke
 ```
 
-The rootless leg's assertion shape: integration tests that depend on
-layer 6 (host-kuid checks via `/proc/<pid>/status`) remain skipped
-via the existing `requireHostUIDMapping` helper, which correctly
-classifies rootless as `bwrapNoHostMap`. Integration tests that only
-need layers 1–5 (spawn lifecycle, filesystem isolation, seccomp,
-etc.) run and pass, proving that the AppArmor profile enables the
-rootless path without the sysctl override.
+The two-step assertion is the point: step 3 proves the restriction
+is active (rootless bwrap fails unprofiled), step 4 proves the
+profile lifts it. Without both, a green result means nothing — the
+environment might be quietly permissive.
 
-The `root` leg continues to run the full test suite including the
-layer-6-dependent tests. Net: matrix goes from three legs (root,
-setuid, unprivileged) to two (root, rootless). Less test time,
-fewer moving parts.
+Net: `process` matrix goes from 3 legs to 2 (drop `setuid`). The
+standalone `apparmor-smoke` job adds ~2 minutes of CI time for the
+only coverage that can meaningfully validate the shipped profile.
+The existing `requireHostUIDMapping` test helper classification is
+unchanged.
 
 ### Step 8: Documentation
 
@@ -807,11 +916,16 @@ cases for the three new checks. `checkCloudMetadataReachable` uses an
 injectable dialer. `CheckRedisAuth` uses miniredis with/without AUTH
 configured. `checkCgroupDelegation` tests both outcomes.
 
-**CI rootless leg end-to-end.** The existing
-`process_integration_test.go` spawn/health/stop/filesystem-isolation
-tests run under the rootless matrix leg; they exercise bwrap from a
-non-root process with the AppArmor profile loaded. No new tests
-needed — the leg itself is the regression test for the profile.
+**`blockyard bwrap-smoke` subcommand.** Unit test that mocks the
+bwrap binary (or points at a stub) and asserts exit-code propagation.
+The real production-path validation is the standalone
+`apparmor-smoke` CI job (Step 7), which exercises the subcommand
+end-to-end against a loaded profile on an Ubuntu 24.04 VM.
+
+**CI standalone `apparmor-smoke` job.** The negative/positive pair
+described in Step 7 is itself the regression test: profile-unloaded
+run fails, profile-loaded run succeeds. No additional Go tests —
+the job's two assertion steps are the test.
 
 ---
 
@@ -828,24 +942,34 @@ New:
 
 Modified:
 - `cmd/by/admin.go` (new `install-apparmor` subcommand)
+- `cmd/blockyard/main.go` (new `bwrap-smoke` subcommand)
 - `internal/backend/process/process.go` (cgroup manager field,
   Enroll call in Spawn)
 - `internal/backend/process/preflight.go` (three new checks,
   `checkBwrapHostUIDMapping` message refresh)
 - `internal/backend/process/process_integration_test.go` (new
-  TestCgroupEnrollment)
+  TestCgroupEnrollment; refresh `requireHostUIDMapping` skip message
+  at line 102 — currently promises "phase 3-9 ships --userns+newuidmap"
+  which this phase explicitly does not do)
 - `internal/config/config.go` (new `skip_metadata_check` field on
   `ProcessConfig`)
-- `docker/blockyard-process.Dockerfile`, `docker/blockyard.Dockerfile`
-  (COPY profile)
-- `.github/workflows/ci.yml` (matrix rework, rootless leg)
-- `.github/workflows/release.yml` (upload profile asset)
+- `docker/server-process.Dockerfile`, `docker/server-everything.Dockerfile`
+  (COPY profile into the bwrap-capable variants; `docker/server.Dockerfile`
+  is the Docker-backend-only variant and does not need the profile)
+- `.github/workflows/ci.yml` (drop `setuid` leg from the process
+  matrix; add standalone `apparmor-smoke` job on the VM)
+- `.github/workflows/release.yml` (extend the `seccomp-blob` job's
+  uploads to include the AppArmor profile; rename to reflect the
+  broader scope if desired)
 - `docs/design/backends.md` (isolation-layer matrix)
 - `docs/content/docs/guides/process-backend.md` (cgroup section)
 - `docs/content/docs/guides/process-backend-container.md` (rootless
   subsection)
-- `docs/design/v3/phase-3-7.md` (correction: the setuid-bwrap mode
-  description is removed; it was mis-documented as a valid mode)
+- `docs/design/v3/phase-3-7.md` (corrections: remove the setuid-bwrap
+  mode description — mis-documented as a valid mode; rewrite the
+  several "wait for phase 3-9's `--userns`+`newuidmap`" forward-
+  references (lines ~101, 423-432, 3014-3015) to point at the
+  cgroup-delegation mechanism this phase actually delivers)
 
 Unchanged (explicit):
 - `internal/backend/process/bwrap_exec.go` (#305 shim stays)
