@@ -229,6 +229,42 @@ func TestAppRoleAuthRunReloginsBeforeExpiry(t *testing.T) {
 	}
 }
 
+func TestAppRoleAuthRunRetriesWithExponentialBackoff(t *testing.T) {
+	// With the fixed 10s backoff, Run would fire at most once in 2.5s
+	// after a failure. Exponential backoff starts at 1s, so we should
+	// see multiple retries in that window.
+	var count atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	t.Setenv("BLOCKYARD_VAULT_SECRET_ID", "s")
+	a := NewAppRoleAuth(srv.URL, "r", "")
+	// Seed an initial failure so Run starts in the retry path.
+	_ = a.Login(context.Background())
+	a.timerMu.Lock()
+	a.nextAt = time.Now()
+	a.timerMu.Unlock()
+	initial := count.Load()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		a.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(2500 * time.Millisecond)
+	cancel()
+	<-done
+
+	if got := count.Load() - initial; got < 2 {
+		t.Errorf("expected ≥2 retries in 2.5s with exp backoff, got %d", got)
+	}
+}
+
 func TestClient403TriggersReloginAndRetries(t *testing.T) {
 	// On the first admin call, vault returns 403; the client must
 	// re-login and retry. The retry succeeds with the fresh token.
