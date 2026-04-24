@@ -50,14 +50,18 @@ func TestMain(m *testing.M) {
 	}
 	defer cli.Close()
 
-	// Pull image (may already be cached from CI pre-pull step).
-	pullResp, err := cli.ImagePull(ctx, keycloakImage, client.ImagePullOptions{})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "image pull: %v\n", err)
-		os.Exit(1)
+	// Pull the image only when not already cached locally. ImagePull
+	// issues a HEAD against the registry even on cache hits, which fails
+	// the package when the registry token endpoint is slow.
+	if _, err := cli.ImageInspect(ctx, keycloakImage); err != nil {
+		pullResp, err := cli.ImagePull(ctx, keycloakImage, client.ImagePullOptions{})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "image pull: %v\n", err)
+			os.Exit(1)
+		}
+		io.Copy(io.Discard, pullResp)
+		pullResp.Close()
 	}
-	io.Copy(io.Discard, pullResp)
-	pullResp.Close()
 
 	// Resolve the absolute path to the realm import file.
 	realmFile, err := filepath.Abs("testdata/blockyard-test-realm.json")
