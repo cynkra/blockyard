@@ -15,14 +15,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
-	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/dockerauth"
 	"github.com/cynkra/blockyard/internal/units"
 )
 
@@ -82,7 +83,7 @@ const (
 // DockerBackend implements backend.Backend using the Docker Engine API.
 type DockerBackend struct {
 	client           dockerClient
-	serverID         string // own container ID; empty = native mode
+	serverID         string               // own container ID; empty = native mode
 	config           *config.DockerConfig // shortcut for fullCfg.Docker
 	fullCfg          *config.Config       // full config; needed for Server.DefaultMemoryLimit/CPULimit and the redis URL the preflight builder reads
 	bundleServerPath string               // root for the by-builder cache and pkg-store
@@ -108,7 +109,7 @@ type DockerBackend struct {
 func New(ctx context.Context, fullCfg *config.Config, bundleServerPath, serverVersion string) (*DockerBackend, error) {
 	cfg := &fullCfg.Docker
 	cli, err := client.New(
-		client.WithHost("unix://"+cfg.Socket),
+		client.WithHost("unix://" + cfg.Socket),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
@@ -278,7 +279,11 @@ func (d *DockerBackend) ensureImage(ctx context.Context, img string) error {
 	}
 
 	slog.Info("pulling image", "image", img)
-	pullResp, err := d.client.ImagePull(ctx, img, client.ImagePullOptions{})
+	auth, err := dockerauth.RegistryAuthFor(img)
+	if err != nil {
+		slog.Warn("registry auth lookup failed, pulling anonymously", "image", img, "error", err)
+	}
+	pullResp, err := d.client.ImagePull(ctx, img, client.ImagePullOptions{RegistryAuth: auth})
 	if err != nil {
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}

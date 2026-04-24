@@ -13,6 +13,7 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 
+	"github.com/cynkra/blockyard/internal/dockerauth"
 	"github.com/cynkra/blockyard/internal/task"
 )
 
@@ -26,6 +27,7 @@ type dockerClient interface {
 	ContainerStop(ctx context.Context, containerID string, options client.ContainerStopOptions) (client.ContainerStopResult, error)
 	ContainerRemove(ctx context.Context, containerID string, options client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
 	ContainerWait(ctx context.Context, containerID string, options client.ContainerWaitOptions) client.ContainerWaitResult
+	ImageInspect(ctx context.Context, imageID string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error)
 	ImagePull(ctx context.Context, refStr string, options client.ImagePullOptions) (client.ImagePullResponse, error)
 }
 
@@ -74,10 +76,10 @@ func newDockerFactoryForTest(c dockerClient, serverID string, listenPort func() 
 // inspect-retry loop, so the field is safe to read without further
 // lookups.
 type dockerInstance struct {
-	id       string
-	addr     string
-	docker   dockerClient
-	log      *slog.Logger
+	id     string
+	addr   string
+	docker dockerClient
+	log    *slog.Logger
 }
 
 func (d *dockerInstance) ID() string   { return d.id }
@@ -262,9 +264,19 @@ func (f *dockerServerFactory) cloneConfig(
 	}, nil
 }
 
-// pullImage pulls the given image via the Docker API.
+// pullImage pulls the given image via the Docker API. Skips the pull
+// when the image is already present locally; the registry-side freshness
+// check that ImagePull would issue otherwise counts against Docker Hub's
+// anonymous rate limit even on cache hits.
 func (f *dockerServerFactory) pullImage(ctx context.Context, ref string) error {
-	resp, err := f.docker.ImagePull(ctx, ref, client.ImagePullOptions{})
+	if _, err := f.docker.ImageInspect(ctx, ref); err == nil {
+		return nil
+	}
+	auth, err := dockerauth.RegistryAuthFor(ref)
+	if err != nil {
+		f.log.Warn("registry auth lookup failed, pulling anonymously", "image", ref, "error", err)
+	}
+	resp, err := f.docker.ImagePull(ctx, ref, client.ImagePullOptions{RegistryAuth: auth})
 	if err != nil {
 		return err
 	}
