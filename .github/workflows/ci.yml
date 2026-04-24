@@ -577,8 +577,8 @@ jobs:
           git fetch --no-tags origin "$BASE"
           go run ./cmd/coverage-check \
             -profile=merged.out \
-            -min-total=76 \
-            -min-patch=76 \
+            -min-total=80 \
+            -min-patch=80 \
             -patch-base="origin/$BASE" \
             -ignore='internal/testutil/**' \
             -ignore='internal/preflight/docker_checks.go'
