@@ -395,6 +395,31 @@ func runRestore(p RestoreParams) error {
 	return nil
 }
 
+// LockfileInstallWithRetryR defines install_with_retry(), an R wrapper
+// around pak::lockfile_install that retries on failure. A single
+// transient PPM/mirror download failure would otherwise propagate out
+// of the build container and sink the whole deploy; pak is idempotent
+// on a partially-populated library, so already-installed packages are
+// skipped on subsequent attempts.
+const LockfileInstallWithRetryR = `
+install_with_retry <- function(lockfile, lib, max_attempts = 3L) {
+  for (attempt in seq_len(max_attempts)) {
+    result <- tryCatch(
+      pak::lockfile_install(lockfile, lib = lib),
+      error = function(e) e
+    )
+    if (!inherits(result, "error")) return(invisible(result))
+    if (attempt == max_attempts) stop(result)
+    backoff <- 5L * attempt
+    message(sprintf(
+      "lockfile_install attempt %d/%d failed: %s",
+      attempt, max_attempts, conditionMessage(result)))
+    message(sprintf("retrying in %ds...", backoff))
+    Sys.sleep(backoff)
+  }
+}
+`
+
 // BuildCommand returns the R command that runs inside the build container.
 // The four-phase store-aware build script:
 //   - Phase 1: lockfile_create (pak resolves + solves)
@@ -404,7 +429,7 @@ func runRestore(p RestoreParams) error {
 //
 // Exported for use by the refresh pipeline (server/refresh.go).
 func BuildCommand() []string {
-	rScript := `
+	rScript := LockfileInstallWithRetryR + `
 Sys.setenv(
   R_USER_CACHE_DIR = "/pak-cache",
   PKG_CACHE_DIR = "/pak-cache",
@@ -501,7 +526,7 @@ if (rc != 0L) {
 }
 
 # -- Phase 3: Install store misses ------------------------------------
-pak::lockfile_install(file.path(build_lib, "pak.lock"), lib = build_lib)
+install_with_retry(file.path(build_lib, "pak.lock"), build_lib)
 
 # -- Phase 4: Ingest newly installed packages into store ---------------
 rc <- system2("/tools/by-builder", c(
@@ -535,7 +560,7 @@ func BuildMounts(
 // legacyBuildCommand returns the R command for the phase 2-5 build flow
 // (no package store). Used when Store is nil (tests, pre-store deployments).
 func legacyBuildCommand() []string {
-	rScript := `
+	rScript := LockfileInstallWithRetryR + `
 Sys.setenv(
   R_USER_CACHE_DIR = "/pak-cache",
   PKG_CACHE_DIR = "/pak-cache",
@@ -572,7 +597,7 @@ refs <- refs[nzchar(refs)]
 
 pak::lockfile_create(refs,
   lockfile = "/build-lib/pak.lock", lib = "/build-lib")
-pak::lockfile_install("/build-lib/pak.lock", lib = "/build-lib")
+install_with_retry("/build-lib/pak.lock", "/build-lib")
 `
 	return []string{"Rscript", "--vanilla", "-e", rScript}
 }
