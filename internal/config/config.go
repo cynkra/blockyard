@@ -326,10 +326,12 @@ func Load(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	meta, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	warnRemovedKeys(meta)
 	migrateDeprecatedFields(&cfg)
 	applyDefaults(&cfg)
 	applyEnvOverrides(&cfg)
@@ -368,6 +370,17 @@ func migrateDeprecatedFields(cfg *Config) {
 		}
 		slog.Warn("config: [openbao] is deprecated; rename the section to [vault]")
 		cfg.Openbao = nil
+	}
+}
+
+// warnRemovedKeys emits a deprecation warning for any config key that
+// used to be valid but has since been removed. BurntSushi/toml silently
+// ignores unknown keys when decoding into a struct, so a schema change
+// otherwise lands without a peep — we consult the decoder metadata to
+// surface them instead.
+func warnRemovedKeys(meta toml.MetaData) {
+	if meta.IsDefined("vault", "token_file") {
+		slog.Warn("config: vault.token_file is deprecated and ignored; remove it from your config")
 	}
 }
 
