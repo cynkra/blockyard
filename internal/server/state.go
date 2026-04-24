@@ -60,7 +60,7 @@ type Server struct {
 	// Derived from session_secret with a different domain string.
 	SessionTokenKey *auth.SigningKey
 
-	// OpenBao — nil when [openbao] is not configured.
+	// Vault — nil when [vault] is not configured.
 	VaultClient     *integration.Client
 	VaultTokenCache *integration.VaultTokenCache
 
@@ -87,7 +87,7 @@ type Server struct {
 	// Package store — nil when not available (no builds yet).
 	PkgStore *pkgstore.Store
 
-	// HMAC key for worker tokens. Persisted via OpenBao or file-based
+	// HMAC key for worker tokens. Persisted via vault or file-based
 	// fallback so both servers verify the same tokens during a rolling
 	// update. Independent of SessionSecret and OIDC.
 	WorkerTokenKey *auth.SigningKey
@@ -286,13 +286,13 @@ func (srv *Server) AuthDeps() *auth.Deps {
 			// VaultTokenCache on the same call avoids a second
 			// round-trip on the first proxy request.
 			token, ttl, err := srv.VaultClient.JWTLogin(
-				ctx, srv.Config.Openbao.JWTAuthPath, accessToken,
+				ctx, srv.Config.Vault.JWTAuthPath, accessToken,
 			)
 			if err != nil {
 				return fmt.Errorf("vault JWT login for %s: %w", sub, err)
 			}
 			if ttl == 0 {
-				ttl = srv.Config.Openbao.TokenTTL.Duration
+				ttl = srv.Config.Vault.TokenTTL.Duration
 			}
 			if srv.VaultTokenCache != nil {
 				srv.VaultTokenCache.Set(sub, token, ttl)

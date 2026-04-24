@@ -99,7 +99,7 @@ concurrent sessions), see [Scaling Out](#scaling-out) below.
 
 ```mermaid
 graph TD
-    blockr["blockr (R app)"] -->|"1. Vault token (existing flow)<br>2. Request DB credentials"| vault["OpenBao"]
+    blockr["blockr (R app)"] -->|"1. Vault token (existing flow)<br>2. Request DB credentials"| vault["Vault"]
     blockr -->|"3. Direct connection<br>(per-user creds)"| pg["PostgreSQL<br>(RLS filters by current_sub())"]
     vault -.->|"manages per-user roles<br>+ rotates passwords"| pg
 ```
@@ -710,7 +710,7 @@ Two provisioning models are supported:
   registers them with vault. Requires backend-specific code in
   blockyard.
 - **Operator provisions out-of-band** (S3, PocketBase, Gitea,
-  etc.): credentials are created externally and stored in OpenBao
+  etc.): credentials are created externally and stored in the vault
   at `secret/data/users/{sub}/apikeys/{service}`. Blockyard's
   existing credential injection (vault token + `VAULT_ADDR`)
   delivers them to the R app at runtime — no blockyard code

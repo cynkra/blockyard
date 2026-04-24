@@ -108,16 +108,22 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 			}()
 		}
 
-		// OpenBao
+		// Vault
 		if srv.VaultClient != nil {
 			func() {
 				ctx, cancel := context.WithTimeout(r.Context(), readyzCheckTimeout)
 				defer cancel()
+				var status string
 				if err := srv.VaultClient.Health(ctx); err != nil {
-					checks["openbao"] = "fail"
+					status = "fail"
 				} else {
-					checks["openbao"] = "pass"
+					status = "pass"
 				}
+				checks["vault"] = status
+				// Deprecated alias — external monitors may still key off
+				// "openbao". Remove with the rest of the openbao compat
+				// shims (#323).
+				checks["openbao"] = status
 			}()
 		}
 

@@ -11,7 +11,7 @@ which is a security model no general-purpose
 [Shiny](https://shiny.posit.co/) host was designed for. Blockyard
 provides hardened per-session worker isolation (as a Docker container
 or a `bubblewrap`-sandboxed process), per-user credential management
-via [OpenBao](https://openbao.org/), server-side dependency resolution,
+via a Vault-compatible secrets manager, server-side dependency resolution,
 and built-in board storage — the full blockr stack as a single binary.
 
 ## How it works
@@ -52,10 +52,10 @@ assigned directly by blockyard admins — not derived from IdP groups. Per-app
 access control lists (ACLs) provide fine-grained authorization, and each app
 has a visibility setting (`acl`, `logged_in`, or `public`).
 
-Optionally, Blockyard integrates with [OpenBao](https://openbao.org/) (a
-Vault-compatible secrets manager) for per-user credential management, allowing
-Shiny apps to securely access external services like AI providers, databases,
-and object storage.
+Optionally, Blockyard integrates with a Vault-compatible secrets manager
+(tested against [OpenBao](https://openbao.org/); HashiCorp Vault also works)
+for per-user credential management, allowing Shiny apps to securely access
+external services like AI providers, databases, and object storage.
 
 ## Key concepts
 

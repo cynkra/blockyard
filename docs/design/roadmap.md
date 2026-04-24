@@ -107,7 +107,7 @@ session_idle_ttl        = "1h"    # sweep sessions idle longer than this
 idle_worker_timeout     = "5m"    # evict workers idle (zero sessions) longer than this
 ```
 
-**v1 additions** (OIDC + OpenBao arrive together — neither is meaningful
+**v1 additions** (OIDC + vault arrive together — neither is meaningful
 without the other):
 
 ```toml
@@ -116,8 +116,8 @@ without the other):
 session_secret = "..."                              # HMAC key for cookie signing
                                                     # use BLOCKYARD_SERVER_SESSION_SECRET env var
                                                     # required when [oidc] is configured and
-                                                    # [openbao] is not — auto-generated and
-                                                    # persisted to vault when [openbao] is set
+                                                    # [vault] is not — auto-generated and
+                                                    # persisted to vault when [vault] is set
 management_bind = "127.0.0.1:9100"                  # optional: separate listener for /healthz,
                                                     # /readyz, /metrics (no auth). Keeps ops
                                                     # endpoints off the public listener.
@@ -134,7 +134,7 @@ initial_admin  = "..."    # OIDC sub of the first admin user
                            # checked only on first login; use BLOCKYARD_OIDC_INITIAL_ADMIN env var
 cookie_max_age = "24h"   # optional, default: 24h
 
-[openbao]
+[vault]
 address     = "https://bao.example.com"
 role_id     = "blockyard-server"         # AppRole role ID (not secret — like a username)
 # secret_id is NEVER in config — delivered once via BLOCKYARD_OPENBAO_SECRET_ID env var
@@ -424,7 +424,7 @@ infrastructure.
 ---
 
 - **Multi-worker and session sharing.** Enforce `max_workers_per_app` and
-  `max_sessions_per_worker` when `> 1`. OpenBao credentials are injected
+  `max_sessions_per_worker` when `> 1`. Vault credentials are injected
   per-request via HTTP headers — not per-worker at spawn time. With
   `max_sessions_per_worker = 1`, the proxy injects the raw vault token
   directly. With `max_sessions_per_worker > 1`, the proxy injects a
@@ -498,7 +498,7 @@ infrastructure.
   these are made available to their Shiny sessions at runtime in a
   cryptographically bounded way.
 
-  **Requires:** IdP (OIDC) and OpenBao — both v1 dependencies. See
+  **Requires:** IdP (OIDC) and a vault — both v1 dependencies. See
   [Credential Trust Model](architecture.md#credential-trust-model) in the
   architecture doc for the security rationale behind these external
   dependencies.
@@ -509,33 +509,33 @@ infrastructure.
   only — no path from the process to any other user's data or to the server's
   own DB credentials.
 
-  **Mechanism — OpenBao + IdP JWT auth:**
+  **Mechanism — vault + IdP JWT auth:**
   [OpenBao](https://openbao.org) (the open source Vault fork) is used as the
-  secrets backend. OpenBao is bundled in the reference Docker Compose; operators
+  secrets backend. OpenBao is bundled in the reference Docker Compose as the tested vault implementation; operators
   who already run Vault or OpenBao can point the server at their own instance.
-  OpenBao must be initialized and unsealed by the operator before the server
+  The vault must be initialized and unsealed by the operator before the server
   starts — no auto-unseal; this is documented as a one-time setup step.
 
-  The IdP and OpenBao are wired together via OpenBao's JWT auth method:
-  OpenBao is configured with the IdP's JWKS endpoint once, after which any
-  valid IdP JWT can be exchanged for a scoped OpenBao token. Per-user policies
+  The IdP and the vault are wired together via the vault's JWT auth method:
+  The vault is configured with the IdP's JWKS endpoint once, after which any
+  valid IdP JWT can be exchanged for a scoped vault token. Per-user policies
   restrict each token to `read` on `secret/users/{sub}/*` only.
 
   **Session flow (single-tenant, `max_sessions_per_worker = 1`):**
   1. User authenticates via IdP → server receives their OIDC JWT
   2. On each proxied request, the **server** (not the R process) presents the
-     user's access token to OpenBao's `/auth/jwt/login` endpoint (with
+     user's access token to the vault's `/auth/jwt/login` endpoint (with
      in-memory caching keyed by `sub` to avoid per-request calls)
-  3. OpenBao validates the JWT, maps the `sub` claim to a policy, and returns
+  3. The vault validates the JWT, maps the `sub` claim to a policy, and returns
      a short-lived token scoped to `secret/users/{sub}/*`
-  4. The scoped OpenBao token is injected as the `X-Blockyard-Vault-Token`
-     HTTP header on the proxied request. The OpenBao address is injected once
+  4. The scoped vault token is injected as the `X-Blockyard-Vault-Token`
+     HTTP header on the proxied request. The vault address is injected once
      at container startup as the `VAULT_ADDR` environment variable (recognized
      natively by Vault/OpenBao client libraries).
-  5. The R process reads the token via `session$request` and calls OpenBao
+  5. The R process reads the token via `session$request` and calls the vault
      directly to read its credentials — it never touches the server's DB or
      decryption keys
-  6. The server's OpenBao admin credentials (used for enrollment writes) never
+  6. The server's vault admin credentials (used for enrollment writes) never
      enter the process space
 
   **Session flow (shared containers, `max_sessions_per_worker > 1`):**
@@ -553,7 +553,7 @@ infrastructure.
      by calling `POST /api/v1/credentials/vault` with the session token
      as a Bearer credential.
   3. The server validates the token (signature, expiry, worker existence),
-     exchanges the user's identity for a scoped OpenBao token, and returns
+     exchanges the user's identity for a scoped vault token, and returns
      it to the app.
 
   The actual vault secret never crosses the proxy layer. The server also
@@ -563,9 +563,9 @@ infrastructure.
   **Enrollment:** users manage credentials via the enrollment forms on the
   blockyard dashboard (v1). The REST API endpoint
   `POST /users/me/credentials/{service}` validates identity via OIDC and
-  writes to OpenBao on the user's behalf.
+  writes to the vault on the user's behalf.
 
-  The server authenticates to OpenBao via AppRole auth — a renewable,
+  The server authenticates to the vault via AppRole auth — a renewable,
   scoped token obtained at startup and maintained by a background renewal
   goroutine. The static `admin_token` is deprecated but still accepted
   for migration. See [v1 wrap-up §4](v1/wrap-up.md#4-secret-lifecycle)
@@ -579,9 +579,9 @@ infrastructure.
     `X-Blockyard-Session-Token`, exchanges it for a vault token via
     `POST /api/v1/credentials/vault`, and returns the token.
 
-  The OpenBao address is available as the `VAULT_ADDR` environment
+  The vault address is available as the `VAULT_ADDR` environment
   variable (injected at container startup). App developers use the helper
-  function and `httr2` to query OpenBao for their credentials.
+  function and `httr2` to query the vault for their credentials.
 
 - **Stable UUID URLs.** The proxy resolves `/app/{uuid}/` in addition to
   `/app/{name}/`, giving every app a stable URL that survives renames.
@@ -604,7 +604,7 @@ infrastructure.
   events (spawn, stop, crash), and health check results.
 
 - **`/readyz` endpoint.** Readiness check. Returns `200 OK` only when all
-  runtime dependencies are reachable — DB, Docker socket, IdP, OpenBao.
+  runtime dependencies are reachable — DB, Docker socket, IdP, vault.
   Returns `503` with a JSON body listing which checks failed.
 
 - **User-facing web UI (minimal).** Server-rendered HTML pages for browser
@@ -614,7 +614,7 @@ infrastructure.
   same catalog queries as the content discovery API, filtered by RBAC).
   Rendered with Go's `html/template` and embedded via `embed.FS` — no
   JavaScript framework, no build step. Credential enrollment forms for
-  operator-defined services (OpenBao) are inline on the dashboard. User
+  operator-defined services (via the vault) are inline on the dashboard. User
   management (admin UI for role assignment and activation/deactivation)
   and PAT management (create, list, and revoke tokens) are also provided.
   In v0 mode (no OIDC), the root page shows all deployed apps without auth.
@@ -670,7 +670,7 @@ existing Docker deployment. No Kubernetes dependency.
   the R app uses its existing vault token to request PostgREST-scoped
   JWTs on demand. Blockyard is not in the data path or auth path at
   runtime. Lightweight alternatives (PocketBase) are available for dev
-  and example setups via operator-provisioned credentials in OpenBao.
+  and example setups via operator-provisioned credentials in the vault.
   See [board-storage.md](board-storage.md) for the full design.
 
 - **Runtime package installation.** Allow users to install additional block
@@ -716,8 +716,8 @@ process backend and per-app container configuration. See
 
 - **Worker token persistence.** The HMAC signing key for worker tokens
   moves from ephemeral (regenerated on every startup) to persistent.
-  Primary storage in OpenBao (`secret/data/blockyard/worker-signing-key`);
-  file-based fallback on the data volume when OpenBao is not configured.
+  Primary storage in the vault (`secret/data/blockyard/worker-signing-key`);
+  file-based fallback on the data volume when the vault is not configured.
 
 - **Drain mode.** A new shutdown path triggered by `SIGUSR1`. Health
   endpoints return 503 immediately (the proxy-agnostic cutover signal),
@@ -872,7 +872,7 @@ deployments.
 - **Per-app environment variables.** Apps execute arbitrary user-supplied R
   code — any env var injected into the process is readable by that code, so
   per-app secrets do not provide a meaningful security boundary. Per-user
-  credentials via OpenBao (v1) are the correct model.
+  credentials via the vault (v1) are the correct model.
 
 - **Multi-language support.** The `Backend` interface is already
   runtime-agnostic, so adding a new language means adding a new deployment

@@ -108,10 +108,10 @@ services:
       BLOCKYARD_OIDC_CLIENT_SECRET: blockyard-dex-secret
       BLOCKYARD_OIDC_INITIAL_ADMIN: Cg1kZW1vLXVzZXItMDAxEgVsb2NhbA
       BLOCKYARD_SERVER_BOOTSTRAP_TOKEN: by_bootstrap_for_examples
-      # OpenBao (AppRole auth — session_secret is auto-generated via vault)
-      BLOCKYARD_OPENBAO_ADDRESS: http://openbao:8200
-      BLOCKYARD_OPENBAO_ROLE_ID: blockyard-server
-      BLOCKYARD_OPENBAO_SECRET_ID: dev-secret-id-for-local-use-only
+      # Vault (AppRole auth — session_secret is auto-generated via the vault)
+      BLOCKYARD_VAULT_ADDRESS: http://openbao:8200
+      BLOCKYARD_VAULT_ROLE_ID: blockyard-server
+      BLOCKYARD_VAULT_SECRET_ID: dev-secret-id-for-local-use-only
       # Database + board storage
       BLOCKYARD_DATABASE_DRIVER: postgres
       BLOCKYARD_DATABASE_URL: postgres://blockyard:dev-password@postgres:5432/blockyard?sslmode=disable

@@ -37,7 +37,7 @@ func credentialServer(t *testing.T, vaultClient *integration.Client) *server.Ser
 	t.Helper()
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
-		Openbao: &config.OpenbaoConfig{
+		Vault: &config.VaultConfig{
 			Address:     "http://mock",
 			AdminToken:  config.NewSecret("admin-token"),
 			TokenTTL:    config.Duration{Duration: 1 * time.Hour},

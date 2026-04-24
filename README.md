@@ -29,7 +29,7 @@ graph LR
     Auth --> Proxy[Reverse Proxy]
     Proxy --> Worker["Worker<br>(Docker container or<br>bwrap process)"]
     Router --> DB["SQLite/Postgres<br>(app & bundle metadata)"]
-    Worker --> Bao["OpenBao<br>(credentials)"]
+    Worker --> Bao["Vault<br>(credentials)"]
 ```
 
 ## Tech Stack
@@ -41,7 +41,7 @@ graph LR
 - **modernc.org/sqlite** — pure-Go SQLite driver
 - **Redis** — optional shared state for rolling updates and multi-server coordination (`redis/go-redis`)
 - **OIDC** — OpenID Connect authentication (`coreos/go-oidc/v3`)
-- **OpenBao** — credential management (Vault-compatible)
+- **Vault** — credential management via the Vault HTTP API (tested against OpenBao; HashiCorp Vault also works)
 - **Prometheus** — metrics (`prometheus/client_golang`)
 - **OpenTelemetry** — distributed tracing
 - **log/slog** — structured JSON logging
@@ -123,7 +123,7 @@ container (e.g. the devcontainer) instead.
   - `bundle/` — Bundle archive storage, unpacking, and R dependency restoration.
   - `db/` — SQLite/PostgreSQL database layer, migrations, and CRUD queries.
   - `drain/` — Graceful drain mode used by the rolling-update orchestrator.
-  - `integration/` — OpenBao (Vault) client, bootstrapping, and credential enrollment.
+  - `integration/` — Vault HTTP client, bootstrapping, and credential enrollment.
   - `orchestrator/` — Rolling-update state machine with Docker (container clone) and process (fork+exec) variants.
   - `preflight/` — Shared startup-check plumbing; backend-specific checks live under each backend.
   - `redisstate/` — Redis-backed implementations of session/worker/resource stores.

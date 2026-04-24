@@ -182,7 +182,7 @@ func main() {
 	bgCtx, bgCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: bgCancel is called by Drainer.Finish/Shutdown, not defer
 	var bgWg sync.WaitGroup
 
-	// ── Initialize OpenBao (before db.Open so the Postgres pool can
+	// ── Initialize the vault (before db.Open so the Postgres pool can
 	// seed creds from vault when database.vault_role is set, and
 	// before OIDC for vault reference resolution). ──
 	var (
@@ -192,19 +192,19 @@ func main() {
 		vaultTokenCache   *integration.VaultTokenCache
 	)
 
-	if cfg.Openbao != nil {
-		tokenFilePath := cfg.Openbao.TokenFile
+	if cfg.Vault != nil {
+		tokenFilePath := cfg.Vault.TokenFile
 
-		if cfg.Openbao.RoleID != "" {
+		if cfg.Vault.RoleID != "" {
 			// AppRole auth flow.
-			token, ttl, err := integration.InitAppRole(context.Background(), cfg.Openbao.Address, cfg.Openbao.RoleID, tokenFilePath)
+			token, ttl, err := integration.InitAppRole(context.Background(), cfg.Vault.Address, cfg.Vault.RoleID, tokenFilePath)
 			if err != nil {
 				slog.Error("vault authentication failed", "error", err)
 				os.Exit(1)
 			}
 
 			// Start token renewal goroutine.
-			renewer := integration.NewTokenRenewer(cfg.Openbao.Address, token, tokenFilePath)
+			renewer := integration.NewTokenRenewer(cfg.Vault.Address, token, tokenFilePath)
 			vaultAdminToken = renewer.Token
 			vaultTokenHealthy = renewer.Healthy
 
@@ -215,10 +215,10 @@ func main() {
 			}()
 		} else {
 			// Deprecated static admin_token.
-			vaultAdminToken = cfg.Openbao.AdminToken.MustExpose
+			vaultAdminToken = cfg.Vault.AdminToken.MustExpose
 		}
 
-		vaultClient = integration.NewClient(cfg.Openbao.Address, vaultAdminToken)
+		vaultClient = integration.NewClient(cfg.Vault.Address, vaultAdminToken)
 		vaultTokenCache = integration.NewVaultTokenCache()
 
 		// Resolve vault references in config (e.g. "vault:path#key").
@@ -239,8 +239,8 @@ func main() {
 		}
 
 		// Bootstrap verification.
-		if err := integration.Bootstrap(context.Background(), vaultClient, cfg.Openbao.JWTAuthPath, cfg.Openbao.SkipPolicyScopeCheck); err != nil {
-			slog.Error("OpenBao bootstrap failed", "error", err)
+		if err := integration.Bootstrap(context.Background(), vaultClient, cfg.Vault.JWTAuthPath, cfg.Vault.SkipPolicyScopeCheck); err != nil {
+			slog.Error("vault bootstrap failed", "error", err)
 			os.Exit(1)
 		}
 	}
@@ -369,7 +369,7 @@ func main() {
 	// the two at startup.
 	if cfg.Database.BoardStorage {
 		accCtx, accCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		accessor, err := srv.VaultClient.AuthMountAccessor(accCtx, cfg.Openbao.JWTAuthPath)
+		accessor, err := srv.VaultClient.AuthMountAccessor(accCtx, cfg.Vault.JWTAuthPath)
 		accCancel()
 		if err != nil {
 			slog.Error("board storage: resolve OIDC mount accessor", "error", err)

@@ -75,12 +75,12 @@ func TestReadyzAllPass(t *testing.T) {
 	if checks["docker"] != "pass" {
 		t.Errorf("docker = %v, want pass", checks["docker"])
 	}
-	// IdP and OpenBao should not be present when not configured
+	// IdP and vault should not be present when not configured
 	if _, exists := checks["idp"]; exists {
 		t.Error("idp check should not be present when OIDC is not configured")
 	}
-	if _, exists := checks["openbao"]; exists {
-		t.Error("openbao check should not be present when VaultClient is nil")
+	if _, exists := checks["vault"]; exists {
+		t.Error("vault check should not be present when VaultClient is nil")
 	}
 }
 
@@ -261,7 +261,7 @@ func TestReadyzDockerFail(t *testing.T) {
 }
 
 func TestReadyzWithVaultPass(t *testing.T) {
-	// Mock OpenBao server that returns 200 for /v1/sys/health.
+	// Mock vault server that returns 200 for /v1/sys/health.
 	baoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/sys/health" {
 			w.WriteHeader(http.StatusOK)
@@ -293,13 +293,18 @@ func TestReadyzWithVaultPass(t *testing.T) {
 	if !ok {
 		t.Fatal("expected checks map")
 	}
+	if checks["vault"] != "pass" {
+		t.Errorf("vault = %v, want pass", checks["vault"])
+	}
+	// Deprecated alias — both keys reflect the same status during the
+	// openbao → vault transition window.
 	if checks["openbao"] != "pass" {
-		t.Errorf("openbao = %v, want pass", checks["openbao"])
+		t.Errorf("openbao (deprecated alias) = %v, want pass", checks["openbao"])
 	}
 }
 
 func TestReadyzWithVaultFail(t *testing.T) {
-	// Mock OpenBao server that returns 503 for /v1/sys/health.
+	// Mock vault server that returns 503 for /v1/sys/health.
 	baoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
@@ -327,8 +332,11 @@ func TestReadyzWithVaultFail(t *testing.T) {
 	if !ok {
 		t.Fatal("expected checks map")
 	}
+	if checks["vault"] != "fail" {
+		t.Errorf("vault = %v, want fail", checks["vault"])
+	}
 	if checks["openbao"] != "fail" {
-		t.Errorf("openbao = %v, want fail", checks["openbao"])
+		t.Errorf("openbao (deprecated alias) = %v, want fail", checks["openbao"])
 	}
 }
 

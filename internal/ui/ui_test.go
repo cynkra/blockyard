@@ -123,9 +123,9 @@ func oidcConfig() *config.Config {
 	return cfg
 }
 
-func openbaoConfig() *config.Config {
+func vaultConfig() *config.Config {
 	cfg := oidcConfig()
-	cfg.Openbao = &config.OpenbaoConfig{
+	cfg.Vault = &config.VaultConfig{
 		Address:    "http://localhost:8200",
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{
@@ -453,7 +453,7 @@ func TestAppsPageNavActiveHighlighting(t *testing.T) {
 	}
 }
 
-func TestAppsPageNavApiKeysHiddenWithoutOpenbao(t *testing.T) {
+func TestAppsPageNavApiKeysHiddenWithoutVault(t *testing.T) {
 	_, ts := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
 
 	resp, err := http.Get(ts.URL + "/")
@@ -464,12 +464,12 @@ func TestAppsPageNavApiKeysHiddenWithoutOpenbao(t *testing.T) {
 
 	body := readBody(t, resp)
 	if strings.Contains(body, "API Keys") {
-		t.Error("API Keys nav link should be hidden without openbao config")
+		t.Error("API Keys nav link should be hidden without vault config")
 	}
 }
 
-func TestAppsPageNavApiKeysShownWithOpenbao(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "u", auth.RoleAdmin)
+func TestAppsPageNavApiKeysShownWithVault(t *testing.T) {
+	_, ts := authServer(t, vaultConfig(), "u", auth.RoleAdmin)
 
 	resp, err := http.Get(ts.URL + "/")
 	if err != nil {
@@ -479,7 +479,7 @@ func TestAppsPageNavApiKeysShownWithOpenbao(t *testing.T) {
 
 	body := readBody(t, resp)
 	if !strings.Contains(body, "API Keys") {
-		t.Error("API Keys nav link should be visible with openbao config")
+		t.Error("API Keys nav link should be visible with vault config")
 	}
 }
 
@@ -924,7 +924,7 @@ func TestDeploymentsPageSearch(t *testing.T) {
 
 // --- API Keys page tests ---
 
-func TestApiKeysPageRedirectsWithoutOpenbao(t *testing.T) {
+func TestApiKeysPageRedirectsWithoutVault(t *testing.T) {
 	_, ts := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
 
 	client := noRedirectClient()
@@ -944,7 +944,7 @@ func TestApiKeysPageRedirectsWithoutOpenbao(t *testing.T) {
 }
 
 func TestApiKeysPageRequiresAuth(t *testing.T) {
-	_, ts := newTestServer(t, openbaoConfig())
+	_, ts := newTestServer(t, vaultConfig())
 
 	client := noRedirectClient()
 	resp, err := client.Get(ts.URL + "/api-keys")
@@ -962,8 +962,8 @@ func TestApiKeysPageRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestApiKeysPageRendersWithOpenbao(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "u", auth.RoleAdmin)
+func TestApiKeysPageRendersWithVault(t *testing.T) {
+	_, ts := authServer(t, vaultConfig(), "u", auth.RoleAdmin)
 
 	resp, err := http.Get(ts.URL + "/api-keys")
 	if err != nil {
@@ -987,7 +987,7 @@ func TestApiKeysPageRendersWithOpenbao(t *testing.T) {
 }
 
 func TestApiKeysPageNavActive(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "u", auth.RoleAdmin)
+	_, ts := authServer(t, vaultConfig(), "u", auth.RoleAdmin)
 
 	resp, err := http.Get(ts.URL + "/api-keys")
 	if err != nil {
@@ -1002,7 +1002,7 @@ func TestApiKeysPageNavActive(t *testing.T) {
 }
 
 func TestApiKeysPageHtmxForm(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "u", auth.RoleAdmin)
+	_, ts := authServer(t, vaultConfig(), "u", auth.RoleAdmin)
 
 	resp, err := http.Get(ts.URL + "/api-keys")
 	if err != nil {
@@ -1844,7 +1844,7 @@ func TestBuildServiceEntriesWithVaultMock(t *testing.T) {
 	t.Cleanup(vaultSrv.Close)
 
 	cfg := oidcConfig()
-	cfg.Openbao = &config.OpenbaoConfig{
+	cfg.Vault = &config.VaultConfig{
 		Address:    vaultSrv.URL,
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{

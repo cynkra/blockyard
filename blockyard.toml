@@ -61,8 +61,8 @@ idle_worker_timeout  = "5m"
 # drain_idle_wait = "5m"         # process backend: max session drain wait
 
 # Optional: OIDC authentication
-# When enabled, server.session_secret is required unless [openbao] is also
-# configured (in which case it is auto-generated and stored in vault).
+# When enabled, server.session_secret is required unless [vault] is also
+# configured (in which case it is auto-generated and stored in the vault).
 # [oidc]
 # issuer_url           = "https://idp.example.com/realms/myapp"
 # issuer_discovery_url = ""      # optional: internal URL for OIDC discovery (e.g. Docker DNS)
@@ -71,8 +71,9 @@ idle_worker_timeout  = "5m"
 # cookie_max_age       = "24h"
 # initial_admin        = "google-oauth2|abc123"   # OIDC sub of the first admin
 
-# Optional: OpenBao credential management (requires [oidc])
-# [openbao]
+# Optional: Vault-compatible credential management (requires [oidc]).
+# Tested against OpenBao; HashiCorp Vault also speaks this protocol.
+# [vault]
 # address       = "http://openbao:8200"
 # role_id       = "blockyard-server"       # AppRole role identifier (recommended)
 # # admin_token = "vault-admin-token"      # deprecated: use role_id instead

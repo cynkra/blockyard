@@ -10,9 +10,9 @@ import (
 	"strings"
 )
 
-// Bootstrap verifies OpenBao is configured correctly for blockyard.
+// Bootstrap verifies the vault is configured correctly for blockyard.
 // Checks:
-//  1. OpenBao is reachable and unsealed (GET /v1/sys/health)
+//  1. the vault is reachable and unsealed (GET /v1/sys/health)
 //  2. JWT auth method is enabled at the configured path
 //  3. The "blockyard-user" role exists
 //  4. KV v2 secrets engine is mounted at "secret/"
@@ -43,12 +43,12 @@ func Bootstrap(ctx context.Context, client *Client, jwtAuthPath string, skipPoli
 
 	// 5. Verify at least one attached policy uses per-user path scoping.
 	if skipPolicyScopeCheck {
-		slog.Warn("OpenBao policy scope check skipped (skip_policy_scope_check = true)")
+		slog.Warn("vault policy scope check skipped (skip_policy_scope_check = true)")
 	} else if err := checkPolicyScoping(ctx, client, jwtAuthPath); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	slog.Info("OpenBao bootstrap checks passed")
+	slog.Info("vault bootstrap checks passed")
 	return nil
 }
 
@@ -186,7 +186,7 @@ func checkPolicyScoping(ctx context.Context, client *Client, jwtAuthPath string)
 }
 
 // policyResponse is the subset of the policy read response we need.
-// OpenBao returns the policy text in data.policy (v2 API at /sys/policies/acl/)
+// The vault returns the policy text in data.policy (v2 API at /sys/policies/acl/)
 // or in the top-level rules field (v1 API at /sys/policy/).
 type policyResponse struct {
 	Rules string `json:"rules"` // old /v1/sys/policy/ API

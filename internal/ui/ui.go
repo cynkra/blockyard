@@ -325,7 +325,7 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server, orch *orchestrato
 
 type layoutData struct {
 	ActivePage     string // "apps", "deployments", "api-keys", "admin", "profile"; empty for landing
-	OpenbaoEnabled bool
+	VaultEnabled bool
 	IsAdmin        bool
 	Version        string
 }
@@ -536,15 +536,15 @@ func requireAuth(w http.ResponseWriter, r *http.Request) *auth.AuthenticatedUser
 	return nil
 }
 
-func openbaoEnabled(srv *server.Server) bool {
-	return srv.Config.Openbao != nil && len(srv.Config.Openbao.Services) > 0
+func vaultEnabled(srv *server.Server) bool {
+	return srv.Config.Vault != nil && len(srv.Config.Vault.Services) > 0
 }
 
 func baseLayout(srv *server.Server, activePage string, caller *auth.CallerIdentity) layoutData {
 	isAdmin := caller != nil && caller.Role.CanManageRoles()
 	return layoutData{
 		ActivePage:     activePage,
-		OpenbaoEnabled: openbaoEnabled(srv),
+		VaultEnabled: vaultEnabled(srv),
 		IsAdmin:        isAdmin,
 		Version:        srv.Version,
 	}
@@ -714,7 +714,7 @@ func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
 
 func (ui *UI) apiKeysPage(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !openbaoEnabled(srv) {
+		if !vaultEnabled(srv) {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}
@@ -1451,8 +1451,8 @@ func buildLandingEntries(apps []db.AppRow, srv *server.Server) []catalogEntry {
 }
 
 func buildServiceEntries(srv *server.Server, sub string) []serviceEntry {
-	entries := make([]serviceEntry, 0, len(srv.Config.Openbao.Services))
-	for _, svc := range srv.Config.Openbao.Services {
+	entries := make([]serviceEntry, 0, len(srv.Config.Vault.Services))
+	for _, svc := range srv.Config.Vault.Services {
 		status := "not_set"
 		if srv.VaultClient != nil {
 			exists, err := srv.VaultClient.SecretExists(

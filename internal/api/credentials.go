@@ -13,14 +13,14 @@ import (
 
 // ExchangeVaultCredential handles POST /api/v1/credentials/vault.
 // Accepts a session reference token (as Bearer auth), validates it,
-// and returns a scoped OpenBao token.
+// and returns a scoped vault token.
 //
 // This endpoint does NOT use the standard API bearer token auth.
 // The session reference token is its own authentication — it proves
 // the caller was routed through the proxy to a specific worker.
 //
 //	@Summary		Exchange vault credential
-//	@Description	Exchange a proxy session reference token for a scoped OpenBao vault token. Used internally by workers.
+//	@Description	Exchange a proxy session reference token for a scoped vault token. Used internally by workers.
 //	@Tags			credentials
 //	@Produce		json
 //	@Success		200	{object}	vaultExchangeResponse
@@ -60,7 +60,7 @@ func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		// 4. Exchange user identity for a scoped OpenBao token.
+		// 4. Exchange user identity for a scoped vault token.
 		if srv.VaultClient == nil {
 			serviceUnavailable(w, "Credential service not configured")
 			return
@@ -75,14 +75,14 @@ func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		ttl := srv.Config.Openbao.TokenTTL.Duration
+		ttl := srv.Config.Vault.TokenTTL.Duration
 		vaultToken, ok := srv.VaultTokenCache.Get(claims.Sub)
 		if !ok {
 			var loginErr error
 			var loginTTL time.Duration
 			vaultToken, loginTTL, loginErr = srv.VaultClient.JWTLogin(
 				r.Context(),
-				srv.Config.Openbao.JWTAuthPath,
+				srv.Config.Vault.JWTAuthPath,
 				userSession.AccessToken,
 			)
 			if loginErr != nil {

@@ -11,7 +11,7 @@ import (
 
 // WorkerEnv builds the backend-agnostic environment variable map for
 // worker containers. Always sets BLOCKYARD_API_URL (needed for runtime
-// package installs). Includes Vault/OpenBao integration vars when
+// package installs). Includes vault integration vars when
 // configured. Sets SHINY_HOST per backend so bundles don't have to.
 // Values from server.worker_env are merged in last; blockyard-managed
 // keys win on collision, everything else (e.g. OTEL_*) is passed through.
@@ -28,11 +28,11 @@ func WorkerEnv(srv *Server) map[string]string {
 	env["BLOCKYARD_API_URL"] = srv.InternalAPIURL()
 	env["SHINY_HOST"] = shinyHost
 
-	if srv.Config.Openbao != nil {
-		env["VAULT_ADDR"] = srv.Config.Openbao.Address
-		if len(srv.Config.Openbao.Services) > 0 {
-			svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
-			for _, svc := range srv.Config.Openbao.Services {
+	if srv.Config.Vault != nil {
+		env["VAULT_ADDR"] = srv.Config.Vault.Address
+		if len(srv.Config.Vault.Services) > 0 {
+			svcMap := make(map[string]string, len(srv.Config.Vault.Services))
+			for _, svc := range srv.Config.Vault.Services {
 				svcMap[svc.ID] = "apikeys/" + svc.ID
 			}
 			svcJSON, _ := json.Marshal(svcMap)

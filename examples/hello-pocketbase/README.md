@@ -162,10 +162,10 @@ docker compose down -v
 
 - All services run in **dev/ephemeral mode** — data is not persisted
   across restarts.
-- Blockyard authenticates to OpenBao via **AppRole** (not a static admin
+- Blockyard authenticates to the vault via **AppRole** (not a static admin
   token). The `session_secret` is auto-generated and stored in vault.
 - PocketBase credentials (email + password) are scoped per user and
-  stored at `secret/data/users/{sub}/apikeys/pocketbase` in OpenBao.
+  stored at `secret/data/users/{sub}/apikeys/pocketbase` in the vault.
   This is the same path pattern used by the credential enrollment UI.
 - The app is set to `access_type: logged_in` so both demo users can
   access it without explicit per-user grants.

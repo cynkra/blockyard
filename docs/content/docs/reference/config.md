@@ -53,7 +53,7 @@ shutdown_timeout = "30s"
 | `shutdown_timeout` | `duration` | `30s` | No | Grace period for draining requests on shutdown |
 | `drain_timeout` | `duration` | — | No | Maximum time the old server will wait for sessions to end during a rolling update drain. See the [process backend rolling update walkthrough](/docs/guides/process-backend/#rolling-update-walkthrough). |
 | `log_level` | `string` | `info` | No | Log verbosity. One of `trace`, `debug`, `info`, `warn` (or `warning`), `error`. |
-| `session_secret` | `string` | — | When `[oidc]` is set without `[openbao]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[openbao]` is configured. |
+| `session_secret` | `string` | — | When `[oidc]` is set without `[vault]` | Secret for signing session cookies. Supports [vault references](#vault-references). Auto-generated and stored in vault when `[vault]` is configured. |
 | `external_url` | `string` | — | No | Public-facing URL of the server (used for OIDC redirect URIs) |
 | `trusted_proxies` | `string[]` | — | No | CIDRs whose `X-Forwarded-For` headers to trust (e.g. `["10.0.0.0/8"]`). Each entry must be a valid CIDR. Set via env as comma-separated: `BLOCKYARD_SERVER_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12`. |
 | `bootstrap_token` | `string` | — | No | One-time token that can be exchanged for a real PAT via `POST /api/v1/bootstrap`. Requires `oidc.initial_admin` to be set. Intended for dev/CI bootstrapping — do not use in production. See [Bootstrap tokens](/docs/reference/api/#post-apiv1bootstrap). |
@@ -184,15 +184,15 @@ path   = "/data/db/blockyard.db"
 | `driver` | `string` | `sqlite` | No | Database driver: `sqlite` or `postgres` |
 | `path` | `path` | `/data/db/blockyard.db` | When `driver = "sqlite"` | Path to the SQLite database file (created if missing). The parent directory must be writable. |
 | `url` | `string` | — | When `driver = "postgres"` | PostgreSQL connection string (e.g. `postgres://user:pass@host/dbname`). Userinfo is ignored when `vault_role` is set. |
-| `vault_mount` | `string` | `database` | No | Vault database secrets-engine mount path. Requires `[openbao]` and `driver = "postgres"`. |
-| `vault_role` | `string` | — | No | Vault static-role name. When set, Blockyard reads `{vault_mount}/static-creds/{vault_role}` at startup and uses those credentials instead of any user/password in `url`. Requires `[openbao]` and `driver = "postgres"`. |
+| `vault_mount` | `string` | `database` | No | Vault database secrets-engine mount path. Requires `[vault]` and `driver = "postgres"`. |
+| `vault_role` | `string` | — | No | Vault static-role name. When set, Blockyard reads `{vault_mount}/static-creds/{vault_role}` at startup and uses those credentials instead of any user/password in `url`. Requires `[vault]` and `driver = "postgres"`. |
 
 ### Vault-managed Postgres credentials
 
 When `database.vault_role` is set, Blockyard obtains its Postgres
-credentials from OpenBao's database secrets engine on every startup
+credentials from the vault database secrets engine on every startup
 and whenever the cached password stops working. The role's password
-is owned by OpenBao (rotated on the schedule the operator configures
+is owned by the vault (rotated on the schedule the operator configures
 on the role), not by the token that created the lease — so Blockyard
 restarts, deploy pipelines, and token renewals do not affect database
 access.
@@ -208,8 +208,8 @@ One-time operator setup:
    GRANT ALL PRIVILEGES ON DATABASE blockyard TO blockyard_admin;
    ```
 
-2. In OpenBao, register the role as a static-role on the database
-   secrets engine. This tells OpenBao to adopt the role and manage
+2. In the vault, register the role as a static-role on the database
+   secrets engine. This tells the vault to adopt the role and manage
    its password:
 
    ```sh
@@ -219,7 +219,7 @@ One-time operator setup:
        rotation_period=24h
    ```
 
-   OpenBao immediately rotates the password; subsequent reads of
+   The vault immediately rotates the password; subsequent reads of
    `database/static-creds/blockyard_admin` return the current one.
 
 3. Grant Blockyard's AppRole policy read access to the static-creds
@@ -333,7 +333,7 @@ for the containerized vs. native rules.
 
 ## `[oidc]` *(optional)*
 
-Enable OIDC-based authentication. When this section is present, `server.session_secret` is required unless `[openbao]` is also configured (in which case it can be auto-generated).
+Enable OIDC-based authentication. When this section is present, `server.session_secret` is required unless `[vault]` is also configured (in which case it can be auto-generated).
 
 ```toml
 [oidc]
@@ -387,12 +387,12 @@ client_secret        = "oidc-client-secret"
 The corresponding environment variables are `BLOCKYARD_OIDC_ISSUER_URL` and
 `BLOCKYARD_OIDC_ISSUER_DISCOVERY_URL`.
 
-## `[openbao]` *(optional)*
+## `[vault]` *(optional)*
 
-Enable OpenBao (Vault-compatible) credential management. Requires `[oidc]` to also be configured.
+Enable Vault-compatible credential management. Requires `[oidc]` to also be configured.
 
 ```toml
-[openbao]
+[vault]
 address       = "http://openbao:8200"
 role_id       = "blockyard-server"    # AppRole role identifier (recommended)
 # admin_token = "vault-admin-token"   # deprecated: use role_id instead
@@ -403,17 +403,17 @@ jwt_auth_path = "jwt"
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `address` | `string` | — | **Yes** | OpenBao server address (must start with `http://` or `https://`) |
-| `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via the `BLOCKYARD_OPENBAO_SECRET_ID` env var at bootstrap. |
+| `address` | `string` | — | **Yes** | Vault server address (must start with `http://` or `https://`) |
+| `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via the `BLOCKYARD_VAULT_SECRET_ID` env var at bootstrap. |
 | `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Supports [vault references](#vault-references). Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
-| `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in OpenBao |
+| `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in the vault |
 | `token_file` | `string` | `/data/.vault-token` | No | Path where the persisted AppRole token is stored. The parent directory must be writable. |
-| `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during OpenBao bootstrap. Useful when the OpenBao policy format differs from what Blockyard expects. |
+| `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during vault bootstrap. Useful when the vault policy format differs from what Blockyard expects. |
 
 > [!TIP]
-> With AppRole auth (`role_id`), the server authenticates to OpenBao using a
-> one-time `secret_id` (via `BLOCKYARD_OPENBAO_SECRET_ID`) and then renews
+> With AppRole auth (`role_id`), the server authenticates to the vault using a
+> one-time `secret_id` (via `BLOCKYARD_VAULT_SECRET_ID`) and then renews
 > its own token indefinitely. After initial bootstrap, the env var is no
 > longer needed — the token is persisted to disk and reused across restarts.
 > `session_secret` is also auto-generated and stored in vault.
@@ -422,15 +422,15 @@ jwt_auth_path = "jwt"
 > `admin_token` and `role_id` are mutually exclusive — setting both is a
 > configuration error.
 
-### `[[openbao.services]]`
+### `[[vault.services]]`
 
-Define third-party services whose API keys users can enroll via OpenBao. Each
+Define third-party services whose API keys users can enroll via the vault. Each
 entry must have `id` and `label`. Service IDs must be unique.
 
 Credentials are stored at `secret/data/users/{sub}/apikeys/{id}`.
 
 ```toml
-[[openbao.services]]
+[[vault.services]]
 id    = "openai"
 label = "OpenAI"
 ```
@@ -443,7 +443,7 @@ label = "OpenAI"
 ## `[board_storage]` *(optional)*
 
 Enable board storage via PostgREST. Requires `database.driver = "postgres"` and
-`[openbao]` (for vault Identity OIDC tokens that PostgREST uses to enforce
+`[vault]` (for vault Identity OIDC tokens that PostgREST uses to enforce
 row-level security).
 
 ```toml
@@ -489,7 +489,7 @@ otlp_endpoint   = "http://otel-collector:4317"
 ## Vault references
 
 Any secret field in the configuration can reference a value stored in
-OpenBao instead of containing the literal secret. Use the `vault:` prefix:
+the vault instead of containing the literal secret. Use the `vault:` prefix:
 
 ```toml
 [oidc]

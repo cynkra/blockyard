@@ -23,7 +23,7 @@ Returns `200 OK` with body `ok`. No authentication required.
 ### `GET /readyz`
 
 Readiness probe. Checks the database and the configured worker backend,
-plus — when configured — the IdP, Redis, and OpenBao. No authentication
+plus — when configured — the IdP, Redis, and the vault. No authentication
 required, but the response detail varies based on the caller.
 
 **Response:** `200 OK` when all checks pass, `503 Service Unavailable` otherwise.
@@ -55,9 +55,9 @@ of the shared `Backend.ListManaged()` call.
 
 When not all checks pass, `status` is `"not_ready"` and the HTTP status is `503`.
 
-When OIDC, Redis, and/or OpenBao are configured, their health is
-included in the checks (as `"idp"`, `"redis"`, and `"openbao"`
-respectively). When AppRole auth is used (`openbao.role_id`), a
+When OIDC, Redis, and/or the vault are configured, their health is
+included in the checks (as `"idp"`, `"redis"`, and `"vault"`
+respectively). When AppRole auth is used (`vault.role_id`), a
 `"vault_token"` check reports whether the token renewal goroutine is
 healthy.
 
@@ -893,9 +893,9 @@ Paginated, RBAC-filtered listing of apps with metadata and tags.
 
 ### `POST /api/v1/credentials/vault`
 
-Exchange a session reference token for a scoped OpenBao token. This endpoint
+Exchange a session reference token for a scoped vault token. This endpoint
 uses session token authentication (not the API bearer token). Only available
-when OpenBao is configured.
+when the vault is configured.
 
 **Response:** `200 OK`
 
@@ -908,8 +908,8 @@ when OpenBao is configured.
 
 ### `POST /api/v1/users/me/credentials/{service}`
 
-Store a user credential in OpenBao's KV store. Authenticated via session cookie
-or JWT bearer token. Only available when OpenBao is configured.
+Store a user credential in the vault KV store. Authenticated via session cookie
+or JWT bearer token. Only available when the vault is configured.
 
 **Request body:**
 
@@ -982,5 +982,5 @@ All error responses use a consistent JSON shape:
 | `413` | Bundle exceeds `max_bundle_size` |
 | `429` | Rate limit exceeded |
 | `500` | Internal server error |
-| `502` | Upstream service error (e.g. OpenBao login failure) |
+| `502` | Upstream service error (e.g. vault login failure) |
 | `503` | Service unavailable (e.g. max workers reached, worker start timeout, app disabled) |

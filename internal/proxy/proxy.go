@@ -357,7 +357,7 @@ func injectCredentials(r *http.Request, srv *server.Server, appID, workerID stri
 		var ttl time.Duration
 		token, ttl, err = srv.VaultClient.JWTLogin(
 			r.Context(),
-			srv.Config.Openbao.JWTAuthPath,
+			srv.Config.Vault.JWTAuthPath,
 			user.AccessToken,
 		)
 		if err != nil {
@@ -366,8 +366,8 @@ func injectCredentials(r *http.Request, srv *server.Server, appID, workerID stri
 		}
 		if ttl == 0 {
 			slog.Debug("vault token TTL is zero, using configured default",
-				"sub", user.Sub, "default_ttl", srv.Config.Openbao.TokenTTL.Duration)
-			ttl = srv.Config.Openbao.TokenTTL.Duration
+				"sub", user.Sub, "default_ttl", srv.Config.Vault.TokenTTL.Duration)
+			ttl = srv.Config.Vault.TokenTTL.Duration
 		}
 		srv.VaultTokenCache.Set(user.Sub, token, ttl)
 	}

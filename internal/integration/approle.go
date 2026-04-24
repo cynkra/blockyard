@@ -21,7 +21,7 @@ type appRoleLoginResponse struct {
 	Errors []string `json:"errors"`
 }
 
-// AppRoleLogin authenticates to OpenBao using AppRole credentials.
+// AppRoleLogin authenticates to the vault using AppRole credentials.
 // Returns the client token and its TTL.
 func AppRoleLogin(ctx context.Context, httpClient *http.Client, addr, roleID, secretID string) (token string, ttl time.Duration, err error) {
 	body := fmt.Sprintf(`{"role_id":%q,"secret_id":%q}`, roleID, secretID)
@@ -77,9 +77,11 @@ func InitAppRole(ctx context.Context, addr, roleID, tokenFile string) (token str
 	}
 
 	// 2. AppRole login with secret_id from env.
-	secretID := os.Getenv("BLOCKYARD_OPENBAO_SECRET_ID")
+	// (BLOCKYARD_OPENBAO_SECRET_ID is renamed to BLOCKYARD_VAULT_SECRET_ID by
+	// the deprecation shim in config.Load before this runs.)
+	secretID := os.Getenv("BLOCKYARD_VAULT_SECRET_ID")
 	if secretID == "" {
-		return "", 0, fmt.Errorf("vault bootstrap required: set BLOCKYARD_OPENBAO_SECRET_ID")
+		return "", 0, fmt.Errorf("vault bootstrap required: set BLOCKYARD_VAULT_SECRET_ID")
 	}
 
 	token, ttl, err = AppRoleLogin(ctx, httpClient, addr, roleID, secretID)

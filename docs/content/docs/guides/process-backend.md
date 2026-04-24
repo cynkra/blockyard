@@ -172,7 +172,7 @@ rules to block them from reaching specific internal destinations:
 sudo iptables -A OUTPUT -m owner --gid-owner 65534 \
     -d 169.254.169.254 -j REJECT
 
-# Block workers from reaching Redis, OpenBao, and the database.
+# Block workers from reaching Redis, the vault, and the database.
 sudo iptables -A OUTPUT -m owner --gid-owner 65534 -d 10.0.0.5 -j REJECT
 sudo iptables -A OUTPUT -m owner --gid-owner 65534 -d 10.0.0.6 -j REJECT
 sudo iptables -A OUTPUT -m owner --gid-owner 65534 -d 10.0.0.7 -j REJECT
@@ -184,7 +184,7 @@ Persist the rules across reboots with `iptables-save` /
 Blockyard's preflight spawns a probe under the worker UID/GID and
 attempts TCP connections to the same internal endpoints at startup.
 A reachable metadata endpoint is reported as an error; reachable
-Redis/OpenBao/database endpoints are reported as warnings.
+Redis/vault/database endpoints are reported as warnings.
 
 > [!IMPORTANT]
 > Rules must be **destination-scoped**, not blanket `REJECT` — workers

@@ -1324,7 +1324,7 @@ const docTemplate = `{
         },
         "/credentials/vault": {
             "post": {
-                "description": "Exchange a proxy session reference token for a scoped OpenBao vault token. Used internally by workers.",
+                "description": "Exchange a proxy session reference token for a scoped vault token. Used internally by workers.",
                 "produces": [
                     "application/json"
                 ],
