@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/cover"
@@ -114,7 +115,7 @@ var hunkRE = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
 // relative to base. Only .go files are included; *_test.go is
 // excluded.
 func gitAddedLines(base string) (map[string]map[int]bool, error) {
-	cmd := exec.Command("git", "diff", "-U0", "--no-color", base+"...HEAD")
+	cmd := exec.Command("git", "diff", "-U0", "--no-color", base+"...HEAD") //nolint:gosec // G204: base is a CI-controlled git ref (e.g. origin/main)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git diff %s...HEAD: %w", base, err)
@@ -145,7 +146,11 @@ func gitAddedLines(base string) (map[string]map[int]bool, error) {
 			if m == nil {
 				continue
 			}
-			fmt.Sscanf(m[1], "%d", &curLine)
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				continue
+			}
+			curLine = n
 		case curFile != "" && strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
 			added[curFile][curLine] = true
 			curLine++
