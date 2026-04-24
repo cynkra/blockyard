@@ -20,6 +20,16 @@ func TestEnrollNoOpWhenUnavailable(t *testing.T) {
 	(&cgroupManager{workersPath: ""}).Enroll(1)
 }
 
+// TestEnrollTreeNoOpWhenUnavailable. Same contract as Enroll: nil
+// and empty-workersPath receivers must not panic. EnrollTree also
+// must not block spawn on nil-receiver paths; the body is guarded
+// before any polling loop.
+func TestEnrollTreeNoOpWhenUnavailable(t *testing.T) {
+	(*cgroupManager)(nil).EnrollTree(1)
+	(&cgroupManager{}).EnrollTree(1)
+	(&cgroupManager{workersPath: ""}).EnrollTree(1)
+}
+
 // TestEnsureWorkersSubcgroupIdempotent. Spawn paths and restarts
 // hit ensureWorkersSubcgroup repeatedly; a double-mkdir must not
 // fail. Uses a temp dir as a stand-in for the delegated cgroup

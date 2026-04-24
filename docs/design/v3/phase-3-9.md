@@ -205,10 +205,13 @@ mechanics; phase 3-9 only adds around them.
     matches and the probe reaches targets that real workers cannot.
     The fix threads `*cgroupManager` through `RunPreflight` and
     `probeReachable`, and after `cmd.Start()` the probe path calls
-    `cgroups.Enroll(cmd.Process.Pid)` before `cmd.Wait()`. The
-    race between `Start` and `Enroll` is bounded by bwrap's
-    namespace/mount setup (~10–50 ms) vs. the enroll write (~1 ms),
-    so the probe's first `connect()` lands after enrollment. When
+    `cgroups.EnrollTree(cmd.Process.Pid)` before `cmd.Wait()`.
+    EnrollTree — not Enroll — because cgroup-v2 `cgroup.procs`
+    moves only the single tgid written; bwrap's inner sandbox
+    fork is a separate tgid that stays in its fork-time cgroup
+    unless we also move it. The walk polls
+    `/proc/<pid>/task/<tid>/children` briefly (≤100 ms, early
+    termination on stable rounds) to catch that descendant. When
     delegation is unavailable the probe behaves identically to the
     phase-3-7 code path (no-op enroll).
 
@@ -565,18 +568,62 @@ func ensureWorkersSubcgroup(cgRoot string) (string, error) {
 }
 ```
 
-Enrollment:
+Enrollment. `Enroll(pid)` is the single-PID primitive that writes
+`pid` to `<workers>/cgroup.procs`. Best-effort: a write failure logs
+a warning and continues, because the worker is functionally correct
+without the move — only the cgroup-based iptables rule fails to
+match.
+
+`EnrollTree(pid)` is the primary entry point for callers spawning
+bwrap. cgroup-v2's `cgroup.procs` moves only the single tgid
+written; descendants forked before the write stay in their
+fork-time cgroup. bwrap's spawn path does an inner fork to enter
+the pidns (the sandbox tgid is separate from `cmd.Process.Pid`), so
+enrolling only the monitor would leave the real worker outside
+`workers/` and outside operator iptables rules. `EnrollTree`
+enrolls the monitor, then polls
+`/proc/<pid>/task/<tid>/children` for descendants, enrolling each
+one; stops early after a few stable rounds, and bounds the total
+wait at ~100 ms.
 
 ```go
-// Enroll moves pid into the workers subcgroup. Best-effort: a
-// write failure logs a warning and continues. The spawn path must
-// tolerate cgroup move failures because the worker is functionally
-// correct without the move — only the cgroup-based iptables rule
-// fails to match, which is already the non-root layer-6 gap.
 func (m *cgroupManager) Enroll(pid int) {
-    if m.workersPath == "" {
+    if m == nil || m.workersPath == "" {
         return
     }
+    m.enroll(pid)
+}
+
+func (m *cgroupManager) EnrollTree(pid int) {
+    if m == nil || m.workersPath == "" {
+        return
+    }
+    m.enroll(pid)
+    seen := map[int]bool{pid: true}
+    deadline := time.Now().Add(enrollTreeMaxPoll)
+    stable := 0
+    for time.Now().Before(deadline) {
+        added := 0
+        for _, child := range collectDescendants(pid) {
+            if !seen[child] {
+                seen[child] = true
+                m.enroll(child)
+                added++
+            }
+        }
+        if added == 0 {
+            stable++
+            if stable >= enrollTreeStableRounds {
+                return
+            }
+        } else {
+            stable = 0
+        }
+        time.Sleep(enrollTreePollInterval)
+    }
+}
+
+func (m *cgroupManager) enroll(pid int) {
     procsFile := filepath.Join(m.workersPath, "cgroup.procs")
     if err := os.WriteFile(procsFile, []byte(strconv.Itoa(pid)), 0); err != nil {
         slog.Warn("process backend: cgroup enroll failed",
@@ -590,7 +637,7 @@ Spawn-path integration in `process.go`:
 ```go
 // Inside (*ProcessBackend).Spawn, just after cmd.Start succeeds
 // and before the wait goroutine is unblocked via proceed.
-b.cgroups.Enroll(cmd.Process.Pid)
+b.cgroups.EnrollTree(cmd.Process.Pid)
 ```
 
 The cgroup manager is a field on `ProcessBackend`, initialised in
@@ -784,7 +831,8 @@ func checkCgroupDelegation(b *ProcessBackend) preflight.Result {
             Message: "cgroup-v2 delegation unavailable. Per-worker egress " +
                 "isolation via `iptables -m cgroup --path` is not available " +
                 "on this host. Root deployments can use `iptables -m owner " +
-                "--gid-owner` rules on the per-worker host kuids instead. " +
+                "--gid-owner <worker_gid>` rules on the shared worker GID " +
+                "instead (see worker_egress for the default recipe). " +
                 "For non-root deployments wanting per-worker egress: enable " +
                 "cgroup delegation (systemd: Delegate=yes on the unit) or " +
                 "use the Docker backend.",
@@ -850,7 +898,7 @@ func probeReachable(
     if err := cmd.Start(); err != nil {
         return false
     }
-    cgroups.Enroll(cmd.Process.Pid) // no-op when delegation unavailable
+    cgroups.EnrollTree(cmd.Process.Pid) // no-op when delegation unavailable
     return cmd.Wait() == nil
 }
 ```
@@ -997,7 +1045,6 @@ guide) gains a "Per-worker egress on non-root hosts" section:
   ```
   [Service]
   Delegate=yes
-  DelegateSubgroup=workers
   User=blockyard
   ExecStart=/usr/bin/blockyard --config /etc/blockyard/blockyard.toml
   ```

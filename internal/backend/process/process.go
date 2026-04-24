@@ -443,12 +443,15 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 		return fmt.Errorf("process backend: start bwrap: %w", err)
 	}
 
-	// Move the worker into the delegated cgroup-v2 `workers/` subtree
-	// so operator `iptables -m cgroup --path <path>/workers` rules
-	// match its egress traffic. No-op when delegation is unavailable.
-	// Must run before `proceed` so the Enroll write happens before
-	// the wait goroutine reaps the child.
-	b.cgroups.Enroll(cmd.Process.Pid)
+	// Move the worker tree into the delegated cgroup-v2 `workers/`
+	// subtree so operator `iptables -m cgroup --path <path>/workers`
+	// rules match its egress traffic. EnrollTree (not Enroll) because
+	// cgroup.procs only moves the single tgid written, and bwrap's
+	// inner sandbox fork produces a separate tgid we also need to
+	// catch. No-op when delegation is unavailable. Must run before
+	// `proceed` so the writes happen before the wait goroutine reaps
+	// the child.
+	b.cgroups.EnrollTree(cmd.Process.Pid)
 
 	// Ingest stdout and stderr concurrently into the shared log buffer.
 	// Two goroutines, not io.MultiReader — MultiReader reads sequentially

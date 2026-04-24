@@ -531,14 +531,14 @@ var probeReachableFn = probeReachable
 // (treated as "not reachable" — fail-safe for the warning, not for
 // security).
 //
-// cgroups (optional) enrolls the probe into the delegated
+// cgroups (optional) enrolls the probe tree into the delegated
 // `workers/` subcgroup before its first connect(), so operator
 // `iptables -m cgroup --path workers` rules match the probe the
-// same way they'd match a real worker. Without this, the probe
-// stays in blockyard's own cgroup and would reach targets that
-// real workers cannot. A bounded race exists between cmd.Start
-// and the enroll write, but bwrap's namespace/mount setup
-// (~10–50 ms) swamps the enroll write (~1 ms).
+// same way they'd match a real worker. EnrollTree walks descendants
+// because bwrap's inner sandbox fork is a separate tgid from
+// cmd.Process.Pid; enrolling only the monitor would leave the
+// actual probe in blockyard's own cgroup. Without this, the probe
+// would reach targets that real workers cannot.
 func probeReachable(cfg *config.ProcessConfig, cgroups *cgroupManager, uid, gid int, target string) bool {
 	self, err := os.Executable()
 	if err != nil {
@@ -567,8 +567,8 @@ func probeReachable(cfg *config.ProcessConfig, cgroups *cgroupManager, uid, gid 
 	if err := cmd.Start(); err != nil {
 		return false
 	}
-	cgroups.Enroll(cmd.Process.Pid) // no-op when delegation unavailable
-	return cmd.Wait() == nil        // exit 0 = connect succeeded
+	cgroups.EnrollTree(cmd.Process.Pid) // no-op when delegation unavailable
+	return cmd.Wait() == nil            // exit 0 = connect succeeded
 }
 
 // checkCloudMetadataReachable attempts a TCP connect to the link-local
@@ -638,7 +638,8 @@ func checkCgroupDelegation(cgroups *cgroupManager) preflight.Result {
 			Message: "cgroup-v2 delegation unavailable. Per-worker egress " +
 				"isolation via `iptables -m cgroup --path` is not available " +
 				"on this host. Root deployments can use `iptables -m owner " +
-				"--gid-owner` rules on the per-worker host kuids instead. " +
+				"--gid-owner <worker_gid>` rules on the shared worker GID " +
+				"instead (see worker_egress for the default recipe). " +
 				"For non-root deployments wanting per-worker egress: enable " +
 				"cgroup delegation (systemd: Delegate=yes on the unit) or " +
 				"use the Docker backend.",

@@ -30,8 +30,8 @@ import (
 //
 //   - bwrapHostMapped: blockyard is root, fork+setuid path works.
 //   - bwrapNoHostMap: blockyard is non-root; iptables owner-match
-//     isolation is unavailable until phase 3-9 lands --userns +
-//     newuidmap.
+//     is inherently inapplicable in this mode (layer 6 reached via
+//     cgroup-v2 delegation instead; see phase-3-9.md).
 //   - bwrapUnavailable: bwrap is missing or can't create a user
 //     namespace at all; every process_test integration test skips.
 type bwrapMode int
@@ -443,18 +443,25 @@ func TestCgroupEnrollment(t *testing.T) {
 	}
 	_ = addr
 
-	// Give the spawn path a moment to cmd.Start + Enroll.
-	time.Sleep(100 * time.Millisecond)
+	// EnrollTree synchronously polls for descendants up to ~100 ms,
+	// then Spawn returns. A small grace buffer here absorbs any
+	// remaining bwrap fork latency on a slow CI host.
+	time.Sleep(200 * time.Millisecond)
 
 	procs, err := os.ReadFile(filepath.Join(cgRoot, "workers", "cgroup.procs"))
 	if err != nil {
 		t.Fatalf("read workers/cgroup.procs: %v", err)
 	}
-	// cgroup.procs may be empty if enrollment failed silently —
-	// best-effort, warns-only. We still want to catch the common
-	// case where it succeeded.
+	pids := strings.Fields(string(procs))
 	fmt.Printf("workers/cgroup.procs:\n%s\n", string(procs))
-	if len(strings.TrimSpace(string(procs))) == 0 {
-		t.Log("cgroup enrollment produced no entries; likely delegation was not effective in this environment")
+	// Two PIDs is the phase-3-9 guarantee: the bwrap monitor (via
+	// the initial Enroll) plus at least one descendant (bwrap's
+	// inner sandbox tgid, via EnrollTree's descendant walk). A
+	// single entry would mean we're back to the pre-fix behaviour
+	// where the real worker's traffic isn't captured by
+	// `iptables -m cgroup --path workers` rules.
+	if len(pids) < 2 {
+		t.Errorf("workers/cgroup.procs has %d PIDs, want >= 2 (monitor + sandbox); contents: %q",
+			len(pids), string(procs))
 	}
 }

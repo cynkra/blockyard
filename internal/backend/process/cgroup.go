@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // cgroupManager coordinates cgroup-v2 delegation for the process
@@ -101,14 +102,79 @@ func ensureWorkersSubcgroup(cgRoot string) (string, error) {
 // without the move — only the cgroup-based iptables rule fails to
 // match, which is already the non-root layer-6 gap.
 //
+// Single-PID: descendants forked before the write stay in their
+// original cgroup (cgroup-v2 cgroup.procs only moves the thread
+// group whose PID is written). Callers that need the whole worker
+// tree — which is every caller spawning bwrap — should use
+// EnrollTree instead.
+//
 // Safe on a nil receiver and on a manager with no delegated subtree.
 func (m *cgroupManager) Enroll(pid int) {
 	if m == nil || m.workersPath == "" {
 		return
 	}
+	m.enroll(pid)
+}
+
+// EnrollTree enrolls pid and any descendants into the workers
+// subcgroup. Required for the bwrap spawn path because cgroup-v2
+// cgroup.procs only moves the single tgid written — bwrap's inner
+// fork(s) produce descendant tgids that stay in their fork-time
+// cgroup unless we catch them explicitly. The walk polls
+// /proc/<pid>/task/<tid>/children briefly since bwrap's first fork
+// typically lands 10–50 ms after exec and may not be visible at
+// our first look.
+//
+// Polling stops early after enrollTreeStableRounds iterations
+// without new descendants (typical fast path: ~20 ms) and always
+// stops at enrollTreeMaxPoll (worst case: ~100 ms). Best-effort:
+// see Enroll for the severity rationale.
+//
+// Safe on a nil receiver and on a manager with no delegated subtree.
+func (m *cgroupManager) EnrollTree(pid int) {
+	if m == nil || m.workersPath == "" {
+		return
+	}
+	m.enroll(pid)
+
+	seen := map[int]bool{pid: true}
+	deadline := time.Now().Add(enrollTreeMaxPoll)
+	stable := 0
+	for time.Now().Before(deadline) {
+		added := 0
+		for _, child := range collectDescendants(pid) {
+			if !seen[child] {
+				seen[child] = true
+				m.enroll(child)
+				added++
+			}
+		}
+		if added == 0 {
+			stable++
+			if stable >= enrollTreeStableRounds {
+				return
+			}
+		} else {
+			stable = 0
+		}
+		time.Sleep(enrollTreePollInterval)
+	}
+}
+
+// enroll writes one PID to cgroup.procs. Shared primitive used by
+// both Enroll and EnrollTree.
+func (m *cgroupManager) enroll(pid int) {
 	procsFile := filepath.Join(m.workersPath, "cgroup.procs")
 	if err := os.WriteFile(procsFile, []byte(strconv.Itoa(pid)), 0); err != nil {
 		slog.Warn("process backend: cgroup enroll failed",
 			"pid", pid, "path", m.workersPath, "err", err)
 	}
 }
+
+// EnrollTree tuning. Exposed as package-level consts so tests can
+// temporarily shorten them.
+const (
+	enrollTreePollInterval  = 5 * time.Millisecond
+	enrollTreeMaxPoll       = 100 * time.Millisecond
+	enrollTreeStableRounds  = 3
+)
