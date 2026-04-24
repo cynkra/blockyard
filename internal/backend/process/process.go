@@ -648,13 +648,22 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 		return backend.BuildResult{Success: false, ExitCode: 1, Logs: err.Error()}, nil
 	}
 
-	// Run Start+Wait in a dedicated goroutine that LockOSThreads and
-	// never unlocks. Same Pdeathsig race as Spawn: pak installs run
-	// for minutes, so a stray runtime thread retirement would SIGKILL
-	// bwrap mid-build. The ingest goroutines read the pipes from any
-	// thread — Pdeathsig only watches the forking thread.
+	// Pin the fork to a single OS thread. Pdeathsig fires when the
+	// thread that forked the child exits, not when its goroutine is
+	// rescheduled, so a stray thread retirement would SIGKILL bwrap
+	// mid-build — pak installs run for minutes. The goroutine parks
+	// on `threadDone` until after cmd.Wait returns so the thread
+	// stays alive for the child's entire lifetime.
+	//
+	// cmd.Wait runs on the main goroutine, after the ingest
+	// goroutines have drained the pipes. cmd.Wait closes the parent
+	// side of the stdout/stderr pipes as part of its cleanup; if we
+	// called it in parallel with ingest (or before ingest attached),
+	// a near-instant child — e.g. the /bin/echo stand-in used in
+	// unit tests — could exit and have its output discarded before
+	// any reader saw it.
 	started := make(chan error, 1)
-	waitDone := make(chan error, 1)
+	threadDone := make(chan struct{})
 	go func() {
 		runtime.LockOSThread()
 		// Intentionally do NOT UnlockOSThread.
@@ -663,7 +672,7 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 			return
 		}
 		started <- nil
-		waitDone <- cmd.Wait()
+		<-threadDone
 	}()
 
 	if err := <-started; err != nil {
@@ -698,7 +707,8 @@ func (b *ProcessBackend) Build(ctx context.Context, spec backend.BuildSpec) (bac
 	go ingest(stderr)
 	wg.Wait()
 
-	waitErr := <-waitDone
+	waitErr := cmd.Wait()
+	close(threadDone)
 	logs := logsBuf.String()
 
 	if waitErr != nil {

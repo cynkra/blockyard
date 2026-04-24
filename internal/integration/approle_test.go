@@ -136,18 +136,11 @@ func TestAppRoleAuthLoginErrors(t *testing.T) {
 }
 
 func TestAppRoleAuthLoginSingleflight(t *testing.T) {
-	var concurrent atomic.Int32
-	var maxConcurrent atomic.Int32
+	var calls atomic.Int32
+	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := concurrent.Add(1)
-		defer concurrent.Add(-1)
-		for {
-			m := maxConcurrent.Load()
-			if n <= m || maxConcurrent.CompareAndSwap(m, n) {
-				break
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
+		calls.Add(1)
+		<-release
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"auth": map[string]any{"client_token": "hvs.shared", "lease_duration": 3600},
@@ -169,10 +162,16 @@ func TestAppRoleAuthLoginSingleflight(t *testing.T) {
 			}
 		}()
 	}
+
+	// The handler stays in flight until close(release), so the wait
+	// only needs to cover goroutine scheduling — not an HTTP round
+	// trip — for the late callers to arrive at singleflight.Do.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
 	wg.Wait()
 
-	if got := maxConcurrent.Load(); got > 1 {
-		t.Errorf("max in-flight logins = %d, want 1 (singleflight should coalesce)", got)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("HTTP handler called %d times, want 1 (singleflight should coalesce)", got)
 	}
 }
 
