@@ -62,7 +62,7 @@ func registryAuthForDomain(domain, path string) (string, error) {
 		cfg.Password = pass
 	}
 
-	buf, err := json.Marshal(cfg)
+	buf, err := json.Marshal(cfg) //nolint:gosec // G117: serializing credentials is the point — the daemon needs X-Registry-Auth
 	if err != nil {
 		return "", err
 	}
@@ -79,7 +79,7 @@ type dockerConfig struct {
 }
 
 func lookupAuth(domain, path string) (dockerConfigAuth, bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: documented DOCKER_CONFIG path, same contract Docker CLI honours
 	if errors.Is(err, fs.ErrNotExist) {
 		return dockerConfigAuth{}, false, nil
 	}
