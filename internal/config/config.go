@@ -286,6 +286,7 @@ type VaultConfig struct {
 	TokenTTL             Duration        `toml:"token_ttl"`                // default: 1h
 	JWTAuthPath          string          `toml:"jwt_auth_path"`            // default: "jwt"
 	SecretIDFile         string          `toml:"secret_id_file"`           // opt-in: read secret_id from this path at every AppRole login, enabling rotation without restart
+	SecretIDWrapped      bool            `toml:"secret_id_wrapped"`        // opt-in: treat secret_id_file contents as a response-wrap token to unwrap at login time
 	CACert               string          `toml:"ca_cert"`                  // path to PEM file; when set, replaces system CA trust for vault HTTP calls
 	SkipPolicyScopeCheck bool            `toml:"skip_policy_scope_check"`
 	Services             []ServiceConfig `toml:"services"`
@@ -870,6 +871,9 @@ func validate(cfg *Config) error {
 		}
 		if !cfg.Vault.AdminToken.IsEmpty() {
 			slog.Warn("vault.admin_token is deprecated; use vault.role_id with AppRole auth")
+		}
+		if cfg.Vault.SecretIDWrapped && cfg.Vault.SecretIDFile == "" {
+			return fmt.Errorf("config: vault.secret_id_wrapped requires vault.secret_id_file")
 		}
 		if cfg.OIDC == nil {
 			return fmt.Errorf("config: [oidc] is required when [vault] is configured")

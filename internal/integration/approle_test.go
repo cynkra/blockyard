@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -307,6 +308,265 @@ func TestClient403TriggersReloginAndRetries(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 2 {
 		t.Errorf("admin call attempted %d times, want 2 (403 + retry)", got)
+	}
+}
+
+// wrappedApproleServer returns a test vault that answers both
+// POST /v1/sys/wrapping/unwrap and POST /v1/auth/approle/login.
+// Each unwrap call consumes one token from wrapTokens in order,
+// mapping it to the matching plaintext from plaintexts. The approle
+// handler records every secret_id it received so tests can assert
+// which plaintext reached the login endpoint.
+func wrappedApproleServer(t *testing.T, wrapTokens, plaintexts []string) (url string, seenSecrets *[]string, unwrapCount, loginCount *atomic.Int32) {
+	t.Helper()
+	if len(wrapTokens) != len(plaintexts) {
+		t.Fatalf("wrapTokens and plaintexts length mismatch: %d vs %d", len(wrapTokens), len(plaintexts))
+	}
+	var (
+		mu          sync.Mutex
+		seen        []string
+		unwraps     atomic.Int32
+		logins      atomic.Int32
+		tokenToPlain = make(map[string]string, len(wrapTokens))
+		consumed    = make(map[string]bool, len(wrapTokens))
+	)
+	for i, tok := range wrapTokens {
+		tokenToPlain[tok] = plaintexts[i]
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/sys/wrapping/unwrap":
+			unwraps.Add(1)
+			tok := r.Header.Get("X-Vault-Token")
+			mu.Lock()
+			plain, ok := tokenToPlain[tok]
+			already := consumed[tok]
+			if ok && !already {
+				consumed[tok] = true
+			}
+			mu.Unlock()
+			if !ok || already {
+				// Unknown wrap token or already-consumed — matches
+				// vault's real tamper behaviour.
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"secret_id": plain},
+			})
+		case "/v1/auth/approle/login":
+			logins.Add(1)
+			var body struct {
+				RoleID   string `json:"role_id"`
+				SecretID string `json:"secret_id"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			seen = append(seen, body.SecretID)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"auth": map[string]any{
+					"client_token":   fmt.Sprintf("hvs.login-%d", logins.Load()),
+					"lease_duration": 3600,
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &seen, &unwraps, &logins
+}
+
+func TestAppRoleAuthUnwrapsWrappedSecretID(t *testing.T) {
+	url, seen, unwraps, logins := wrappedApproleServer(t,
+		[]string{"wrap-token-A"}, []string{"real-secret-A"})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap-token-A\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(url, "my-role", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !a.Healthy() {
+		t.Error("Healthy() = false after successful wrapped login")
+	}
+	if got := unwraps.Load(); got != 1 {
+		t.Errorf("unwrap calls = %d, want 1", got)
+	}
+	if got := logins.Load(); got != 1 {
+		t.Errorf("login calls = %d, want 1", got)
+	}
+	if len(*seen) != 1 || (*seen)[0] != "real-secret-A" {
+		t.Errorf("server received secret_ids %v, want [real-secret-A] (unwrapped plaintext)", *seen)
+	}
+}
+
+func TestAppRoleAuthWrappedCachesPlaintextAcrossLogins(t *testing.T) {
+	// Server will reject a second unwrap of the same wrap token. The
+	// cache must skip the second unwrap so a proactive re-login works
+	// on an unchanged file.
+	url, seen, unwraps, _ := wrappedApproleServer(t,
+		[]string{"wrap-A"}, []string{"plain-A"})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap-A"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(url, "r", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Login(context.Background()); err != nil {
+		t.Fatalf("second login failed (cache miss would re-unwrap a consumed token): %v", err)
+	}
+	if got := unwraps.Load(); got != 1 {
+		t.Errorf("unwrap calls = %d, want 1 (cache should coalesce re-logins on unchanged file)", got)
+	}
+	if len(*seen) != 2 || (*seen)[0] != "plain-A" || (*seen)[1] != "plain-A" {
+		t.Errorf("server received %v, want [plain-A plain-A]", *seen)
+	}
+}
+
+func TestAppRoleAuthWrappedReunwrapsAfterRotation(t *testing.T) {
+	url, seen, unwraps, _ := wrappedApproleServer(t,
+		[]string{"wrap-A", "wrap-B"}, []string{"plain-A", "plain-B"})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap-A"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(url, "r", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Rotate the on-disk wrap token.
+	if err := os.WriteFile(path, []byte("wrap-B"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := unwraps.Load(); got != 2 {
+		t.Errorf("unwrap calls = %d, want 2 (one per distinct wrap token)", got)
+	}
+	if len(*seen) != 2 || (*seen)[0] != "plain-A" || (*seen)[1] != "plain-B" {
+		t.Errorf("server received %v, want [plain-A plain-B]", *seen)
+	}
+}
+
+func TestAppRoleAuthWrappedUnwrapDecodeErrorIsFatal(t *testing.T) {
+	// sys/wrapping/unwrap returns 200 with a non-JSON body: the
+	// unwrap must error out rather than treat the garbage as a
+	// successful response.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sys/wrapping/unwrap" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not-json"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(srv.URL, "r", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err == nil {
+		t.Fatal("expected Login to fail when unwrap body is malformed JSON")
+	}
+	if a.Healthy() {
+		t.Error("Healthy() = true after decode failure")
+	}
+}
+
+func TestAppRoleAuthWrappedUnwrapEmptyResponseIsFatal(t *testing.T) {
+	// sys/wrapping/unwrap returns 200 with no secret_id. Without this
+	// guard we'd attempt an AppRole login with an empty secret_id,
+	// which is a distinct, more confusing failure mode.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sys/wrapping/unwrap" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{}})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(srv.URL, "r", path).WithSecretIDWrapped(true)
+	err := a.Login(context.Background())
+	if err == nil {
+		t.Fatal("expected Login to fail when unwrap returns empty secret_id")
+	}
+	if !strings.Contains(err.Error(), "empty secret_id") {
+		t.Errorf("error %v does not mention empty secret_id", err)
+	}
+}
+
+func TestAppRoleAuthWrappedUnwrapNetworkErrorIsFatal(t *testing.T) {
+	// Point at a server that has already been closed: httpClient.Do
+	// fails at the transport layer, exercising the dial-error return
+	// path distinct from the non-200-status path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.URL
+	srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(addr, "r", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err == nil {
+		t.Fatal("expected Login to fail when unwrap cannot reach the server")
+	}
+}
+
+func TestAppRoleAuthWrappedUnwrapFailureIsFatal(t *testing.T) {
+	// sys/wrapping/unwrap returns 400 (e.g. tampered/consumed token);
+	// the login must fail and Healthy() must be false.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sys/wrapping/unwrap" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("bad-wrap-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(srv.URL, "r", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err == nil {
+		t.Fatal("expected Login to fail when unwrap returns 400")
+	}
+	if a.Healthy() {
+		t.Error("Healthy() = true after unwrap failure")
 	}
 }
 

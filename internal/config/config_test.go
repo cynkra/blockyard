@@ -908,6 +908,48 @@ func TestVaultSecretIDFileSet(t *testing.T) {
 	}
 }
 
+func TestVaultSecretIDWrappedRequiresFile(t *testing.T) {
+	// secret_id_wrapped without secret_id_file is a configuration
+	// error — the file path is the unwrap input.
+	toml := strings.Replace(
+		vaultTOML(t),
+		`admin_token = "hvs.admin123"`,
+		`role_id            = "blockyard-server"`+"\n"+`secret_id_wrapped  = true`,
+		1,
+	)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "secret_id_wrapped") {
+		t.Errorf("expected vault.secret_id_wrapped error, got %v", err)
+	}
+}
+
+func TestVaultSecretIDWrappedEnabled(t *testing.T) {
+	toml := strings.Replace(
+		vaultTOML(t),
+		`admin_token = "hvs.admin123"`,
+		`role_id            = "blockyard-server"`+"\n"+
+			`secret_id_file     = "/run/secrets/vault_secret_id"`+"\n"+
+			`secret_id_wrapped  = true`,
+		1,
+	)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockyard.toml")
+	os.WriteFile(path, []byte(toml), 0o644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Vault.SecretIDWrapped {
+		t.Error("expected secret_id_wrapped = true")
+	}
+	if cfg.Vault.SecretIDFile != "/run/secrets/vault_secret_id" {
+		t.Errorf("secret_id_file = %q", cfg.Vault.SecretIDFile)
+	}
+}
+
 func TestParseConfigWithoutVault(t *testing.T) {
 	cfg := loadFromString(t, minimalTOML)
 	if cfg.Vault != nil {

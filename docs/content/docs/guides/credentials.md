@@ -135,13 +135,71 @@ With those in place, a secret_id leak requires either privileged
 on-host access (root) or a sandbox escape, both of which compromise
 every secret on the host equally.
 
-> [!NOTE]
-> A stronger opt-in delivery mode using vault response-wrapping — where
-> the on-disk file holds a short-lived wrap token instead of the raw
-> `secret_id`, giving tamper-detection and bounded exposure windows —
-> is tracked in [#337](https://github.com/cynkra/blockyard/issues/337).
-> File-based delivery today is suitable for the standard uid-separated
-> worker threat model.
+### Response-wrapped `secret_id` (file)
+
+For deployments that want **bounded on-disk exposure** and **leak
+detection** on top of the standard uid-perms story, opt in to
+response-wrap mode. The file contains a vault [response-wrap
+token](https://developer.hashicorp.com/vault/docs/concepts/response-wrapping)
+instead of the raw `secret_id`; Blockyard unwraps it at login time:
+
+```toml
+[vault]
+address           = "http://vault:8200"
+role_id           = "blockyard-server"
+token_ttl         = "1h"
+secret_id_file    = "/run/secrets/vault_secret_id"
+secret_id_wrapped = true
+```
+
+Or via env var: `BLOCKYARD_VAULT_SECRET_ID_WRAPPED=true`.
+
+Properties this gives you on top of raw-file delivery:
+
+- **Time-bounded exposure.** The on-disk artifact is valid for the
+  wrap TTL only (vault default 5 min, operator-configurable). After
+  the TTL elapses, even an attacker with the file bytes gets nothing.
+- **Tamper detection.** Wrap tokens are single-use. If a hostile
+  process reads and unwraps the file before Blockyard does,
+  Blockyard's unwrap fails loudly and the login errors — the operator
+  sees something broke instead of a silent read.
+- **Same rotation story.** The rotation tool produces a fresh wrap
+  token per rotation and overwrites the file; Blockyard unwraps on
+  every change. Plaintext is cached keyed by file contents, so
+  proactive re-logins don't burn additional unwraps against the same
+  rotation.
+
+Blockyard requires `secret_id_file` to be set when this flag is on;
+the file path is the input to the unwrap.
+
+#### Generating wrap tokens
+
+A Vault Agent config that keeps `/run/secrets/vault_secret_id` holding
+a fresh 5-minute wrap token looks like:
+
+```hcl
+auto_auth {
+  method "approle" {
+    config = {
+      role_id_file_path   = "/run/secrets/role_id"
+      secret_id_file_path = "/run/secrets/agent_secret_id"
+    }
+  }
+}
+
+template {
+  destination = "/run/secrets/vault_secret_id"
+  perms       = "0400"
+
+  contents = <<EOT
+{{ with secret "auth/approle/role/blockyard-server/secret-id" "-wrap-ttl=5m" }}{{ .WrapInfo.Token }}{{ end }}
+EOT
+}
+```
+
+The same idea works with a cron job that calls
+`vault write -f -wrap-ttl=5m auth/approle/role/blockyard-server/secret-id`
+and writes `.wrap_info.token` to the file atomically.
 
 ### Migrating from `admin_token`
 
