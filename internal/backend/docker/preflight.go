@@ -18,6 +18,7 @@ import (
 	"github.com/moby/moby/client"
 
 	"github.com/cynkra/blockyard/internal/buildercache"
+	"github.com/cynkra/blockyard/internal/dockerauth"
 	"github.com/cynkra/blockyard/internal/preflight"
 )
 
@@ -429,7 +430,11 @@ func ensurePreflightImage(ctx context.Context, cli *client.Client, img string) e
 	}
 
 	slog.Info("preflight: pulling image", "image", img)
-	pullResp, err := cli.ImagePull(ctx, img, client.ImagePullOptions{})
+	auth, err := dockerauth.RegistryAuthFor(img)
+	if err != nil {
+		slog.Warn("preflight: registry auth lookup failed, pulling anonymously", "image", img, "error", err)
+	}
+	pullResp, err := cli.ImagePull(ctx, img, client.ImagePullOptions{RegistryAuth: auth})
 	if err != nil {
 		return fmt.Errorf("pull %s: %w", img, err)
 	}

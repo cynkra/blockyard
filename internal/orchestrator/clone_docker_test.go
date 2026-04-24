@@ -18,13 +18,14 @@ import (
 // --- mock Docker client ---
 
 type mockDocker struct {
-	inspectFn func(ctx context.Context, id string, opts client.ContainerInspectOptions) (client.ContainerInspectResult, error)
-	createFn  func(ctx context.Context, opts client.ContainerCreateOptions) (client.ContainerCreateResult, error)
-	startFn   func(ctx context.Context, id string, opts client.ContainerStartOptions) (client.ContainerStartResult, error)
-	stopFn    func(ctx context.Context, id string, opts client.ContainerStopOptions) (client.ContainerStopResult, error)
-	removeFn  func(ctx context.Context, id string, opts client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
-	waitFn    func(ctx context.Context, id string, opts client.ContainerWaitOptions) client.ContainerWaitResult
-	pullFn    func(ctx context.Context, ref string, opts client.ImagePullOptions) (client.ImagePullResponse, error)
+	inspectFn      func(ctx context.Context, id string, opts client.ContainerInspectOptions) (client.ContainerInspectResult, error)
+	createFn       func(ctx context.Context, opts client.ContainerCreateOptions) (client.ContainerCreateResult, error)
+	startFn        func(ctx context.Context, id string, opts client.ContainerStartOptions) (client.ContainerStartResult, error)
+	stopFn         func(ctx context.Context, id string, opts client.ContainerStopOptions) (client.ContainerStopResult, error)
+	removeFn       func(ctx context.Context, id string, opts client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
+	waitFn         func(ctx context.Context, id string, opts client.ContainerWaitOptions) client.ContainerWaitResult
+	pullFn         func(ctx context.Context, ref string, opts client.ImagePullOptions) (client.ImagePullResponse, error)
+	imageInspectFn func(ctx context.Context, id string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error)
 }
 
 func (m *mockDocker) ContainerInspect(ctx context.Context, id string, opts client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
@@ -78,6 +79,18 @@ func (m *mockDocker) ImagePull(_ context.Context, _ string, _ client.ImagePullOp
 	return mockPullResponse{ReadCloser: io.NopCloser(&emptyReader{})}, nil
 }
 
+func (m *mockDocker) ImageInspect(ctx context.Context, id string, opts ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+	if m.imageInspectFn != nil {
+		return m.imageInspectFn(ctx, id, opts...)
+	}
+	return client.ImageInspectResult{}, errNotFound{}
+}
+
+type errNotFound struct{}
+
+func (errNotFound) Error() string  { return "image not found" }
+func (errNotFound) NotFound() bool { return true }
+
 type mockPullResponse struct {
 	io.ReadCloser
 }
@@ -121,6 +134,52 @@ func mustParsePort(s string) network.Port {
 		panic(err)
 	}
 	return p
+}
+
+// ---------------------------------------------------------------------------
+// pullImage
+// ---------------------------------------------------------------------------
+
+func TestPullImageSkipsWhenPresent(t *testing.T) {
+	var pullCalled bool
+	docker := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{}, nil
+		},
+		pullFn: func(_ context.Context, _ string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
+			pullCalled = true
+			return mockPullResponse{ReadCloser: io.NopCloser(&emptyReader{})}, nil
+		},
+	}
+	f := newDockerFactoryForTest(docker, "self-id", func() string { return "8080" })
+
+	if err := f.pullImage(context.Background(), "ghcr.io/cynkra/blockyard:1.0.0"); err != nil {
+		t.Fatalf("pullImage: %v", err)
+	}
+	if pullCalled {
+		t.Error("ImagePull must not be called when image is present locally")
+	}
+}
+
+func TestPullImagePullsWhenAbsent(t *testing.T) {
+	var pullCalled bool
+	docker := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string, _ ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{}, errNotFound{}
+		},
+		pullFn: func(_ context.Context, _ string, _ client.ImagePullOptions) (client.ImagePullResponse, error) {
+			pullCalled = true
+			return mockPullResponse{ReadCloser: io.NopCloser(&emptyReader{})}, nil
+		},
+	}
+	f := newDockerFactoryForTest(docker, "self-id", func() string { return "8080" })
+
+	if err := f.pullImage(context.Background(), "ghcr.io/cynkra/blockyard:1.0.0"); err != nil {
+		t.Fatalf("pullImage: %v", err)
+	}
+	if !pullCalled {
+		t.Error("ImagePull must be called when image is absent locally")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +278,7 @@ func TestCloneConfigNilNetworkSettings(t *testing.T) {
 	docker := &mockDocker{
 		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
 			return client.ContainerInspectResult{Container: container.InspectResponse{
-				Config:   &container.Config{Image: "old:1.0", Env: []string{}},
+				Config:     &container.Config{Image: "old:1.0", Env: []string{}},
 				HostConfig: &container.HostConfig{},
 			}}, nil
 		},
