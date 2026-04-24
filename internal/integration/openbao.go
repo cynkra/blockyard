@@ -220,6 +220,65 @@ func (c *Client) DatabaseStaticRoleCreate(
 	return nil
 }
 
+// dbStaticCredsResponse is the relevant subset of OpenBao's database
+// secrets-engine static-role credential response.
+type dbStaticCredsResponse struct {
+	Data struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		TTL      int    `json:"ttl"`
+	} `json:"data"`
+}
+
+// DatabaseStaticCredsRead fetches the current username/password for a
+// vault static DB role. Vault manages the PG user out-of-band (the
+// operator registers the role; vault rotates its password on a
+// schedule) — this call just reads the current credentials, which are
+// stable between rotations.
+//
+// Unlike dynamic creds (`{mount}/creds/{role}`), static-creds leases
+// are not tied to the caller's token, so blockyard can read with its
+// own AppRole token without inheriting a lease that expires with the
+// token. Returned TTL reflects vault's time-to-next-rotation, not a
+// lease bound to this caller.
+//
+// Used for admin creds (#238, via cfg.Database.VaultRole) and by
+// workers for per-user creds (#284, `{mount}/static-creds/user_<id>`).
+// GET {addr}/v1/{mount}/static-creds/{name}
+func (c *Client) DatabaseStaticCredsRead(
+	ctx context.Context, mount, name string,
+) (username, password string, ttl time.Duration, err error) {
+	url := fmt.Sprintf("%s/v1/%s/static-creds/%s", c.addr, mount, name)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("openbao db static-creds: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("openbao db static-creds: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", "", 0, fmt.Errorf("openbao db static-creds %s: %w", name, ErrNotFound)
+	}
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return "", "", 0, fmt.Errorf("openbao db static-creds %s: status %d", name, resp.StatusCode)
+	}
+
+	var result dbStaticCredsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", 0, fmt.Errorf("openbao db static-creds: decode: %w", err)
+	}
+	if result.Data.Username == "" || result.Data.Password == "" {
+		return "", "", 0, fmt.Errorf("openbao db static-creds %s: empty username or password", name)
+	}
+	return result.Data.Username, result.Data.Password, time.Duration(result.Data.TTL) * time.Second, nil
+}
+
 // AuthMountAccessor returns the opaque accessor of the auth method
 // mounted at `path` (e.g. "jwt"). Accessors are vault-internal
 // identifiers distinct from mount paths; the alias lookup below

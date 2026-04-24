@@ -344,3 +344,70 @@ func TestIdentityLookupEntityByAlias_UnknownAlias(t *testing.T) {
 		t.Errorf("expected 'not found' in error, got %v", err)
 	}
 }
+
+func TestDatabaseStaticCredsRead_Success(t *testing.T) {
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/database/static-creds/blockyard_app" || r.Method != "GET" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("X-Vault-Token") != "test-admin-token" {
+			http.Error(w, "missing admin token", http.StatusForbidden)
+			return
+		}
+		fmt.Fprint(w, `{
+			"data": {
+				"username": "blockyard_admin",
+				"password": "rotated-secret",
+				"ttl": 3600,
+				"rotation_period": 86400
+			}
+		}`)
+	}))
+
+	user, pass, ttl, err := client.DatabaseStaticCredsRead(context.Background(),
+		"database", "blockyard_app")
+	if err != nil {
+		t.Fatalf("DatabaseStaticCredsRead: %v", err)
+	}
+	if user != "blockyard_admin" {
+		t.Errorf("username = %q, want %q", user, "blockyard_admin")
+	}
+	if pass != "rotated-secret" {
+		t.Errorf("password = %q, want %q", pass, "rotated-secret")
+	}
+	if ttl.Seconds() != 3600 {
+		t.Errorf("ttl = %v, want 3600s", ttl)
+	}
+}
+
+func TestDatabaseStaticCredsRead_NotFound(t *testing.T) {
+	// Role not registered in vault — static-creds returns 404.
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	_, _, _, err := client.DatabaseStaticCredsRead(context.Background(), "database", "absent")
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got %v", err)
+	}
+}
+
+func TestDatabaseStaticCredsRead_EmptyCreds(t *testing.T) {
+	// Vault returned 200 but with blank creds — treat as an error so
+	// the caller doesn't hand empty strings to pgx.
+	client := mockBao(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data": {"username": "", "password": ""}}`)
+	}))
+
+	_, _, _, err := client.DatabaseStaticCredsRead(context.Background(), "database", "blockyard_app")
+	if err == nil {
+		t.Fatal("expected error on empty creds")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("expected 'empty' in error, got %v", err)
+	}
+}
