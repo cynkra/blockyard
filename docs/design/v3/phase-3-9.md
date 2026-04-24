@@ -135,9 +135,13 @@ mechanics; phase 3-9 only adds around them.
    (`internal/backend/process/cgroup.go`, new). Startup:
    detects whether blockyard's own cgroup is in a writable v2 subtree
    by attempting to create a sentinel subdirectory; if so, creates
-   `<cgroup>/workers/` and enables the `cpu`, `memory`, and (if
-   present on the host) `io` controllers via `cgroup.subtree_control`.
-   Spawn: after `cmd.Start`, writes `cmd.Process.Pid` to
+   `<cgroup>/workers/`. Controllers (cpu/memory/io) are intentionally
+   *not* enabled on `subtree_control`: process grouping via
+   `cgroup.procs` is all the `iptables -m cgroup --path` match needs,
+   and enabling controllers at a level where blockyard itself resides
+   violates cgroup-v2's "no internal processes" rule. Per-worker
+   resource limits stay out of scope (phase 3-7 decision #6). Spawn:
+   after `cmd.Start`, writes `cmd.Process.Pid` to
    `<workers>/cgroup.procs` (best-effort — a failure logs a warning
    but does not abort the spawn). Fallback when delegation is
    unavailable: no cgroup move, phase-3-7 behaviour preserved.
@@ -160,9 +164,14 @@ mechanics; phase 3-9 only adds around them.
    "Redis accepts commands without authentication. Workers (or any
    process on the host network) can read/modify session state, flush
    the registry, or DoS the service. Configure `requirepass` or
-   ACLs." `-NOAUTH` / `-ERR` → OK: "Redis requires authentication."
-   Connection failure → Info: "Redis not reachable from blockyard"
-   (which is itself a potential concern and surfaced by
+   ACLs." `-NOAUTH` → OK: "Redis requires authentication." Any
+   other reply (including generic `-ERR` like MAXCLIENTS, a truncated
+   response, or an empty reply from a TLS-only server rejecting our
+   plain-TCP bytes) → Info with the raw reply, so the operator
+   investigates rather than getting a false OK. `rediss://` URLs
+   short-circuit to Info ("TLS Redis; plain-TCP auth probe skipped")
+   without dialing. Connection failure → Info: "Redis not reachable
+   from blockyard" (the reachability concern itself is surfaced by
    `checkRedisOnServiceNetwork`, not this check). Applies to all
    deployment modes regardless of backend.
 
@@ -186,7 +195,24 @@ mechanics; phase 3-9 only adds around them.
     or (c) use the Docker backend." The placeholder "wait for phase
     3-9" text is removed.
 
-11. **CI coverage update** (`.github/workflows/ci.yml`).
+11. **`checkWorkerEgress` probe enrolls into the workers cgroup**
+    (`internal/backend/process/preflight.go`). Phase 3-7's egress
+    probe was written against `-m owner --uid-owner/--gid-owner`
+    rules, so it spawns bwrap with the worker UID/GID and relies on
+    the kernel's owner match to mirror a real worker. That fails
+    under cgroup-path layer 6: the probe is in blockyard's cgroup,
+    not `workers/`, so `iptables -m cgroup --path workers` never
+    matches and the probe reaches targets that real workers cannot.
+    The fix threads `*cgroupManager` through `RunPreflight` and
+    `probeReachable`, and after `cmd.Start()` the probe path calls
+    `cgroups.Enroll(cmd.Process.Pid)` before `cmd.Wait()`. The
+    race between `Start` and `Enroll` is bounded by bwrap's
+    namespace/mount setup (~10–50 ms) vs. the enroll write (~1 ms),
+    so the probe's first `connect()` lands after enrollment. When
+    delegation is unavailable the probe behaves identically to the
+    phase-3-7 code path (no-op enroll).
+
+12. **CI coverage update** (`.github/workflows/ci.yml`).
     Retire the `setuid` leg from the `process` matrix (setuid-bwrap was
     incorrectly documented as a valid isolation mode in phase 3-7 and
     never delivered per-worker host kuids; this is a correctness
@@ -203,7 +229,7 @@ mechanics; phase 3-9 only adds around them.
     Also asserts the negative: with the profile unloaded, the same
     invocation fails.
 
-12. **Documentation** — `docs/design/backends.md` gains a
+13. **Documentation** — `docs/design/backends.md` gains a
     deployment-mode × isolation-layer matrix (see Step 7). The
     phase-3-8 `process-backend.md` native guide gains a section on
     cgroup-v2 delegation + `systemd` unit configuration + the
@@ -249,6 +275,18 @@ exists to lift, so it doesn't need one.
 
 ```
 include <tunables/global>
+
+# Purpose: grant the `userns` permission to blockyard and its
+# subprocesses, narrowly, so rootless bwrap can create its sandbox
+# user namespace on hosts where kernel.apparmor_restrict_unprivileged_userns=1
+# (Ubuntu 23.10+ default). This profile does NOT confine blockyard
+# itself — the rules below are deliberately broad (all capabilities,
+# all paths, network, mount, ptrace) because blockyard is the trusted
+# component in this architecture; the workers it spawns are the
+# untrusted ones, and they are confined by bwrap's capability drop,
+# seccomp, and bind-mount restrictions, not by AppArmor. Site-specific
+# profiles wanting tighter confinement of blockyard should layer on
+# top of this one.
 
 profile blockyard /usr/{bin,local/bin}/blockyard
          flags=(attach_disconnected, mediate_deleted) {
@@ -509,21 +547,19 @@ func detectCgroupDelegation() (string, error) {
 Workers-subcgroup setup:
 
 ```go
-// ensureWorkersSubcgroup creates <cgroot>/workers/ and enables the
-// common controllers blockyard cares about (cpu, memory, io when
-// available). Idempotent — safe to call on every startup.
+// ensureWorkersSubcgroup creates <cgroot>/workers/. Idempotent.
+//
+// Resource controllers (cpu/memory/io) are deliberately not enabled
+// on cgRoot's subtree_control. The iptables `-m cgroup --path` match
+// only reads cgroup.procs membership, and enabling controllers at
+// cgRoot would violate cgroup-v2's "no internal processes" rule
+// because blockyard itself is a process at cgRoot (both blockyard
+// and workers/ sit at the same level). Per-worker resource limits
+// stay out of scope — see phase 3-7 decision #6.
 func ensureWorkersSubcgroup(cgRoot string) (string, error) {
     workers := filepath.Join(cgRoot, "workers")
     if err := os.MkdirAll(workers, 0o755); err != nil {
         return "", fmt.Errorf("mkdir workers subcgroup: %w", err)
-    }
-    // Enable controllers on the parent's subtree_control so they
-    // propagate into the workers subcgroup. Best-effort; a missing
-    // controller (e.g. io on minimal hosts) is not fatal — we're
-    // using the subcgroup for process grouping, not resource limits.
-    subtreeControl := filepath.Join(cgRoot, "cgroup.subtree_control")
-    for _, ctrl := range []string{"+cpu", "+memory", "+io"} {
-        _ = os.WriteFile(subtreeControl, []byte(ctrl), 0)
     }
     return workers, nil
 }
@@ -594,6 +630,22 @@ existing phase-3-7 checks. Order matters only where one check
 depends on another's environment; none of the three new checks
 depend on each other.
 
+`RunPreflight`'s signature grows a `*cgroupManager` parameter so
+`checkCgroupDelegation` can read `workersPath` and `checkWorkerEgress`
+can enroll its probe into the workers cgroup (deliverable #11):
+
+```go
+func RunPreflight(
+    cfg *config.ProcessConfig,
+    fullCfg *config.Config,
+    cgroups *cgroupManager,
+) *preflight.Report
+```
+
+`ProcessBackend.Preflight` passes `b.cgroups`. Tests that invoke
+`RunPreflight` directly pass `nil`, which is handled throughout
+(Enroll no-ops on nil or on empty `workersPath`).
+
 `checkCloudMetadataReachable`:
 
 ```go
@@ -647,6 +699,14 @@ func CheckRedisAuth(cfg *config.RedisConfig) Result {
     if cfg == nil || cfg.URL == "" {
         return Result{Name: name, Severity: SeverityOK,
             Message: "Redis not configured", Category: "redis"}
+    }
+    if strings.HasPrefix(strings.ToLower(cfg.URL), "rediss://") {
+        // Plain-TCP probe against a TLS-only server would write
+        // garbage at the TLS handshake layer and get no useful reply.
+        // Skip rather than report spurious "unexpected reply".
+        return Result{Name: name, Severity: SeverityInfo,
+            Message: "TLS Redis (rediss://); plain-TCP auth probe skipped",
+            Category: "redis"}
     }
     hp := TCPAddrFromRedisURL(cfg.URL) // existing helper
     if hp == "" {
@@ -710,7 +770,10 @@ worker-to-Redis reachability.
 
 `checkCgroupDelegation` lives in
 `internal/backend/process/preflight.go` since it's process-backend
-specific:
+specific. It also probes for `xt_cgroup` availability, because a
+kernel without that module will fail the operator's
+`iptables -m cgroup --path` rule at rule-install time with a cryptic
+"No chain/target/match by that name" error:
 
 ```go
 func checkCgroupDelegation(b *ProcessBackend) preflight.Result {
@@ -728,42 +791,106 @@ func checkCgroupDelegation(b *ProcessBackend) preflight.Result {
             Category: "process",
         }
     }
+    xtCgroup := xtCgroupAvailable()
+    msg := fmt.Sprintf(
+        "cgroup-v2 delegation available at %q; workers moved into %q. "+
+            "Install a rule like `iptables -A OUTPUT -m cgroup --path %s -d <service-ip> -j REJECT` "+
+            "to block worker access to internal services.",
+        filepath.Dir(b.cgroups.workersPath),
+        b.cgroups.workersPath,
+        strings.TrimPrefix(b.cgroups.workersPath, "/sys/fs/cgroup/"))
+    if !xtCgroup {
+        return preflight.Result{
+            Name: name, Severity: preflight.SeverityWarning,
+            Message: msg + " WARNING: the xt_cgroup netfilter module does " +
+                "not appear to be loaded (no match in /proc/net/ip_tables_matches); " +
+                "`iptables -m cgroup` rules will fail to install. Run " +
+                "`sudo modprobe xt_cgroup` or add it to /etc/modules-load.d/.",
+            Category: "process",
+        }
+    }
     return preflight.Result{
         Name: name, Severity: preflight.SeverityOK,
-        Message: fmt.Sprintf(
-            "cgroup-v2 delegation available at %q; workers moved into %q. "+
-                "Install a rule like `iptables -A OUTPUT -m cgroup --path %s -d <service-ip> -j REJECT` " +
-                "to block worker access to internal services.",
-            filepath.Dir(b.cgroups.workersPath),
-            b.cgroups.workersPath,
-            strings.TrimPrefix(b.cgroups.workersPath, "/sys/fs/cgroup/")),
-        Category: "process",
+        Message: msg, Category: "process",
     }
+}
+
+// xtCgroupAvailable reports whether the xt_cgroup netfilter match is
+// loaded. /proc/net/ip_tables_matches lists builtin+loaded matches,
+// one per line. Returns true on any read error so we don't emit a
+// false warning on hosts where the file isn't accessible (rootless
+// containers, odd /proc mounts).
+func xtCgroupAvailable() bool {
+    data, err := os.ReadFile("/proc/net/ip_tables_matches")
+    if err != nil {
+        return true
+    }
+    for _, line := range strings.Split(string(data), "\n") {
+        if strings.TrimSpace(line) == "cgroup" {
+            return true
+        }
+    }
+    return false
 }
 ```
 
-`checkBwrapHostUIDMapping` — the existing function's non-root error
-message is updated. The function body stays the same; only the
-message text changes:
+`checkWorkerEgress` — existing phase-3-7 function. Signature gains
+`cgroups *cgroupManager`; the probe path enrolls after `Start` and
+before `Wait` so the probe PID is in the `workers/` cgroup before
+its first `connect()`:
+
+```go
+func probeReachable(
+    cfg *config.ProcessConfig,
+    cgroups *cgroupManager,
+    uid, gid int,
+    target string,
+) bool {
+    // ...existing bwrapExecSpec + exec.Command setup...
+    if err := cmd.Start(); err != nil {
+        return false
+    }
+    cgroups.Enroll(cmd.Process.Pid) // no-op when delegation unavailable
+    return cmd.Wait() == nil
+}
+```
+
+The `probeReachableFn` test seam at the top of `preflight.go` keeps
+the same shape; tests that replace it adopt the new signature. Tests
+that stub `probeReachable` to return a fixed bool already ignore the
+extra argument.
+
+`checkBwrapHostUIDMapping` — the existing function's non-root branch
+is rewritten. Message text changes, and severity drops from Error to
+Info: the `-m owner` mechanism is inherently inapplicable in non-root
+mode (not broken), so blocking startup was wrong. Operators reach
+layer-6 in non-root deployments through cgroup delegation instead;
+`checkCgroupDelegation` reports that mechanism. Root-branch probe
+logic is unchanged — it still errors if the fork+setuid wiring is
+broken:
 
 ```go
 // In checkBwrapHostUIDMapping, the existing os.Getuid() != 0 branch:
 return preflight.Result{
     Name:     name,
-    Severity: preflight.SeverityError,
-    Message: "non-root blockyard cannot produce per-worker host kuids. " +
-        "Workers still have filesystem, PID, capability, seccomp, and " +
-        "in-sandbox UID isolation (layers 1-5). What is missing is " +
-        "kernel-level per-worker egress filtering via " +
-        "`iptables -m owner --uid-owner` (layer 6). Remediations: " +
-        "(a) switch to containerized root blockyard, " +
-        "(b) enable cgroup-v2 delegation so the cgroup preflight check " +
-        "reports OK, then use `iptables -m cgroup --path` rules, or " +
-        "(c) use the Docker backend for per-worker network namespaces. " +
-        "Set server.skip_preflight=true to proceed without layer 6.",
+    Severity: preflight.SeverityInfo,
+    Message: "non-root blockyard cannot produce per-worker host kuids " +
+        "via fork+setuid, so `iptables -m owner --uid-owner` rules do " +
+        "not match worker traffic. This is inherent to non-root mode, " +
+        "not a failure: workers still have filesystem, PID, capability, " +
+        "seccomp, and in-sandbox UID isolation (layers 1-5), and " +
+        "per-worker egress (layer 6) is available via cgroup-v2 " +
+        "delegation — see cgroup_delegation. Alternatives: run as root " +
+        "(containerized deployment) for the `-m owner` path, or use the " +
+        "Docker backend for per-worker network namespaces.",
     Category: "process",
 }
 ```
+
+This removes the previous situation where an operator who had done
+everything right (`Delegate=yes` systemd unit, cgroup delegation
+preflight reports OK, `-m cgroup --path` rules installed) still had
+to set `server.skip_preflight=true` to start the service.
 
 ### Step 7: CI coverage update
 
@@ -950,7 +1077,9 @@ Modified:
 - `internal/backend/process/process.go` (cgroup manager field,
   Enroll call in Spawn)
 - `internal/backend/process/preflight.go` (three new checks,
-  `checkBwrapHostUIDMapping` message refresh)
+  `checkBwrapHostUIDMapping` message refresh, `RunPreflight` +
+  `checkWorkerEgress` + `probeReachable` signatures gain
+  `*cgroupManager` for probe enrollment into `workers/`)
 - `internal/backend/process/process_integration_test.go` (new
   TestCgroupEnrollment; refresh `requireHostUIDMapping` skip message
   at line 102 — currently promises "phase 3-9 ships --userns+newuidmap"
@@ -1125,8 +1254,8 @@ functionally correct without the cgroup move — only the iptables
 rule fails to match, which is already the non-root-without-
 delegation situation the deployment mode accepts. Strict enforcement
 would surface cgroup quirks (delegated-but-read-only subtree,
-cgroup namespaces, controller availability) as spawn errors, which
-is worse than a best-effort warning.
+cgroup namespaces, transient write races on `cgroup.procs`) as
+spawn errors, which is worse than a best-effort warning.
 
 The check `checkCgroupDelegation` reports the chosen mode at
 startup, so operators see "cgroup delegation unavailable" once
