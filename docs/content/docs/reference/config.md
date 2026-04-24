@@ -395,30 +395,32 @@ Enable Vault-compatible credential management. Requires `[oidc]` to also be conf
 
 ```toml
 [vault]
-address       = "http://openbao:8200"
-role_id       = "blockyard-server"    # AppRole role identifier (recommended)
-# admin_token = "vault-admin-token"   # deprecated: use role_id instead
-token_ttl     = "1h"
-jwt_auth_path = "jwt"
-# token_file  = "/data/.vault-token"  # where the AppRole token is persisted
+address          = "http://openbao:8200"
+role_id          = "blockyard-server"           # AppRole role identifier (recommended)
+# admin_token    = "vault-admin-token"          # deprecated: use role_id instead
+token_ttl        = "1h"
+jwt_auth_path    = "jwt"
+# secret_id_file = "/run/secrets/vault_secret_id"   # opt-in: re-read secret_id on each login for rotation
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `address` | `string` | — | **Yes** | Vault server address (must start with `http://` or `https://`) |
-| `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via the `BLOCKYARD_VAULT_SECRET_ID` env var at bootstrap. |
+| `role_id` | `string` | — | One of `role_id` or `admin_token` | AppRole role identifier. The `secret_id` is delivered via `BLOCKYARD_VAULT_SECRET_ID` or (opt-in) `secret_id_file`. |
 | `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Supports [vault references](#vault-references). Use `role_id` with AppRole auth instead. |
-| `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
+| `token_ttl` | `duration` | `1h` | No | TTL hint; the actual TTL is whatever vault returns on login. Shorten it to make rotation propagate faster. |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in the vault |
-| `token_file` | `string` | `/data/.vault-token` | No | Path where the persisted AppRole token is stored. The parent directory must be writable. |
+| `secret_id_file` | `string` | — | No | Path to a file containing the AppRole `secret_id`. When set, the file is re-read on every login so `secret_id` rotations on disk take effect without restarting Blockyard. Takes precedence over `BLOCKYARD_VAULT_SECRET_ID`. |
 | `ca_cert` | `string` | — | No | Path to a PEM-encoded CA bundle used to verify the vault server's TLS certificate. When set, replaces the system CA bundle for vault HTTP calls (matches `VAULT_CACERT` semantics). Overridable via `BLOCKYARD_VAULT_CA_CERT`. |
 | `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during vault bootstrap. Useful when the vault policy format differs from what Blockyard expects. |
 
 > [!TIP]
-> With AppRole auth (`role_id`), the server authenticates to the vault using a
-> one-time `secret_id` (via `BLOCKYARD_VAULT_SECRET_ID`) and then renews
-> its own token indefinitely. After initial bootstrap, the env var is no
-> longer needed — the token is persisted to disk and reused across restarts.
+> With AppRole auth (`role_id`), Blockyard logs in against the vault and
+> re-logs in shortly before each token expires; a 403 on any admin call
+> also triggers an immediate re-login and retry. Point `secret_id_file`
+> at a path written by Vault Agent (or any rotation tool) to rotate the
+> `secret_id` without restarting the server. When no file is configured,
+> the `secret_id` is read once from `BLOCKYARD_VAULT_SECRET_ID` at startup.
 > `session_secret` is also auto-generated and stored in vault.
 
 > [!WARNING]

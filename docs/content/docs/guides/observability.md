@@ -71,9 +71,10 @@ When `management_bind` is set:
   workloads cannot access operational data
 
 When AppRole auth is used (`vault.role_id`), `/readyz` also reports a
-`vault_token` check that reflects whether the token renewal goroutine is
-healthy. A stale or expired token degrades readiness, signaling the
-operator to re-bootstrap with a fresh `secret_id`.
+`vault_token` check that reflects whether Blockyard can successfully
+re-login against the vault. A stale or expired token degrades readiness,
+signaling that either the `secret_id` is no longer valid or the vault
+is unreachable.
 
 Point your health checks and Prometheus scraper at the management port:
 

@@ -223,9 +223,8 @@ func main() {
 		vaultTokenCache   *integration.VaultTokenCache
 	)
 
+	var vaultRelogin func(context.Context) error
 	if cfg.Vault != nil {
-		tokenFilePath := cfg.Vault.TokenFile
-
 		vaultHTTPClient, err := integration.NewHTTPClient(cfg.Vault.CACert)
 		if err != nil {
 			slog.Error("vault http client", "error", err)
@@ -234,28 +233,31 @@ func main() {
 
 		if cfg.Vault.RoleID != "" {
 			// AppRole auth flow.
-			token, ttl, err := integration.InitAppRole(context.Background(), vaultHTTPClient, cfg.Vault.Address, cfg.Vault.RoleID, tokenFilePath)
-			if err != nil {
+			auth := integration.NewAppRoleAuth(cfg.Vault.Address, cfg.Vault.RoleID, cfg.Vault.SecretIDFile).
+				WithHTTPClient(vaultHTTPClient)
+			if err := auth.Login(context.Background()); err != nil {
 				slog.Error("vault authentication failed", "error", err)
 				os.Exit(1)
 			}
+			vaultAdminToken = auth.Token
+			vaultTokenHealthy = auth.Healthy
+			vaultRelogin = auth.Login
 
-			// Start token renewal goroutine.
-			renewer := integration.NewTokenRenewer(cfg.Vault.Address, token, tokenFilePath).WithHTTPClient(vaultHTTPClient)
-			vaultAdminToken = renewer.Token
-			vaultTokenHealthy = renewer.Healthy
-
+			// Proactive re-login runs until bgCtx is cancelled; on each
+			// fire it re-reads the secret_id file (when configured), so
+			// rotations land within one token TTL of the rotation.
 			bgWg.Add(1)
 			go func() {
 				defer bgWg.Done()
-				renewer.Run(bgCtx, ttl)
+				auth.Run(bgCtx)
 			}()
 		} else {
-			// Deprecated static admin_token.
+			// Deprecated static admin_token — no re-login possible.
 			vaultAdminToken = cfg.Vault.AdminToken.MustExpose
 		}
 
-		vaultClient = integration.NewClient(cfg.Vault.Address, vaultAdminToken).WithHTTPClient(vaultHTTPClient)
+		vaultClient = integration.NewClient(cfg.Vault.Address, vaultAdminToken, vaultRelogin).
+			WithHTTPClient(vaultHTTPClient)
 		vaultTokenCache = integration.NewVaultTokenCache()
 
 		// Resolve vault references in config (e.g. "vault:path#key").

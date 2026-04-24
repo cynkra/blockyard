@@ -871,16 +871,16 @@ func TestParseVaultConfig(t *testing.T) {
 	if cfg.Vault.JWTAuthPath != "jwt" {
 		t.Errorf("expected default jwt_auth_path 'jwt', got %q", cfg.Vault.JWTAuthPath)
 	}
-	if cfg.Vault.TokenFile != "/data/.vault-token" {
-		t.Errorf("expected default token_file '/data/.vault-token', got %q", cfg.Vault.TokenFile)
+	if cfg.Vault.SecretIDFile != "" {
+		t.Errorf("expected secret_id_file empty by default, got %q", cfg.Vault.SecretIDFile)
 	}
 }
 
-func TestVaultTokenFileOverride(t *testing.T) {
+func TestVaultSecretIDFileSet(t *testing.T) {
 	toml := strings.Replace(
 		vaultTOML(t),
 		`admin_token = "hvs.admin123"`,
-		`admin_token = "hvs.admin123"`+"\n"+`token_file   = "/var/lib/blockyard/.vault-token"`,
+		`admin_token    = "hvs.admin123"`+"\n"+`secret_id_file = "/run/secrets/vault_secret_id"`,
 		1,
 	)
 	dir := t.TempDir()
@@ -890,8 +890,8 @@ func TestVaultTokenFileOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Vault.TokenFile != "/var/lib/blockyard/.vault-token" {
-		t.Errorf("token_file = %q, want /var/lib/blockyard/.vault-token", cfg.Vault.TokenFile)
+	if cfg.Vault.SecretIDFile != "/run/secrets/vault_secret_id" {
+		t.Errorf("secret_id_file = %q, want /run/secrets/vault_secret_id", cfg.Vault.SecretIDFile)
 	}
 }
 

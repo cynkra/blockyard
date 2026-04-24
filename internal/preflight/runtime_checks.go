@@ -181,7 +181,7 @@ func checkVaultToken(deps RuntimeDeps) Result {
 	return Result{
 		Name:     name,
 		Severity: SeverityError,
-		Message:  "vault token renewal has failed; secrets operations may be broken",
+		Message:  "vault AppRole login has failed; secrets operations may be broken",
 		Category: category,
 	}
 }

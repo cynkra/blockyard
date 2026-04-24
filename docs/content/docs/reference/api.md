@@ -58,8 +58,8 @@ When not all checks pass, `status` is `"not_ready"` and the HTTP status is `503`
 When OIDC, Redis, and/or the vault are configured, their health is
 included in the checks (as `"idp"`, `"redis"`, and `"vault"`
 respectively). When AppRole auth is used (`vault.role_id`), a
-`"vault_token"` check reports whether the token renewal goroutine is
-healthy.
+`"vault_token"` check reports whether the most recent AppRole login
+succeeded and the current admin token has not yet expired.
 
 When served on the [management listener](/docs/guides/observability/#management-listener),
 `/readyz` always returns full per-component check details regardless of

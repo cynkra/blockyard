@@ -1,8 +1,11 @@
 package preflight
 
 import (
+	"fmt"
 	"net"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cynkra/blockyard/internal/config"
@@ -24,6 +27,7 @@ func RunConfigChecks(cfg *config.Config) *Report {
 
 	r.Add(checkExternalURLNotHTTPS(cfg))
 	r.Add(checkVaultHTTP(cfg))
+	r.Add(checkVaultSecretIDFile(cfg))
 	r.Add(checkManagementBindPublic(cfg))
 	r.Add(checkNoDefaultMemoryLimit(cfg))
 	r.Add(checkNoDefaultCPULimit(cfg))
@@ -130,6 +134,82 @@ func checkVaultHTTP(cfg *config.Config) Result {
 		Severity: SeverityWarning,
 		Message:  "vault.address uses plain HTTP; vault traffic (tokens, secrets) is not encrypted",
 		Category: "config",
+	}
+}
+
+// checkVaultSecretIDFile errors when vault.secret_id_file points at a
+// file that other uids on the host can read. On the process backend,
+// workers run as unprivileged sibling uids; a mode-0644 or
+// group-readable secret_id file leaks the AppRole secret_id to any
+// of them. We require mode bits 0077 to be clear and the file to be
+// owned by blockyard's effective uid.
+func checkVaultSecretIDFile(cfg *config.Config) Result {
+	const name = "vault_secret_id_file"
+	const category = "config"
+
+	if cfg.Vault == nil || cfg.Vault.SecretIDFile == "" {
+		return Result{
+			Name:     name,
+			Severity: SeverityOK,
+			Message:  "vault.secret_id_file not configured",
+			Category: category,
+		}
+	}
+
+	path := cfg.Vault.SecretIDFile
+	info, err := os.Stat(path)
+	if err != nil {
+		return Result{
+			Name:     name,
+			Severity: SeverityError,
+			Message:  fmt.Sprintf("vault.secret_id_file %q: %v", path, err),
+			Category: category,
+		}
+	}
+	if !info.Mode().IsRegular() {
+		return Result{
+			Name:     name,
+			Severity: SeverityError,
+			Message:  fmt.Sprintf("vault.secret_id_file %q is not a regular file", path),
+			Category: category,
+		}
+	}
+
+	mode := info.Mode().Perm()
+	if mode&0o077 != 0 {
+		return Result{
+			Name:     name,
+			Severity: SeverityError,
+			Message: fmt.Sprintf(
+				"vault.secret_id_file %q has mode %#o (group/other-accessible); clear group and other bits (e.g. `chmod 0400 %s` or 0600)",
+				path, mode, path),
+			Category: category,
+		}
+	}
+
+	// info.Sys() returns *syscall.Stat_t on Linux; on non-Linux GOOS the
+	// assertion fails and we skip the uid check. Blockyard targets Linux
+	// in production, so this branch is effectively always taken.
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if ok {
+		euid := uint32(os.Geteuid()) //nolint:gosec // G115: Geteuid is non-negative on Linux
+		if stat.Uid != euid {
+			return Result{
+				Name:     name,
+				Severity: SeverityError,
+				Message: fmt.Sprintf(
+					"vault.secret_id_file %q is owned by uid %d, not process uid %d; run `chown %d %s`",
+					path, stat.Uid, euid, euid, path),
+				Category: category,
+			}
+		}
+	}
+
+	return Result{
+		Name:     name,
+		Severity: SeverityOK,
+		Message:  fmt.Sprintf("vault.secret_id_file %q has safe permissions", path),
+		Category: category,
 	}
 }
 
