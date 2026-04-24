@@ -91,6 +91,13 @@ type AppRoleAuth struct {
 	timerMu sync.Mutex
 	nextAt  time.Time
 
+	// kick is a buffered (cap 1) signal from doLogin to Run that nextAt
+	// was updated outside the proactive-timer path (startup Login, a
+	// 403-driven re-login). Run re-arms its timer against the fresh
+	// nextAt so the already-armed timer doesn't fire a redundant
+	// second login at its originally-scheduled time.
+	kick chan struct{}
+
 	// Wrap-unwrap cache. Wrap tokens are single-use, so re-unwrapping
 	// the same bytes fails — we cache the plaintext keyed by the SHA-256
 	// of the file contents and only re-unwrap when the file changes.
@@ -111,6 +118,7 @@ func NewAppRoleAuth(addr, roleID, secretIDFile string) *AppRoleAuth {
 		roleID:       roleID,
 		secretIDFile: secretIDFile,
 		httpClient:   DefaultHTTPClient(),
+		kick:         make(chan struct{}, 1),
 	}
 	a.token.Store("")
 	a.expireAt.Store(time.Time{})
@@ -183,6 +191,14 @@ func (a *AppRoleAuth) doLogin(ctx context.Context) error {
 	a.timerMu.Lock()
 	a.nextAt = time.Now().Add(ttl - reloginBuffer)
 	a.timerMu.Unlock()
+
+	// Non-blocking: signal Run to re-arm its timer against the new
+	// nextAt. A full buffer means a previous kick is still pending;
+	// Run will read the latest nextAt when it drains either way.
+	select {
+	case a.kick <- struct{}{}:
+	default:
+	}
 
 	slog.Info("vault AppRole login succeeded", "ttl", ttl)
 	return nil
@@ -278,38 +294,62 @@ func unwrapSecretID(ctx context.Context, httpClient *http.Client, addr, wrapToke
 // can recover. Retries use exponential backoff (1s → 60s cap) because
 // the 403-retry path on admin calls provides the actual recovery signal,
 // so the proactive loop only needs to keep trying without flooding vault.
+//
+// A Login that completes outside this loop (startup bootstrap, 403
+// retry) signals via a.kick so Run re-arms against the fresh nextAt,
+// avoiding a redundant second login at the previously-scheduled time.
 func (a *AppRoleAuth) Run(ctx context.Context) {
 	backoff := 1 * time.Second
 	const maxBackoff = 60 * time.Second
 
+	timer := time.NewTimer(a.waitUntilNext())
+	defer timer.Stop()
+
 	for {
-		a.timerMu.Lock()
-		wait := time.Until(a.nextAt)
-		a.timerMu.Unlock()
-
-		if wait < time.Second {
-			wait = time.Second
-		}
-
-		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
 		case <-timer.C:
-		}
-
-		if err := a.Login(ctx); err != nil {
-			slog.Warn("vault AppRole re-login failed", "error", err, "retry_in", backoff)
-			// On failure, retry with exponential backoff. If an admin
-			// call 403s in the meantime, that call re-logs in through
-			// the same singleflight and kicks nextAt forward.
-			a.timerMu.Lock()
-			a.nextAt = time.Now().Add(backoff)
-			a.timerMu.Unlock()
-			backoff = min(backoff*2, maxBackoff)
-		} else {
-			backoff = 1 * time.Second
+			if err := a.Login(ctx); err != nil {
+				slog.Warn("vault AppRole re-login failed", "error", err, "retry_in", backoff)
+				// On failure, retry with exponential backoff. If an
+				// admin call 403s in the meantime, that call re-logs in
+				// through the same singleflight and kicks nextAt forward.
+				a.timerMu.Lock()
+				a.nextAt = time.Now().Add(backoff)
+				a.timerMu.Unlock()
+				backoff = min(backoff*2, maxBackoff)
+			} else {
+				backoff = 1 * time.Second
+			}
+			// Drain the self-kick our own successful Login just emitted
+			// so the next loop iteration doesn't re-arm for no reason.
+			select {
+			case <-a.kick:
+			default:
+			}
+			timer.Reset(a.waitUntilNext())
+		case <-a.kick:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(a.waitUntilNext())
 		}
 	}
+}
+
+// waitUntilNext returns how long until the currently-scheduled re-login
+// should fire, clamped to a 1s minimum so a missed deadline still gives
+// the vault round-trip room to land.
+func (a *AppRoleAuth) waitUntilNext() time.Duration {
+	a.timerMu.Lock()
+	defer a.timerMu.Unlock()
+	w := time.Until(a.nextAt)
+	if w < time.Second {
+		w = time.Second
+	}
+	return w
 }
