@@ -2,17 +2,20 @@
 // and determining whether the running build is older than the latest
 // publicly available version.
 //
-// The check distinguishes two version shapes:
+// Checks are parameterised on a release channel:
 //
-//   - Semver builds (vX.Y.Z, with optional v prefix): compared
-//     numerically against the repo's latest stable release.
-//   - SHA builds (any string carrying a commit hash — bare hex,
-//     git describe, the legacy main+SHA): compared against the
-//     origin/main HEAD via the GitHub commits-compare API.
+//   - channel="stable" compares against the latest tagged release
+//     (/releases/latest). Semver current versions get a numeric
+//     compare; SHA currents fall back to string equality (installing
+//     would switch channel to stable).
+//   - channel="main" compares against the rolling "main" release
+//     (/releases/tags/main). SHA currents get a commit-graph compare
+//     via the GitHub commits-compare API for a "behind by N" /
+//     "diverged" readout.
 //
 // Anything we can't classify (e.g. the literal "dev") is reported as
-// State=DevBuild — current is unrecognized, latest release is shown
-// for reference but no update is offered.
+// State=DevBuild — the channel's latest is shown for reference but
+// no update is offered.
 package update
 
 import (
@@ -56,11 +59,14 @@ const (
 // Result is what consumers persist and render. LatestVersion is a
 // display string (semver tag, short SHA, or empty when unknown);
 // Detail carries human-readable extra context (e.g. "3 commits behind").
+// Channel records which release stream the check queried so the UI
+// can surface and preserve the user's selection across refreshes.
 type Result struct {
 	State          State  `json:"state"`
 	CurrentVersion string `json:"current_version"`
 	LatestVersion  string `json:"latest_version,omitempty"`
 	Detail         string `json:"detail,omitempty"`
+	Channel        string `json:"channel,omitempty"`
 }
 
 // Kind tags the version string format.
@@ -118,34 +124,64 @@ func compareSemver(a, b [3]int) int {
 	return 0
 }
 
-// shortSHA truncates a hash to 7 chars for display. Strings shorter
-// than 7 are returned unchanged.
-func shortSHA(s string) string {
-	if len(s) > 7 {
-		return s[:7]
-	}
-	return s
-}
-
-// CheckLatest classifies the current version and queries GitHub to
-// produce a Result. Network errors are folded into the Result as
-// State=NoRemote rather than returned, so callers can render the
-// outcome without an extra error branch — the (error) return is
-// reserved for unrecoverable bugs (none today).
-func CheckLatest(currentVersion string) (*Result, error) {
-	res := &Result{CurrentVersion: currentVersion}
+// CheckLatest queries GitHub for the head of the given channel and
+// compares it to currentVersion. Network errors are folded into the
+// Result as State=NoRemote rather than returned, so callers can
+// render the outcome without an extra error branch — the (error)
+// return is reserved for unrecoverable bugs (none today).
+//
+// channel is "stable" (default) or "main"; any other value is
+// treated as "stable".
+func CheckLatest(currentVersion, channel string) (*Result, error) {
+	res := &Result{CurrentVersion: currentVersion, Channel: channel}
 	kind, sha := classifyVersion(currentVersion)
 
-	switch kind {
-	case KindSemver:
-		rel, err := FetchLatestStableRelease()
+	if channel == "main" {
+		rel, err := FetchReleaseByTag("main")
 		if err != nil {
 			res.State = StateNoRemote
 			res.Detail = err.Error()
 			return res, nil
 		}
-		latest := strings.TrimPrefix(rel.TagName, "v")
-		res.LatestVersion = latest
+		target := rel.Name
+		res.LatestVersion = target
+
+		if kind == KindUnknown {
+			res.State = StateDevBuild
+			return res, nil
+		}
+		// Commit-graph compare when both current and target carry
+		// a SHA — gives the user a "N commits behind" readout.
+		if kind == KindSHA {
+			if _, targetSHA := classifyVersion(target); targetSHA != "" {
+				return compareSHAs(res, sha, targetSHA), nil
+			}
+		}
+		// Semver current, or main release Name without an
+		// embedded SHA — fall back to string equality.
+		if currentVersion == target {
+			res.State = StateUpToDate
+		} else {
+			res.State = StateUpdateAvailable
+		}
+		return res, nil
+	}
+
+	// Stable channel (default).
+	rel, err := FetchLatestStableRelease()
+	if err != nil {
+		res.State = StateNoRemote
+		res.Detail = err.Error()
+		return res, nil
+	}
+	latest := strings.TrimPrefix(rel.TagName, "v")
+	res.LatestVersion = latest
+
+	if kind == KindUnknown {
+		res.State = StateDevBuild
+		return res, nil
+	}
+	if kind == KindSemver {
 		cur, _ := parseSemver(currentVersion)
 		lat, _ := parseSemver(latest)
 		switch compareSemver(cur, lat) {
@@ -158,56 +194,52 @@ func CheckLatest(currentVersion string) (*Result, error) {
 			res.Detail = fmt.Sprintf("running %s, latest release is %s", currentVersion, latest)
 		}
 		return res, nil
-
-	case KindSHA:
-		head, err := FetchBranchHEAD("main")
-		if err != nil {
-			res.State = StateNoRemote
-			res.Detail = err.Error()
-			return res, nil
-		}
-		res.LatestVersion = shortSHA(head)
-		cmp, err := CompareCommits(sha, head)
-		if err != nil {
-			res.State = StateNoRemote
-			res.Detail = err.Error()
-			return res, nil
-		}
-		if cmp == nil {
-			res.State = StateLocalNotFound
-			res.Detail = "current commit is not on origin/main (fork or unpushed branch?)"
-			return res, nil
-		}
-		switch cmp.Status {
-		case "ahead":
-			// head (origin/main) is ahead of base (us) → we are behind.
-			res.State = StateUpdateAvailable
-			res.Detail = fmt.Sprintf("%d commits behind origin/main", cmp.AheadBy)
-		case "behind":
-			// head (origin/main) is behind base (us) → we are ahead.
-			res.State = StateAhead
-			res.Detail = fmt.Sprintf("%d commits ahead of origin/main", cmp.BehindBy)
-		case "identical":
-			res.State = StateUpToDate
-		case "diverged":
-			res.State = StateDiverged
-			res.Detail = fmt.Sprintf("%d commits ahead, %d commits behind origin/main",
-				cmp.BehindBy, cmp.AheadBy)
-		default:
-			res.State = StateUnknown
-			res.Detail = "unexpected compare status: " + cmp.Status
-		}
-		return res, nil
-
-	default:
-		// KindUnknown — e.g. "dev" with no SHA. Show the latest
-		// release for reference but do not offer an update.
-		res.State = StateDevBuild
-		if rel, err := FetchLatestStableRelease(); err == nil {
-			res.LatestVersion = strings.TrimPrefix(rel.TagName, "v")
-		}
-		return res, nil
 	}
+	// SHA current, stable channel — no numeric compare, just
+	// expose the latest stable tag as the install target.
+	if currentVersion == latest {
+		res.State = StateUpToDate
+	} else {
+		res.State = StateUpdateAvailable
+	}
+	return res, nil
+}
+
+// compareSHAs fills res with the result of a GitHub commit-graph
+// compare between a current SHA and a target SHA. Called only from
+// CheckLatest's main-channel path.
+func compareSHAs(res *Result, currentSHA, targetSHA string) *Result {
+	cmp, err := CompareCommits(currentSHA, targetSHA)
+	if err != nil {
+		res.State = StateNoRemote
+		res.Detail = err.Error()
+		return res
+	}
+	if cmp == nil {
+		res.State = StateLocalNotFound
+		res.Detail = "current commit is not on origin/main (fork or unpushed branch?)"
+		return res
+	}
+	switch cmp.Status {
+	case "ahead":
+		// target is ahead of current → we are behind.
+		res.State = StateUpdateAvailable
+		res.Detail = fmt.Sprintf("%d commits behind main", cmp.AheadBy)
+	case "behind":
+		// target is behind current → we are ahead.
+		res.State = StateAhead
+		res.Detail = fmt.Sprintf("%d commits ahead of main", cmp.BehindBy)
+	case "identical":
+		res.State = StateUpToDate
+	case "diverged":
+		res.State = StateDiverged
+		res.Detail = fmt.Sprintf("%d commits ahead, %d commits behind main",
+			cmp.BehindBy, cmp.AheadBy)
+	default:
+		res.State = StateUnknown
+		res.Detail = "unexpected compare status: " + cmp.Status
+	}
+	return res
 }
 
 // GitHubRelease represents a GitHub release.
@@ -299,39 +331,6 @@ func FetchRelease(url string) (*GitHubRelease, error) {
 		return nil, err
 	}
 	return &rel, nil
-}
-
-// FetchBranchHEAD returns the HEAD commit SHA of the named branch
-// (typically "main"). Used by SHA-build update checks to know what
-// the upstream is currently at.
-func FetchBranchHEAD(branch string) (string, error) {
-	url := APIBase + "/branches/" + branch
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	AddGitHubAuth(req)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub branches API returned %s", resp.Status)
-	}
-
-	var b struct {
-		Commit struct {
-			SHA string `json:"sha"`
-		} `json:"commit"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
-		return "", err
-	}
-	return b.Commit.SHA, nil
 }
 
 // CompareResult is the relevant subset of GitHub's compare-commits

@@ -638,7 +638,7 @@ func main() {
 		bgWg.Add(1)
 		go func() {
 			defer bgWg.Done()
-			update.SpawnChecker(bgCtx, version, srv)
+			update.SpawnChecker(bgCtx, version, update.InferChannel(version), srv)
 		}()
 
 		// Store eviction sweeper.

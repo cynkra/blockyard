@@ -392,6 +392,7 @@ type adminVersionData struct {
 	CheckError      string          // surfaced when a manual refresh raised an error from CheckLatest
 	UpdateSupported bool            // false on the containerized backend (orch is nil)
 	UpdateState     string          // orchestrator state: idle, updating, watching, rolling_back
+	Channel         string          // release channel the check queried / the UI selector is set to
 }
 
 // UpdateAvailable reports whether the Updates tab should show the
@@ -824,7 +825,7 @@ func (ui *UI) adminPage(srv *server.Server, orch *orchestrator.Orchestrator) htt
 			Report:     report,
 			Users:      usersData,
 			Errors:     buildAdminErrors(srv),
-			Updates:    buildAdminVersion(srv, orch, ""),
+			Updates:    buildAdminVersion(srv, orch, "", ""),
 		}
 
 		if err := ui.pages["admin.html"].ExecuteTemplate(w, "base", data); err != nil {
@@ -939,7 +940,7 @@ func (ui *UI) adminTabVersionFragment(srv *server.Server, orch *orchestrator.Orc
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
-		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersion", buildAdminVersion(srv, orch, "")); err != nil {
+		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersion", buildAdminVersion(srv, orch, "", "")); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}
@@ -955,12 +956,13 @@ func (ui *UI) adminUpdateCheck(srv *server.Server, orch *orchestrator.Orchestrat
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
+		channel := resolveChannel(r, srv)
 		var checkErr string
-		if _, err := updatepkg.PerformCheck(srv); err != nil {
+		if _, err := updatepkg.PerformCheck(srv, channel); err != nil {
 			checkErr = err.Error()
 		}
 		w.Header().Set("Content-Type", "text/html")
-		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", buildAdminVersion(srv, orch, checkErr)); err != nil {
+		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", buildAdminVersion(srv, orch, checkErr, channel)); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}
@@ -978,24 +980,17 @@ func (ui *UI) adminUpdateStart(srv *server.Server, orch *orchestrator.Orchestrat
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
+		channel := resolveChannel(r, srv)
 		if orch == nil {
 			w.Header().Set("Content-Type", "text/html")
-			data := buildAdminVersion(srv, orch, "Rolling updates are not supported on this deployment; update through your container runtime.")
+			data := buildAdminVersion(srv, orch, "Rolling updates are not supported on this deployment; update through your container runtime.", channel)
 			_ = ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", data)
 			return
 		}
 
-		channel := ""
-		if srv.Config.Update != nil {
-			channel = srv.Config.Update.Channel
-		}
-		if channel == "" {
-			channel = "stable"
-		}
-
 		if !orch.CASState("idle", "updating") {
 			w.Header().Set("Content-Type", "text/html")
-			data := buildAdminVersion(srv, orch, "Update already in progress ("+orch.State()+").")
+			data := buildAdminVersion(srv, orch, "Update already in progress ("+orch.State()+").", channel)
 			_ = ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", data)
 			return
 		}
@@ -1032,11 +1027,24 @@ func (ui *UI) adminUpdateStart(srv *server.Server, orch *orchestrator.Orchestrat
 		}()
 
 		w.Header().Set("Content-Type", "text/html")
-		data := buildAdminVersion(srv, orch, "")
+		data := buildAdminVersion(srv, orch, "", channel)
 		if err := ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminUpdateProgress", data); err != nil {
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// resolveChannel returns the release channel the request is
+// targeting: the "channel" form value when provided, else the
+// inferred default for the running build. The UI always includes
+// the selector value on check/start posts, so the fallback only
+// fires for direct curl-style callers.
+func resolveChannel(r *http.Request, srv *server.Server) string {
+	switch c := r.FormValue("channel"); c {
+	case "stable", "main":
+		return c
+	}
+	return updatepkg.InferChannel(srv.Version)
 }
 
 // adminUpdateProgress returns the current orchestrator state as an
@@ -1050,7 +1058,7 @@ func (ui *UI) adminUpdateProgress(srv *server.Server, orch *orchestrator.Orchest
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
-		data := buildAdminVersion(srv, orch, "")
+		data := buildAdminVersion(srv, orch, "", "")
 		w.Header().Set("Content-Type", "text/html")
 		if data.UpdateState == "idle" {
 			_ = ui.fragments["admin_version.html"].ExecuteTemplate(w, "adminVersionCard", data)
@@ -1064,19 +1072,29 @@ func (ui *UI) adminUpdateProgress(srv *server.Server, orch *orchestrator.Orchest
 // the server's cached state and the orchestrator's current phase.
 // checkErr is surfaced in the UI when a manual refresh raised an
 // error from CheckLatest itself (rare — most failures fold into
-// State=NoRemote on the cached Result).
-func buildAdminVersion(srv *server.Server, orch *orchestrator.Orchestrator, checkErr string) adminVersionData {
+// State=NoRemote on the cached Result). selectedChannel overrides
+// the selector value when a handler has a specific choice in hand
+// (e.g. from the request form); passing "" falls back to the last
+// checked channel or the inferred default.
+func buildAdminVersion(srv *server.Server, orch *orchestrator.Orchestrator, checkErr, selectedChannel string) adminVersionData {
 	data := adminVersionData{
 		CurrentVersion:  srv.Version,
 		State:           updatepkg.StateUnknown,
 		UpdateSupported: orch != nil,
 		UpdateState:     "idle",
 		CheckError:      checkErr,
+		Channel:         selectedChannel,
 	}
 	if status := srv.UpdateStatus.Load(); status != nil {
 		data.State = status.State
 		data.LatestVersion = status.LatestVersion
 		data.Detail = status.Detail
+		if data.Channel == "" {
+			data.Channel = status.Channel
+		}
+	}
+	if data.Channel == "" {
+		data.Channel = updatepkg.InferChannel(srv.Version)
 	}
 	if t := srv.UpdateLastChecked.Load(); t != nil {
 		data.LastCheckedStr = t.UTC().Format(time.RFC3339)

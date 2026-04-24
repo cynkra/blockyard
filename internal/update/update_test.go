@@ -65,11 +65,11 @@ func TestCompareSemver(t *testing.T) {
 // records request paths so tests can assert which calls happened.
 type fakeRemote struct {
 	server      *httptest.Server
-	latestTag   string                  // /releases/latest TagName
-	branchHead  string                  // /branches/main commit.sha
-	compareResp *CompareResult          // /compare/{base}...{head} payload
-	compare404  bool                    // when true, /compare returns 404
-	called      map[string]int          // path → count
+	latestTag   string         // /releases/latest TagName
+	mainRelName string         // /releases/tags/main Name
+	compareResp *CompareResult // /compare/{base}...{head} payload
+	compare404  bool           // when true, /compare returns 404
+	called      map[string]int // path → count
 }
 
 func newFakeRemote() *fakeRemote {
@@ -79,14 +79,8 @@ func newFakeRemote() *fakeRemote {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
 			json.NewEncoder(w).Encode(GitHubRelease{TagName: f.latestTag})
-		case strings.HasPrefix(r.URL.Path, "/branches/"):
-			payload := struct {
-				Commit struct {
-					SHA string `json:"sha"`
-				} `json:"commit"`
-			}{}
-			payload.Commit.SHA = f.branchHead
-			json.NewEncoder(w).Encode(payload)
+		case strings.HasSuffix(r.URL.Path, "/releases/tags/main"):
+			json.NewEncoder(w).Encode(GitHubRelease{Name: f.mainRelName})
 		case strings.HasPrefix(r.URL.Path, "/compare/"):
 			if f.compare404 {
 				http.Error(w, "not found", http.StatusNotFound)
@@ -111,13 +105,13 @@ func (f *fakeRemote) install(t *testing.T) {
 	t.Cleanup(func() { APIBase = old })
 }
 
-func TestCheckLatest_Semver_UpdateAvailable(t *testing.T) {
+func TestCheckLatest_Stable_Semver_UpdateAvailable(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
 	f.latestTag = "v1.5.0"
 	f.install(t)
 
-	res, err := CheckLatest("1.4.0")
+	res, err := CheckLatest("1.4.0", "stable")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,27 +121,30 @@ func TestCheckLatest_Semver_UpdateAvailable(t *testing.T) {
 	if res.LatestVersion != "1.5.0" {
 		t.Errorf("LatestVersion = %q", res.LatestVersion)
 	}
+	if res.Channel != "stable" {
+		t.Errorf("Channel = %q, want %q", res.Channel, "stable")
+	}
 }
 
-func TestCheckLatest_Semver_UpToDate(t *testing.T) {
+func TestCheckLatest_Stable_Semver_UpToDate(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
 	f.latestTag = "v1.5.0"
 	f.install(t)
 
-	res, _ := CheckLatest("1.5.0")
+	res, _ := CheckLatest("1.5.0", "stable")
 	if res.State != StateUpToDate {
 		t.Errorf("State = %q, want %q", res.State, StateUpToDate)
 	}
 }
 
-func TestCheckLatest_Semver_Ahead(t *testing.T) {
+func TestCheckLatest_Stable_Semver_Ahead(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
 	f.latestTag = "v1.4.0"
 	f.install(t)
 
-	res, _ := CheckLatest("v1.5.0")
+	res, _ := CheckLatest("v1.5.0", "stable")
 	if res.State != StateAhead {
 		t.Errorf("State = %q, want %q", res.State, StateAhead)
 	}
@@ -156,74 +153,111 @@ func TestCheckLatest_Semver_Ahead(t *testing.T) {
 	}
 }
 
-func TestCheckLatest_SHA_Behind(t *testing.T) {
+// SHA-build running on stable channel: no numeric comparison, just
+// string-equality against the latest tag. Different → update available.
+func TestCheckLatest_Stable_SHA_UpdateAvailable(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
-	f.branchHead = "feedbeef0000000000000000000000000000aaaa"
+	f.latestTag = "v1.5.0"
+	f.install(t)
+
+	res, _ := CheckLatest("abc1234", "stable")
+	if res.State != StateUpdateAvailable {
+		t.Errorf("State = %q, want %q", res.State, StateUpdateAvailable)
+	}
+	if res.LatestVersion != "1.5.0" {
+		t.Errorf("LatestVersion = %q, want 1.5.0", res.LatestVersion)
+	}
+}
+
+func TestCheckLatest_Main_SHA_Behind(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.mainRelName = "v1.5.0-3-gfeedbee"
 	f.compareResp = &CompareResult{Status: "ahead", AheadBy: 3}
 	f.install(t)
 
-	res, _ := CheckLatest("abc1234")
+	res, _ := CheckLatest("abc1234", "main")
 	if res.State != StateUpdateAvailable {
-		t.Errorf("State = %q, want %q (origin/main ahead means we are behind)", res.State, StateUpdateAvailable)
+		t.Errorf("State = %q, want %q (target ahead means we are behind)", res.State, StateUpdateAvailable)
 	}
 	if !strings.Contains(res.Detail, "3 commits behind") {
 		t.Errorf("Detail = %q, expected 3-commits-behind note", res.Detail)
 	}
-	if res.LatestVersion != "feedbee" {
-		t.Errorf("LatestVersion = %q, want short SHA %q", res.LatestVersion, "feedbee")
+	if res.LatestVersion != "v1.5.0-3-gfeedbee" {
+		t.Errorf("LatestVersion = %q, want %q", res.LatestVersion, "v1.5.0-3-gfeedbee")
 	}
 }
 
-func TestCheckLatest_SHA_Ahead(t *testing.T) {
+func TestCheckLatest_Main_SHA_Ahead(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
-	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.mainRelName = "v1.4.0-1-gabc1234"
 	f.compareResp = &CompareResult{Status: "behind", BehindBy: 2}
 	f.install(t)
 
-	res, _ := CheckLatest("def5678")
+	res, _ := CheckLatest("def5678", "main")
 	if res.State != StateAhead {
 		t.Errorf("State = %q, want %q", res.State, StateAhead)
 	}
 }
 
-func TestCheckLatest_SHA_Identical(t *testing.T) {
+func TestCheckLatest_Main_SHA_Identical(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
-	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.mainRelName = "v1.4.0-1-gabc1234"
 	f.compareResp = &CompareResult{Status: "identical"}
 	f.install(t)
 
-	res, _ := CheckLatest("abc1234")
+	res, _ := CheckLatest("abc1234", "main")
 	if res.State != StateUpToDate {
 		t.Errorf("State = %q, want %q", res.State, StateUpToDate)
 	}
 }
 
-func TestCheckLatest_SHA_Diverged(t *testing.T) {
+func TestCheckLatest_Main_SHA_Diverged(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
-	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.mainRelName = "v1.4.0-1-gabc1234"
 	f.compareResp = &CompareResult{Status: "diverged", AheadBy: 2, BehindBy: 1}
 	f.install(t)
 
-	res, _ := CheckLatest("def5678")
+	res, _ := CheckLatest("def5678", "main")
 	if res.State != StateDiverged {
 		t.Errorf("State = %q, want %q", res.State, StateDiverged)
 	}
 }
 
-func TestCheckLatest_SHA_LocalNotFound(t *testing.T) {
+func TestCheckLatest_Main_SHA_LocalNotFound(t *testing.T) {
 	f := newFakeRemote()
 	defer f.Close()
-	f.branchHead = "abc12340000000000000000000000000000aaaa"
+	f.mainRelName = "v1.4.0-1-gabc1234"
 	f.compare404 = true
 	f.install(t)
 
-	res, _ := CheckLatest("def5678")
+	res, _ := CheckLatest("def5678", "main")
 	if res.State != StateLocalNotFound {
 		t.Errorf("State = %q, want %q", res.State, StateLocalNotFound)
+	}
+}
+
+// Semver current on main channel: skips the commit-graph path and
+// falls back to string equality.
+func TestCheckLatest_Main_Semver_UpdateAvailable(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.mainRelName = "v1.5.0-2-gabc1234"
+	f.install(t)
+
+	res, _ := CheckLatest("1.4.0", "main")
+	if res.State != StateUpdateAvailable {
+		t.Errorf("State = %q, want %q", res.State, StateUpdateAvailable)
+	}
+	// Did not hit the compare API.
+	for path := range f.called {
+		if strings.HasPrefix(path, "/compare/") {
+			t.Errorf("unexpected /compare call for semver-on-main path")
+		}
 	}
 }
 
@@ -233,11 +267,11 @@ func TestCheckLatest_DevBuild_NoUpdateOffer(t *testing.T) {
 	f.latestTag = "v0.0.2"
 	f.install(t)
 
-	res, _ := CheckLatest("dev")
+	res, _ := CheckLatest("dev", "stable")
 	if res.State != StateDevBuild {
 		t.Errorf("State = %q, want %q", res.State, StateDevBuild)
 	}
-	// The latest release is fetched for informational display,
+	// The channel's latest is fetched for informational display,
 	// not as an "update" offer.
 	if res.LatestVersion != "0.0.2" {
 		t.Errorf("LatestVersion = %q, want 0.0.2 (informational)", res.LatestVersion)
@@ -253,7 +287,7 @@ func TestCheckLatest_NoRemote(t *testing.T) {
 	APIBase = srv.URL
 	defer func() { APIBase = old }()
 
-	res, err := CheckLatest("1.4.0")
+	res, err := CheckLatest("1.4.0", "stable")
 	if err != nil {
 		t.Fatalf("expected error folded into result, got %v", err)
 	}

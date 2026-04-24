@@ -66,17 +66,21 @@ func authServerWithOrch(t *testing.T, cfg *config.Config, sub string, role auth.
 	return srv, ts, orch
 }
 
-// stubGithubAPI points update.APIBase at a local server that returns
-// a single stubbed /releases/latest response for the duration of the
-// test. Avoids hitting real GitHub from the UI update-check handler.
-func stubGithubAPI(t *testing.T, tag string) {
+// stubGithubAPI points update.APIBase at a local server that answers
+// both /releases/latest (stableTag) and /releases/tags/main (mainName).
+// Either can be empty when the test doesn't care about that channel.
+// Avoids hitting real GitHub from the UI update-check handler.
+func stubGithubAPI(t *testing.T, stableTag, mainName string) {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/releases/latest") {
-			_ = json.NewEncoder(w).Encode(updatepkg.GitHubRelease{TagName: tag})
-			return
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			_ = json.NewEncoder(w).Encode(updatepkg.GitHubRelease{TagName: stableTag})
+		case strings.HasSuffix(r.URL.Path, "/releases/tags/main"):
+			_ = json.NewEncoder(w).Encode(updatepkg.GitHubRelease{Name: mainName})
+		default:
+			http.Error(w, "unexpected path: "+r.URL.Path, http.StatusInternalServerError)
 		}
-		http.Error(w, "unexpected path: "+r.URL.Path, http.StatusInternalServerError)
 	}))
 	t.Cleanup(s.Close)
 	old := updatepkg.APIBase
@@ -121,7 +125,8 @@ func TestUpdateAvailableMethod(t *testing.T) {
 
 func TestBuildAdminVersionEmptyStatus(t *testing.T) {
 	srv, _ := authServer(t, oidcConfig(), "a", auth.RoleAdmin)
-	data := buildAdminVersion(srv, nil, "")
+	srv.Version = "1.0.0" // semver → infers "stable" default channel
+	data := buildAdminVersion(srv, nil, "", "")
 	if data.State != updatepkg.StateUnknown {
 		t.Errorf("State = %q, want %q", data.State, updatepkg.StateUnknown)
 	}
@@ -131,6 +136,9 @@ func TestBuildAdminVersionEmptyStatus(t *testing.T) {
 	if data.UpdateState != "idle" {
 		t.Errorf("UpdateState = %q, want idle", data.UpdateState)
 	}
+	if data.Channel != "stable" {
+		t.Errorf("Channel = %q, want stable (inferred default)", data.Channel)
+	}
 }
 
 func TestBuildAdminVersionWithStatus(t *testing.T) {
@@ -139,8 +147,9 @@ func TestBuildAdminVersionWithStatus(t *testing.T) {
 		State:         updatepkg.StateUpdateAvailable,
 		LatestVersion: "1.2.3",
 		Detail:        "3 commits behind",
+		Channel:       "main",
 	})
-	data := buildAdminVersion(srv, nil, "boom")
+	data := buildAdminVersion(srv, nil, "boom", "")
 	if data.State != updatepkg.StateUpdateAvailable {
 		t.Errorf("State = %q, want update_available", data.State)
 	}
@@ -155,6 +164,25 @@ func TestBuildAdminVersionWithStatus(t *testing.T) {
 	}
 	if data.LastCheckedStr == "" {
 		t.Error("LastCheckedStr should be populated after SetUpdateStatus")
+	}
+	if data.Channel != "main" {
+		t.Errorf("Channel = %q, want main (from cached status)", data.Channel)
+	}
+}
+
+// A selectedChannel argument from the handler (e.g. the form value
+// on a check POST) takes precedence over whatever the cached status
+// last recorded, so the selector in the re-rendered card reflects
+// the user's most recent choice.
+func TestBuildAdminVersionSelectedChannelWins(t *testing.T) {
+	srv, _ := authServer(t, oidcConfig(), "a", auth.RoleAdmin)
+	srv.SetUpdateStatus(&updatepkg.Result{
+		State:   updatepkg.StateUpToDate,
+		Channel: "stable",
+	})
+	data := buildAdminVersion(srv, nil, "", "main")
+	if data.Channel != "main" {
+		t.Errorf("Channel = %q, want main (selected)", data.Channel)
 	}
 }
 
@@ -231,7 +259,7 @@ func TestAdminTabVersionFragmentForbiddenForNonAdmin(t *testing.T) {
 func TestAdminUpdateCheckRendersCardForAdmin(t *testing.T) {
 	// Stub GitHub so the handler's PerformCheck call resolves locally
 	// and exercises the "card rendered with fresh status" path.
-	stubGithubAPI(t, "v99.0.0")
+	stubGithubAPI(t, "v99.0.0", "")
 	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
 	srv.Version = "1.0.0" // KindSemver → stable-release check path
 
@@ -246,6 +274,35 @@ func TestAdminUpdateCheckRendersCardForAdmin(t *testing.T) {
 	body := readBody(t, resp)
 	if !strings.Contains(body, "admin-version-card") {
 		t.Errorf("expected admin-version-card in body, got: %s", body)
+	}
+}
+
+// A form-submitted channel=main from the UI selector drives
+// PerformCheck against the main release and the card re-renders
+// with that channel selected (matching what HTMX would do when a
+// user changes the dropdown or clicks Check/Update).
+func TestAdminUpdateCheckHonoursChannelFormValue(t *testing.T) {
+	stubGithubAPI(t, "v99.0.0", "v0.0.2-3-gabc1234")
+	srv, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
+	srv.Version = "1.0.0"
+
+	resp, err := http.PostForm(ts.URL+"/ui/admin/update/check",
+		url.Values{"channel": []string{"main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	status := srv.UpdateStatus.Load()
+	if status == nil || status.Channel != "main" {
+		t.Fatalf("expected cached status with Channel=main, got %+v", status)
+	}
+	body := readBody(t, resp)
+	// The Alpine dropdown seeds itself from x-data="dropdown({value: 'main'})".
+	if !strings.Contains(body, `dropdown({value: 'main'})`) {
+		t.Errorf("expected dropdown initialised with value=main, got: %s", body)
 	}
 }
 
