@@ -557,6 +557,9 @@ jobs:
     needs: [unit, cli, docker, idp, openbao, pak, process, redis, ui]
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Patch coverage diff needs enough history to reach the PR base.
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -564,13 +567,18 @@ jobs:
         with:
           pattern: coverage-*
           merge-multiple: true
-      - name: Enforce 80% coverage threshold
+      - name: Merge coverage profiles
         run: |
           head -1 coverage-unit.out > merged.out
           tail -n +2 -q coverage-*.out | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> merged.out
-          TOTAL=$(go tool cover -func=merged.out | grep ^total: | awk '{print $3}' | tr -d '%')
-          echo "Total coverage: ${TOTAL}%"
-          if [ "$(echo "$TOTAL < 80" | bc -l)" -eq 1 ]; then
-            echo "::error::Coverage ${TOTAL}% is below 80% threshold"
-            exit 1
-          fi
+      - name: Check coverage thresholds
+        run: |
+          BASE="${GITHUB_BASE_REF:-main}"
+          git fetch --no-tags origin "$BASE"
+          go run ./cmd/coverage-check \
+            -profile=merged.out \
+            -min-total=75 \
+            -min-patch=75 \
+            -patch-base="origin/$BASE" \
+            -ignore='internal/testutil/**' \
+            -ignore='internal/preflight/docker_checks.go'
