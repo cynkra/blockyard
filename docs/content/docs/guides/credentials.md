@@ -109,10 +109,39 @@ BLOCKYARD_VAULT_SECRET_ID_FILE=/run/secrets/vault_secret_id blockyard
 Blockyard re-reads the file on each AppRole login (proactive, 403-driven,
 or startup). A rotation written to disk is picked up within one
 `token_ttl` of the rotation; shorten `token_ttl` to tighten that window.
-The file should be mode `0400`, owned by the Blockyard user, ideally on
-`tmpfs`.
 
 When both are set, `secret_id_file` takes precedence.
+
+#### Securing the file
+
+Protection against other users on the host relies entirely on Unix
+permissions. Blockyard enforces this at startup with a hard preflight
+check and refuses to start unless:
+
+- the file is owned by Blockyard's effective uid, and
+- the mode has all group/other bits cleared (i.e. `0400` or `0600`).
+
+The recommended setup on Linux hosts:
+
+- **Place the file on `tmpfs`** (e.g. `/run/secrets/blockyard/`). The
+  bytes never touch persistent storage, so backups, image snapshots,
+  and stolen drives can't recover it.
+- **`chmod 0400`, `chown blockyard:blockyard`.** No group or world read.
+- **On the process backend**, keep the tmpfs mount *outside* any path
+  that is bind-mounted into worker sandboxes, so the file isn't
+  reachable from inside a worker even if the sandbox is misconfigured.
+
+With those in place, a secret_id leak requires either privileged
+on-host access (root) or a sandbox escape, both of which compromise
+every secret on the host equally.
+
+> [!NOTE]
+> A stronger opt-in delivery mode using vault response-wrapping — where
+> the on-disk file holds a short-lived wrap token instead of the raw
+> `secret_id`, giving tamper-detection and bounded exposure windows —
+> is tracked in [#337](https://github.com/cynkra/blockyard/issues/337).
+> File-based delivery today is suitable for the standard uid-separated
+> worker threat model.
 
 ### Migrating from `admin_token`
 

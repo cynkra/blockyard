@@ -1,6 +1,9 @@
 package preflight
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cynkra/blockyard/internal/config"
@@ -119,6 +122,89 @@ func TestCheckVaultHTTP(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
 		assertOK(t, r, "vault_http")
+	})
+}
+
+func TestCheckVaultSecretIDFile(t *testing.T) {
+	writeFile := func(t *testing.T, mode os.FileMode) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "secret_id")
+		if err := os.WriteFile(path, []byte("s"), mode); err != nil {
+			t.Fatal(err)
+		}
+		// os.WriteFile respects umask; re-chmod to force the mode we
+		// asked for so the test is deterministic in any environment.
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("ok when not configured", func(t *testing.T) {
+		cfg := &config.Config{Vault: &config.VaultConfig{Address: "https://v"}}
+		r := RunConfigChecks(cfg)
+		assertOK(t, r, "vault_secret_id_file")
+	})
+
+	t.Run("ok when mode 0400 owned by euid", func(t *testing.T) {
+		path := writeFile(t, 0o400)
+		cfg := &config.Config{Vault: &config.VaultConfig{
+			Address: "https://v", SecretIDFile: path,
+		}}
+		r := RunConfigChecks(cfg)
+		assertOK(t, r, "vault_secret_id_file")
+	})
+
+	t.Run("errors on group-readable mode", func(t *testing.T) {
+		path := writeFile(t, 0o440)
+		cfg := &config.Config{Vault: &config.VaultConfig{
+			Address: "https://v", SecretIDFile: path,
+		}}
+		r := RunConfigChecks(cfg)
+		res := findResult(r, "vault_secret_id_file")
+		if res == nil || res.Severity != SeverityError {
+			t.Fatalf("expected SeverityError, got %+v", res)
+		}
+		if !strings.Contains(res.Message, "chmod 0400") {
+			t.Errorf("expected chmod remediation in message, got: %s", res.Message)
+		}
+	})
+
+	t.Run("errors on world-readable mode", func(t *testing.T) {
+		path := writeFile(t, 0o444)
+		cfg := &config.Config{Vault: &config.VaultConfig{
+			Address: "https://v", SecretIDFile: path,
+		}}
+		r := RunConfigChecks(cfg)
+		if !hasFinding(r, "vault_secret_id_file") {
+			t.Error("expected finding for world-readable file")
+		}
+	})
+
+	t.Run("errors when file missing", func(t *testing.T) {
+		cfg := &config.Config{Vault: &config.VaultConfig{
+			Address: "https://v", SecretIDFile: "/nonexistent/path/secret_id",
+		}}
+		r := RunConfigChecks(cfg)
+		if !hasFinding(r, "vault_secret_id_file") {
+			t.Error("expected finding for missing file")
+		}
+	})
+
+	t.Run("errors when path is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &config.Config{Vault: &config.VaultConfig{
+			Address: "https://v", SecretIDFile: dir,
+		}}
+		r := RunConfigChecks(cfg)
+		res := findResult(r, "vault_secret_id_file")
+		if res == nil || res.Severity != SeverityError {
+			t.Fatalf("expected SeverityError, got %+v", res)
+		}
+		if !strings.Contains(res.Message, "regular file") {
+			t.Errorf("expected 'regular file' in message, got: %s", res.Message)
+		}
 	})
 }
 
