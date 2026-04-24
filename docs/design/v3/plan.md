@@ -886,10 +886,12 @@ See phase-3-9.md for the full design. Short version:
   `checkBwrapHostUIDMapping` mechanics stay as-is; only the
   non-root error message is refreshed to frame the situation in
   layer-6 terms and point at the cgroup path.
-- **CI matrix** drops `setuid` (never a valid isolation mode) and
-  `unprivileged` (subsumed). Adds a `rootless` leg that loads the
-  AppArmor profile with the restrictive sysctl in place, exercising
-  the production non-root path.
+- **CI coverage** drops `setuid` from the `process` matrix (never a
+  valid isolation mode) and keeps `root` and `unprivileged`. Adds a
+  standalone `apparmor-smoke` job on the Ubuntu 24.04 VM (not in a
+  container, because `--privileged` bypasses AppArmor enforcement)
+  that asserts a negative/positive pair: rootless bwrap blocked
+  without the profile, unblocked with it loaded.
 
 **k8s deployments** don't benefit from any in-pod layer-6 mechanism:
 restricted pods lack CAP_NET_ADMIN for iptables rules, and cgroup

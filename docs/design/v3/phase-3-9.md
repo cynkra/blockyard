@@ -89,10 +89,10 @@ mechanics; phase 3-9 only adds around them.
    pragma) so the profile parses on any AppArmor release that knows
    the `userns` rule, from Ubuntu 23.10's 3.x backport through
    AppArmor 4.x on 24.04+. The `by admin install-apparmor` CLI runs
-   a post-write syntax check via `apparmor_parser --preprocess` so
-   version-specific parse failures surface at install time with the
-   parser's error message, not at load time as a cryptic
-   `apparmor_parser -r` failure.
+   a post-write syntax check via `apparmor_parser -QT` (skip-kernel-
+   load + skip-cache) so version-specific parse failures surface at
+   install time with the parser's error message, not at load time as
+   a cryptic `apparmor_parser -r` failure.
 
 2. **`internal/apparmor/` Go package** — `//go:embed blockyard` into
    `var Profile []byte`. Exported `DefaultInstallPath` constant
@@ -283,10 +283,8 @@ profile blockyard /usr/{bin,local/bin}/blockyard
     # the `userns` grant.
     /usr/{bin,local/bin}/blockyard ix,
     /usr/bin/bwrap ix,
-    /usr/{bin,local/bin}/R*   ix,
-    /usr/{bin,local/bin}/Rscript ix,
-    /opt/R/*/bin/R*  ix,
-    /opt/R/*/bin/Rscript ix,
+    /usr/{bin,local/bin}/R* ix,  # matches R, Rscript, Rdevel, …
+    /opt/R/*/bin/R* ix,          # rig-managed R installations
 }
 ```
 
@@ -377,18 +375,19 @@ disabling kernel.apparmor_restrict_unprivileged_userns host-wide.`,
     return cmd
 }
 
-// validateApparmorProfile runs apparmor_parser in preprocess-only
-// mode to catch version-specific parse failures at install time.
-// Preprocess doesn't require root and doesn't load the profile — it
-// just exercises the parser. Missing apparmor_parser is not an error;
-// the host simply isn't configured for AppArmor and the load step is
-// a no-op anyway.
+// validateApparmorProfile runs apparmor_parser in syntax-check mode
+// (-Q skip-kernel-load, -T skip-cache) to catch version-specific
+// parse failures at install time. This fully exercises the grammar
+// and binary-policy generation without touching the kernel or the
+// on-disk parser cache. Missing apparmor_parser is not an error;
+// the host simply isn't configured for AppArmor and the load step
+// is a no-op anyway.
 func validateApparmorProfile(target string) error {
     parser, err := exec.LookPath("apparmor_parser")
     if err != nil {
         return nil
     }
-    out, err := exec.Command(parser, "--preprocess", target).CombinedOutput()
+    out, err := exec.Command(parser, "-QT", target).CombinedOutput()
     if err != nil {
         return fmt.Errorf("%s: %w (output: %s)",
             parser, err, strings.TrimSpace(string(out)))
@@ -678,14 +677,16 @@ func CheckRedisAuth(cfg *config.RedisConfig) Result {
                 "read/modify session state, flush the registry, or DoS the service. " +
                 "Configure `requirepass` in redis.conf or enable ACLs.",
             Category: "redis"}
-    case strings.HasPrefix(reply, "-NOAUTH"), strings.HasPrefix(reply, "-WRONGPASS"),
-         strings.HasPrefix(reply, "-NOPERM"):
+    case strings.HasPrefix(reply, "-NOAUTH"):
         return Result{Name: name, Severity: SeverityOK,
             Message: "Redis requires authentication", Category: "redis"}
     default:
-        // Includes generic `-ERR ...` (protocol errors, MAXCLIENTS,
-        // etc.) — unclear state, surface as Info so the operator can
-        // investigate rather than a false OK.
+        // Includes generic `-ERR ...` (protocol errors, MAXCLIENTS),
+        // and surprise ACL replies like `-WRONGPASS` / `-NOPERM`
+        // that shouldn't fire for an unauthenticated PING but would
+        // indicate the probe is hitting a weirdly-configured server.
+        // Surface as Info so the operator investigates rather than a
+        // false OK.
         return Result{Name: name, Severity: SeverityInfo,
             Message: fmt.Sprintf("Redis responded with unexpected reply to unauthenticated PING: %q", reply),
             Category: "redis"}
@@ -783,7 +784,10 @@ An AppArmor profile loaded on the host VM doesn't attach to
 processes inside the privileged container, so the rootless-with-
 profile behaviour can't be observed there.
 
-Second, add a standalone `apparmor-smoke` job on the VM directly:
+Second, add a standalone `apparmor-smoke` job on the VM directly.
+Also add `apparmor-smoke` to the `workflow_dispatch.inputs.job`
+choice enum at the top of `ci.yml` so the job is dispatchable by
+name (`gh workflow run ci.yml -f job=apparmor-smoke`):
 
 ```yaml
 apparmor-smoke:
@@ -969,7 +973,12 @@ Modified:
   mode description — mis-documented as a valid mode; rewrite the
   several "wait for phase 3-9's `--userns`+`newuidmap`" forward-
   references (lines ~101, 423-432, 3014-3015) to point at the
-  cgroup-delegation mechanism this phase actually delivers)
+  cgroup-delegation mechanism this phase actually delivers; retitle
+  the stale "Step 9: Phase 3-9 (zygote workers) forward compatibility"
+  section (line 2377) to "Step 9: v4 zygote-worker forward
+  compatibility" — phase 3-9 is no longer the zygote-workers phase,
+  but the three contracts that section documents are still v4
+  prerequisites)
 
 Unchanged (explicit):
 - `internal/backend/process/bwrap_exec.go` (#305 shim stays)
