@@ -181,12 +181,15 @@ func checkVaultSecretIDFile(cfg *config.Config) Result {
 			Name:     name,
 			Severity: SeverityError,
 			Message: fmt.Sprintf(
-				"vault.secret_id_file %q has mode %#o (group/other-accessible); run `chmod 0400 %s`",
+				"vault.secret_id_file %q has mode %#o (group/other-accessible); clear group and other bits (e.g. `chmod 0400 %s` or 0600)",
 				path, mode, path),
 			Category: category,
 		}
 	}
 
+	// info.Sys() returns *syscall.Stat_t on Linux; on non-Linux GOOS the
+	// assertion fails and we skip the uid check. Blockyard targets Linux
+	// in production, so this branch is effectively always taken.
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if ok {
 		euid := uint32(os.Geteuid()) //nolint:gosec // G115: Geteuid is non-negative on Linux

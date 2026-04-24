@@ -76,7 +76,7 @@ func appRoleLogin(ctx context.Context, httpClient *http.Client, addr, roleID, se
 type AppRoleAuth struct {
 	addr         string
 	roleID       string
-	secretIDFile string // empty → read BLOCKYARD_VAULT_SECRET_ID once at Login time
+	secretIDFile string // empty → read BLOCKYARD_VAULT_SECRET_ID from the process environment
 	httpClient   *http.Client
 
 	token    atomic.Value // string
@@ -164,7 +164,7 @@ func (a *AppRoleAuth) doLogin(ctx context.Context) error {
 	a.nextAt = time.Now().Add(ttl - reloginBuffer)
 	a.timerMu.Unlock()
 
-	slog.Debug("vault AppRole login succeeded", "ttl", ttl)
+	slog.Info("vault AppRole login succeeded", "ttl", ttl)
 	return nil
 }
 
