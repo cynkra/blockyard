@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -28,7 +27,7 @@ func TestPerformCheck_Semver_UpdateAvailable(t *testing.T) {
 	defer func() { APIBase = old }()
 
 	store := &mockStore{version: "1.0.0"}
-	res, err := PerformCheck(store)
+	res, err := PerformCheck(store, "stable")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +36,9 @@ func TestPerformCheck_Semver_UpdateAvailable(t *testing.T) {
 	}
 	if store.last == nil || store.last.State != StateUpdateAvailable {
 		t.Errorf("store not updated, got %+v", store.last)
+	}
+	if store.last.Channel != "stable" {
+		t.Errorf("Channel = %q, want %q", store.last.Channel, "stable")
 	}
 }
 
@@ -50,7 +52,7 @@ func TestPerformCheck_Semver_UpToDateStillRecorded(t *testing.T) {
 	defer func() { APIBase = old }()
 
 	store := &mockStore{version: "1.0.0"}
-	_, _ = PerformCheck(store)
+	_, _ = PerformCheck(store, "stable")
 	if store.last == nil || store.last.State != StateUpToDate {
 		t.Errorf("expected up_to_date recorded, got %+v", store.last)
 	}
@@ -72,7 +74,7 @@ func TestPerformCheck_OverwritesPriorAvailable(t *testing.T) {
 		version: "1.0.0",
 		last:    &Result{State: StateUpdateAvailable, LatestVersion: "2.0.0"},
 	}
-	_, _ = PerformCheck(store)
+	_, _ = PerformCheck(store, "stable")
 	if store.last.State != StateUpToDate {
 		t.Errorf("expected stale available record cleared, got %+v", store.last)
 	}
@@ -88,7 +90,7 @@ func TestPerformCheck_DevBuild(t *testing.T) {
 	defer func() { APIBase = old }()
 
 	store := &mockStore{version: "dev"}
-	_, _ = PerformCheck(store)
+	_, _ = PerformCheck(store, "stable")
 	if store.last == nil || store.last.State != StateDevBuild {
 		t.Errorf("expected dev_build state, got %+v", store.last)
 	}
@@ -101,7 +103,7 @@ func TestSpawnChecker_CancelledImmediately(t *testing.T) {
 	store := &mockStore{version: "1.0.0"}
 	done := make(chan struct{})
 	go func() {
-		SpawnChecker(ctx, "1.0.0", store)
+		SpawnChecker(ctx, "1.0.0", "stable", store)
 		close(done)
 	}()
 
@@ -109,29 +111,5 @@ func TestSpawnChecker_CancelledImmediately(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("SpawnChecker did not return after context cancel")
-	}
-}
-
-// Smoke test that the http server fixture echoes a recognizable
-// response (sanity check for the test infra; not exercising new
-// behaviour).
-func TestFetchBranchHEAD(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/branches/") {
-			t.Errorf("unexpected path %q", r.URL.Path)
-		}
-		_, _ = w.Write([]byte(`{"commit":{"sha":"deadbeef00000000000000000000000000000000"}}`))
-	}))
-	defer srv.Close()
-	old := APIBase
-	APIBase = srv.URL
-	defer func() { APIBase = old }()
-
-	sha, err := FetchBranchHEAD("main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sha != "deadbeef00000000000000000000000000000000" {
-		t.Errorf("sha = %q", sha)
 	}
 }

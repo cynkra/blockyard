@@ -76,7 +76,7 @@ func startUpdateCheck() {
 	ch := make(chan updateResult, 1)
 	updateNoticeState.ch = ch
 	go func() {
-		res, err := update.CheckLatest(version)
+		res, err := update.CheckLatest(version, update.InferChannel(version))
 		ch <- updateResult{result: res, err: err}
 	}()
 }

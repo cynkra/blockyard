@@ -36,8 +36,27 @@
         {{end}}
     </div>
     <div class="flex items-center gap-2 shrink-0">
+        <div x-data="dropdown({value: '{{.Channel}}'})" class="dd w-44"
+             @click.outside="open = false"
+             title="Release channel to check and update from">
+            <button type="button" class="dd-trigger" @click="toggle()" @keydown="onKeydown($event)"
+                    role="combobox" aria-haspopup="listbox" :aria-expanded="open">
+                <span x-text="label" class="dd-label"></span>
+            </button>
+            <input type="hidden" id="admin-update-channel" name="channel" x-ref="input" :value="value"
+                   hx-post="/ui/admin/update/check"
+                   hx-trigger="change"
+                   hx-target="#admin-version-card"
+                   hx-swap="innerHTML">
+            <div x-ref="menu" x-show="open" x-cloak x-transition.opacity.duration.100ms class="dd-menu" role="listbox"
+                 @mousedown.prevent="selectClosest($event)">
+                <div role="option" class="dd-item" data-value="stable">Stable releases</div>
+                <div role="option" class="dd-item" data-value="main">Main (development)</div>
+            </div>
+        </div>
         <button class="btn btn-soft btn-sm"
                 hx-post="/ui/admin/update/check"
+                hx-include="#admin-update-channel"
                 hx-target="#admin-version-card"
                 hx-swap="innerHTML"
                 hx-disabled-elt="this">
@@ -46,6 +65,7 @@
         {{if .UpdateAvailable}}
         <button class="btn btn-primary btn-sm"
                 hx-post="/ui/admin/update/start"
+                hx-include="#admin-update-channel"
                 hx-target="#admin-version-card"
                 hx-swap="innerHTML"
                 hx-disabled-elt="this"
