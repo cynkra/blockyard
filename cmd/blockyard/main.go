@@ -36,9 +36,7 @@ import (
 	"github.com/cynkra/blockyard/internal/preflight"
 	"github.com/cynkra/blockyard/internal/proxy"
 	"github.com/cynkra/blockyard/internal/redisstate"
-	"github.com/cynkra/blockyard/internal/registry"
 	"github.com/cynkra/blockyard/internal/server"
-	"github.com/cynkra/blockyard/internal/session"
 	"github.com/cynkra/blockyard/internal/telemetry"
 	"github.com/cynkra/blockyard/internal/update"
 )
@@ -449,38 +447,12 @@ func main() {
 	mode := config.ResolveSessionStoreMode(cfg)
 	registryTTL := 3 * cfg.Proxy.HealthInterval.Duration
 	idleTTL := cfg.Proxy.SessionIdleTTL.Duration
-	var pgSessions *session.PostgresStore
-	var pgWorkers *server.PostgresWorkerMap
-	switch mode {
-	case config.SessionStoreMemory:
-		srv.Registry = registry.NewMemoryRegistry()
-		srv.Workers = server.NewMemoryWorkerMap()
-		srv.Sessions = session.NewMemoryStore()
-	case config.SessionStoreRedis:
-		srv.Registry = registry.NewRedisRegistry(rc, registryTTL)
-		srv.Workers = server.NewRedisWorkerMap(rc, serverID)
-		srv.Sessions = session.NewRedisStore(rc, idleTTL)
-	case config.SessionStorePostgres:
-		srv.Registry = registry.NewPostgresRegistry(database.DB, registryTTL)
-		pgWorkers = server.NewPostgresWorkerMap(database.DB, serverID)
-		srv.Workers = pgWorkers
-		pgSessions = session.NewPostgresStore(database.DB, idleTTL)
-		srv.Sessions = pgSessions
-	case config.SessionStoreLayered:
-		srv.Registry = registry.NewLayeredRegistry(
-			registry.NewPostgresRegistry(database.DB, registryTTL),
-			registry.NewRedisRegistry(rc, registryTTL),
-		)
-		pgWorkers = server.NewPostgresWorkerMap(database.DB, serverID)
-		srv.Workers = server.NewLayeredWorkerMap(
-			pgWorkers,
-			server.NewRedisWorkerMap(rc, serverID),
-		)
-		pgSessions = session.NewPostgresStore(database.DB, idleTTL)
-		srv.Sessions = session.NewLayeredStore(
-			pgSessions, session.NewRedisStore(rc, idleTTL),
-		)
-	}
+	stores := buildSharedStateStores(mode, rc, database.DB, serverID, registryTTL, idleTTL)
+	srv.Registry = stores.Registry
+	srv.Workers = stores.Workers
+	srv.Sessions = stores.Sessions
+	pgSessions := stores.PGSessions
+	pgWorkers := stores.PGWorkers
 	if rc != nil {
 		srv.RedisClient = rc
 		slog.Info("using redis for shared state",
