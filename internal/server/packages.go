@@ -13,6 +13,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/backend"
 	"github.com/cynkra/blockyard/internal/buildercache"
+	"github.com/cynkra/blockyard/internal/bundle"
 	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/pakcache"
 	"github.com/cynkra/blockyard/internal/pkgstore"
@@ -156,7 +157,7 @@ func (srv *Server) runRuntimeInstall(
 
 	reposJSON, _ := json.Marshal(p.Repositories)
 
-	rScript := `
+	rScript := bundle.LockfileInstallWithRetryR + `
 library(pak, lib.loc = "/pak")
 Sys.setenv(PKG_CACHE_DIR = "/pak-cache")
 
@@ -206,10 +207,7 @@ if (rc != 0L) {
 }
 
 # ── Phase 3: Install store misses ────────────────────────────────
-pak::lockfile_install(
-  file.path(staging, "pak.lock"),
-  lib = staging
-)
+install_with_retry(file.path(staging, "pak.lock"), staging)
 
 # ── Phase 4: Ingest newly installed packages into store ──────────
 rc <- system2("/tools/by-builder", c(
