@@ -14,6 +14,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/testutil"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -53,12 +54,17 @@ func setupRegistryTemplate(base string) error {
 		return fmt.Errorf("create template: %w", err)
 	}
 
+	// Serialize migration 001's CREATE ROLE against parallel test
+	// packages — pg_authid is cluster-wide (#317).
+	unlock := testutil.AcquirePGMigrationLockMain(base)
 	tplURL := replacePGName(base, pgRegistryTemplate)
 	tpl, err := db.Open(config.DatabaseConfig{Driver: "postgres", URL: tplURL})
 	if err != nil {
+		unlock()
 		return fmt.Errorf("migrate template: %w", err)
 	}
 	tpl.Close()
+	unlock()
 
 	admin.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '" + pgRegistryTemplate + "'")
 	admin.Exec("ALTER DATABASE " + pgRegistryTemplate + " WITH ALLOW_CONNECTIONS = false")

@@ -11,9 +11,7 @@ func TestEnsureBlockyardAdmin_CreatesRole(t *testing.T) {
 	// test in this run (or a previous invocation) may have left
 	// blockyard_admin behind. Idempotent bootstrap handles both
 	// states — the post-condition check below is what matters.
-	if err := EnsureBlockyardAdmin(context.Background(), d); err != nil {
-		t.Fatalf("EnsureBlockyardAdmin: %v", err)
-	}
+	bootstrapAdmin(t, d)
 
 	// Role now exists with the expected attributes.
 	var rolcreaterole, rolinherit bool
@@ -58,9 +56,7 @@ func TestEnsureBlockyardAdmin_CreatesRole(t *testing.T) {
 func TestEnsureBlockyardAdmin_Idempotent(t *testing.T) {
 	d := boardStoragePgDB(t)
 	for i := 0; i < 3; i++ {
-		if err := EnsureBlockyardAdmin(context.Background(), d); err != nil {
-			t.Fatalf("run %d: %v", i, err)
-		}
+		bootstrapAdmin(t, d)
 	}
 	var count int
 	if err := d.QueryRowContext(context.Background(),
