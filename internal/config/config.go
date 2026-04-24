@@ -326,11 +326,12 @@ func Load(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	meta, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	warnRemovedKeys(data)
+	warnRemovedKeys(meta)
 	migrateDeprecatedFields(&cfg)
 	applyDefaults(&cfg)
 	applyEnvOverrides(&cfg)
@@ -372,21 +373,14 @@ func migrateDeprecatedFields(cfg *Config) {
 	}
 }
 
-// warnRemovedKeys re-parses the raw TOML into a generic map and warns
-// when any config key that used to be valid but has since been removed
-// still appears in the operator's file. Needed because BurntSushi/toml
-// silently ignores unknown keys when unmarshaling into a struct, so a
-// schema-change otherwise lands without a peep.
-func warnRemovedKeys(data []byte) {
-	var raw map[string]any
-	if err := toml.Unmarshal(data, &raw); err != nil {
-		// Load already surfaced the parse error; nothing to do here.
-		return
-	}
-	if vault, ok := raw["vault"].(map[string]any); ok {
-		if _, ok := vault["token_file"]; ok {
-			slog.Warn("config: vault.token_file is deprecated and ignored; remove it from your config")
-		}
+// warnRemovedKeys emits a deprecation warning for any config key that
+// used to be valid but has since been removed. BurntSushi/toml silently
+// ignores unknown keys when decoding into a struct, so a schema change
+// otherwise lands without a peep — we consult the decoder metadata to
+// surface them instead.
+func warnRemovedKeys(meta toml.MetaData) {
+	if meta.IsDefined("vault", "token_file") {
+		slog.Warn("config: vault.token_file is deprecated and ignored; remove it from your config")
 	}
 }
 
