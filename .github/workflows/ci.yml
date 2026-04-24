@@ -522,21 +522,20 @@ jobs:
     if: github.event_name != 'merge_group' && github.event_name != 'push' && inputs.job == ''
     needs: [unit, cli, docker, idp, openbao, pak, process, redis, ui]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
       - uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           merge-multiple: true
-      - name: Enforce 80% coverage threshold
+      - name: Merge coverage profiles
         run: |
           head -1 coverage-unit.out > merged.out
           tail -n +2 -q coverage-*.out | sort -k1,2 -k3,3rn | awk '{k=$1" "$2} !seen[k]++' >> merged.out
-          TOTAL=$(go tool cover -func=merged.out | grep ^total: | awk '{print $3}' | tr -d '%')
-          echo "Total coverage: ${TOTAL}%"
-          if [ "$(echo "$TOTAL < 80" | bc -l)" -eq 1 ]; then
-            echo "::error::Coverage ${TOTAL}% is below 80% threshold"
-            exit 1
-          fi
+      # Counts partial lines (some blocks hit, some not) as misses so
+      # this gate stays a lower bound on codecov's displayed number.
+      # `go tool cover -func` would treat any count>0 block as covered
+      # and drift above codecov.
+      - name: Check test coverage threshold
+        uses: vladopajic/go-test-coverage@v2.18.4
+        with:
+          profile: merged.out
+          threshold-total: 75
