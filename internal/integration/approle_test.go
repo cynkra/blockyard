@@ -318,6 +318,36 @@ func TestAppRoleAuthRunReArmsOnExternalLogin(t *testing.T) {
 	}
 }
 
+func TestAppRoleAuthRunHandlesLoginFailure(t *testing.T) {
+	// When the proactive Login fails (e.g. vault rejects us), Run
+	// marks the component unhealthy and pushes nextAt out by 10s so
+	// the loop retries on a coarse schedule rather than tight-looping.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	t.Setenv("BLOCKYARD_VAULT_SECRET_ID", "s")
+	a := NewAppRoleAuth(srv.URL, "r", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		a.Run(ctx)
+		close(done)
+	}()
+
+	// Initial nextAt is zero so waitUntilNext clamps to 1s. Give Run
+	// time to fire the timer, attempt Login (403), take the error path.
+	time.Sleep(1400 * time.Millisecond)
+	if a.Healthy() {
+		t.Error("Healthy() = true after failed proactive Login")
+	}
+	cancel()
+	<-done
+}
+
 func TestClient403TriggersReloginAndRetries(t *testing.T) {
 	// On the first admin call, vault returns 403; the client must
 	// re-login and retry. The retry succeeds with the fresh token.

@@ -302,12 +302,11 @@ func (a *AppRoleAuth) Run(ctx context.Context) {
 	backoff := 1 * time.Second
 	const maxBackoff = 60 * time.Second
 
-	timer := time.NewTimer(a.waitUntilNext())
-	defer timer.Stop()
-
 	for {
+		timer := time.NewTimer(a.waitUntilNext())
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		case <-timer.C:
 			if err := a.Login(ctx); err != nil {
@@ -322,21 +321,15 @@ func (a *AppRoleAuth) Run(ctx context.Context) {
 			} else {
 				backoff = 1 * time.Second
 			}
-			// Drain the self-kick our own successful Login just emitted
-			// so the next loop iteration doesn't re-arm for no reason.
+			// Drain the self-kick our own Login just emitted (only on
+			// success; on error doLogin returns before kicking). The
+			// next iteration recomputes wait from nextAt either way.
 			select {
 			case <-a.kick:
 			default:
 			}
-			timer.Reset(a.waitUntilNext())
 		case <-a.kick:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(a.waitUntilNext())
+			timer.Stop()
 		}
 	}
 }
