@@ -1,0 +1,77 @@
+name: Merge & upload per-variant Trivy SARIFs
+description: >
+  Download every sarif-* artifact produced by the scan-image action
+  in this run, merge results that share a (ruleId, first-location
+  URI, startLine) key across variants — aggregating the tagged
+  variant names into the alert message — and upload once under a
+  single category. GitHub code scanning dedupes within a category,
+  so this collapses the same libssl/libcurl/... CVE across all
+  variant images into one Security-tab alert that still names every
+  affected variant.
+
+inputs:
+  category:
+    description: SARIF category under which to upload the merged result (e.g. trivy-server, trivy-worker).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: sarif-*
+        path: sarif-input
+        merge-multiple: true
+
+    - name: Merge SARIFs by (ruleId, location)
+      id: merge
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p sarif-output
+        shopt -s nullglob
+        files=(sarif-input/*.sarif)
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "No SARIF artifacts found; skipping upload."
+          echo "uploaded=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        jq -s '
+          (.[0].runs[0] | del(.results)) as $baseRun
+          | [.[] | .runs[] | .results[]?] as $all
+          | ($all | group_by([
+              .ruleId,
+              (.locations[0]?.physicalLocation?.artifactLocation?.uri // ""),
+              (.locations[0]?.physicalLocation?.region?.startLine // 0)
+            ])) as $groups
+          | {
+              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+              version: "2.1.0",
+              runs: [
+                $baseRun + {
+                  results: [
+                    $groups[] | (
+                      ([.[].properties.variant // empty] | unique) as $variants
+                      | (.[0]) + {
+                          message: {
+                            text: (
+                              (.[0].message.text // "")
+                              + (if ($variants | length) > 0
+                                 then " [affects: " + ($variants | join(", ")) + "]"
+                                 else "" end)
+                            )
+                          }
+                        }
+                    )
+                  ]
+                }
+              ]
+            }
+        ' "${files[@]}" > sarif-output/merged.sarif
+        echo "uploaded=true" >> "$GITHUB_OUTPUT"
+
+    - uses: github/codeql-action/upload-sarif@v4
+      if: steps.merge.outputs.uploaded == 'true'
+      with:
+        sarif_file: sarif-output/merged.sarif
+        category: ${{ inputs.category }}
