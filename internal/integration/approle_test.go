@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -424,6 +425,85 @@ func TestAppRoleAuthWrappedReunwrapsAfterRotation(t *testing.T) {
 	}
 	if len(*seen) != 2 || (*seen)[0] != "plain-A" || (*seen)[1] != "plain-B" {
 		t.Errorf("server received %v, want [plain-A plain-B]", *seen)
+	}
+}
+
+func TestAppRoleAuthWrappedUnwrapDecodeErrorIsFatal(t *testing.T) {
+	// sys/wrapping/unwrap returns 200 with a non-JSON body: the
+	// unwrap must error out rather than treat the garbage as a
+	// successful response.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sys/wrapping/unwrap" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not-json"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(srv.URL, "r", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err == nil {
+		t.Fatal("expected Login to fail when unwrap body is malformed JSON")
+	}
+	if a.Healthy() {
+		t.Error("Healthy() = true after decode failure")
+	}
+}
+
+func TestAppRoleAuthWrappedUnwrapEmptyResponseIsFatal(t *testing.T) {
+	// sys/wrapping/unwrap returns 200 with no secret_id. Without this
+	// guard we'd attempt an AppRole login with an empty secret_id,
+	// which is a distinct, more confusing failure mode.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sys/wrapping/unwrap" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{}})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(srv.URL, "r", path).WithSecretIDWrapped(true)
+	err := a.Login(context.Background())
+	if err == nil {
+		t.Fatal("expected Login to fail when unwrap returns empty secret_id")
+	}
+	if !strings.Contains(err.Error(), "empty secret_id") {
+		t.Errorf("error %v does not mention empty secret_id", err)
+	}
+}
+
+func TestAppRoleAuthWrappedUnwrapNetworkErrorIsFatal(t *testing.T) {
+	// Point at a server that has already been closed: httpClient.Do
+	// fails at the transport layer, exercising the dial-error return
+	// path distinct from the non-200-status path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.URL
+	srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret_id")
+	if err := os.WriteFile(path, []byte("wrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAppRoleAuth(addr, "r", path).WithSecretIDWrapped(true)
+	if err := a.Login(context.Background()); err == nil {
+		t.Fatal("expected Login to fail when unwrap cannot reach the server")
 	}
 }
 
