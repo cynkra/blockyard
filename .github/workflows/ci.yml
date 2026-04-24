@@ -197,7 +197,7 @@ jobs:
       # instrumentation those stale entries get merged with fresh
       # entries from packages that did change, producing two block
       # sets for the same source file and a misleadingly low total.
-      - run: go test -count=1 -coverprofile=coverage-unit.out -coverpkg=./internal/...,./cmd/by/...,./cmd/blockyard/... ./internal/... ./cmd/...
+      - run: go test -count=1 -coverprofile=coverage-unit.out -coverpkg=./internal/...,./cmd/by/... ./internal/... ./cmd/...
       - uses: actions/upload-artifact@v7
         with:
           name: coverage-unit
