@@ -1,10 +1,12 @@
 package docker
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/preflight"
 )
 
@@ -54,5 +56,68 @@ func TestCheckMetadataBlocking_WithServerID(t *testing.T) {
 	// and iptables is available.
 	if res.Severity == preflight.SeverityError {
 		t.Errorf("unexpected Error severity: %s", res.Message)
+	}
+}
+
+// TestCheckRedisOnServiceNetwork_MissingConfig hits the early OK-return
+// branch when RedisURL is empty — the check is skipped with a "not
+// configured" message. This does not require a Docker client.
+func TestCheckRedisOnServiceNetwork_MissingConfig(t *testing.T) {
+	d := &DockerBackend{config: &config.DockerConfig{}}
+	res := checkRedisOnServiceNetwork(context.Background(), d, PreflightDeps{RedisURL: ""})
+	if res.Severity != preflight.SeverityOK {
+		t.Errorf("severity = %v, want OK when unconfigured", res.Severity)
+	}
+}
+
+// TestCheckRedisOnServiceNetwork_ParseError hits the "parse error"
+// branch when the URL is malformed — the function returns OK with a
+// skip message rather than an error.
+func TestCheckRedisOnServiceNetwork_ParseError(t *testing.T) {
+	d := &DockerBackend{config: &config.DockerConfig{ServiceNetwork: "svc-net"}}
+	res := checkRedisOnServiceNetwork(context.Background(), d,
+		PreflightDeps{RedisURL: "::::not-a-url"})
+	if res.Severity != preflight.SeverityOK {
+		t.Errorf("severity = %v, want OK on parse error", res.Severity)
+	}
+	if res.Category != "docker" {
+		t.Errorf("category = %q", res.Category)
+	}
+}
+
+// TestCheckRedisOnServiceNetwork_EmptyHost hits the "no host" branch
+// where a URL parses but has no hostname (e.g. scheme-only).
+func TestCheckRedisOnServiceNetwork_EmptyHost(t *testing.T) {
+	d := &DockerBackend{config: &config.DockerConfig{ServiceNetwork: "svc-net"}}
+	res := checkRedisOnServiceNetwork(context.Background(), d,
+		PreflightDeps{RedisURL: "redis://"})
+	if res.Severity != preflight.SeverityOK {
+		t.Errorf("severity = %v, want OK when URL has no host", res.Severity)
+	}
+}
+
+// TestCleanupOrphanResources_NoOpReturnsNil exercises the trivial
+// public CleanupOrphanResources method, covering the 0% block.
+func TestCleanupOrphanResources_NoOpReturnsNil(t *testing.T) {
+	d := &DockerBackend{
+		runCmd: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	if err := d.CleanupOrphanResources(context.Background()); err != nil {
+		t.Errorf("CleanupOrphanResources = %v, want nil", err)
+	}
+}
+
+// TestCheckRVersion_AlwaysNil covers the trivial CheckRVersion method
+// on DockerBackend — the docker backend selects R via image tag and
+// always returns nil.
+func TestCheckRVersion_AlwaysNil(t *testing.T) {
+	d := &DockerBackend{}
+	if err := d.CheckRVersion("4.5.0"); err != nil {
+		t.Errorf("CheckRVersion = %v, want nil", err)
+	}
+	if err := d.CheckRVersion(""); err != nil {
+		t.Errorf("CheckRVersion(\"\") = %v, want nil", err)
 	}
 }
