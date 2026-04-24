@@ -296,6 +296,11 @@ func TestReadyzWithVaultPass(t *testing.T) {
 	if checks["vault"] != "pass" {
 		t.Errorf("vault = %v, want pass", checks["vault"])
 	}
+	// Deprecated alias — both keys reflect the same status during the
+	// openbao → vault transition window.
+	if checks["openbao"] != "pass" {
+		t.Errorf("openbao (deprecated alias) = %v, want pass", checks["openbao"])
+	}
 }
 
 func TestReadyzWithVaultFail(t *testing.T) {
@@ -329,6 +334,9 @@ func TestReadyzWithVaultFail(t *testing.T) {
 	}
 	if checks["vault"] != "fail" {
 		t.Errorf("vault = %v, want fail", checks["vault"])
+	}
+	if checks["openbao"] != "fail" {
+		t.Errorf("openbao (deprecated alias) = %v, want fail", checks["openbao"])
 	}
 }
 
