@@ -50,16 +50,28 @@ async function loginAndOpen(
   return page;
 }
 
+// #status re-renders through Shiny's reactive chain, which can lag
+// several seconds behind the click on a loaded CI runner. The default
+// 5 s assertion budget races the prior action's trailing message
+// (e.g. a saveBoard after listBoards still shows "listed boards ..."
+// until the save's render flushes). Give each wait 15 s so CI load
+// spikes don't manifest as status-stuck flakes.
+const STATUS_TIMEOUT = 15_000;
+
 async function saveBoard(page: Page, boardId: string, data: string) {
   await page.fill("#board_id", boardId);
   await page.fill("#data", data);
   await page.click("#save");
-  await expect(page.locator("#status")).toContainText(`saved ${boardId}`);
+  await expect(page.locator("#status")).toContainText(`saved ${boardId}`, {
+    timeout: STATUS_TIMEOUT,
+  });
 }
 
 async function listBoards(page: Page): Promise<string> {
   await page.click("#list");
-  await expect(page.locator("#status")).toContainText("listed boards");
+  await expect(page.locator("#status")).toContainText("listed boards", {
+    timeout: STATUS_TIMEOUT,
+  });
   // Return the rendered text inside the boards table for negative
   // assertions (doesn't matter whether the table is empty-HTML or
   // absent; .innerText gives "" either way).
