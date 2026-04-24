@@ -2,7 +2,6 @@ package bundle
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/cynkra/blockyard/internal/backend"
 	mockmock "github.com/cynkra/blockyard/internal/backend/mock"
-	"github.com/cynkra/blockyard/internal/manifest"
 	"github.com/cynkra/blockyard/internal/pkgstore"
 	"github.com/cynkra/blockyard/internal/task"
 	"github.com/cynkra/blockyard/internal/telemetry"
@@ -339,21 +337,6 @@ func TestSpawnRestore_NilMetricsStillSucceeds(t *testing.T) {
 	<-doneCh
 	if s, _ := tasks.Status("task-1"); s != task.Completed {
 		t.Errorf("task status = %d, want Completed", s)
-	}
-}
-
-// writeManifestFile is a helper for tests that need an unpacked bundle
-// with a specific manifest layout (e.g., bare-scripts by omitting it).
-func writeManifestFile(t *testing.T, path string) {
-	t.Helper()
-	m := manifest.Manifest{
-		Version:  1,
-		RVersion: "4.4.2",
-		Metadata: manifest.Metadata{AppMode: "shiny", Entrypoint: "app.R"},
-	}
-	data, _ := json.Marshal(m)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
 	}
 }
 
