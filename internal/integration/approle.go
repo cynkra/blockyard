@@ -194,9 +194,13 @@ func (a *AppRoleAuth) resolveSecretID() (string, error) {
 // Run blocks until ctx is cancelled, re-logging in shortly before each
 // token expires. Failed re-logins mark the component unhealthy but do
 // not exit the loop — a later retry (or a 403-driven retry via Login)
-// can recover. Backoff is simple and short because the 403-retry path
-// on admin calls provides the actual recovery signal.
+// can recover. Retries use exponential backoff (1s → 60s cap) because
+// the 403-retry path on admin calls provides the actual recovery signal,
+// so the proactive loop only needs to keep trying without flooding vault.
 func (a *AppRoleAuth) Run(ctx context.Context) {
+	backoff := 1 * time.Second
+	const maxBackoff = 60 * time.Second
+
 	for {
 		a.timerMu.Lock()
 		wait := time.Until(a.nextAt)
@@ -215,14 +219,16 @@ func (a *AppRoleAuth) Run(ctx context.Context) {
 		}
 
 		if err := a.Login(ctx); err != nil {
-			slog.Warn("vault AppRole re-login failed", "error", err)
-			// On failure, retry sooner but not in a tight loop. The
-			// proactive timer isn't the load-bearing recovery path; if
-			// an admin call 403s in the meantime, that call re-logs in
-			// through the same singleflight and kicks nextAt forward.
+			slog.Warn("vault AppRole re-login failed", "error", err, "retry_in", backoff)
+			// On failure, retry with exponential backoff. If an admin
+			// call 403s in the meantime, that call re-logs in through
+			// the same singleflight and kicks nextAt forward.
 			a.timerMu.Lock()
-			a.nextAt = time.Now().Add(10 * time.Second)
+			a.nextAt = time.Now().Add(backoff)
 			a.timerMu.Unlock()
+			backoff = min(backoff*2, maxBackoff)
+		} else {
+			backoff = 1 * time.Second
 		}
 	}
 }
