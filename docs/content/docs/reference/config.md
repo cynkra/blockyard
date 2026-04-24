@@ -173,13 +173,80 @@ max_bundle_size       = 104857600
 driver = "sqlite"
 path   = "/data/db/blockyard.db"
 # url  = ""   # PostgreSQL connection string (when driver = "postgres")
+
+# Vault-managed Postgres credentials (optional; postgres only):
+# vault_mount = "database"
+# vault_role  = "blockyard_admin"
 ```
 
 | Field | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `driver` | `string` | `sqlite` | No | Database driver: `sqlite` or `postgres` |
 | `path` | `path` | `/data/db/blockyard.db` | When `driver = "sqlite"` | Path to the SQLite database file (created if missing). The parent directory must be writable. |
-| `url` | `string` | — | When `driver = "postgres"` | PostgreSQL connection string (e.g. `postgres://user:pass@host/dbname`) |
+| `url` | `string` | — | When `driver = "postgres"` | PostgreSQL connection string (e.g. `postgres://user:pass@host/dbname`). Userinfo is ignored when `vault_role` is set. |
+| `vault_mount` | `string` | `database` | No | Vault database secrets-engine mount path. Requires `[openbao]` and `driver = "postgres"`. |
+| `vault_role` | `string` | — | No | Vault static-role name. When set, Blockyard reads `{vault_mount}/static-creds/{vault_role}` at startup and uses those credentials instead of any user/password in `url`. Requires `[openbao]` and `driver = "postgres"`. |
+
+### Vault-managed Postgres credentials
+
+When `database.vault_role` is set, Blockyard obtains its Postgres
+credentials from OpenBao's database secrets engine on every startup
+and whenever the cached password stops working. The role's password
+is owned by OpenBao (rotated on the schedule the operator configures
+on the role), not by the token that created the lease — so Blockyard
+restarts, deploy pipelines, and token renewals do not affect database
+access.
+
+One-time operator setup:
+
+1. Create a PostgreSQL role for Blockyard with the privileges it needs
+   (at minimum `LOGIN` plus `CREATE` and `USAGE` on the target
+   database). A typical setup uses a dedicated `blockyard_admin` role:
+
+   ```sql
+   CREATE ROLE blockyard_admin LOGIN PASSWORD '<temp>' CREATEROLE;
+   GRANT ALL PRIVILEGES ON DATABASE blockyard TO blockyard_admin;
+   ```
+
+2. In OpenBao, register the role as a static-role on the database
+   secrets engine. This tells OpenBao to adopt the role and manage
+   its password:
+
+   ```sh
+   bao write database/static-roles/blockyard_admin \
+       db_name=postgresql \
+       username=blockyard_admin \
+       rotation_period=24h
+   ```
+
+   OpenBao immediately rotates the password; subsequent reads of
+   `database/static-creds/blockyard_admin` return the current one.
+
+3. Grant Blockyard's AppRole policy read access to the static-creds
+   endpoint:
+
+   ```hcl
+   path "database/static-creds/blockyard_admin" {
+     capabilities = ["read"]
+   }
+   ```
+
+4. Configure Blockyard:
+
+   ```toml
+   [database]
+   driver     = "postgres"
+   url        = "postgres://postgres.internal/blockyard?sslmode=verify-full"
+   vault_role = "blockyard_admin"
+   ```
+
+   The `url` does not need (and should not include) a username or
+   password — Blockyard injects the vault-issued credentials on every
+   connection.
+
+At runtime, Blockyard re-reads the static-creds endpoint on any
+Postgres authentication failure, so an out-of-band password rotation
+heals automatically on the next health poll.
 
 ## `[proxy]`
 
