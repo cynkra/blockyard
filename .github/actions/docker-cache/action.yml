@@ -86,34 +86,32 @@ runs:
           <(docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
               | grep -v '<none>' | sort -u))
 
-        if [ -z "$changed" ]; then
-          echo "No new images pulled"
-          echo "skip=true" >> "$GITHUB_OUTPUT"
-          exit 0
+        if [ -n "$changed" ]; then
+          # Extract just the repo:tag for saving.
+          new=$(echo "$changed" | awk '{print $1}')
+
+          mkdir -p /tmp/docker-cache
+
+          # Evict stale versions: when alpine:3.24 is pulled, remove
+          # any existing alpine__*.tar.zst tarballs (e.g. alpine:3.23).
+          declare -A seen
+          while IFS= read -r img; do
+            # Skip locally built images — only cache images pulled from
+            # a registry (they have RepoDigests; built images don't).
+            digests=$(docker image inspect --format '{{len .RepoDigests}}' "$img" 2>/dev/null) || continue
+            [ "$digests" = "0" ] && continue
+            id=$(docker image inspect --format '{{.Id}}' "$img" 2>/dev/null) || continue
+            [ "${seen[$id]+_}" ] && continue
+            seen[$id]=1
+            repo=$(echo "${img%%:*}" | tr '/' '-')
+            rm -f /tmp/docker-cache/"${repo}"__*.tar.zst
+            safe="${repo}__${img#*:}"
+            echo "Caching $img"
+            docker save "$img" | zstd -T0 -3 > "/tmp/docker-cache/${safe}.tar.zst"
+          done <<< "$new"
+        else
+          echo "No new images pulled — refreshing existing cache entry"
         fi
-
-        # Extract just the repo:tag for saving.
-        new=$(echo "$changed" | awk '{print $1}')
-
-        mkdir -p /tmp/docker-cache
-
-        # Evict stale versions: when alpine:3.24 is pulled, remove
-        # any existing alpine__*.tar.zst tarballs (e.g. alpine:3.23).
-        declare -A seen
-        while IFS= read -r img; do
-          # Skip locally built images — only cache images pulled from a
-          # registry (they have RepoDigests; built images don't).
-          digests=$(docker image inspect --format '{{len .RepoDigests}}' "$img" 2>/dev/null) || continue
-          [ "$digests" = "0" ] && continue
-          id=$(docker image inspect --format '{{.Id}}' "$img" 2>/dev/null) || continue
-          [ "${seen[$id]+_}" ] && continue
-          seen[$id]=1
-          repo=$(echo "${img%%:*}" | tr '/' '-')
-          rm -f /tmp/docker-cache/"${repo}"__*.tar.zst
-          safe="${repo}__${img#*:}"
-          echo "Caching $img"
-          docker save "$img" | zstd -T0 -3 > "/tmp/docker-cache/${safe}.tar.zst"
-        done <<< "$new"
 
         # Skip save if no tarballs exist (e.g. all images were locally built).
         if ! ls /tmp/docker-cache/*.tar.zst >/dev/null 2>&1; then
@@ -122,7 +120,11 @@ runs:
           exit 0
         fi
 
-        # Hash the full set of cached tarballs (existing + new).
+        # Hash the full set of cached tarballs (existing + new). Save
+        # runs every time tarballs exist — even when nothing new was
+        # pulled — so the entry's access time stays fresh. Without this,
+        # heavy entries get LRU-evicted from the 10 GB repo quota
+        # between runs despite being restored each time (#313).
         hash=$(ls -1 /tmp/docker-cache/*.tar.zst | sort | sha256sum | cut -c1-16)
         echo "hash=$hash" >> "$GITHUB_OUTPUT"
         echo "skip=false" >> "$GITHUB_OUTPUT"
