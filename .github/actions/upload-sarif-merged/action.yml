@@ -1,13 +1,13 @@
 name: Merge & upload per-variant Trivy SARIFs
 description: >
   Download every sarif-* artifact produced by the scan-image action
-  in this run, merge results that share a (ruleId, first-location
-  URI, startLine) key across variants — aggregating the tagged
-  variant names into the alert message — and upload once under a
-  single category. GitHub code scanning dedupes within a category,
-  so this collapses the same libssl/libcurl/... CVE across all
-  variant images into one Security-tab alert that still names every
-  affected variant.
+  in this run, merge results that share a ruleId (CVE ID) across
+  variants and packages into one result, and upload once under a
+  single category. Trivy emits one result per (CVE, package) and
+  writes the image repo into the SARIF location URI, so the same
+  CVE surfaces once per affected package and once per variant; we
+  collapse all of them into a single alert whose message lists
+  every affected package and variant.
 
 inputs:
   category:
@@ -23,7 +23,7 @@ runs:
         path: sarif-input
         merge-multiple: true
 
-    - name: Merge SARIFs by (ruleId, location)
+    - name: Merge SARIFs by ruleId
       id: merge
       shell: bash
       run: |
@@ -36,14 +36,16 @@ runs:
           echo "uploaded=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
+        # Group by ruleId alone: the location URI is per-image
+        # (cynkra/blockyard vs cynkra/blockyard-process) so a
+        # composite key including URI would preserve per-variant
+        # duplicates. Within a variant Trivy also emits one result
+        # per affected package, so grouping on ruleId collapses
+        # both axes at once.
         jq -s '
           (.[0].runs[0] | del(.results)) as $baseRun
           | [.[] | .runs[] | .results[]?] as $all
-          | ($all | group_by([
-              .ruleId,
-              (.locations[0]?.physicalLocation?.artifactLocation?.uri // ""),
-              (.locations[0]?.physicalLocation?.region?.startLine // 0)
-            ])) as $groups
+          | ($all | group_by(.ruleId)) as $groups
           | {
               "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
               version: "2.1.0",
@@ -51,17 +53,31 @@ runs:
                 $baseRun + {
                   results: [
                     $groups[] | (
-                      ([.[].properties.variant // empty] | unique) as $variants
-                      | (.[0]) + {
-                          message: {
-                            text: (
-                              (.[0].message.text // "")
-                              + (if ($variants | length) > 0
-                                 then " [affects: " + ($variants | join(", ")) + "]"
-                                 else "" end)
-                            )
-                          }
+                      ([.[].properties.variant // empty]
+                       | map(select(. != "")) | unique) as $variants
+                      | ([.[].message.text // ""
+                          | capture("Package: (?<p>[^\n]+)\nInstalled Version: (?<v>[^\n]+)")?]
+                         | map("\(.p)@\(.v)") | unique) as $pkgs
+                      | ((.[0].message.text // "")
+                         | capture("(?s)^.*?(?<rest>Vulnerability .*)").rest
+                         // (.[0].message.text // "")) as $vuln
+                      | (.[0])
+                      | del(.properties.variant)
+                      | .message = {
+                          text: (
+                            (if ($pkgs | length) > 0
+                             then "Affected packages:\n  - " + ($pkgs | join("\n  - ")) + "\n\n"
+                             else "" end)
+                            + $vuln
+                            + (if ($variants | length) > 0
+                               then "\n\n[affects variants: " + ($variants | join(", ")) + "]"
+                               else "" end)
+                          )
                         }
+                      | .properties.variants = $variants
+                      | (if (.locations[0]?.message?.text) and ($pkgs | length) > 1
+                         then .locations[0].message.text = "Affects \($pkgs | length) packages (see alert details)"
+                         else . end)
                     )
                   ]
                 }
