@@ -286,6 +286,7 @@ type VaultConfig struct {
 	TokenTTL             Duration        `toml:"token_ttl"`                // default: 1h
 	JWTAuthPath          string          `toml:"jwt_auth_path"`            // default: "jwt"
 	TokenFile            string          `toml:"token_file"`               // persisted vault token path; default: "/data/.vault-token"
+	CACert               string          `toml:"ca_cert"`                  // path to PEM file; when set, replaces system CA trust for vault HTTP calls
 	SkipPolicyScopeCheck bool            `toml:"skip_policy_scope_check"`
 	Services             []ServiceConfig `toml:"services"`
 }

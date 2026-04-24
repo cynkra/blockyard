@@ -411,6 +411,7 @@ jwt_auth_path = "jwt"
 | `token_ttl` | `duration` | `1h` | No | TTL for issued credential tokens |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in the vault |
 | `token_file` | `string` | `/data/.vault-token` | No | Path where the persisted AppRole token is stored. The parent directory must be writable. |
+| `ca_cert` | `string` | — | No | Path to a PEM-encoded CA bundle used to verify the vault server's TLS certificate. When set, replaces the system CA bundle for vault HTTP calls (matches `VAULT_CACERT` semantics). Overridable via `BLOCKYARD_VAULT_CA_CERT`. |
 | `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during vault bootstrap. Useful when the vault policy format differs from what Blockyard expects. |
 
 > [!TIP]

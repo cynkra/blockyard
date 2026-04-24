@@ -58,9 +58,12 @@ func AppRoleLogin(ctx context.Context, httpClient *http.Client, addr, roleID, se
 
 // InitAppRole authenticates to vault using AppRole. It first tries
 // a persisted token (renew-self), then falls back to AppRole login with
-// secret_id from the environment.
-func InitAppRole(ctx context.Context, addr, roleID, tokenFile string) (token string, ttl time.Duration, err error) {
-	httpClient := &http.Client{}
+// secret_id from the environment. Pass nil for httpClient to use the
+// default (system CA trust, 10s timeout).
+func InitAppRole(ctx context.Context, httpClient *http.Client, addr, roleID, tokenFile string) (token string, ttl time.Duration, err error) {
+	if httpClient == nil {
+		httpClient = DefaultHTTPClient()
+	}
 
 	// 1. Try persisted token.
 	persisted, err := ReadTokenFile(tokenFile)
