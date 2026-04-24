@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,10 +75,11 @@ func appRoleLogin(ctx context.Context, httpClient *http.Client, addr, roleID, se
 // trigger an on-demand re-login through the same singleflight-coalesced
 // path.
 type AppRoleAuth struct {
-	addr         string
-	roleID       string
-	secretIDFile string // empty → read BLOCKYARD_VAULT_SECRET_ID from the process environment
-	httpClient   *http.Client
+	addr            string
+	roleID          string
+	secretIDFile    string // empty → read BLOCKYARD_VAULT_SECRET_ID from the process environment
+	secretIDWrapped bool   // when true, file contents are a response-wrap token to unwrap at login time
+	httpClient      *http.Client
 
 	token    atomic.Value // string
 	expireAt atomic.Value // time.Time — zero until first successful login
@@ -88,6 +90,14 @@ type AppRoleAuth struct {
 	// timerMu guards the scheduling state updated from both Login and Run.
 	timerMu sync.Mutex
 	nextAt  time.Time
+
+	// Wrap-unwrap cache. Wrap tokens are single-use, so re-unwrapping
+	// the same bytes fails — we cache the plaintext keyed by the SHA-256
+	// of the file contents and only re-unwrap when the file changes.
+	// Accessed only from resolveSecretID, which runs under the "login"
+	// singleflight, so no lock is needed.
+	unwrapHash      [sha256.Size]byte
+	unwrapPlaintext string
 }
 
 // NewAppRoleAuth constructs an AppRoleAuth. secretIDFile may be empty,
@@ -111,6 +121,16 @@ func NewAppRoleAuth(addr, roleID, secretIDFile string) *AppRoleAuth {
 // receiver to allow chaining from NewAppRoleAuth.
 func (a *AppRoleAuth) WithHTTPClient(h *http.Client) *AppRoleAuth {
 	a.httpClient = h
+	return a
+}
+
+// WithSecretIDWrapped enables response-wrap mode: the secret_id file
+// is treated as a vault wrap token, and the real secret_id is fetched
+// via sys/wrapping/unwrap on every login for which the file has
+// changed. Requires SecretIDFile to be set. Returns the receiver to
+// allow chaining from NewAppRoleAuth.
+func (a *AppRoleAuth) WithSecretIDWrapped(b bool) *AppRoleAuth {
+	a.secretIDWrapped = b
 	return a
 }
 
@@ -144,7 +164,7 @@ func (a *AppRoleAuth) Login(ctx context.Context) error {
 }
 
 func (a *AppRoleAuth) doLogin(ctx context.Context) error {
-	secretID, err := a.resolveSecretID()
+	secretID, err := a.resolveSecretID(ctx)
 	if err != nil {
 		a.healthy.Store(false)
 		return err
@@ -170,9 +190,12 @@ func (a *AppRoleAuth) doLogin(ctx context.Context) error {
 
 // resolveSecretID returns the secret_id to use for the next login. When
 // SecretIDFile is set, the file is re-read every call so a rotation on
-// disk is picked up immediately. Otherwise BLOCKYARD_VAULT_SECRET_ID is
-// read from the process environment.
-func (a *AppRoleAuth) resolveSecretID() (string, error) {
+// disk is picked up immediately. In wrap mode the file contents are a
+// single-use response-wrap token; the plaintext secret_id is cached
+// against the file's hash so proactive re-logins don't burn extra
+// unwraps against the same rotation. Without SecretIDFile, the
+// BLOCKYARD_VAULT_SECRET_ID env var is used.
+func (a *AppRoleAuth) resolveSecretID(ctx context.Context) (string, error) {
 	if a.secretIDFile != "" {
 		data, err := os.ReadFile(a.secretIDFile) //nolint:gosec // G304: operator-configured path
 		if err != nil {
@@ -182,13 +205,71 @@ func (a *AppRoleAuth) resolveSecretID() (string, error) {
 		if s == "" {
 			return "", fmt.Errorf("secret_id file %q is empty", a.secretIDFile)
 		}
-		return s, nil
+		if !a.secretIDWrapped {
+			return s, nil
+		}
+		hash := sha256.Sum256([]byte(s))
+		if hash == a.unwrapHash && a.unwrapPlaintext != "" {
+			return a.unwrapPlaintext, nil
+		}
+		plaintext, err := unwrapSecretID(ctx, a.httpClient, a.addr, s)
+		if err != nil {
+			return "", fmt.Errorf("unwrap secret_id file %q: %w", a.secretIDFile, err)
+		}
+		a.unwrapHash = hash
+		a.unwrapPlaintext = plaintext
+		return plaintext, nil
 	}
 	s := os.Getenv("BLOCKYARD_VAULT_SECRET_ID")
 	if s == "" {
 		return "", errors.New("set BLOCKYARD_VAULT_SECRET_ID or vault.secret_id_file")
 	}
 	return s, nil
+}
+
+// wrappingUnwrapResponse is the relevant subset of the vault
+// sys/wrapping/unwrap response when the wrapped payload was a
+// {"secret_id": ..., "secret_id_accessor": ...} envelope (the shape
+// `vault write -f -wrap-ttl=… auth/approle/role/<name>/secret-id`
+// produces).
+type wrappingUnwrapResponse struct {
+	Data struct {
+		SecretID string `json:"secret_id"`
+	} `json:"data"`
+	Errors []string `json:"errors"`
+}
+
+// unwrapSecretID POSTs a wrap token to sys/wrapping/unwrap and returns
+// the enclosed secret_id. Wrap tokens are single-use: a repeat unwrap
+// of the same token fails, which is the intended tamper signal when a
+// hostile process consumed the token before blockyard did.
+func unwrapSecretID(ctx context.Context, httpClient *http.Client, addr, wrapToken string) (string, error) {
+	url := strings.TrimRight(addr, "/") + "/v1/sys/wrapping/unwrap"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("unwrap: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", wrapToken)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("unwrap: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("unwrap: status %d", resp.StatusCode)
+	}
+
+	var result wrappingUnwrapResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("unwrap: decode: %w", err)
+	}
+	if result.Data.SecretID == "" {
+		return "", fmt.Errorf("unwrap: empty secret_id in response")
+	}
+	return result.Data.SecretID, nil
 }
 
 // Run blocks until ctx is cancelled, re-logging in shortly before each

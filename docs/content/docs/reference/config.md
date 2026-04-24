@@ -395,12 +395,13 @@ Enable Vault-compatible credential management. Requires `[oidc]` to also be conf
 
 ```toml
 [vault]
-address          = "http://openbao:8200"
-role_id          = "blockyard-server"           # AppRole role identifier (recommended)
-# admin_token    = "vault-admin-token"          # deprecated: use role_id instead
-token_ttl        = "1h"
-jwt_auth_path    = "jwt"
-# secret_id_file = "/run/secrets/vault_secret_id"   # opt-in: re-read secret_id on each login for rotation
+address            = "http://openbao:8200"
+role_id            = "blockyard-server"          # AppRole role identifier (recommended)
+# admin_token      = "vault-admin-token"         # deprecated: use role_id instead
+token_ttl          = "1h"
+jwt_auth_path      = "jwt"
+# secret_id_file    = "/run/secrets/vault_secret_id"   # opt-in: re-read secret_id on each login for rotation
+# secret_id_wrapped = true                             # opt-in: secret_id_file holds a response-wrap token to unwrap at login
 ```
 
 | Field | Type | Default | Required | Description |
@@ -410,7 +411,8 @@ jwt_auth_path    = "jwt"
 | `admin_token` | `string` | — | One of `role_id` or `admin_token` | **Deprecated.** Static admin token. Supports [vault references](#vault-references). Use `role_id` with AppRole auth instead. |
 | `token_ttl` | `duration` | `1h` | No | TTL hint; the actual TTL is whatever vault returns on login. Shorten it to make rotation propagate faster. |
 | `jwt_auth_path` | `string` | `jwt` | No | Auth method mount path in the vault |
-| `secret_id_file` | `string` | — | No | Path to a file containing the AppRole `secret_id`. When set, the file is re-read on every login so `secret_id` rotations on disk take effect without restarting Blockyard. Takes precedence over `BLOCKYARD_VAULT_SECRET_ID`. |
+| `secret_id_file` | `string` | — | No | Path to a file containing the AppRole `secret_id` (or, with `secret_id_wrapped`, a response-wrap token). When set, the file is re-read on every login so rotations on disk take effect without restarting Blockyard. Takes precedence over `BLOCKYARD_VAULT_SECRET_ID`. |
+| `secret_id_wrapped` | `boolean` | `false` | No | Treat `secret_id_file` contents as a vault response-wrap token; Blockyard calls `sys/wrapping/unwrap` to fetch the real `secret_id`. Gives time-bounded on-disk exposure and tamper detection. Requires `secret_id_file`. |
 | `ca_cert` | `string` | — | No | Path to a PEM-encoded CA bundle used to verify the vault server's TLS certificate. When set, replaces the system CA bundle for vault HTTP calls (matches `VAULT_CACERT` semantics). Overridable via `BLOCKYARD_VAULT_CA_CERT`. |
 | `skip_policy_scope_check` | `boolean` | `false` | No | Skip the policy scope check during vault bootstrap. Useful when the vault policy format differs from what Blockyard expects. |
 

@@ -234,6 +234,7 @@ func main() {
 		if cfg.Vault.RoleID != "" {
 			// AppRole auth flow.
 			auth := integration.NewAppRoleAuth(cfg.Vault.Address, cfg.Vault.RoleID, cfg.Vault.SecretIDFile).
+				WithSecretIDWrapped(cfg.Vault.SecretIDWrapped).
 				WithHTTPClient(vaultHTTPClient)
 			if err := auth.Login(context.Background()); err != nil {
 				slog.Error("vault authentication failed", "error", err)
