@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,18 @@ func loadFromString(t *testing.T, content string) *Config {
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+// captureSlog routes slog.Default output into a buffer for the lifetime
+// of the test, so assertions can inspect warning messages. Restores the
+// previous default logger on cleanup.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func TestParseMinimalConfig(t *testing.T) {
@@ -1010,6 +1023,30 @@ func TestDeprecatedOpenbaoEnvVarMigrates(t *testing.T) {
 	cfg := loadFromString(t, vaultTOML(t))
 	if cfg.Vault.TokenTTL.Duration != 45*time.Minute {
 		t.Errorf("token_ttl = %v, want 45m (from deprecated env var)", cfg.Vault.TokenTTL.Duration)
+	}
+}
+
+// TestRemovedVaultTokenFileWarns verifies that an upgraded config still
+// carrying the removed vault.token_file key triggers an explicit
+// deprecation warning rather than being silently dropped by the TOML
+// decoder.
+func TestRemovedVaultTokenFileWarns(t *testing.T) {
+	logs := captureSlog(t)
+	toml := vaultTOML(t) + "token_file = \"/data/.vault-token\"\n"
+	loadFromString(t, toml)
+	if !strings.Contains(logs.String(), "vault.token_file is deprecated") {
+		t.Errorf("expected deprecation warning for vault.token_file, got logs:\n%s", logs.String())
+	}
+}
+
+// TestRemovedVaultTokenFileNotPresent ensures the deprecation warning
+// does not fire when the key is absent — otherwise every startup noise
+// would be indistinguishable from an actual upgrade problem.
+func TestRemovedVaultTokenFileNotPresent(t *testing.T) {
+	logs := captureSlog(t)
+	loadFromString(t, vaultTOML(t))
+	if strings.Contains(logs.String(), "vault.token_file is deprecated") {
+		t.Errorf("unexpected token_file warning for clean config:\n%s", logs.String())
 	}
 }
 
