@@ -28,13 +28,21 @@ type Client struct {
 
 // NewClient creates a new vault client. The adminToken is retrieved
 // via a callback to avoid holding the plaintext value in a long-lived
-// struct field.
+// struct field. The underlying http.Client uses system CA trust and a
+// 10s timeout; call WithHTTPClient to override (e.g. for a private CA).
 func NewClient(addr string, adminTokenFunc func() string) *Client {
 	return &Client{
 		addr:           strings.TrimRight(addr, "/"),
 		adminTokenFunc: adminTokenFunc,
-		httpClient:     &http.Client{Timeout: 10 * time.Second},
+		httpClient:     DefaultHTTPClient(),
 	}
+}
+
+// WithHTTPClient replaces the underlying http.Client. Returns the
+// receiver to allow chaining from NewClient.
+func (c *Client) WithHTTPClient(h *http.Client) *Client {
+	c.httpClient = h
+	return c
 }
 
 // Addr returns the vault server address.

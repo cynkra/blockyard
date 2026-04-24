@@ -20,15 +20,24 @@ type TokenRenewer struct {
 }
 
 // NewTokenRenewer creates a TokenRenewer with the given initial token.
-// The token is immediately marked as healthy.
+// The token is immediately marked as healthy. The underlying http.Client
+// uses system CA trust and a 10s timeout; call WithHTTPClient to
+// override (e.g. for a private CA).
 func NewTokenRenewer(addr, initialToken, tokenFile string) *TokenRenewer {
 	r := &TokenRenewer{
 		addr:       addr,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: DefaultHTTPClient(),
 		tokenFile:  tokenFile,
 	}
 	r.token.Store(initialToken)
 	r.healthy.Store(true)
+	return r
+}
+
+// WithHTTPClient replaces the underlying http.Client. Returns the
+// receiver to allow chaining from NewTokenRenewer.
+func (r *TokenRenewer) WithHTTPClient(h *http.Client) *TokenRenewer {
+	r.httpClient = h
 	return r
 }
 

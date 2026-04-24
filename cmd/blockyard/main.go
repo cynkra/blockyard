@@ -226,16 +226,22 @@ func main() {
 	if cfg.Vault != nil {
 		tokenFilePath := cfg.Vault.TokenFile
 
+		vaultHTTPClient, err := integration.NewHTTPClient(cfg.Vault.CACert)
+		if err != nil {
+			slog.Error("vault http client", "error", err)
+			os.Exit(1)
+		}
+
 		if cfg.Vault.RoleID != "" {
 			// AppRole auth flow.
-			token, ttl, err := integration.InitAppRole(context.Background(), cfg.Vault.Address, cfg.Vault.RoleID, tokenFilePath)
+			token, ttl, err := integration.InitAppRole(context.Background(), vaultHTTPClient, cfg.Vault.Address, cfg.Vault.RoleID, tokenFilePath)
 			if err != nil {
 				slog.Error("vault authentication failed", "error", err)
 				os.Exit(1)
 			}
 
 			// Start token renewal goroutine.
-			renewer := integration.NewTokenRenewer(cfg.Vault.Address, token, tokenFilePath)
+			renewer := integration.NewTokenRenewer(cfg.Vault.Address, token, tokenFilePath).WithHTTPClient(vaultHTTPClient)
 			vaultAdminToken = renewer.Token
 			vaultTokenHealthy = renewer.Healthy
 
@@ -249,7 +255,7 @@ func main() {
 			vaultAdminToken = cfg.Vault.AdminToken.MustExpose
 		}
 
-		vaultClient = integration.NewClient(cfg.Vault.Address, vaultAdminToken)
+		vaultClient = integration.NewClient(cfg.Vault.Address, vaultAdminToken).WithHTTPClient(vaultHTTPClient)
 		vaultTokenCache = integration.NewVaultTokenCache()
 
 		// Resolve vault references in config (e.g. "vault:path#key").
