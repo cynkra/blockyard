@@ -544,7 +544,7 @@ jobs:
           go run ./cmd/coverage-check \
             -profile=merged.out \
             -min-total=75 \
-            -min-patch=70 \
+            -min-patch=75 \
             -patch-base="origin/$BASE" \
             -ignore='internal/testutil/**' \
             -ignore='internal/preflight/docker_checks.go'
