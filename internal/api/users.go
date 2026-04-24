@@ -136,7 +136,7 @@ func authenticateFromCookie(srv *server.Server, cookieValue string) *auth.Caller
 }
 
 // EnrollCredential handles POST /api/v1/users/me/credentials/{service}.
-// Stores a user's credential in OpenBao's KV v2 store.
+// Stores a user's credential in the vault 's KV v2 store.
 //
 //	@Summary		Enroll credential
 //	@Description	Store a credential (API key) for an external service in the vault.

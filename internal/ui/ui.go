@@ -325,7 +325,7 @@ func (ui *UI) RegisterRoutes(r chi.Router, srv *server.Server, orch *orchestrato
 
 type layoutData struct {
 	ActivePage     string // "apps", "deployments", "api-keys", "admin", "profile"; empty for landing
-	OpenbaoEnabled bool
+	VaultEnabled bool
 	IsAdmin        bool
 	Version        string
 }
@@ -536,7 +536,7 @@ func requireAuth(w http.ResponseWriter, r *http.Request) *auth.AuthenticatedUser
 	return nil
 }
 
-func openbaoEnabled(srv *server.Server) bool {
+func vaultEnabled(srv *server.Server) bool {
 	return srv.Config.Vault != nil && len(srv.Config.Vault.Services) > 0
 }
 
@@ -544,7 +544,7 @@ func baseLayout(srv *server.Server, activePage string, caller *auth.CallerIdenti
 	isAdmin := caller != nil && caller.Role.CanManageRoles()
 	return layoutData{
 		ActivePage:     activePage,
-		OpenbaoEnabled: openbaoEnabled(srv),
+		VaultEnabled: vaultEnabled(srv),
 		IsAdmin:        isAdmin,
 		Version:        srv.Version,
 	}
@@ -714,7 +714,7 @@ func (ui *UI) deploymentsPage(srv *server.Server) http.HandlerFunc {
 
 func (ui *UI) apiKeysPage(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !openbaoEnabled(srv) {
+		if !vaultEnabled(srv) {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
 		}

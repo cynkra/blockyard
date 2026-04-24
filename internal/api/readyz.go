@@ -108,15 +108,15 @@ func readyzHandler(srv *server.Server, trusted bool) http.HandlerFunc {
 			}()
 		}
 
-		// OpenBao
+		// Vault
 		if srv.VaultClient != nil {
 			func() {
 				ctx, cancel := context.WithTimeout(r.Context(), readyzCheckTimeout)
 				defer cancel()
 				if err := srv.VaultClient.Health(ctx); err != nil {
-					checks["openbao"] = "fail"
+					checks["vault"] = "fail"
 				} else {
-					checks["openbao"] = "pass"
+					checks["vault"] = "pass"
 				}
 			}()
 		}

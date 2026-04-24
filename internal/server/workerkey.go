@@ -17,19 +17,19 @@ import (
 // LoadOrCreateWorkerKey resolves the worker signing key. It tries
 // three sources in order:
 //
-//  1. OpenBao (if configured) -- read or generate + store
+//  1. The vault (if configured) -- read or generate + store
 //  2. File ({bundle_server_path}/.worker-key) -- read existing
 //  3. Generate new + write to file
 //
 // This ensures both the old and new server use the same key during
-// a rolling update. When OpenBao is not available, the file path
+// a rolling update. When the vault is not available, the file path
 // provides persistence across restarts.
 func LoadOrCreateWorkerKey(
 	ctx context.Context,
 	vaultClient *integration.Client,
 	cfg *config.Config,
 ) (*auth.SigningKey, error) {
-	// Path 1: OpenBao.
+	// Path 1: vault.
 	if vaultClient != nil {
 		key, err := integration.ResolveWorkerKey(ctx, vaultClient)
 		if err != nil {

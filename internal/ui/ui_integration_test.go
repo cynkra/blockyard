@@ -12,10 +12,10 @@ import (
 )
 
 // allAuthenticatedPaths returns the set of page paths used by cross-page
-// tests. When openbao is enabled the list includes /api-keys.
-func allAuthenticatedPaths(withOpenbao bool) []string {
+// tests. When vault is enabled the list includes /api-keys.
+func allAuthenticatedPaths(withVault bool) []string {
 	paths := []string{"/", "/deployments", "/profile"}
-	if withOpenbao {
+	if withVault {
 		paths = append(paths, "/api-keys")
 	}
 	return paths
@@ -24,7 +24,7 @@ func allAuthenticatedPaths(withOpenbao bool) []string {
 // TestNavConsistencyAcrossPages verifies that every authenticated page
 // renders the same left-nav structure with links to all pages.
 func TestNavConsistencyAcrossPages(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "nav-user", auth.RoleAdmin)
+	_, ts := authServer(t, vaultConfig(), "nav-user", auth.RoleAdmin)
 
 	expectedLinks := []string{
 		`href="/"`,
@@ -58,7 +58,7 @@ func TestNavConsistencyAcrossPages(t *testing.T) {
 // TestActiveNavExclusivity verifies that each page marks exactly one nav
 // link as active and that it is the correct one.
 func TestActiveNavExclusivity(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "nav-user", auth.RoleAdmin)
+	_, ts := authServer(t, vaultConfig(), "nav-user", auth.RoleAdmin)
 
 	pages := []struct {
 		path       string
@@ -95,7 +95,7 @@ func TestActiveNavExclusivity(t *testing.T) {
 
 // TestPageTitles verifies that each page sets the correct <title>.
 func TestPageTitles(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "title-user", auth.RoleAdmin)
+	_, ts := authServer(t, vaultConfig(), "title-user", auth.RoleAdmin)
 
 	pages := []struct {
 		path  string
@@ -143,7 +143,7 @@ func TestLandingPageTitle(t *testing.T) {
 // TestAllProtectedRoutesRedirect verifies every protected route redirects
 // to /login with the correct return_url when unauthenticated.
 func TestAllProtectedRoutesRedirect(t *testing.T) {
-	_, ts := newTestServer(t, openbaoConfig())
+	_, ts := newTestServer(t, vaultConfig())
 	client := noRedirectClient()
 
 	routes := []struct {
@@ -180,7 +180,7 @@ func TestAllProtectedRoutesRedirect(t *testing.T) {
 // TestBaseHTMLStructureOnAllPages verifies the shared HTML skeleton
 // (DOCTYPE, charset, stylesheet, htmx, layout classes) on every page.
 func TestBaseHTMLStructureOnAllPages(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "struct-user", auth.RoleAdmin)
+	_, ts := authServer(t, vaultConfig(), "struct-user", auth.RoleAdmin)
 
 	mustContain := []string{
 		"<!DOCTYPE html>",
@@ -241,7 +241,7 @@ func TestLandingPageUsesSimpleLayout(t *testing.T) {
 
 // TestAllPagesReturnHTML verifies every page returns text/html.
 func TestAllPagesReturnHTML(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "ct-user", auth.RoleAdmin)
+	_, ts := authServer(t, vaultConfig(), "ct-user", auth.RoleAdmin)
 
 	for _, path := range allAuthenticatedPaths(true) {
 		t.Run(path, func(t *testing.T) {
@@ -262,7 +262,7 @@ func TestAllPagesReturnHTML(t *testing.T) {
 // TestVersionDisplayedOnAllPages verifies the version string appears in
 // the nav on every authenticated page, not just the apps page.
 func TestVersionDisplayedOnAllPages(t *testing.T) {
-	srv, ts := authServer(t, openbaoConfig(), "ver-user", auth.RoleAdmin)
+	srv, ts := authServer(t, vaultConfig(), "ver-user", auth.RoleAdmin)
 	srv.Version = "v2.0.0-test"
 
 	for _, path := range allAuthenticatedPaths(true) {
@@ -281,9 +281,9 @@ func TestVersionDisplayedOnAllPages(t *testing.T) {
 	}
 }
 
-// TestApiKeysNavHiddenOnAllPagesWithoutOpenbao verifies the API Keys nav
-// link is absent on every page when openbao is not configured.
-func TestApiKeysNavHiddenOnAllPagesWithoutOpenbao(t *testing.T) {
+// TestApiKeysNavHiddenOnAllPagesWithoutVault verifies the API Keys nav
+// link is absent on every page when vault is not configured.
+func TestApiKeysNavHiddenOnAllPagesWithoutVault(t *testing.T) {
 	_, ts := authServer(t, oidcConfig(), "u", auth.RoleAdmin)
 
 	for _, path := range allAuthenticatedPaths(false) {
@@ -296,16 +296,16 @@ func TestApiKeysNavHiddenOnAllPagesWithoutOpenbao(t *testing.T) {
 
 			body := readBody(t, resp)
 			if strings.Contains(body, `href="/api-keys"`) {
-				t.Error("API Keys link should be hidden without openbao")
+				t.Error("API Keys link should be hidden without vault")
 			}
 		})
 	}
 }
 
-// TestApiKeysNavVisibleOnAllPagesWithOpenbao verifies the API Keys nav
-// link appears on every page when openbao is configured.
-func TestApiKeysNavVisibleOnAllPagesWithOpenbao(t *testing.T) {
-	_, ts := authServer(t, openbaoConfig(), "u", auth.RoleAdmin)
+// TestApiKeysNavVisibleOnAllPagesWithVault verifies the API Keys nav
+// link appears on every page when vault is configured.
+func TestApiKeysNavVisibleOnAllPagesWithVault(t *testing.T) {
+	_, ts := authServer(t, vaultConfig(), "u", auth.RoleAdmin)
 
 	for _, path := range allAuthenticatedPaths(true) {
 		t.Run(path, func(t *testing.T) {
@@ -317,7 +317,7 @@ func TestApiKeysNavVisibleOnAllPagesWithOpenbao(t *testing.T) {
 
 			body := readBody(t, resp)
 			if !strings.Contains(body, `href="/api-keys"`) {
-				t.Error("API Keys link should be visible with openbao")
+				t.Error("API Keys link should be visible with vault")
 			}
 		})
 	}
@@ -390,7 +390,7 @@ func TestRoleBasedNavigationStructure(t *testing.T) {
 // in sequence and verifies that navigation state updates correctly at
 // each step.
 func TestFullNavigationFlow(t *testing.T) {
-	srv, ts := authServer(t, openbaoConfig(), "flow-user", auth.RoleAdmin)
+	srv, ts := authServer(t, vaultConfig(), "flow-user", auth.RoleAdmin)
 
 	// Seed data so pages have meaningful content.
 	app, _ := srv.DB.CreateApp("nav-test-app", "flow-user")

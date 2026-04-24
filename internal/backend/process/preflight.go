@@ -14,7 +14,7 @@ import (
 
 // RunPreflight verifies the process backend prerequisites. Called by
 // (*ProcessBackend).Preflight() with the full config so the egress
-// probe can read Redis/OpenBao/database addresses and the resource-
+// probe can read Redis/vault/database addresses and the resource-
 // limit check can read server-level defaults.
 //
 // Check ordering matters: bwrap/R/userns are prerequisites for
@@ -436,7 +436,7 @@ func checkPortRange(cfg *config.ProcessConfig) preflight.Result {
 //     reachable since there is no legitimate reason for a worker to
 //     read instance credentials.
 //   - Redis address (if configured) — WARNING if reachable.
-//   - OpenBao address (if configured) — WARNING if reachable.
+//   - vault address (if configured) — WARNING if reachable.
 //   - Database TCP address (if not SQLite) — WARNING if reachable.
 //
 // The probe binary is the same blockyard binary, invoked with
@@ -458,7 +458,7 @@ func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) prefli
 	}
 	if fullCfg.Vault != nil && fullCfg.Vault.Address != "" {
 		if hp := preflight.TCPAddrFromHTTPURL(fullCfg.Vault.Address); hp != "" {
-			targets = append(targets, target{name: "openbao", addr: hp})
+			targets = append(targets, target{name: "vault", addr: hp})
 		}
 	}
 	if hp := preflight.TCPAddrFromDBConfig(fullCfg.Database); hp != "" {

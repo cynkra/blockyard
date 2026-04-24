@@ -144,7 +144,7 @@ func checkIDP(ctx context.Context, deps RuntimeDeps) Result {
 }
 
 func checkVault(ctx context.Context, deps RuntimeDeps) Result {
-	const name = "openbao"
+	const name = "vault"
 	const category = "runtime"
 
 	ctx, cancel := context.WithTimeout(ctx, runtimeCheckTimeout)
@@ -154,14 +154,14 @@ func checkVault(ctx context.Context, deps RuntimeDeps) Result {
 		return Result{
 			Name:     name,
 			Severity: SeverityError,
-			Message:  fmt.Sprintf("OpenBao health check failed: %v", err),
+			Message:  fmt.Sprintf("vault health check failed: %v", err),
 			Category: category,
 		}
 	}
 	return Result{
 		Name:     name,
 		Severity: SeverityOK,
-		Message:  "OpenBao is healthy",
+		Message:  "vault is healthy",
 		Category: category,
 	}
 }

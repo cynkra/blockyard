@@ -96,14 +96,14 @@ func TestCheckExternalURLNotHTTPS(t *testing.T) {
 	})
 }
 
-func TestCheckOpenbaoHTTP(t *testing.T) {
+func TestCheckVaultHTTP(t *testing.T) {
 	t.Run("fires on HTTP", func(t *testing.T) {
 		cfg := &config.Config{
 			Vault: &config.VaultConfig{Address: "http://vault:8200"},
 		}
 		r := RunConfigChecks(cfg)
-		if !hasFinding(r, "openbao_http") {
-			t.Error("expected openbao_http finding")
+		if !hasFinding(r, "vault_http") {
+			t.Error("expected vault_http finding")
 		}
 	})
 
@@ -112,13 +112,13 @@ func TestCheckOpenbaoHTTP(t *testing.T) {
 			Vault: &config.VaultConfig{Address: "https://vault:8200"},
 		}
 		r := RunConfigChecks(cfg)
-		assertOK(t, r, "openbao_http")
+		assertOK(t, r, "vault_http")
 	})
 
 	t.Run("ok when not configured", func(t *testing.T) {
 		cfg := &config.Config{}
 		r := RunConfigChecks(cfg)
-		assertOK(t, r, "openbao_http")
+		assertOK(t, r, "vault_http")
 	})
 }
 

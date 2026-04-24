@@ -50,7 +50,7 @@ type workerProc struct {
 // ProcessBackend implements backend.Backend using bubblewrap.
 type ProcessBackend struct {
 	cfg     *config.ProcessConfig // shortcut for fullCfg.Process; used in hot paths
-	fullCfg *config.Config        // held for Preflight() — needs Redis/OpenBao/DB addrs and Server.DefaultMemoryLimit/CPULimit
+	fullCfg *config.Config        // held for Preflight() — needs Redis/vault/DB addrs and Server.DefaultMemoryLimit/CPULimit
 	ports   portAllocator
 	uids    uidAllocator
 
@@ -61,7 +61,7 @@ type ProcessBackend struct {
 // New creates a ProcessBackend. Verifies that bwrap exists at the
 // configured path and that the worker mount point can be reached
 // from inside the bwrap sandbox. The full config is stored so
-// Preflight() can read the addresses of Redis/OpenBao/database for
+// Preflight() can read the addresses of Redis/vault/database for
 // the egress probe and the server-level resource-limit fields for
 // the warning check.
 //
@@ -338,7 +338,7 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	}
 
 	// Minimal environment — do NOT inherit the server's env, which
-	// contains database URLs, Redis credentials, OpenBao tokens, etc.
+	// contains database URLs, Redis credentials, vault tokens, etc.
 	rLibs := "/blockyard-lib"
 	if spec.LibDir != "" {
 		rLibs = "/blockyard-lib-store"

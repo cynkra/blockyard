@@ -182,7 +182,7 @@ func main() {
 	bgCtx, bgCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: bgCancel is called by Drainer.Finish/Shutdown, not defer
 	var bgWg sync.WaitGroup
 
-	// ── Initialize OpenBao (before db.Open so the Postgres pool can
+	// ── Initialize the vault (before db.Open so the Postgres pool can
 	// seed creds from vault when database.vault_role is set, and
 	// before OIDC for vault reference resolution). ──
 	var (
@@ -240,7 +240,7 @@ func main() {
 
 		// Bootstrap verification.
 		if err := integration.Bootstrap(context.Background(), vaultClient, cfg.Vault.JWTAuthPath, cfg.Vault.SkipPolicyScopeCheck); err != nil {
-			slog.Error("OpenBao bootstrap failed", "error", err)
+			slog.Error("vault bootstrap failed", "error", err)
 			os.Exit(1)
 		}
 	}

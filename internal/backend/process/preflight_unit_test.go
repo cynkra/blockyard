@@ -242,12 +242,12 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 		WorkerUIDEnd:   60099,
 		WorkerGID:      65534,
 	}
-	// Include redis + openbao + postgres so we have multiple non-
+	// Include redis + vault + postgres so we have multiple non-
 	// critical targets alongside the always-critical cloud metadata.
 	fullCfg := &config.Config{
 		Process: cfg,
 		Redis:   &config.RedisConfig{URL: "redis://redis.internal:6379"},
-		Vault: &config.VaultConfig{Address: "https://openbao.internal:8200"},
+		Vault: &config.VaultConfig{Address: "https://vault.internal:8200"},
 		Database: config.DatabaseConfig{
 			Driver: "postgres",
 			URL:    "postgres://u:p@db.internal:5432/app",
@@ -268,7 +268,7 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 			reachable: map[string]bool{
 				"169.254.169.254:80":  false,
 				"redis.internal:6379": false,
-				"openbao.internal:8200": false,
+				"vault.internal:8200": false,
 				"db.internal:5432":    false,
 			},
 			wantSeverity: preflight.SeverityOK,
@@ -279,7 +279,7 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 			reachable: map[string]bool{
 				"169.254.169.254:80":  true,
 				"redis.internal:6379": false,
-				"openbao.internal:8200": false,
+				"vault.internal:8200": false,
 				"db.internal:5432":    false,
 			},
 			wantSeverity: preflight.SeverityError,
@@ -290,7 +290,7 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 			reachable: map[string]bool{
 				"169.254.169.254:80":  false,
 				"redis.internal:6379": true,
-				"openbao.internal:8200": false,
+				"vault.internal:8200": false,
 				"db.internal:5432":    false,
 			},
 			wantSeverity: preflight.SeverityWarning,
@@ -301,7 +301,7 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 			reachable: map[string]bool{
 				"169.254.169.254:80":  true,
 				"redis.internal:6379": true,
-				"openbao.internal:8200": false,
+				"vault.internal:8200": false,
 				"db.internal:5432":    false,
 			},
 			wantSeverity: preflight.SeverityError,
@@ -326,7 +326,7 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 }
 
 // TestCheckWorkerEgressNoOptionalTargets — cloud_metadata is always
-// probed even without any Redis/OpenBao/database configuration.
+// probed even without any Redis/vault/database configuration.
 func TestCheckWorkerEgressNoOptionalTargets(t *testing.T) {
 	cfg := &config.ProcessConfig{WorkerUIDStart: 60000, WorkerGID: 65534}
 	fullCfg := &config.Config{Process: cfg}

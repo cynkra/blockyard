@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// VaultTokenCache caches OpenBao tokens keyed by user sub.
-// Avoids calling OpenBao's JWT login endpoint on every proxied request.
+// VaultTokenCache caches vault tokens keyed by user sub.
+// Avoids calling the vault 's JWT login endpoint on every proxied request.
 type VaultTokenCache struct {
 	mu     sync.RWMutex
 	tokens map[string]*cachedToken

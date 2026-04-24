@@ -23,7 +23,7 @@ func RunConfigChecks(cfg *config.Config) *Report {
 	}
 
 	r.Add(checkExternalURLNotHTTPS(cfg))
-	r.Add(checkOpenbaoHTTP(cfg))
+	r.Add(checkVaultHTTP(cfg))
 	r.Add(checkManagementBindPublic(cfg))
 	r.Add(checkNoDefaultMemoryLimit(cfg))
 	r.Add(checkNoDefaultCPULimit(cfg))
@@ -107,28 +107,28 @@ func checkExternalURLNotHTTPS(cfg *config.Config) Result {
 	}
 }
 
-// checkOpenbaoHTTP warns when the OpenBao/Vault address uses plain HTTP.
-func checkOpenbaoHTTP(cfg *config.Config) Result {
+// checkVaultHTTP warns when the vault address uses plain HTTP.
+func checkVaultHTTP(cfg *config.Config) Result {
 	if cfg.Vault == nil {
 		return Result{
-			Name:     "openbao_http",
+			Name:     "vault_http",
 			Severity: SeverityOK,
-			Message:  "OpenBao not configured",
+			Message:  "vault not configured",
 			Category: "config",
 		}
 	}
 	if !strings.HasPrefix(cfg.Vault.Address, "http://") {
 		return Result{
-			Name:     "openbao_http",
+			Name:     "vault_http",
 			Severity: SeverityOK,
-			Message:  "OpenBao address uses HTTPS",
+			Message:  "vault address uses HTTPS",
 			Category: "config",
 		}
 	}
 	return Result{
-		Name:     "openbao_http",
+		Name:     "vault_http",
 		Severity: SeverityWarning,
-		Message:  "openbao.address uses plain HTTP; vault traffic (tokens, secrets) is not encrypted",
+		Message:  "vault.address uses plain HTTP; vault traffic (tokens, secrets) is not encrypted",
 		Category: "config",
 	}
 }

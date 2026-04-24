@@ -11,7 +11,7 @@ import (
 
 // WorkerEnv builds the backend-agnostic environment variable map for
 // worker containers. Always sets BLOCKYARD_API_URL (needed for runtime
-// package installs). Includes Vault/OpenBao integration vars when
+// package installs). Includes vault integration vars when
 // configured. Sets SHINY_HOST per backend so bundles don't have to.
 // Values from server.worker_env are merged in last; blockyard-managed
 // keys win on collision, everything else (e.g. OTEL_*) is passed through.
