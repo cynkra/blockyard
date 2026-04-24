@@ -56,3 +56,24 @@ func TestRunProbeRejectsUnknownFlag(t *testing.T) {
 		t.Error("expected parse error for unknown flag")
 	}
 }
+
+// TestRunBwrapSmokeMissingBinary — bwrap path is "/nonexistent" so
+// exec fails. The function must surface the error (not swallow it);
+// the standalone apparmor-smoke CI job relies on a non-zero exit
+// for the negative assertion.
+func TestRunBwrapSmokeMissingBinary(t *testing.T) {
+	err := runBwrapSmoke([]string{"--bwrap", "/nonexistent/bwrap"})
+	if err == nil {
+		t.Error("expected error when bwrap binary is missing")
+	}
+}
+
+// TestRunBwrapSmokeUnknownFlag — fresh FlagSet enforces the
+// interface; unknown flag should surface as a parse error without
+// triggering an exec.
+func TestRunBwrapSmokeUnknownFlag(t *testing.T) {
+	err := runBwrapSmoke([]string{"--bogus"})
+	if err == nil {
+		t.Error("expected parse error for unknown flag")
+	}
+}

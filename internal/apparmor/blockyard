@@ -1,0 +1,50 @@
+include <tunables/global>
+
+# Purpose: grant the `userns` permission to blockyard and its
+# subprocesses, narrowly, so rootless bwrap can create its sandbox
+# user namespace on hosts where kernel.apparmor_restrict_unprivileged_userns=1
+# (Ubuntu 23.10+ default). This profile does NOT confine blockyard
+# itself — the rules below are deliberately broad (all capabilities,
+# all paths, network, mount, ptrace) because blockyard is the trusted
+# component in this architecture; the workers it spawns are the
+# untrusted ones, and they are confined by bwrap's capability drop,
+# seccomp, and bind-mount restrictions, not by AppArmor. Site-specific
+# profiles wanting tighter confinement of blockyard should layer on
+# top of this one.
+
+profile blockyard /usr/{bin,local/bin}/blockyard
+         flags=(attach_disconnected, mediate_deleted) {
+
+    include <abstractions/base>
+
+    # The load-bearing grant this profile exists for.
+    userns,
+
+    # Core filesystem access — blockyard reads its config, writes
+    # bundle storage, opens /proc and /sys for preflight checks, etc.
+    # We intentionally grant broad filesystem access rather than
+    # enumerate paths: tightening is an operator-hardening exercise
+    # and belongs in a site-specific profile, not the default we
+    # ship.
+    / r,
+    /** mrwklix,
+
+    capability,
+    network,
+    signal,
+    dbus,
+    mount,
+    umount,
+    pivot_root,
+    ptrace,
+
+    # Subprocess transitions — blockyard exec's itself (bwrap-exec
+    # shim, probe subcommand), bwrap, and the worker R interpreter.
+    # `ix` inherits the profile; the bwrap child's internal
+    # `unshare(CLONE_NEWUSER)` then runs under this profile and sees
+    # the `userns` grant.
+    /usr/{bin,local/bin}/blockyard ix,
+    /usr/bin/bwrap ix,
+    /usr/{bin,local/bin}/R* ix,  # matches R, Rscript, Rdevel, …
+    /opt/R/*/bin/R* ix,          # rig-managed R installations
+}

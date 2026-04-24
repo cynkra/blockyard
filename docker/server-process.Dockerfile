@@ -133,6 +133,10 @@ COPY --from=seccomp-compiler /blockyard-bwrap-seccomp.bpf /etc/blockyard/seccomp
 # --entrypoint cat IMAGE /etc/blockyard/seccomp.json` can extract
 # a copy.
 COPY internal/seccomp/blockyard-outer.json /etc/blockyard/seccomp.json
+# AppArmor profile — extracted by operators on Ubuntu 23.10+ hosts
+# to lift kernel.apparmor_restrict_unprivileged_userns for blockyard
+# without disabling the restriction host-wide. See phase 3-9.
+COPY internal/apparmor/blockyard /etc/blockyard/apparmor/blockyard
 
 # Extras hook. The default is a no-op; operators override by
 # bind-mounting their own script to /etc/blockyard/extras.sh to

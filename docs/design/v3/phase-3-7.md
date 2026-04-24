@@ -97,8 +97,10 @@ can be integrated later.
    `sandbox_uid caller_uid 1`, so the sandboxed child's kuid in
    init_userns equals blockyard's own UID and iptables owner-match
    does not fire. Verified at startup by
-   `checkBwrapHostUIDMapping` (see deliverable #8); native non-root
-   deployments get the newuidmap-based path in phase 3-9.
+   `checkBwrapHostUIDMapping` (see deliverable #8); non-root
+   deployments reach layer 6 via cgroup-v2 delegation in phase 3-9
+   (the `--userns + newuidmap` path was investigated and rejected on
+   an upstream bwrap bug — see `phase-3-9.md`).
 10. **`blockyard probe` subcommand** — small TCP-connectivity probe
     used by `checkWorkerEgress`. Dispatched early in `main.go` based
     on `os.Args[1]`. ~30 lines, no external tools required, runs
@@ -419,18 +421,21 @@ blockyard as root and letting the spawn path fork+setuid into
   without CAP_SETUID, so the spawn path skips the Credential. bwrap
   runs as the caller's UID and writes `uid caller_uid 1` — a
   non-identity map. Workers appear as blockyard's own UID in
-  init_userns and iptables owner-match rules do not fire, even if
-  bwrap is setuid-root (setuid-bwrap moves the bwrap monitor's UID
-  but does not change the uid_map format). **Phase 3-9** will add
-  a `--userns` + `newuidmap` path so native non-root deployments
-  can map to subuid ranges and regain identity-style kuid values in
-  init_userns.
+  init_userns and iptables owner-match rules do not fire. **Phase
+  3-9** delivers layer-6 egress filtering for this deployment mode
+  via cgroup-v2 delegation (operators install
+  `iptables -m cgroup --path <cgpath>/workers` rules instead of
+  `-m owner`). A `--userns + newuidmap` alternative was investigated
+  and rejected on an upstream bwrap bug; see `phase-3-9.md` for the
+  full discussion.
 
 `process.RunPreflight` catches non-root deployments explicitly via
 `checkBwrapHostUIDMapping` (step 7): when `os.Getuid() != 0` it
-returns `Error` and points operators at the remediation paths (run
-as root, use the Docker backend, wait for phase 3-9, or set
-`server.skip_preflight=true` to run without egress isolation).
+returns `Info` (not Error — the `-m owner` path is inherently
+inapplicable in non-root mode, not broken) and points operators at
+the remediation paths (run as root for `-m owner`, enable cgroup-v2
+delegation for `-m cgroup`, or use the Docker backend). Phase 3-9
+added `checkCgroupDelegation` alongside to report the cgroup path.
 
 The UID range must be at least as large as the port range, since each
 worker consumes one port and one UID. Defaults: 60000-60999 (1000
@@ -652,8 +657,13 @@ import (
 // affecting blockyard or blocking the open internet.
 //
 // For the host UID/GID to actually take effect (so iptables owner
-// match works), blockyard must run as root or bwrap must be setuid.
-// Verified at startup by checkBwrapHostUIDMapping.
+// match works), blockyard must run as root — the spawn path then
+// fork+setuid's the child to (uid, gid) before exec(bwrap). setuid
+// bwrap on the host is NOT a substitute: it moves the bwrap
+// monitor's UID but does not change the uid_map format, so the
+// sandboxed child's kuid stays at blockyard's UID (see phase-3-9.md
+// for why setuid-bwrap was retired as a documented mode). Verified
+// at startup by checkBwrapHostUIDMapping.
 func bwrapArgs(cfg *config.ProcessConfig, spec backend.WorkerSpec, port, uid, gid int) []string {
     args := []string{
         // Namespace isolation
@@ -1955,10 +1965,12 @@ func checkUserNamespaces() preflight.Result {
 // Uid/Gid lines do not match what we asked for, bwrap is running in
 // unprivileged-userns mode and the mapping is local-only.
 //
-// Remediation: run blockyard as root (typical containerized mode) or
-// install bwrap setuid on the host (`chmod u+s /usr/bin/bwrap`, or
-// equivalent via setcap). On Debian 12+/Ubuntu 24.04+ bwrap is no
-// longer shipped setuid by default.
+// Remediation: run blockyard as root (typical containerized mode)
+// for the `-m owner` path, reach for cgroup-v2 delegation
+// (`iptables -m cgroup --path`, delivered in phase 3-9), or use the
+// Docker backend for per-worker network namespaces. setuid bwrap
+// was investigated and retired — it does not change the uid_map
+// format and does not deliver per-worker host kuids.
 func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
     const name = "bwrap_host_uid_mapping"
 
@@ -2065,9 +2077,10 @@ func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
                 "bwrap --uid/--gid do not affect the host view of the child: "+
                     "requested uid=%d gid=%d, host /proc sees uid=%d gid=%d. "+
                     "The operator's iptables --uid-owner/--gid-owner rules will not match "+
-                    "worker traffic in this configuration. Either run blockyard as root "+
-                    "(typical containerized deployment) or install bwrap setuid on the host "+
-                    "(`sudo chmod u+s %s`). See backends.md for details.",
+                    "worker traffic in this configuration. Run blockyard as root "+
+                    "(typical containerized deployment) for the -m owner path, or use "+
+                    "phase-3-9's cgroup-v2 delegation (iptables -m cgroup --path). "+
+                    "setuid bwrap is NOT a substitute; see backends.md. (bwrap at %s.)",
                 probeUID, probeGID, realHostUID, realHostGID, cfg.BwrapPath,
             ),
             Category: "process",
@@ -2374,7 +2387,7 @@ mentioned above. This is acceptable for the use case: scale-to-zero
 deployments expect cold starts, and internal-only deployments have
 infrequent rolling updates.
 
-### Step 9: Phase 3-9 (zygote workers) forward compatibility
+### Step 9: v4 zygote-worker forward compatibility
 
 v4 adds multi-process containers and (conditionally) a zygote worker
 model, both of which need a control channel between blockyard and each
@@ -2841,14 +2854,16 @@ func TestWorkerResourceUsageLiveWorker(t *testing.T) {
 // build tag with the external integration tests above so a single
 // `-tags process_test` flag runs the whole suite.
 //
-// The test is strict per deployment mode: when bwrap can write a
-// host-effective uid_map (root caller or setuid bwrap) the check must
-// return OK; when bwrap can spawn but cannot write a foreign uid_map
-// (unprivileged caller without setuid) the check MUST return Error
-// and the message must name the requested vs observed UID. Both modes
-// are valid CI configurations and we want to catch regressions in
-// either one. See `detectBwrapMode` / `probeBwrapModeInternal` for
-// the three-way probe (unavailable / no-host-map / host-mapped).
+// The test is strict per deployment mode: when the spawn path can
+// produce a host-effective uid_map (root blockyard fork+setuids the
+// child before exec(bwrap)) the check must return OK; when bwrap
+// can spawn but cannot write a foreign uid_map (non-root blockyard)
+// the check must return Info. Phase 3-9 dropped the severity from
+// Error to Info on the non-root branch because the `-m owner`
+// mechanism is inherently inapplicable, not broken; non-root
+// deployments reach layer 6 via cgroup-v2 delegation instead.
+// Setuid bwrap is no longer a valid deployment mode — it doesn't
+// change the uid_map format.
 func TestCheckBwrapHostUIDMapping(t *testing.T) {
     mode := probeBwrapModeInternal(t)
     if mode == "unavailable" {
@@ -3010,11 +3025,13 @@ func TestCheckBwrapHostUIDMapping(t *testing.T) {
    the forked child setuid's into the worker UID/GID before
    `exec(bwrap)`. Non-root blockyard cannot do this (the kernel
    rejects setuid without CAP_SETUID); the
-   `checkBwrapHostUIDMapping` preflight check detects `os.Getuid() != 0`
-   and returns `Error` with a pointer to the phase-3-9
-   `--userns`+`newuidmap` follow-up, the Docker backend, or
-   `server.skip_preflight=true` for operators willing to run without
-   egress isolation.
+   `checkBwrapHostUIDMapping` preflight check detects
+   `os.Getuid() != 0` and returns `Info` pointing operators at
+   phase-3-9's cgroup-v2 delegation path (`iptables -m cgroup --path`
+   rules, orthogonal to UID mechanics) or the Docker backend as
+   alternatives. Severity was dropped from Error to Info in phase 3-9
+   because the `-m owner` mechanism is inherently inapplicable in
+   non-root mode, not broken.
 
    **Limitations.** This model gives worker-vs-host-services
    isolation but not cross-worker isolation: two workers in the same

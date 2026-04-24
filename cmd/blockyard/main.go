@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -75,11 +76,43 @@ func runProbe(args []string) error {
 	return nil
 }
 
+// runBwrapSmoke exec's `bwrap --unshare-user --ro-bind / / -- /bin/true`
+// and returns the run error. Used by the standalone apparmor-smoke CI
+// job and by operators who want to verify that a production host's
+// AppArmor profile actually unblocks rootless bwrap. Intentionally
+// tiny — no config parsing, no logging setup.
+func runBwrapSmoke(args []string) error {
+	fs := flag.NewFlagSet("bwrap-smoke", flag.ContinueOnError)
+	bwrapPath := fs.String("bwrap", "bwrap", "path to bwrap")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cmd := exec.Command(*bwrapPath, //nolint:gosec // G204: operator-supplied smoke-test path
+		"--unshare-user",
+		"--ro-bind", "/", "/",
+		"--", "/bin/true")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 func main() {
 	// `blockyard probe ...` short-circuits before flag.Parse() so its
 	// own FlagSet handles the args. Used by process.checkWorkerEgress.
 	if len(os.Args) > 1 && os.Args[1] == "probe" {
 		if err := runProbe(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// `blockyard bwrap-smoke` runs a minimal rootless bwrap invocation
+	// and exits 0 on success. Used by the apparmor-smoke CI job and by
+	// operators verifying that a loaded AppArmor profile unblocks
+	// rootless userns on Ubuntu 23.10+.
+	if len(os.Args) > 1 && os.Args[1] == "bwrap-smoke" {
+		if err := runBwrapSmoke(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		os.Exit(0)

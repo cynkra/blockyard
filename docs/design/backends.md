@@ -264,6 +264,39 @@ containers.
 | Network | **Not provided.** Workers share the host (or container) network stack. | None |
 | Resources | **Not provided.** No per-worker CPU, memory, or PID limits. The outer container's cgroup limits act as a shared ceiling (containerized mode only). | Shared ceiling only |
 
+### Deployment mode × isolation layer matrix
+
+The six-layer isolation model breaks down differently per deployment
+mode. Layers 1–5 (bwrap-native) hold regardless of how blockyard is
+deployed; layer 6 (per-worker egress) depends on whether blockyard
+can produce distinct host identities for each worker, and on whether
+cgroup-v2 delegation is available.
+
+| Layer                         | Mechanism                             | Root | Rootless | k8s pod |
+|-------------------------------|---------------------------------------|------|----------|---------|
+| 1 Filesystem view             | bwrap --ro-bind + --tmpfs             | ✓    | ✓        | ✓       |
+| 2 PID namespace               | bwrap --unshare-pid                   | ✓    | ✓        | ✓       |
+| 3 Capabilities                | bwrap --cap-drop ALL                  | ✓    | ✓        | ✓       |
+| 4 Seccomp                     | bwrap --seccomp                       | ✓    | ✓        | ✓       |
+| 5 In-sandbox UIDs             | bwrap --uid                           | ✓    | ✓        | ✓       |
+| 6 Per-worker host kuid        | fork+setuid+exec(bwrap), --uid W      | ✓    | ✗        | n/a     |
+| 6' Per-worker cgroup (v2)     | cgroup subtree + iptables -m cgroup   | ✓    | ✓¹       | n/a²    |
+| 7 Per-worker network namespace| (not used; Docker backend instead)    | —    | —        | —       |
+
+¹ Requires cgroup-v2 delegation (systemd: `Delegate=yes`).
+² Restricted k8s pods lack CAP_NET_ADMIN for host-iptables-in-pod
+  rules and typically don't get a delegated cgroup subtree inside
+  the pod; use the Docker backend's per-worker network namespaces
+  for per-worker egress instead.
+
+Layer 6 and 6' are two independent paths to the same goal: matching
+worker-only egress at the kernel netfilter layer. Root deployments
+can use either or both. Non-root deployments get 6' only; the
+fork+setuid path needed for 6 fails without CAP_SETUID, and a
+`--userns + newuidmap` workaround was investigated during phase 3-9
+drafting and rejected (blocked on an upstream bwrap bug, see
+`phase-3-9.md`).
+
 ### What's intentionally not included
 
 **Network isolation** and **per-worker resource limits** are omitted from

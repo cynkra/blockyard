@@ -10,6 +10,74 @@ import (
 	"github.com/cynkra/blockyard/internal/preflight"
 )
 
+// TestCheckCloudMetadataSkip — when the operator opts out via
+// skip_metadata_check, the result is Info and nothing dials.
+func TestCheckCloudMetadataSkip(t *testing.T) {
+	cfg := &config.ProcessConfig{SkipMetadataCheck: true}
+	res := checkCloudMetadataReachable(cfg)
+	if res.Severity != preflight.SeverityInfo {
+		t.Errorf("severity = %v, want Info", res.Severity)
+	}
+	if !strings.Contains(res.Message, "skipped") {
+		t.Errorf("message should say skipped: %q", res.Message)
+	}
+}
+
+// TestCheckCloudMetadataUnreachable — in normal CI / dev
+// environments 169.254.169.254 is not reachable. The check returns
+// OK. On an EC2/GCE instance this test would flip to Error, which
+// is the correct production behaviour but not observable here.
+// Skipping when unreachable would mask the real assertion; instead
+// we accept either OK or Error (any other severity is a bug).
+func TestCheckCloudMetadataNormalHostShape(t *testing.T) {
+	cfg := &config.ProcessConfig{}
+	res := checkCloudMetadataReachable(cfg)
+	switch res.Severity {
+	case preflight.SeverityOK, preflight.SeverityError:
+		// both are valid; depends on test host
+	default:
+		t.Errorf("unexpected severity %v: %q", res.Severity, res.Message)
+	}
+}
+
+// TestCheckCgroupDelegationNil — nil manager reports unavailable.
+// This is the common case on hosts without cgroup-v2 delegation
+// (the default on most non-systemd configurations).
+func TestCheckCgroupDelegationNil(t *testing.T) {
+	res := checkCgroupDelegation(nil)
+	if res.Severity != preflight.SeverityInfo {
+		t.Errorf("nil: severity = %v, want Info", res.Severity)
+	}
+	if !strings.Contains(res.Message, "unavailable") {
+		t.Errorf("message should say unavailable: %q", res.Message)
+	}
+}
+
+// TestCheckCgroupDelegationEmpty — manager with no workersPath is
+// equivalent to nil (detection found nothing to delegate).
+func TestCheckCgroupDelegationEmpty(t *testing.T) {
+	res := checkCgroupDelegation(&cgroupManager{})
+	if res.Severity != preflight.SeverityInfo {
+		t.Errorf("empty: severity = %v, want Info", res.Severity)
+	}
+}
+
+// TestCheckCgroupDelegationAvailableMentionsPath — when delegation
+// succeeds, the OK/Warning result must surface the cgroup path so
+// operators can plug it into an iptables rule without guessing.
+func TestCheckCgroupDelegationAvailableMentionsPath(t *testing.T) {
+	m := &cgroupManager{workersPath: "/sys/fs/cgroup/system.slice/blockyard.service/workers"}
+	res := checkCgroupDelegation(m)
+	// Result may be OK or Warning depending on xt_cgroup availability
+	// on the test host; the path must appear either way.
+	if !strings.Contains(res.Message, "blockyard.service/workers") {
+		t.Errorf("message should include the workers path: %q", res.Message)
+	}
+	if !strings.Contains(res.Message, "iptables -A OUTPUT -m cgroup --path") {
+		t.Errorf("message should include the iptables recipe: %q", res.Message)
+	}
+}
+
 // TestCheckBwrap covers all three branches of checkBwrap. /bin/echo
 // stands in for a working bwrap: it's on PATH and prints something
 // for --version; /bin/false is present but exits non-zero. The real
@@ -310,10 +378,10 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			probeReachableFn = func(_ *config.ProcessConfig, _ int, _ int, target string) bool {
+			probeReachableFn = func(_ *config.ProcessConfig, _ *cgroupManager, _ int, _ int, target string) bool {
 				return tc.reachable[target]
 			}
-			res := checkWorkerEgress(cfg, fullCfg)
+			res := checkWorkerEgress(cfg, fullCfg, nil)
 			if res.Severity != tc.wantSeverity {
 				t.Errorf("severity = %v, want %v; message: %q",
 					res.Severity, tc.wantSeverity, res.Message)
@@ -334,11 +402,11 @@ func TestCheckWorkerEgressNoOptionalTargets(t *testing.T) {
 	t.Cleanup(func() { probeReachableFn = restore })
 
 	var targets []string
-	probeReachableFn = func(_ *config.ProcessConfig, _ int, _ int, target string) bool {
+	probeReachableFn = func(_ *config.ProcessConfig, _ *cgroupManager, _ int, _ int, target string) bool {
 		targets = append(targets, target)
 		return false // metadata blocked → OK
 	}
-	res := checkWorkerEgress(cfg, fullCfg)
+	res := checkWorkerEgress(cfg, fullCfg, nil)
 	if res.Severity != preflight.SeverityOK {
 		t.Errorf("severity = %v, want OK", res.Severity)
 	}
@@ -362,7 +430,7 @@ func TestRunPreflightPopulatesReport(t *testing.T) {
 		WorkerGID:      65534,
 	}
 	fullCfg := &config.Config{Process: cfg}
-	report := RunPreflight(cfg, fullCfg)
+	report := RunPreflight(cfg, fullCfg, nil)
 	if report == nil {
 		t.Fatal("expected non-nil report")
 		return // unreachable; satisfies staticcheck SA5011
@@ -376,6 +444,9 @@ func TestRunPreflightPopulatesReport(t *testing.T) {
 		"seccomp_profile":        false,
 		"bwrap_host_uid_mapping": false,
 		"worker_egress":          false,
+		"cloud_metadata":         false,
+		"redis_auth":             false,
+		"cgroup_delegation":      false,
 	}
 	for _, r := range report.Results {
 		if _, ok := expected[r.Name]; ok {

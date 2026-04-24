@@ -43,9 +43,12 @@ func bwrapSysProcAttr() *syscall.SysProcAttr {
 // worker traffic.
 //
 // Non-root blockyard: bwrap runs directly. Setuid to a foreign UID
-// fails without CAP_SETUID, and checkBwrapHostUIDMapping has already
-// flagged this deployment as unsupported for egress isolation until
-// phase 3-9 ships --userns + newuidmap.
+// fails without CAP_SETUID, so the `-m owner` path is inherently
+// inapplicable in this deployment mode. Phase 3-9 added cgroup-v2
+// delegation as an orthogonal layer-6 mechanism (see cgroup.go and
+// checkCgroupDelegation); a `--userns + newuidmap` path was
+// investigated and rejected on an upstream bwrap bug, see
+// docs/design/v3/phase-3-9.md.
 //
 // The bwrap path is always resolved to an absolute path via $PATH
 // before being passed on: the shim path uses syscall.Exec which does

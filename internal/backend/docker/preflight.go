@@ -81,6 +81,7 @@ func runDockerChecks(ctx context.Context, d *DockerBackend, deps PreflightDeps) 
 		// still run non-container checks.
 		r.Add(checkHardLink(deps.StorePath))
 		r.Add(checkMetadataBlocking(d.serverID))
+		r.Add(preflight.CheckRedisAuth(d.fullCfg.Redis))
 		return r
 	}
 
@@ -93,6 +94,7 @@ func runDockerChecks(ctx context.Context, d *DockerBackend, deps PreflightDeps) 
 	r.Add(checkHardLink(deps.StorePath))
 	r.Add(checkMetadataBlocking(d.serverID))
 	r.Add(checkRedisOnServiceNetwork(ctx, d, deps))
+	r.Add(preflight.CheckRedisAuth(d.fullCfg.Redis))
 
 	return r
 }

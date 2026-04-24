@@ -53,6 +53,7 @@ type ProcessBackend struct {
 	fullCfg *config.Config        // held for Preflight() — needs Redis/vault/DB addrs and Server.DefaultMemoryLimit/CPULimit
 	ports   portAllocator
 	uids    uidAllocator
+	cgroups *cgroupManager // nil-safe; no-op when cgroup-v2 delegation is unavailable
 
 	mu      sync.Mutex
 	workers map[string]*workerProc // keyed by worker ID
@@ -88,11 +89,21 @@ func New(fullCfg *config.Config, rc *redisstate.Client, db *sqlx.DB) (*ProcessBa
 
 	ports, uids := selectAllocators(fullCfg, rc, db)
 
+	cgMgr, err := newCgroupManager()
+	if err != nil {
+		// Detection error is informational only — falls back to flat
+		// cgroup behaviour. checkCgroupDelegation reports the chosen
+		// mode at startup.
+		slog.Info("process backend: cgroup delegation probe failed, falling back to flat cgroup",
+			"err", err)
+	}
+
 	return &ProcessBackend{
 		cfg:     cfg,
 		fullCfg: fullCfg,
 		ports:   ports,
 		uids:    uids,
+		cgroups: cgMgr,
 		workers: make(map[string]*workerProc),
 	}, nil
 }
@@ -183,7 +194,7 @@ func ensureBundleMountPoint(path string) error {
 
 // Preflight implements backend.Backend by delegating to RunPreflight.
 func (b *ProcessBackend) Preflight(_ context.Context) (*preflight.Report, error) {
-	return RunPreflight(b.cfg, b.fullCfg), nil
+	return RunPreflight(b.cfg, b.fullCfg, b.cgroups), nil
 }
 
 func (b *ProcessBackend) CheckRVersion(version string) error {
@@ -436,8 +447,26 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 	// Two goroutines, not io.MultiReader — MultiReader reads sequentially
 	// (stdout to EOF before stderr), which would suppress stderr for the
 	// entire worker lifetime.
+	//
+	// Must start BEFORE EnrollTree. EnrollTree can block for up to
+	// ~100 ms on delegated hosts while polling for descendants; a
+	// short-lived worker (e.g. R --version in the integration smoke
+	// test) can fork+print+exit during that window. If ingest hasn't
+	// started when cmd.Wait closes the pipes (via close(proceed)
+	// below), the buffered output is lost. Launching ingest first
+	// lets it drain the pipe concurrently with EnrollTree's poll.
 	go logs.ingest(stdout)
 	go logs.ingest(stderr)
+
+	// Move the worker tree into the delegated cgroup-v2 `workers/`
+	// subtree so operator `iptables -m cgroup --path <path>/workers`
+	// rules match its egress traffic. EnrollTree (not Enroll) because
+	// cgroup.procs only moves the single tgid written, and bwrap's
+	// inner sandbox fork produces a separate tgid we also need to
+	// catch. No-op when delegation is unavailable. Must run before
+	// `proceed` so the writes happen before the wait goroutine reaps
+	// the child.
+	b.cgroups.EnrollTree(cmd.Process.Pid)
 
 	b.mu.Lock()
 	b.workers[spec.WorkerID] = &workerProc{

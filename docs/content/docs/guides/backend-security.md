@@ -92,7 +92,7 @@ once on the process backend.
 
 Picking the process backend is the start of the work, not the end. The
 backend provides the per-worker sandbox; the operator provides the
-network and resource boundaries around it. Three controls matter.
+network and resource boundaries around it. Four controls matter.
 
 ### 1. Prefer containerized mode
 
@@ -111,64 +111,148 @@ for the image layout, the custom seccomp profile Docker needs to allow
 deployment runs with no `--privileged`, no `--cap-add SYS_ADMIN`, and
 no Docker socket mount.
 
-### 2. Install a destination-scoped egress firewall
+### 2. Load the AppArmor profile on Ubuntu 23.10+
 
-Workers share the host network stack, so the only way to keep them away
-from sensitive destinations is an egress firewall outside the sandbox.
+Ubuntu 23.10 and later ship `kernel.apparmor_restrict_unprivileged_userns=1`
+by default, which intercepts any non-root `unshare(CLONE_NEWUSER)` unless
+the caller runs under an AppArmor profile granting the `userns` permission.
+Without a profile, rootless `bwrap` cannot create its sandbox at all —
+this affects every isolation layer, not just layer 6.
+
+Blockyard ships a narrow AppArmor profile that grants `userns` to
+blockyard and its subprocesses only:
+
+```sh
+sudo by admin install-apparmor
+sudo apparmor_parser -r /etc/apparmor.d/blockyard
+```
+
+The profile does **not** confine blockyard itself — blockyard is the
+trusted component; the workers it spawns are confined by bwrap's
+capability drop, seccomp, and bind-mount restrictions, not by
+AppArmor. The alternative,
+`sysctl kernel.apparmor_restrict_unprivileged_userns=0`, disables the
+restriction host-wide for every unprivileged process; the profile is
+the narrow equivalent.
+
+Other supported distros (Debian, Fedora, RHEL, Arch, GKE's COS,
+minikube's default node OS) either don't ship this sysctl or have it
+disabled. No profile needed.
+
+### 3. Install a destination-scoped egress firewall
+
+Workers share the host network stack, so the only way to keep them
+away from sensitive destinations is an egress firewall outside the
+sandbox. Blockyard supports two independent iptables matches for
+worker traffic; which one fits depends on how blockyard is deployed:
+
+| Deployment | Mechanism | iptables match |
+|---|---|---|
+| Containerized root (default) | fork+setuid per worker | `-m owner --uid-owner` / `--gid-owner` |
+| Native non-root or rootless container, with cgroup-v2 delegation | workers subcgroup | `-m cgroup --path <cgroup>/workers` |
+| Rootless container without cgroup delegation, or restricted k8s pod | neither available | use the Docker backend |
+
+The two mechanisms are orthogonal. Root deployments can use either or
+both; non-root deployments get the cgroup path only. A `--userns` +
+`newuidmap` alternative for non-root was investigated and rejected
+during phase 3-9 drafting (blocked on an upstream bwrap bug — see
+[phase-3-9.md](https://github.com/cynkra/blockyard/blob/main/docs/design/v3/phase-3-9.md)).
+
+#### Root deployments: `-m owner`
+
 Blockyard assigns each running worker a unique host UID from
 `[process] worker_uid_range_start..worker_uid_range_end` (default
-60000–60999), and a shared `worker_gid` (default 65534, `nogroup`). This
-gives iptables an `owner` match to key rules on.
+60000–60999), and a shared `worker_gid` (default 65534, `nogroup`).
+The spawn path fork+setuid's each worker into its host UID before
+`exec(bwrap)`, so the worker's socket creator is visible to
+`-m owner`.
 
 ```sh
 # Allow blockyard's own egress to internal services.
 iptables -A OUTPUT -m owner --uid-owner blockyard -j ACCEPT
 
-# Block worker access to specific internal destinations. The worker GID
-# is the match; the destination address narrows the rule.
+# Block worker access to specific internal destinations. The worker
+# GID is the match; the destination address narrows the rule.
 iptables -A OUTPUT -m owner --gid-owner 65534 -d 169.254.169.254 -j REJECT
 iptables -A OUTPUT -m owner --gid-owner 65534 -d <redis-ip>      -j REJECT
-iptables -A OUTPUT -m owner --gid-owner 65534 -d <vault-ip>    -j REJECT
+iptables -A OUTPUT -m owner --gid-owner 65534 -d <vault-ip>      -j REJECT
 iptables -A OUTPUT -m owner --gid-owner 65534 -d <database-ip>   -j REJECT
 ```
 
-The rules are **destination-scoped, not blanket**. A rule like
-`iptables -A OUTPUT -m owner --gid-owner 65534 -j REJECT` would also cut
-off the open internet — but workers legitimately need to fetch data,
-call external APIs, and download models. Enumerate the specific internal
-endpoints you want to protect and scope each rule to them.
+The preflight check `bwrap_host_uid_mapping` confirms at startup that
+fork+setuid is wiring host-visible worker IDs. A non-root deployment
+cannot produce them and the check steers you to the cgroup path
+instead.
 
-Blockyard's preflight actively verifies these rules at startup by
-spawning a probe under the worker UID/GID and attempting TCP connections
-to the same internal endpoints. A reachable cloud metadata endpoint is
-reported as an error; reachable Redis, vault, or database endpoints
-are reported as warnings. The probe never tests the open internet —
-workers are expected to reach it.
+#### Any deployment with cgroup-v2 delegation: `-m cgroup --path`
 
-#### Host UID mapping is load-bearing
+When blockyard's cgroup-v2 subtree is delegated (systemd:
+`Delegate=yes`), blockyard moves each worker's PID tree into a
+`workers/` subcgroup and operators match that path with
+`iptables -m cgroup --path`. Works for both root and non-root
+blockyard; independent of the UID mapping entirely.
 
-`iptables -m owner` matches on the *host-side* UID/GID of the process
-creating the socket, not on the namespace-local UID inside the sandbox.
-For bubblewrap's `--uid`/`--gid` flags to produce host-visible IDs, one
-of these must hold:
+Prerequisites:
 
-- **Blockyard runs as root** (typical containerized mode, where
-  blockyard is PID 1 root inside a container). bwrap inherits root and
-  can set up any uid_map.
-- **bwrap is setuid root on the host** (`sudo chmod u+s /usr/bin/bwrap`
-  if the distro package doesn't ship it that way). Required for native
-  non-root deployments.
+- cgroup-v2 unified hierarchy (`grep cgroup2 /proc/mounts`).
+- `xt_cgroup` netfilter module loaded (`sudo modprobe xt_cgroup`;
+  add to `/etc/modules-load.d/` for persistence).
+- systemd service unit with `Delegate=yes`.
 
-If neither condition holds, workers still start — but they all run
-under blockyard's own host UID, and the operator's iptables rules
-silently match nothing. Blockyard's preflight catches this at startup
-by spawning a bwrap probe with a distinct sandbox UID and checking
-whether the child's host-side `/proc/<pid>/status` reports the
-requested UID. If it reports an error here, your iptables rules will
-not work until you add the setuid bit (or switch to running blockyard
-as root).
+The cgroup path depends on where systemd placed the service. The
+`cgroup_delegation` preflight reports the path at startup so you
+don't have to guess:
 
-### 3. Apply resource limits outside the sandbox
+```sh
+CGPATH=system.slice/blockyard.service/workers
+iptables -A OUTPUT -m cgroup --path "$CGPATH" -d 169.254.169.254 -j REJECT
+iptables -A OUTPUT -m cgroup --path "$CGPATH" -d <redis-ip>      -j REJECT
+iptables -A OUTPUT -m cgroup --path "$CGPATH" -d <vault-ip>      -j REJECT
+```
+
+See the native guide's
+[cgroup-v2 section](/docs/guides/process-backend/#per-worker-egress-via-cgroup-v2-delegation)
+for the full systemd unit template.
+
+#### Rules are destination-scoped, not blanket
+
+Whichever match you use, rules must name the internal endpoints you
+want blocked. A blanket `-m owner --gid-owner 65534 -j REJECT` or
+`-m cgroup --path <path> -j REJECT` also cuts off the open internet
+— and workers legitimately need it (CRAN, package downloads, model
+APIs, `httr` calls).
+
+#### Preflight catches the common footguns
+
+Blockyard runs several checks at startup so misconfiguration surfaces
+before the first user session hits it:
+
+- `worker_egress` — spawns a probe under the worker UID/GID (enrolled
+  into the workers cgroup when delegation is available) and attempts
+  TCP connections to cloud metadata, Redis, vault, and the database.
+  Reachable metadata → Error; reachable internal services → Warning.
+  The probe never tests the open internet.
+- `cloud_metadata` — TCP-connects from blockyard's own process to
+  `169.254.169.254:80`. Reachable → Error, because any host-network
+  process (including a compromised worker) can reach it too. Set
+  `[process] skip_metadata_check = true` only when blockyard itself
+  legitimately needs metadata access (e.g. using the VM's IAM role
+  for S3 storage); opting in accepts that a compromised worker can
+  read instance credentials.
+- `redis_auth` — sends an unauthenticated `PING` to the configured
+  Redis. `+PONG` → Error ("any host-network process can modify
+  session state"); `-NOAUTH` → OK. `rediss://` URLs short-circuit to
+  Info because a plain-TCP probe against a TLS server is not
+  meaningful.
+- `cgroup_delegation` — reports whether delegation is available, the
+  path workers are moved into, and whether the `xt_cgroup` module is
+  loaded (without it, `-m cgroup --path` rules fail to install).
+- `bwrap_host_uid_mapping` — on root deployments, confirms
+  fork+setuid produces host-visible worker IDs. On non-root
+  deployments, reports the gap as Info and points at cgroup
+  delegation or the Docker backend.
+
+### 4. Apply resource limits outside the sandbox
 
 The process backend does not enforce per-worker CPU, memory, or PID
 limits. Any limit must be applied at a layer above the sandbox:

@@ -4,6 +4,7 @@ package process_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,8 +30,8 @@ import (
 //
 //   - bwrapHostMapped: blockyard is root, fork+setuid path works.
 //   - bwrapNoHostMap: blockyard is non-root; iptables owner-match
-//     isolation is unavailable until phase 3-9 lands --userns +
-//     newuidmap.
+//     is inherently inapplicable in this mode (layer 6 reached via
+//     cgroup-v2 delegation instead; see phase-3-9.md).
 //   - bwrapUnavailable: bwrap is missing or can't create a user
 //     namespace at all; every process_test integration test skips.
 type bwrapMode int
@@ -92,14 +93,18 @@ func requireBwrap(t *testing.T) {
 // root (fork+setuid before exec(bwrap) → identity uid_map). Non-root
 // blockyard keeps sandboxed children at blockyard's own kuid, which
 // makes any test that depends on per-worker host identity
-// meaningless.
+// meaningless. Phase 3-9 decided against a `--userns + newuidmap`
+// path for non-root (see docs/design/v3/phase-3-9.md, blocked on an
+// upstream bwrap bug) and delivers layer 6 via cgroup-v2 delegation
+// instead, so this constraint is permanent for tests that need
+// per-worker host UIDs.
 func requireHostUIDMapping(t *testing.T) {
 	t.Helper()
 	switch detectBwrapMode(t) {
 	case bwrapUnavailable:
 		t.Skip("bwrap not available")
 	case bwrapNoHostMap:
-		t.Skip("non-root blockyard: spawn path cannot produce identity uid_map until phase 3-9 ships --userns+newuidmap")
+		t.Skip("non-root blockyard: spawn path cannot produce identity uid_map (per-worker host kuid is root-only; non-root deployments reach layer 6 via cgroup-v2 delegation)")
 	}
 }
 
@@ -372,5 +377,91 @@ func TestRSmokeBoot(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "R version") {
 		t.Errorf("expected output to contain 'R version', got:\n%s", joined)
+	}
+}
+
+// TestCgroupEnrollment exercises the phase-3-9 cgroup-v2 delegation
+// path end-to-end: spawn a worker, observe its PID in the
+// `workers/` subcgroup's cgroup.procs. Skipped unless detection
+// succeeded on the test host (the --privileged CI container may
+// not have a writable unified hierarchy, and native dev boxes that
+// aren't systemd-delegated won't either).
+func TestCgroupEnrollment(t *testing.T) {
+	requireHostUIDMapping(t)
+
+	// Probe /proc/self/cgroup for a v2 unified layout with write
+	// access. Same logic as detectCgroupDelegation but duplicated
+	// here because the integration test lives outside the package.
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		t.Skipf("read /proc/self/cgroup: %v", err)
+	}
+	text := strings.TrimRight(string(data), "\n")
+	if strings.Contains(text, "\n") || !strings.HasPrefix(text, "0::") {
+		t.Skip("not a cgroup-v2 unified hierarchy; skipping enrollment test")
+	}
+	cgRoot := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(text, "0::"))
+	probe := filepath.Join(cgRoot, ".blockyard-integration-probe")
+	if err := os.Mkdir(probe, 0o755); err != nil {
+		t.Skipf("cgroup subtree not writable (delegation unavailable): %v", err)
+	}
+	_ = os.Remove(probe)
+
+	cfg := &config.Config{
+		Server:  config.ServerConfig{Backend: "process"},
+		Storage: config.StorageConfig{BundleWorkerPath: "/tmp/app"},
+		Process: &config.ProcessConfig{
+			BwrapPath:      "bwrap",
+			RPath:          "/bin/sleep",
+			PortRangeStart: 19500,
+			PortRangeEnd:   19599,
+			WorkerUIDStart: 69500,
+			WorkerUIDEnd:   69599,
+			WorkerGID:      65534,
+		},
+	}
+	be, err := process.New(cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	spec := backend.WorkerSpec{
+		WorkerID:    "cgroup-enroll",
+		BundlePath:  workerAccessibleTempDir(t),
+		WorkerMount: "/tmp/app",
+		Cmd:         []string{"/bin/sleep", "30"},
+	}
+	if err := be.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer be.Stop(ctx, spec.WorkerID)
+
+	addr, err := be.Addr(ctx, spec.WorkerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = addr
+
+	// EnrollTree synchronously polls for descendants up to ~100 ms,
+	// then Spawn returns. A small grace buffer here absorbs any
+	// remaining bwrap fork latency on a slow CI host.
+	time.Sleep(200 * time.Millisecond)
+
+	procs, err := os.ReadFile(filepath.Join(cgRoot, "workers", "cgroup.procs"))
+	if err != nil {
+		t.Fatalf("read workers/cgroup.procs: %v", err)
+	}
+	pids := strings.Fields(string(procs))
+	fmt.Printf("workers/cgroup.procs:\n%s\n", string(procs))
+	// Two PIDs is the phase-3-9 guarantee: the bwrap monitor (via
+	// the initial Enroll) plus at least one descendant (bwrap's
+	// inner sandbox tgid, via EnrollTree's descendant walk). A
+	// single entry would mean we're back to the pre-fix behaviour
+	// where the real worker's traffic isn't captured by
+	// `iptables -m cgroup --path workers` rules.
+	if len(pids) < 2 {
+		t.Errorf("workers/cgroup.procs has %d PIDs, want >= 2 (monitor + sandbox); contents: %q",
+			len(pids), string(procs))
 	}
 }

@@ -292,6 +292,44 @@ Blockyard's preflight runs the same worker-egress probe in
 containerized mode. Review the startup logs for warnings about
 reachable internal services.
 
+## Rootless containers
+
+Running blockyard as a non-root user inside a container (or on k8s
+with a `runAsNonRoot: true` pod spec) changes the egress isolation
+picture. The six-layer model from
+[backends.md](/docs/design/backends/#deployment-mode--isolation-layer-matrix)
+reduces to:
+
+- **Layers 1–5** (filesystem, PID, capabilities, seccomp, in-sandbox
+  UIDs) hold regardless.
+- **Layer 6 via `-m owner` is unavailable.** The fork+setuid path
+  that produces per-worker host kuids requires CAP_SETUID.
+- **Layer 6 via cgroup-v2 delegation is available only** if the
+  container runtime grants a delegated cgroup subtree *inside the
+  container* (not default). In that case, install
+  `iptables -m cgroup --path <cgpath>/workers` rules on the host or
+  in a network-admin sidecar.
+- **AppArmor on Ubuntu 23.10+:** extract and load the profile on the
+  host (not inside the container) so it applies to the container's
+  blockyard process:
+
+  ```bash
+  docker run --rm --entrypoint cat \
+      ghcr.io/cynkra/blockyard-process:${VERSION} \
+      /etc/blockyard/apparmor/blockyard | sudo tee /etc/apparmor.d/blockyard
+  sudo apparmor_parser -r /etc/apparmor.d/blockyard
+  ```
+
+  The profile attaches by path (`/usr/{bin,local/bin}/blockyard`), so
+  the container's blockyard binary needs to match one of those paths
+  for enforcement to apply.
+
+For deployments that need per-worker egress isolation but land on a
+rootless-container surface without cgroup delegation, the Docker
+backend is the supported path — it gives each worker its own
+network namespace and per-worker bridge, independent of host
+iptables mechanics.
+
 ## Rolling updates in containerized mode
 
 `by admin update` returns `501 Not Implemented` when blockyard runs

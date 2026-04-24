@@ -114,6 +114,15 @@ type ProcessConfig struct {
 	WorkerUIDStart int    `toml:"worker_uid_range_start"` // first host UID for workers (inclusive)
 	WorkerUIDEnd   int    `toml:"worker_uid_range_end"`   // last host UID for workers (inclusive)
 	WorkerGID      int    `toml:"worker_gid"`             // shared host GID for all workers (used by egress firewall rules)
+
+	// SkipMetadataCheck suppresses the cloud-metadata reachability
+	// preflight check. Default false: the check is meant to flag the
+	// "workers can reach 169.254.169.254 and steal IAM creds" footgun
+	// on VMs with an attached instance role. Set true only when
+	// blockyard itself legitimately needs metadata access (e.g.
+	// IRSA-style auth against S3); operators who opt in also accept
+	// the worker-compromise implication.
+	SkipMetadataCheck bool `toml:"skip_metadata_check"`
 }
 
 type DockerConfig struct {

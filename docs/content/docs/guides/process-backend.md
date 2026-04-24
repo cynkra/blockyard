@@ -68,24 +68,59 @@ echo "kernel.unprivileged_userns_clone = 1" | sudo tee /etc/sysctl.d/99-blockyar
 sudo sysctl --system
 ```
 
-### bwrap setuid requirement (Debian 12+/Ubuntu 24.04+)
+### Worker egress isolation options
 
-Debian 12 and Ubuntu 24.04 ship `bwrap` as a regular (non-setuid)
-binary. With user namespaces enabled, bwrap *can* still enter a new
-namespace, but `--uid`/`--gid` no longer produce a host-visible UID —
-and the egress firewall relies on host-side UIDs to work. Blockyard's
-preflight detects this and refuses to start; the fix is:
+Per-worker egress filtering (layer 6 in the isolation model — see
+[backends.md](/docs/design/backends/#deployment-mode--isolation-layer-matrix))
+depends on how blockyard is deployed:
+
+- **Root blockyard (containerized deployments):** the spawn path
+  fork+setuid's each worker into a distinct host UID before
+  `exec(bwrap)`, so operator `iptables -m owner --uid-owner` rules
+  match worker traffic.
+- **Non-root blockyard (native or unprivileged containers):** the
+  fork+setuid path fails without CAP_SETUID. Reach layer 6 via
+  [cgroup-v2 delegation](#per-worker-egress-via-cgroup-v2-delegation)
+  and `iptables -m cgroup --path` rules instead.
+- **k8s / restricted containers:** when neither path is available,
+  use the Docker backend for per-worker network namespaces.
+
+On Ubuntu 23.10+ the kernel's AppArmor restriction on unprivileged
+user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns=1`) intercepts any
+non-root `unshare(CLONE_NEWUSER)` unless the caller runs under a
+profile granting `userns`. Blockyard ships a narrow profile — see
+[AppArmor profile](#apparmor-profile-ubuntu-2310).
+
+### AppArmor profile (Ubuntu 23.10+)
+
+Extract the shipped profile and load it:
 
 ```bash
-sudo chmod u+s /usr/bin/bwrap
+by admin install-apparmor
+sudo apparmor_parser -r /etc/apparmor.d/blockyard
 ```
 
-This is the same configuration Fedora/RHEL ship by default. The other
-option is to run blockyard as root, which inherits `CAP_SYS_ADMIN` and
-bypasses the restriction — the containerized image does this.
+Or, from a built image:
 
-See [Host UID mapping is load-bearing](/docs/guides/backend-security/#host-uid-mapping-is-load-bearing)
-in the backend security guide for the full explanation.
+```bash
+docker run --rm --entrypoint cat \
+    ghcr.io/cynkra/blockyard-process:${VERSION} \
+    /etc/blockyard/apparmor/blockyard | sudo tee /etc/apparmor.d/blockyard
+sudo apparmor_parser -r /etc/apparmor.d/blockyard
+```
+
+The profile grants the `userns` permission narrowly to blockyard and
+its subprocesses (`bwrap`, the `bwrap-exec` shim, the worker R
+interpreter) so rootless bwrap can create its sandbox user namespace.
+It does **not** confine blockyard itself — blockyard is the trusted
+component here; the workers it spawns are confined by bwrap's
+capability drop, seccomp, and bind-mount restrictions, not by
+AppArmor.
+
+The alternative, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`,
+disables the restriction host-wide for every unprivileged process.
+The profile is the narrow equivalent.
 
 ## Install blockyard
 
@@ -193,7 +228,26 @@ Redis/vault/database endpoints are reported as warnings.
 > that makes `-m owner` actually match, see
 > [Backend Security](/docs/guides/backend-security/#2-install-a-destination-scoped-egress-firewall).
 
-## systemd unit
+## Per-worker egress via cgroup-v2 delegation
+
+For non-root deployments (and as an alternative to `-m owner` for
+root deployments), blockyard moves each worker's PID into a delegated
+cgroup-v2 subtree so operators can match worker traffic with
+`iptables -m cgroup --path <path>/workers`. The preflight check
+`cgroup_delegation` reports at startup whether this mechanism is
+available on the host.
+
+Prerequisites:
+
+- Host is on cgroup-v2 unified hierarchy
+  (`grep cgroup2 /proc/mounts` shows a line).
+- The `xt_cgroup` netfilter module is loaded
+  (`lsmod | grep xt_cgroup`, or `sudo modprobe xt_cgroup`; add to
+  `/etc/modules-load.d/` for persistence).
+- blockyard's cgroup is delegated. With systemd, add `Delegate=yes`
+  to the service unit (see below).
+
+### systemd unit with cgroup delegation
 
 `/etc/systemd/system/blockyard.service`:
 
@@ -210,6 +264,11 @@ Group=blockyard
 ExecStart=/usr/local/bin/blockyard --config /etc/blockyard/blockyard.toml
 Restart=on-failure
 RestartSec=5s
+
+# Delegate blockyard's cgroup-v2 subtree to the service, so blockyard
+# can create a `workers/` subcgroup and enroll each worker PID into
+# it. `iptables -m cgroup --path` rules then match worker traffic.
+Delegate=yes
 
 # Shared ceilings — per-worker cgroup limits are not enforced by the
 # process backend. These apply to the entire blockyard service unit
@@ -231,6 +290,25 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now blockyard
 sudo systemctl status blockyard
 ```
+
+With `Delegate=yes` in place, the startup preflight reports the
+delegated path in `cgroup_delegation`. Install iptables rules
+matching that path — typically
+`system.slice/blockyard.service/workers`:
+
+```bash
+CGPATH=system.slice/blockyard.service/workers
+sudo iptables -A OUTPUT -m cgroup --path "$CGPATH" \
+    -d 169.254.169.254 -j REJECT
+sudo iptables -A OUTPUT -m cgroup --path "$CGPATH" \
+    -d <redis-ip>   -j REJECT
+sudo iptables -A OUTPUT -m cgroup --path "$CGPATH" \
+    -d <openbao-ip> -j REJECT
+```
+
+If the `xt_cgroup` module is missing, the preflight escalates
+`cgroup_delegation` to WARNING and iptables will fail rule
+installation at runtime with "No chain/target/match by that name".
 
 ## Reverse proxy for rolling updates
 
