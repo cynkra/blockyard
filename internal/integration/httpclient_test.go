@@ -68,6 +68,22 @@ func TestNewHTTPClient_NotPEM(t *testing.T) {
 	}
 }
 
+func TestClient_WithHTTPClient(t *testing.T) {
+	custom := &http.Client{Timeout: 1 * time.Second}
+	c := NewClient("http://vault", func() string { return "" }).WithHTTPClient(custom)
+	if c.httpClient != custom {
+		t.Errorf("WithHTTPClient did not replace httpClient")
+	}
+}
+
+func TestTokenRenewer_WithHTTPClient(t *testing.T) {
+	custom := &http.Client{Timeout: 1 * time.Second}
+	r := NewTokenRenewer("http://vault", "tok", "").WithHTTPClient(custom)
+	if r.httpClient != custom {
+		t.Errorf("WithHTTPClient did not replace httpClient")
+	}
+}
+
 func writeCert(t *testing.T, cert *x509.Certificate) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ca.pem")
