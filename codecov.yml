@@ -20,7 +20,15 @@ flags:
     carryforward: true
   pak:
     carryforward: true
+  redis:
+    carryforward: true
   ui:
+    carryforward: true
+  process-root:
+    carryforward: true
+  process-setuid:
+    carryforward: true
+  process-unprivileged:
     carryforward: true
   examples:
     carryforward: true
