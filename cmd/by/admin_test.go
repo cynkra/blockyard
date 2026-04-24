@@ -17,7 +17,7 @@ func TestAdminCmdStructure(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		subs[sub.Use] = true
 	}
-	for _, want := range []string{"update", "rollback", "status"} {
+	for _, want := range []string{"update", "rollback", "status", "install-seccomp", "install-apparmor"} {
 		if !subs[want] {
 			t.Errorf("missing subcommand %q", want)
 		}

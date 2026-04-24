@@ -2,8 +2,10 @@ package process
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +26,11 @@ import (
 // effective). If a prerequisite fails we still run the later checks
 // — they'll fail too, and emitting all failures at once is more
 // useful than bailing at the first.
-func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config) *preflight.Report {
+//
+// cgroups is the optional cgroup-v2 delegation manager; nil is safe
+// and tests pass nil directly. The manager feeds checkCgroupDelegation
+// and the worker-egress probe's cgroup enrollment.
+func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config, cgroups *cgroupManager) *preflight.Report {
 	r := &preflight.Report{RanAt: time.Now().UTC()}
 	r.Add(checkBwrap(cfg))
 	r.Add(checkRBinary(cfg))
@@ -34,7 +40,10 @@ func RunPreflight(cfg *config.ProcessConfig, fullCfg *config.Config) *preflight.
 	r.Add(checkResourceLimits(&fullCfg.Server))
 	r.Add(checkSeccompProfile(cfg))
 	r.Add(checkBwrapHostUIDMapping(cfg))
-	r.Add(checkWorkerEgress(cfg, fullCfg))
+	r.Add(checkCloudMetadataReachable(cfg))
+	r.Add(preflight.CheckRedisAuth(fullCfg.Redis))
+	r.Add(checkCgroupDelegation(cgroups))
+	r.Add(checkWorkerEgress(cfg, fullCfg, cgroups))
 	return r
 }
 
@@ -206,29 +215,28 @@ func checkUserNamespacesAt(path string) preflight.Result {
 // sandboxed grandchild through --info-fd.
 //
 // When blockyard is non-root, setuid(W) is rejected by the kernel, so
-// bwrap's uid_map still maps sandbox_uid to blockyard's own uid; the
-// sandboxed child appears as blockyard in init_userns and operator
-// iptables owner-match rules do not fire. The check fails explicitly
-// and points operators at the remediation paths: run as root
-// (containerized deployment), use the Docker backend, or wait for
-// phase 3-9's --userns + newuidmap path which will give native
-// non-root deployments identity uid_maps without needing root.
+// bwrap's uid_map still maps sandbox_uid to blockyard's own uid. The
+// `-m owner` mechanism is inherently inapplicable in that mode (not
+// broken), and blocking startup was wrong — operators reach layer 6
+// via cgroup-v2 delegation instead. The non-root branch reports Info
+// with the alternatives; checkCgroupDelegation reports the cgroup
+// path availability.
 func checkBwrapHostUIDMapping(cfg *config.ProcessConfig) preflight.Result {
 	const name = "bwrap_host_uid_mapping"
 
 	if os.Getuid() != 0 {
 		return preflight.Result{
 			Name:     name,
-			Severity: preflight.SeverityError,
-			Message: "worker egress isolation requires blockyard to run as root " +
-				"(typical containerized deployment); non-root blockyard cannot setuid " +
-				"the bwrap child, so the uid_map bwrap writes maps the sandbox UID to " +
-				"blockyard's own host UID and operator iptables --uid-owner/--gid-owner " +
-				"rules do not match worker traffic. Remediations: run blockyard as root, " +
-				"use the Docker backend for per-worker network namespaces, or wait for " +
-				"phase 3-9 which adds a --userns + newuidmap path for native non-root " +
-				"deployments. Set server.skip_preflight=true to run anyway with no egress " +
-				"isolation.",
+			Severity: preflight.SeverityInfo,
+			Message: "non-root blockyard cannot produce per-worker host kuids " +
+				"via fork+setuid, so `iptables -m owner --uid-owner` rules do " +
+				"not match worker traffic. This is inherent to non-root mode, " +
+				"not a failure: workers still have filesystem, PID, capability, " +
+				"seccomp, and in-sandbox UID isolation (layers 1-5), and " +
+				"per-worker egress (layer 6) is available via cgroup-v2 " +
+				"delegation — see cgroup_delegation. Alternatives: run as root " +
+				"(containerized deployment) for the `-m owner` path, or use the " +
+				"Docker backend for per-worker network namespaces.",
 			Category: "process",
 		}
 	}
@@ -442,7 +450,7 @@ func checkPortRange(cfg *config.ProcessConfig) preflight.Result {
 // The probe binary is the same blockyard binary, invoked with
 // `blockyard probe --tcp host:port`. It exits 0 on successful TCP
 // connect, 1 on failure. No external tools required.
-func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) preflight.Result {
+func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config, cgroups *cgroupManager) preflight.Result {
 	type target struct {
 		name     string
 		addr     string
@@ -474,7 +482,7 @@ func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) prefli
 	var reachable, blocked []string
 	var critical bool
 	for _, t := range targets {
-		if probeReachableFn(cfg, probeUID, probeGID, t.addr) {
+		if probeReachableFn(cfg, cgroups, probeUID, probeGID, t.addr) {
 			reachable = append(reachable, fmt.Sprintf("%s (%s)", t.name, t.addr))
 			if t.critical {
 				critical = true
@@ -522,7 +530,16 @@ var probeReachableFn = probeReachable
 // target TCP address is reachable. Returns false on probe error
 // (treated as "not reachable" — fail-safe for the warning, not for
 // security).
-func probeReachable(cfg *config.ProcessConfig, uid, gid int, target string) bool {
+//
+// cgroups (optional) enrolls the probe into the delegated
+// `workers/` subcgroup before its first connect(), so operator
+// `iptables -m cgroup --path workers` rules match the probe the
+// same way they'd match a real worker. Without this, the probe
+// stays in blockyard's own cgroup and would reach targets that
+// real workers cannot. A bounded race exists between cmd.Start
+// and the enroll write, but bwrap's namespace/mount setup
+// (~10–50 ms) swamps the enroll write (~1 ms).
+func probeReachable(cfg *config.ProcessConfig, cgroups *cgroupManager, uid, gid int, target string) bool {
 	self, err := os.Executable()
 	if err != nil {
 		return false
@@ -547,5 +564,129 @@ func probeReachable(cfg *config.ProcessConfig, uid, gid int, target string) bool
 	}
 	cmd := exec.Command(prog, argv...) //nolint:gosec // G204
 	cmd.SysProcAttr = bwrapSysProcAttr()
-	return cmd.Run() == nil // exit 0 = connect succeeded
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	cgroups.Enroll(cmd.Process.Pid) // no-op when delegation unavailable
+	return cmd.Wait() == nil        // exit 0 = connect succeeded
+}
+
+// checkCloudMetadataReachable attempts a TCP connect to the link-local
+// cloud metadata endpoint from blockyard's own process (not from
+// inside a bwrap sandbox). Workers share the host network in the
+// process backend, so if blockyard can reach the endpoint, so can
+// every worker — and a compromised worker can steal the VM's IAM
+// credentials. Reachable is treated as SeverityError prompting the
+// operator to install a host-wide block rule or use a token-scoped
+// metadata service (IMDSv2 / Workload Identity).
+//
+// Skipped when `[process] skip_metadata_check = true`. The escape
+// hatch is for the rare deployment where blockyard legitimately needs
+// metadata access (e.g. running on a VM whose IAM role is used by
+// blockyard itself for S3 storage); operators who opt in also accept
+// the worker-compromise implication.
+func checkCloudMetadataReachable(cfg *config.ProcessConfig) preflight.Result {
+	const name = "cloud_metadata"
+	if cfg.SkipMetadataCheck {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityInfo,
+			Message:  "cloud metadata check skipped by [process] skip_metadata_check",
+			Category: "process",
+		}
+	}
+	d := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.Dial("tcp", "169.254.169.254:80")
+	if err != nil {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityOK,
+			Message:  "cloud metadata endpoint not reachable from blockyard",
+			Category: "process",
+		}
+	}
+	_ = conn.Close()
+	return preflight.Result{
+		Name:     name,
+		Severity: preflight.SeverityError,
+		Message: "cloud metadata endpoint (169.254.169.254) is reachable from blockyard. " +
+			"A compromised worker can steal this VM's IAM credentials. " +
+			"Block it with `iptables -A OUTPUT -d 169.254.169.254 -j REJECT`, " +
+			"enable IMDSv2 (EC2) or Workload Identity (GCP/AKS), " +
+			"or run on a VM without an attached instance role. " +
+			"Set [process] skip_metadata_check = true to suppress this check.",
+		Category: "process",
+	}
+}
+
+// checkCgroupDelegation reports whether cgroup-v2 delegation is
+// available and the workers subcgroup was created. When available,
+// also probes for the xt_cgroup netfilter module and escalates the
+// severity to Warning if missing — operators installing
+// `iptables -m cgroup --path` rules would otherwise hit a cryptic
+// "No chain/target/match by that name" at rule-install time.
+//
+// nil cgroups is treated as "unavailable" so tests that construct a
+// fake Preflight without initializing cgroup detection still get a
+// well-formed result.
+func checkCgroupDelegation(cgroups *cgroupManager) preflight.Result {
+	const name = "cgroup_delegation"
+	if cgroups == nil || cgroups.workersPath == "" {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityInfo,
+			Message: "cgroup-v2 delegation unavailable. Per-worker egress " +
+				"isolation via `iptables -m cgroup --path` is not available " +
+				"on this host. Root deployments can use `iptables -m owner " +
+				"--gid-owner` rules on the per-worker host kuids instead. " +
+				"For non-root deployments wanting per-worker egress: enable " +
+				"cgroup delegation (systemd: Delegate=yes on the unit) or " +
+				"use the Docker backend.",
+			Category: "process",
+		}
+	}
+	xtCgroup := xtCgroupAvailable()
+	cgRoot := filepath.Dir(cgroups.workersPath)
+	cgMatchPath := strings.TrimPrefix(cgroups.workersPath, "/sys/fs/cgroup/")
+	msg := fmt.Sprintf(
+		"cgroup-v2 delegation available at %q; workers moved into %q. "+
+			"Install a rule like `iptables -A OUTPUT -m cgroup --path %s -d <service-ip> -j REJECT` "+
+			"to block worker access to internal services.",
+		cgRoot, cgroups.workersPath, cgMatchPath,
+	)
+	if !xtCgroup {
+		return preflight.Result{
+			Name:     name,
+			Severity: preflight.SeverityWarning,
+			Message: msg + " WARNING: the xt_cgroup netfilter module does " +
+				"not appear to be loaded (no match in /proc/net/ip_tables_matches); " +
+				"`iptables -m cgroup` rules will fail to install. Run " +
+				"`sudo modprobe xt_cgroup` or add it to /etc/modules-load.d/.",
+			Category: "process",
+		}
+	}
+	return preflight.Result{
+		Name:     name,
+		Severity: preflight.SeverityOK,
+		Message:  msg,
+		Category: "process",
+	}
+}
+
+// xtCgroupAvailable reports whether the xt_cgroup netfilter match is
+// loaded. /proc/net/ip_tables_matches lists builtin+loaded matches,
+// one per line. Returns true on any read error so we don't emit a
+// false warning on hosts where the file isn't accessible (rootless
+// containers, odd /proc mounts).
+func xtCgroupAvailable() bool {
+	data, err := os.ReadFile("/proc/net/ip_tables_matches")
+	if err != nil {
+		return true
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "cgroup" {
+			return true
+		}
+	}
+	return false
 }

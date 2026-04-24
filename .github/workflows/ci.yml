@@ -18,6 +18,7 @@ on:
           - openbao
           - pak
           - process
+          - apparmor-smoke
           - ui
           - redis
 
@@ -390,48 +391,42 @@ jobs:
           path: coverage-ui.out
           retention-days: 1
 
-  # The process backend supports three deployment modes (see
-  # backends.md / phase-3-7.md decision #5). All three are tested
-  # in parallel because the security-relevant preflight check
-  # (checkBwrapHostUIDMapping) and the iptables --uid-owner contract
-  # behave differently per mode and we want regressions in any
-  # single mode to surface immediately.
+  # The process backend supports two deployment modes after phase 3-9
+  # retired the `setuid-bwrap` mode (correctness — it never delivered
+  # per-worker host kuids and was mis-documented in phase 3-7).
+  # Both remaining modes run inside the --privileged CI container and
+  # exercise distinct production spawn paths:
   #
-  #   - root        — sudo go test, blockyard-as-root containerized
-  #                   mode. bwrap inherits CAP_SYS_ADMIN and writes
-  #                   any uid_map.
-  #   - setuid      — `chmod u+s /usr/bin/bwrap` then run unprivileged.
-  #                   Matches the Fedora/RHEL production default and
-  #                   the recommended path for native non-root
-  #                   blockyard on Debian 12+/Ubuntu 24.04+.
-  #   - unprivileged — disable Ubuntu 24.04's AppArmor restriction
-  #                    on unprivileged user namespaces and run as
-  #                    the runner user with no setuid. Workers can
-  #                    spawn but uid_map writes to foreign UIDs are
-  #                    rejected by the kernel — exactly the silent
-  #                    failure mode the preflight check is supposed
-  #                    to detect. The integration tests assert that
-  #                    checkBwrapHostUIDMapping returns Error here.
+  #   - root         — blockyard runs as container root; the spawn
+  #                    path fork+setuid's into the worker UID before
+  #                    exec(bwrap), producing host-effective worker
+  #                    kuids for the `-m owner` path.
+  #   - unprivileged — non-root blockyard; the fork+setuid shim is
+  #                    short-circuited, bwrap's uid_map remains
+  #                    identity-mapped to blockyard's own uid, and
+  #                    the integration tests verify that
+  #                    checkBwrapHostUIDMapping returns Info (not
+  #                    Error — phase 3-9 recharacterised non-root
+  #                    layer 6 as "inapplicable, steer to cgroup
+  #                    delegation" rather than "broken, blocks
+  #                    startup").
+  #
+  # AppArmor profile coverage lives in the standalone apparmor-smoke
+  # job below; --privileged bypasses AppArmor enforcement inside the
+  # container, so the profile's real behaviour can only be observed
+  # on the VM directly.
   process:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'process')
-    # Run inside the production worker image so TestRSmokeBoot
-    # exercises R (/usr/local/bin/R) from the exact path blockyard.toml
-    # points at. --privileged is required for the unprivileged matrix
-    # leg to write kernel.apparmor_restrict_unprivileged_userns (a
-    # non-namespaced sysctl that the kernel enforces for container
-    # processes too). Tests still run as a non-root user for the
-    # setuid/unprivileged modes, so the capability matrix is preserved
-    # per-test.
     container:
       image: ghcr.io/cynkra/blockyard-worker:4.4.3
       options: --privileged
     strategy:
       fail-fast: false
       matrix:
-        mode: [root, setuid, unprivileged]
+        mode: [root, unprivileged]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -441,40 +436,28 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends bubblewrap
-          # Non-root user used by setuid and unprivileged modes.
-          # root mode doesn't need it but creating it is cheap.
+          # Non-root user used by the unprivileged mode. root mode
+          # doesn't need it but creating it is cheap.
           useradd -m -u 2000 blockyard-runner
           # setup-go puts Go in /opt/hostedtoolcache owned by root.
           # The non-root user needs execute access on the Go binary;
           # GOCACHE/GOMODCACHE will go to the non-root user's $HOME.
           chmod -R a+rx /opt/hostedtoolcache/go || true
-      - name: Configure mode (${{ matrix.mode }})
+      - name: Relax AppArmor userns restriction
         run: |
-          # All three matrix modes need the AppArmor restriction on
-          # unprivileged userns disabled so that the non-root workers
-          # our fork+setuid shim produces can call unshare(CLONE_NEWUSER)
-          # inside bwrap. Ubuntu 24.04's default
-          # kernel.apparmor_restrict_unprivileged_userns=1 blocks this
-          # for processes that aren't in an AppArmor profile granting
-          # the userns capability; --privileged disables AppArmor
-          # inside the container but the sysctl is a host-level check
-          # tied to the process's profile state and still fires. `|| true`
-          # because the file is absent on kernels that don't ship the
-          # restriction at all.
+          # Both matrix modes need Ubuntu 24.04's AppArmor restriction
+          # on unprivileged userns disabled so bwrap's post-setuid
+          # (root leg) and direct non-root (unprivileged leg) userns
+          # unshare calls are not intercepted. --privileged disables
+          # AppArmor enforcement inside the container but the sysctl
+          # is a host-level check tied to the process's profile state
+          # and still fires. `|| true` because the file is absent on
+          # kernels that don't ship the restriction at all. The shipped
+          # AppArmor profile is not loadable here (process path inside
+          # --privileged container != /usr/local/bin/blockyard path the
+          # profile attaches to); profile-load coverage lives in the
+          # standalone apparmor-smoke job.
           sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          case "${{ matrix.mode }}" in
-            root)
-              : # nothing extra; blockyard runs as container root and
-                # the spawn path fork+setuid's into the worker UID
-                # before exec(bwrap).
-              ;;
-            setuid)
-              chmod u+s /usr/bin/bwrap
-              ;;
-            unprivileged)
-              : # sysctl already set above.
-              ;;
-          esac
       - name: Run process backend tests (${{ matrix.mode }})
         # /github/home (the HOME Actions sets inside container jobs)
         # isn't writable as root in the worker container, so go's
@@ -494,7 +477,7 @@ jobs:
                 ./internal/backend/process/... \
                 ./internal/orchestrator/...
               ;;
-            *)
+            unprivileged)
               # Run as the non-root user. chown the workspace + cache
               # so go test can write coverage and cache artifacts.
               chown -R blockyard-runner:blockyard-runner "$PWD" "$GOCACHE" "$GOMODCACHE"
@@ -515,6 +498,57 @@ jobs:
           name: coverage-process-${{ matrix.mode }}
           path: coverage-process-${{ matrix.mode }}.out
           retention-days: 1
+
+  # apparmor-smoke runs directly on the Ubuntu 24.04 VM — NOT inside
+  # a container — so the host AppArmor profile actually attaches to
+  # processes that match its path. The CI runner's VM image ships
+  # AppArmor 4.x and has kernel.apparmor_restrict_unprivileged_userns=1
+  # by default. The test pair is the entire regression guard: the
+  # negative step proves the restriction is active (rootless bwrap
+  # fails without the profile), and the positive step proves the
+  # profile lifts it. Without both, a green result means nothing
+  # because the environment might be quietly permissive.
+  apparmor-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [unit]
+    if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'apparmor-smoke')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install bubblewrap + apparmor utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap apparmor apparmor-utils
+      - name: Build and install blockyard to /usr/local/bin
+        run: |
+          go build -o /tmp/blockyard ./cmd/blockyard
+          sudo install -m 755 /tmp/blockyard /usr/local/bin/blockyard
+      - name: Assert baseline — profile unloaded, rootless bwrap blocked
+        run: |
+          sudo useradd -m -u 2000 blockyard-runner
+          sysctl_value=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          if [ "$sysctl_value" != "1" ]; then
+            echo "sysctl kernel.apparmor_restrict_unprivileged_userns=$sysctl_value (expected 1 on the runner)"
+            exit 1
+          fi
+          # Expected to fail: no profile grants userns, sysctl=1 blocks.
+          if sudo -u blockyard-runner /usr/local/bin/blockyard bwrap-smoke; then
+            echo "FAIL: rootless bwrap succeeded without the profile — test is not exercising the restriction"
+            exit 1
+          fi
+      - name: Load profile, assert rootless bwrap unblocked
+        run: |
+          sudo install -m 644 internal/apparmor/blockyard /etc/apparmor.d/blockyard
+          sudo apparmor_parser -r /etc/apparmor.d/blockyard
+          if ! sudo aa-status | grep -q 'blockyard'; then
+            echo "profile did not load"
+            sudo aa-status
+            exit 1
+          fi
+          sudo -u blockyard-runner /usr/local/bin/blockyard bwrap-smoke
 
   coverage:
     runs-on: ubuntu-24.04

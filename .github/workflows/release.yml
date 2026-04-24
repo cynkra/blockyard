@@ -222,6 +222,18 @@ jobs:
           name: seccomp-outer-json
           path: internal/seccomp/blockyard-outer.json
           retention-days: 1
+      # AppArmor profile — same release channel as the seccomp
+      # profiles. Renamed to `blockyard-apparmor` so the published
+      # filename is unambiguous (the source filename `blockyard`
+      # alone would collide with the server binary on the release
+      # page).
+      - name: Stage AppArmor profile with release filename
+        run: cp internal/apparmor/blockyard /tmp/blockyard-apparmor
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apparmor-profile
+          path: /tmp/blockyard-apparmor
+          retention-days: 1
 
   binaries:
     needs: tests
@@ -303,6 +315,10 @@ jobs:
         with:
           name: seccomp-outer-json
           path: .
+      - uses: actions/download-artifact@v8
+        with:
+          name: apparmor-profile
+          path: .
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -312,3 +328,4 @@ jobs:
             by-*
             blockyard-bwrap-seccomp.bpf
             blockyard-outer.json
+            blockyard-apparmor

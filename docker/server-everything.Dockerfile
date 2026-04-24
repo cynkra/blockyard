@@ -106,6 +106,10 @@ COPY --from=builder /by-builder /usr/local/lib/blockyard/by-builder
 COPY blockyard.toml /etc/blockyard/blockyard.toml
 COPY --from=seccomp-compiler /blockyard-bwrap-seccomp.bpf /etc/blockyard/seccomp.bpf
 COPY internal/seccomp/blockyard-outer.json /etc/blockyard/seccomp.json
+# AppArmor profile — extracted by operators on Ubuntu 23.10+ hosts
+# to lift kernel.apparmor_restrict_unprivileged_userns for blockyard
+# without disabling the restriction host-wide. See phase 3-9.
+COPY internal/apparmor/blockyard /etc/blockyard/apparmor/blockyard
 
 # Extras hook. See server-process.Dockerfile for the full comment
 # and docs/content/docs/guides/process-backend-container.md for

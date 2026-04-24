@@ -5,12 +5,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cynkra/blockyard/internal/apiclient"
+	"github.com/cynkra/blockyard/internal/apparmor"
 	"github.com/cynkra/blockyard/internal/seccomp"
 )
 
@@ -25,8 +27,82 @@ func adminCmd() *cobra.Command {
 		adminRollbackCmd(),
 		adminStatusCmd(),
 		adminInstallSeccompCmd(),
+		adminInstallApparmorCmd(),
 	)
 	return cmd
+}
+
+func adminInstallApparmorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "install-apparmor",
+		Short: "Write the blockyard AppArmor profile to disk",
+		Long: `Write the embedded AppArmor profile to a target path so
+operators on AppArmor-enforcing hosts (Ubuntu 23.10+ by default) can
+load it with 'sudo apparmor_parser -r <target>'. The profile grants
+the 'userns' permission narrowly to blockyard and its subprocesses,
+enabling rootless bwrap to create its sandbox user namespace without
+disabling kernel.apparmor_restrict_unprivileged_userns host-wide.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			target, _ := cmd.Flags().GetString("target")
+			if target == "" {
+				target = apparmor.DefaultInstallPath
+			}
+			if err := installApparmorProfile(target); err != nil {
+				return err
+			}
+			fmt.Printf("Wrote AppArmor profile to %s\n", target)
+			if err := validateApparmorProfile(target); err != nil {
+				// Non-fatal: surface the parse error and guidance, but
+				// the file is already written — operators can inspect
+				// it or try a different AppArmor version.
+				fmt.Fprintf(os.Stderr,
+					"Warning: apparmor_parser rejected the profile: %v\n"+
+						"On AppArmor versions without the 'userns' rule, use "+
+						"sysctl kernel.apparmor_restrict_unprivileged_userns=0 "+
+						"as a host-wide fallback instead.\n", err)
+				return nil
+			}
+			fmt.Println("Load with: sudo apparmor_parser -r " + target)
+			return nil
+		},
+	}
+	cmd.Flags().String("target", "",
+		`output path (default: /etc/apparmor.d/blockyard)`)
+	return cmd
+}
+
+// installApparmorProfile writes the embedded profile to the target
+// path, creating parent directories as needed. Extracted for
+// testability.
+func installApparmorProfile(target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // G301: non-secret config dir
+		return fmt.Errorf("create parent directory: %w", err)
+	}
+	if err := os.WriteFile(target, apparmor.Profile, 0o644); err != nil { //nolint:gosec // G306: non-secret config file
+		return fmt.Errorf("write profile: %w", err)
+	}
+	return nil
+}
+
+// validateApparmorProfile runs apparmor_parser in syntax-check mode
+// (-Q skip-kernel-load, -T skip-cache) to catch version-specific
+// parse failures at install time. This fully exercises the grammar
+// and binary-policy generation without touching the kernel or the
+// on-disk parser cache. Missing apparmor_parser is not an error: the
+// host simply isn't configured for AppArmor and the load step is a
+// no-op anyway.
+func validateApparmorProfile(target string) error {
+	parser, err := exec.LookPath("apparmor_parser")
+	if err != nil {
+		return nil
+	}
+	out, err := exec.Command(parser, "-QT", target).CombinedOutput() //nolint:gosec // G204: parser is from LookPath
+	if err != nil {
+		return fmt.Errorf("%s: %w (output: %s)",
+			parser, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func adminInstallSeccompCmd() *cobra.Command {

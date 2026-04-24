@@ -53,6 +53,7 @@ type ProcessBackend struct {
 	fullCfg *config.Config        // held for Preflight() — needs Redis/vault/DB addrs and Server.DefaultMemoryLimit/CPULimit
 	ports   portAllocator
 	uids    uidAllocator
+	cgroups *cgroupManager // nil-safe; no-op when cgroup-v2 delegation is unavailable
 
 	mu      sync.Mutex
 	workers map[string]*workerProc // keyed by worker ID
@@ -88,11 +89,21 @@ func New(fullCfg *config.Config, rc *redisstate.Client, db *sqlx.DB) (*ProcessBa
 
 	ports, uids := selectAllocators(fullCfg, rc, db)
 
+	cgMgr, err := newCgroupManager()
+	if err != nil {
+		// Detection error is informational only — falls back to flat
+		// cgroup behaviour. checkCgroupDelegation reports the chosen
+		// mode at startup.
+		slog.Info("process backend: cgroup delegation probe failed, falling back to flat cgroup",
+			"err", err)
+	}
+
 	return &ProcessBackend{
 		cfg:     cfg,
 		fullCfg: fullCfg,
 		ports:   ports,
 		uids:    uids,
+		cgroups: cgMgr,
 		workers: make(map[string]*workerProc),
 	}, nil
 }
@@ -183,7 +194,7 @@ func ensureBundleMountPoint(path string) error {
 
 // Preflight implements backend.Backend by delegating to RunPreflight.
 func (b *ProcessBackend) Preflight(_ context.Context) (*preflight.Report, error) {
-	return RunPreflight(b.cfg, b.fullCfg), nil
+	return RunPreflight(b.cfg, b.fullCfg, b.cgroups), nil
 }
 
 func (b *ProcessBackend) CheckRVersion(version string) error {
@@ -431,6 +442,13 @@ func (b *ProcessBackend) Spawn(_ context.Context, spec backend.WorkerSpec) error
 		releaseSlots()
 		return fmt.Errorf("process backend: start bwrap: %w", err)
 	}
+
+	// Move the worker into the delegated cgroup-v2 `workers/` subtree
+	// so operator `iptables -m cgroup --path <path>/workers` rules
+	// match its egress traffic. No-op when delegation is unavailable.
+	// Must run before `proceed` so the Enroll write happens before
+	// the wait goroutine reaps the child.
+	b.cgroups.Enroll(cmd.Process.Pid)
 
 	// Ingest stdout and stderr concurrently into the shared log buffer.
 	// Two goroutines, not io.MultiReader — MultiReader reads sequentially
