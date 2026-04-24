@@ -99,7 +99,7 @@ func TestCheckExternalURLNotHTTPS(t *testing.T) {
 func TestCheckOpenbaoHTTP(t *testing.T) {
 	t.Run("fires on HTTP", func(t *testing.T) {
 		cfg := &config.Config{
-			Openbao: &config.OpenbaoConfig{Address: "http://vault:8200"},
+			Vault: &config.VaultConfig{Address: "http://vault:8200"},
 		}
 		r := RunConfigChecks(cfg)
 		if !hasFinding(r, "openbao_http") {
@@ -109,7 +109,7 @@ func TestCheckOpenbaoHTTP(t *testing.T) {
 
 	t.Run("ok on HTTPS", func(t *testing.T) {
 		cfg := &config.Config{
-			Openbao: &config.OpenbaoConfig{Address: "https://vault:8200"},
+			Vault: &config.VaultConfig{Address: "https://vault:8200"},
 		}
 		r := RunConfigChecks(cfg)
 		assertOK(t, r, "openbao_http")

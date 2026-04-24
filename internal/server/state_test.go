@@ -252,7 +252,7 @@ func TestWorkerEnv_WithOpenbao(t *testing.T) {
 	srv := &Server{
 		Config: &config.Config{
 			Server: config.ServerConfig{Bind: ":8080"},
-			Openbao: &config.OpenbaoConfig{
+			Vault: &config.VaultConfig{
 				Address: "http://vault:8200",
 				Services: []config.ServiceConfig{
 					{ID: "mydb"},
@@ -494,7 +494,7 @@ func TestWorkerEnv_OpenbaoNoServices(t *testing.T) {
 	srv := &Server{
 		Config: &config.Config{
 			Server: config.ServerConfig{Bind: ":8080"},
-			Openbao: &config.OpenbaoConfig{
+			Vault: &config.VaultConfig{
 				Address: "https://vault:8200",
 			},
 		},

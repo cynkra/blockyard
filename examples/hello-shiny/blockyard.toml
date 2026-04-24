@@ -27,5 +27,5 @@ log_retention        = "1h"
 idle_worker_timeout  = "5m"
 
 # OIDC settings are provided via environment variables in docker-compose.yml.
-# No [openbao] section — this example runs without a secrets manager.
+# No [vault] section — this example runs without a secrets manager.
 # session_secret is set explicitly via env var.

@@ -282,7 +282,7 @@ Two options:
    need this.
 
 2. **Use Docker network segmentation** (recommended). Put Redis,
-   OpenBao, and the database on an `internal: true` network that the
+   the vault, and the database on an `internal: true` network that the
    blockyard container joins, and put worker-egress-sensitive services
    on a separate network workers cannot reach. Cleaner than iptables
    but requires deliberate service topology — the Docker Compose

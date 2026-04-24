@@ -27,15 +27,15 @@ environment variables is fundamentally broken here — `Sys.getenv()` is one lin
 of R code, and users can run arbitrary expressions. This rules out ShinyProxy
 and Connect's standard credential model.
 
-Blockyard integrates with OpenBao (Vault-compatible) to inject short-lived,
+Blockyard integrates with a Vault-compatible secrets manager (tested against OpenBao) to inject short-lived,
 scoped tokens per request. The server itself cannot read user secrets. The R
-process exchanges the token directly with OpenBao. No existing Shiny platform offers per-user credential isolation with
+process exchanges the token directly with the vault. No existing Shiny platform offers per-user credential isolation with
 this trust model.
 
 ## One stack, ready to boot
 
 A single `docker-compose up` gives you the complete blockr hosting stack:
-hardened container isolation, per-user credential management via OpenBao, board
+hardened container isolation, per-user credential management via a Vault-compatible secrets manager, board
 storage with ACLs — all wired together and configured correctly out of the box.
 
 Assembling the equivalent from Connect + external Vault + custom board storage +

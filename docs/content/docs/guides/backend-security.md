@@ -37,7 +37,7 @@ Regardless of which backend you pick, each worker runs with:
 - **User namespace** with all Linux capabilities dropped
   (`CapDrop: ALL`, `no_new_privs`).
 - **Minimal environment** — the server's database URL, Redis credentials,
-  OpenBao tokens, and session secret are never exported into worker
+  Vault tokens, and session secret are never exported into worker
   processes.
 
 Worker-to-worker filesystem access, signal delivery, and `/proc` visibility
@@ -128,7 +128,7 @@ iptables -A OUTPUT -m owner --uid-owner blockyard -j ACCEPT
 # is the match; the destination address narrows the rule.
 iptables -A OUTPUT -m owner --gid-owner 65534 -d 169.254.169.254 -j REJECT
 iptables -A OUTPUT -m owner --gid-owner 65534 -d <redis-ip>      -j REJECT
-iptables -A OUTPUT -m owner --gid-owner 65534 -d <openbao-ip>    -j REJECT
+iptables -A OUTPUT -m owner --gid-owner 65534 -d <vault-ip>    -j REJECT
 iptables -A OUTPUT -m owner --gid-owner 65534 -d <database-ip>   -j REJECT
 ```
 
@@ -141,7 +141,7 @@ endpoints you want to protect and scope each rule to them.
 Blockyard's preflight actively verifies these rules at startup by
 spawning a probe under the worker UID/GID and attempting TCP connections
 to the same internal endpoints. A reachable cloud metadata endpoint is
-reported as an error; reachable Redis, OpenBao, or database endpoints
+reported as an error; reachable Redis, vault, or database endpoints
 are reported as warnings. The probe never tests the open internet —
 workers are expected to reach it.
 
@@ -199,7 +199,7 @@ Three classes of risk remain regardless of backend choice:
   against what the worker legitimately runs — it only constrains what
   the worker can reach.
 - **Credentials inside the process.** Any secret injected into a worker
-  (e.g. an OpenBao-issued per-user API token) is readable by the code
+  (e.g. a vault-issued per-user API token) is readable by the code
   running in that worker. Treat any credential in worker scope as
   exfiltrable by the code in that session. See
   [Credential Management](/docs/guides/credentials/) for the scoping

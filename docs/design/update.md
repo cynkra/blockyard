@@ -177,12 +177,12 @@ The HMAC signing key used for worker tokens is currently ephemeral. For
 the overlap to work, both old and new servers must sign and verify tokens
 with the same key.
 
-**Primary path (OpenBao configured):** on first startup, generate the
+**Primary path (vault configured):** on first startup, generate the
 key and store it at `secret/data/blockyard/worker-signing-key`. On
-subsequent startups, read it back. OpenBao is already in the stack for
+subsequent startups, read it back. The vault is already in the stack for
 credential management; this is a natural extension.
 
-**Fallback (no OpenBao):** write the key to the data volume at
+**Fallback (no vault):** write the key to the data volume at
 `/data/db/.worker-key`. The signing key protects worker-to-server
 communication on a local Docker network — storing it alongside the
 database is acceptable given the threat model.

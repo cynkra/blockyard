@@ -109,7 +109,7 @@ func checkExternalURLNotHTTPS(cfg *config.Config) Result {
 
 // checkOpenbaoHTTP warns when the OpenBao/Vault address uses plain HTTP.
 func checkOpenbaoHTTP(cfg *config.Config) Result {
-	if cfg.Openbao == nil {
+	if cfg.Vault == nil {
 		return Result{
 			Name:     "openbao_http",
 			Severity: SeverityOK,
@@ -117,7 +117,7 @@ func checkOpenbaoHTTP(cfg *config.Config) Result {
 			Category: "config",
 		}
 	}
-	if !strings.HasPrefix(cfg.Openbao.Address, "http://") {
+	if !strings.HasPrefix(cfg.Vault.Address, "http://") {
 		return Result{
 			Name:     "openbao_http",
 			Severity: SeverityOK,

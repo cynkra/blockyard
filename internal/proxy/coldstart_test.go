@@ -436,7 +436,7 @@ func TestEnsureWorkerRecheckAfterSpawnSlot(t *testing.T) {
 // openbao config sets extra env vars on the worker spec.
 func TestSpawnWorkerOpenbaoExtraEnv(t *testing.T) {
 	srv := testColdstartServer(t)
-	srv.Config.Openbao = &config.OpenbaoConfig{
+	srv.Config.Vault = &config.VaultConfig{
 		Address:     "http://vault:8200",
 		AdminToken:  config.NewSecret("root-token"),
 		JWTAuthPath: "jwt",
@@ -458,7 +458,7 @@ func TestSpawnWorkerOpenbaoExtraEnv(t *testing.T) {
 // openbao config without ExternalURL uses dev fallback.
 func TestSpawnWorkerOpenbaoDevFallback(t *testing.T) {
 	srv := testColdstartServer(t)
-	srv.Config.Openbao = &config.OpenbaoConfig{
+	srv.Config.Vault = &config.VaultConfig{
 		Address:     "http://vault:8200",
 		AdminToken:  config.NewSecret("root-token"),
 		JWTAuthPath: "jwt",
@@ -591,10 +591,10 @@ func TestPtrOrNil(t *testing.T) {
 }
 
 // TestWorkerEnvNilOpenbao verifies that WorkerEnv returns nil when
-// srv.Config.Openbao is nil — env should still contain BLOCKYARD_API_URL.
+// srv.Config.Vault is nil — env should still contain BLOCKYARD_API_URL.
 func TestWorkerEnvNilOpenbao(t *testing.T) {
 	srv := testColdstartServer(t)
-	srv.Config.Openbao = nil
+	srv.Config.Vault = nil
 
 	env := server.WorkerEnv(srv)
 	if env == nil {
@@ -613,7 +613,7 @@ func TestWorkerEnvNilOpenbao(t *testing.T) {
 // BLOCKYARD_API_URL correctly when ExternalURL is configured.
 func TestWorkerEnvWithExternalURL(t *testing.T) {
 	srv := testColdstartServer(t)
-	srv.Config.Openbao = &config.OpenbaoConfig{
+	srv.Config.Vault = &config.VaultConfig{
 		Address: "http://vault:8200",
 	}
 	srv.Config.Server.ExternalURL = "https://blockyard.example.com"
@@ -635,7 +635,7 @@ func TestWorkerEnvWithExternalURL(t *testing.T) {
 // BLOCKYARD_VAULT_SERVICES to valid JSON mapping service IDs to paths.
 func TestWorkerEnvWithServices(t *testing.T) {
 	srv := testColdstartServer(t)
-	srv.Config.Openbao = &config.OpenbaoConfig{
+	srv.Config.Vault = &config.VaultConfig{
 		Address: "http://vault:8200",
 		Services: []config.ServiceConfig{
 			{ID: "openai", Label: "OpenAI"},
@@ -675,7 +675,7 @@ func TestWorkerEnvWithServices(t *testing.T) {
 // configured, overriding ExternalURL.
 func TestWorkerEnvWithServiceNetwork(t *testing.T) {
 	srv := testColdstartServer(t)
-	srv.Config.Openbao = &config.OpenbaoConfig{
+	srv.Config.Vault = &config.VaultConfig{
 		Address: "http://openbao:8200",
 	}
 	srv.Config.Server.ExternalURL = "http://localhost:8080"
@@ -699,7 +699,7 @@ func TestWorkerEnvWithServiceNetwork(t *testing.T) {
 // service_network takes precedence over ExternalURL for BLOCKYARD_API_URL.
 func TestWorkerEnvServiceNetworkOverridesExternalURL(t *testing.T) {
 	srv := testColdstartServer(t)
-	srv.Config.Openbao = &config.OpenbaoConfig{
+	srv.Config.Vault = &config.VaultConfig{
 		Address: "http://vault:8200",
 	}
 	srv.Config.Server.ExternalURL = "https://blockyard.example.com"

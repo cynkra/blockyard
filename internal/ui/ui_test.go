@@ -125,7 +125,7 @@ func oidcConfig() *config.Config {
 
 func openbaoConfig() *config.Config {
 	cfg := oidcConfig()
-	cfg.Openbao = &config.OpenbaoConfig{
+	cfg.Vault = &config.VaultConfig{
 		Address:    "http://localhost:8200",
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{
@@ -1844,7 +1844,7 @@ func TestBuildServiceEntriesWithVaultMock(t *testing.T) {
 	t.Cleanup(vaultSrv.Close)
 
 	cfg := oidcConfig()
-	cfg.Openbao = &config.OpenbaoConfig{
+	cfg.Vault = &config.VaultConfig{
 		Address:    vaultSrv.URL,
 		AdminToken: config.NewSecret("root"),
 		Services: []config.ServiceConfig{

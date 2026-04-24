@@ -537,7 +537,7 @@ func requireAuth(w http.ResponseWriter, r *http.Request) *auth.AuthenticatedUser
 }
 
 func openbaoEnabled(srv *server.Server) bool {
-	return srv.Config.Openbao != nil && len(srv.Config.Openbao.Services) > 0
+	return srv.Config.Vault != nil && len(srv.Config.Vault.Services) > 0
 }
 
 func baseLayout(srv *server.Server, activePage string, caller *auth.CallerIdentity) layoutData {
@@ -1451,8 +1451,8 @@ func buildLandingEntries(apps []db.AppRow, srv *server.Server) []catalogEntry {
 }
 
 func buildServiceEntries(srv *server.Server, sub string) []serviceEntry {
-	entries := make([]serviceEntry, 0, len(srv.Config.Openbao.Services))
-	for _, svc := range srv.Config.Openbao.Services {
+	entries := make([]serviceEntry, 0, len(srv.Config.Vault.Services))
+	for _, svc := range srv.Config.Vault.Services {
 		status := "not_set"
 		if srv.VaultClient != nil {
 			exists, err := srv.VaultClient.SecretExists(

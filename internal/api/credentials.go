@@ -75,14 +75,14 @@ func ExchangeVaultCredential(srv *server.Server) http.HandlerFunc {
 			return
 		}
 
-		ttl := srv.Config.Openbao.TokenTTL.Duration
+		ttl := srv.Config.Vault.TokenTTL.Duration
 		vaultToken, ok := srv.VaultTokenCache.Get(claims.Sub)
 		if !ok {
 			var loginErr error
 			var loginTTL time.Duration
 			vaultToken, loginTTL, loginErr = srv.VaultClient.JWTLogin(
 				r.Context(),
-				srv.Config.Openbao.JWTAuthPath,
+				srv.Config.Vault.JWTAuthPath,
 				userSession.AccessToken,
 			)
 			if loginErr != nil {

@@ -153,7 +153,7 @@ func TestResolveSecretsSkipsNilOpenbao(t *testing.T) {
 
 func TestResolveSecretsOpenbaoAdminToken(t *testing.T) {
 	cfg := &Config{
-		Openbao: &OpenbaoConfig{
+		Vault: &VaultConfig{
 			AdminToken: NewSecret("vault:secret/data/blockyard/openbao#admin_token"),
 		},
 	}
@@ -168,7 +168,7 @@ func TestResolveSecretsOpenbaoAdminToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cfg.Openbao.AdminToken.MustExpose() != "resolved-admin" {
-		t.Errorf("admin_token = %q", cfg.Openbao.AdminToken.MustExpose())
+	if cfg.Vault.AdminToken.MustExpose() != "resolved-admin" {
+		t.Errorf("admin_token = %q", cfg.Vault.AdminToken.MustExpose())
 	}
 }

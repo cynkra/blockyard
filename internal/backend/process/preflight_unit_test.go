@@ -247,7 +247,7 @@ func TestCheckWorkerEgressAggregation(t *testing.T) {
 	fullCfg := &config.Config{
 		Process: cfg,
 		Redis:   &config.RedisConfig{URL: "redis://redis.internal:6379"},
-		Openbao: &config.OpenbaoConfig{Address: "https://openbao.internal:8200"},
+		Vault: &config.VaultConfig{Address: "https://openbao.internal:8200"},
 		Database: config.DatabaseConfig{
 			Driver: "postgres",
 			URL:    "postgres://u:p@db.internal:5432/app",

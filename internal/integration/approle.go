@@ -77,9 +77,11 @@ func InitAppRole(ctx context.Context, addr, roleID, tokenFile string) (token str
 	}
 
 	// 2. AppRole login with secret_id from env.
-	secretID := os.Getenv("BLOCKYARD_OPENBAO_SECRET_ID")
+	// (BLOCKYARD_OPENBAO_SECRET_ID is renamed to BLOCKYARD_VAULT_SECRET_ID by
+	// the deprecation shim in config.Load before this runs.)
+	secretID := os.Getenv("BLOCKYARD_VAULT_SECRET_ID")
 	if secretID == "" {
-		return "", 0, fmt.Errorf("vault bootstrap required: set BLOCKYARD_OPENBAO_SECRET_ID")
+		return "", 0, fmt.Errorf("vault bootstrap required: set BLOCKYARD_VAULT_SECRET_ID")
 	}
 
 	token, ttl, err = AppRoleLogin(ctx, httpClient, addr, roleID, secretID)

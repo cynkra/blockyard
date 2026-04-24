@@ -28,11 +28,11 @@ func WorkerEnv(srv *Server) map[string]string {
 	env["BLOCKYARD_API_URL"] = srv.InternalAPIURL()
 	env["SHINY_HOST"] = shinyHost
 
-	if srv.Config.Openbao != nil {
-		env["VAULT_ADDR"] = srv.Config.Openbao.Address
-		if len(srv.Config.Openbao.Services) > 0 {
-			svcMap := make(map[string]string, len(srv.Config.Openbao.Services))
-			for _, svc := range srv.Config.Openbao.Services {
+	if srv.Config.Vault != nil {
+		env["VAULT_ADDR"] = srv.Config.Vault.Address
+		if len(srv.Config.Vault.Services) > 0 {
+			svcMap := make(map[string]string, len(srv.Config.Vault.Services))
+			for _, svc := range srv.Config.Vault.Services {
 				svcMap[svc.ID] = "apikeys/" + svc.ID
 			}
 			svcJSON, _ := json.Marshal(svcMap)

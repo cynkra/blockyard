@@ -24,10 +24,16 @@ type Config struct {
 	Process      *ProcessConfig      `toml:"process"`       // nil when backend != "process"
 	Redis        *RedisConfig        `toml:"redis"`         // nil when not configured
 	OIDC         *OidcConfig         `toml:"oidc"`          // nil when not configured
-	Openbao      *OpenbaoConfig      `toml:"openbao"`       // nil when not configured
+	Vault        *VaultConfig        `toml:"vault"`         // nil when not configured
 	Audit        *AuditConfig        `toml:"audit"`         // nil when not configured
 	Telemetry    *TelemetryConfig    `toml:"telemetry"`     // nil when not configured
 	Update       *UpdateConfig       `toml:"update"`        // nil when not configured
+
+	// Openbao is the deprecated name for Vault. Present only to let
+	// existing configs keep loading; migrateDeprecatedFields copies it
+	// into Vault at load time and emits a warning. Remove in a future
+	// release.
+	Openbao *VaultConfig `toml:"openbao"`
 
 	// ConfigPath is the filesystem path to the config file this
 	// Config was loaded from. Populated by main.go after Load so the
@@ -157,7 +163,7 @@ type DatabaseConfig struct {
 	// VaultRole, when set, routes the admin connection through vault:
 	// blockyard reads `{VaultMount}/static-creds/{VaultRole}` at
 	// startup instead of using a static Database.URL password.
-	// Requires [openbao].
+	// Requires [vault].
 	//
 	// VaultDBConnection names the vault database-engine connection
 	// blockyard targets when registering per-user static roles
@@ -175,7 +181,7 @@ type DatabaseConfig struct {
 	//
 	// BoardStorage enables the board-storage feature: adds a PG16+
 	// preflight at startup and (in #284) drives per-user role
-	// provisioning. Requires driver = "postgres" and [openbao].
+	// provisioning. Requires driver = "postgres" and [vault].
 	VaultMount          string   `toml:"vault_mount"`
 	VaultRole           string   `toml:"vault_role"`
 	VaultDBConnection   string   `toml:"vault_db_connection"`
@@ -264,7 +270,7 @@ type OidcConfig struct {
 	DefaultRole       string   `toml:"default_role"` // role assigned on first login: "viewer" (default) or "publisher"
 }
 
-type OpenbaoConfig struct {
+type VaultConfig struct {
 	Address              string          `toml:"address"`
 	AdminToken           Secret          `toml:"admin_token"`              // deprecated: use role_id with AppRole auth
 	RoleID               string          `toml:"role_id"`                  // AppRole role identifier
@@ -275,8 +281,15 @@ type OpenbaoConfig struct {
 	Services             []ServiceConfig `toml:"services"`
 }
 
+// OpenbaoConfig is the deprecated type alias kept so external callers
+// that still reference OpenbaoConfig continue to compile. Remove
+// together with the deprecated Openbao field on Config.
+//
+// Deprecated: use VaultConfig.
+type OpenbaoConfig = VaultConfig
+
 // ServiceConfig describes a third-party service whose API key users
-// can enroll via OpenBao (e.g. OpenAI, Posit Connect).
+// can enroll via the vault (e.g. OpenAI, Posit Connect).
 //
 // Credentials are stored at: secret/data/users/{sub}/apikeys/{id}
 type ServiceConfig struct {
@@ -339,6 +352,46 @@ func migrateDeprecatedFields(cfg *Config) {
 		cfg.Server.SkipPreflight = true
 		slog.Warn("config: server.skip_docker_preflight is deprecated; use server.skip_preflight")
 	}
+	if cfg.Openbao != nil {
+		if cfg.Vault == nil {
+			cfg.Vault = cfg.Openbao
+		}
+		slog.Warn("config: [openbao] is deprecated; rename the section to [vault]")
+		cfg.Openbao = nil
+	}
+}
+
+// warnDeprecatedEnv emits a deprecation warning for each BLOCKYARD_OPENBAO_*
+// env var present in the environment. The actual value application
+// happens in applyDeprecatedOpenbaoEnv via a second reflection pass;
+// keeping the two separate avoids mutating os.Environ, which would
+// leak across tests using t.Setenv.
+func warnDeprecatedEnv() {
+	const oldPrefix = "BLOCKYARD_OPENBAO_"
+	const newPrefix = "BLOCKYARD_VAULT_"
+	for _, env := range os.Environ() {
+		key, _, _ := strings.Cut(env, "=")
+		if !strings.HasPrefix(key, oldPrefix) {
+			continue
+		}
+		newKey := newPrefix + strings.TrimPrefix(key, oldPrefix)
+		slog.Warn("env: " + key + " is deprecated; rename to " + newKey)
+	}
+}
+
+// applyDeprecatedOpenbaoEnv overlays BLOCKYARD_OPENBAO_* values onto
+// cfg.Vault using the same reflection machinery that handles
+// BLOCKYARD_VAULT_*. Values from the canonical BLOCKYARD_VAULT_* prefix
+// always win because they are applied first.
+func applyDeprecatedOpenbaoEnv(cfg *Config) {
+	if !envPrefixExists("BLOCKYARD_OPENBAO_") {
+		return
+	}
+	if cfg.Vault == nil {
+		cfg.Vault = &VaultConfig{}
+		vaultDefaults(cfg.Vault)
+	}
+	applyEnvToStruct(reflect.ValueOf(cfg.Vault).Elem(), "BLOCKYARD_OPENBAO")
 }
 
 func applyDefaults(cfg *Config) {
@@ -430,8 +483,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.OIDC != nil {
 		oidcDefaults(cfg.OIDC)
 	}
-	if cfg.Openbao != nil {
-		openbaoDefaults(cfg.Openbao)
+	if cfg.Vault != nil {
+		vaultDefaults(cfg.Vault)
 	}
 }
 
@@ -468,7 +521,7 @@ func oidcDefaults(c *OidcConfig) {
 	}
 }
 
-func openbaoDefaults(c *OpenbaoConfig) {
+func vaultDefaults(c *VaultConfig) {
 	if c.TokenTTL.Duration == 0 {
 		c.TokenTTL.Duration = 1 * time.Hour
 	}
@@ -511,16 +564,18 @@ func processDefaults(c *ProcessConfig) {
 // from toml struct tags (BLOCKYARD_ + section + _ + field, uppercased).
 // Supported field types: string, int, int64, float64, Duration, Secret, *Secret.
 func applyEnvOverrides(cfg *Config) {
+	warnDeprecatedEnv()
+
 	// Auto-construct [oidc] section if any BLOCKYARD_OIDC_* env var is set.
 	if cfg.OIDC == nil && envPrefixExists("BLOCKYARD_OIDC_") {
 		cfg.OIDC = &OidcConfig{}
 		oidcDefaults(cfg.OIDC)
 	}
 
-	// Auto-construct [openbao] section if any BLOCKYARD_OPENBAO_* env var is set.
-	if cfg.Openbao == nil && envPrefixExists("BLOCKYARD_OPENBAO_") {
-		cfg.Openbao = &OpenbaoConfig{}
-		openbaoDefaults(cfg.Openbao)
+	// Auto-construct [vault] section if any BLOCKYARD_VAULT_* env var is set.
+	if cfg.Vault == nil && envPrefixExists("BLOCKYARD_VAULT_") {
+		cfg.Vault = &VaultConfig{}
+		vaultDefaults(cfg.Vault)
 	}
 
 	// Auto-construct [redis] section if any BLOCKYARD_REDIS_* env var is set.
@@ -552,6 +607,7 @@ func applyEnvOverrides(cfg *Config) {
 	}
 
 	applyEnvToStruct(reflect.ValueOf(cfg).Elem(), "BLOCKYARD")
+	applyDeprecatedOpenbaoEnv(cfg)
 }
 
 // envPrefixExists returns true if any environment variable starts with
@@ -768,11 +824,11 @@ func validate(cfg *Config) error {
 		if cfg.OIDC.ClientSecret.IsEmpty() {
 			return fmt.Errorf("config: oidc.client_secret must not be empty")
 		}
-		// session_secret validation is deferred when openbao is configured
+		// session_secret validation is deferred when vault is configured
 		// (it may be auto-generated or resolved from a vault reference).
-		if cfg.Openbao == nil {
+		if cfg.Vault == nil {
 			if cfg.Server.SessionSecret == nil || cfg.Server.SessionSecret.IsEmpty() {
-				return fmt.Errorf("config: server.session_secret is required when [oidc] is configured without [openbao]")
+				return fmt.Errorf("config: server.session_secret is required when [oidc] is configured without [vault]")
 			}
 		}
 		switch cfg.OIDC.DefaultRole {
@@ -782,32 +838,32 @@ func validate(cfg *Config) error {
 		}
 	}
 
-	if cfg.Openbao != nil {
-		if cfg.Openbao.Address == "" {
-			return fmt.Errorf("config: openbao.address must not be empty")
+	if cfg.Vault != nil {
+		if cfg.Vault.Address == "" {
+			return fmt.Errorf("config: vault.address must not be empty")
 		}
-		if !strings.HasPrefix(cfg.Openbao.Address, "http://") && !strings.HasPrefix(cfg.Openbao.Address, "https://") {
-			return fmt.Errorf("config: openbao.address must start with http:// or https://")
+		if !strings.HasPrefix(cfg.Vault.Address, "http://") && !strings.HasPrefix(cfg.Vault.Address, "https://") {
+			return fmt.Errorf("config: vault.address must start with http:// or https://")
 		}
-		if !cfg.Openbao.AdminToken.IsEmpty() && cfg.Openbao.RoleID != "" {
-			return fmt.Errorf("config: openbao.admin_token and openbao.role_id are mutually exclusive")
+		if !cfg.Vault.AdminToken.IsEmpty() && cfg.Vault.RoleID != "" {
+			return fmt.Errorf("config: vault.admin_token and vault.role_id are mutually exclusive")
 		}
-		if cfg.Openbao.AdminToken.IsEmpty() && cfg.Openbao.RoleID == "" {
-			return fmt.Errorf("config: openbao requires either admin_token or role_id")
+		if cfg.Vault.AdminToken.IsEmpty() && cfg.Vault.RoleID == "" {
+			return fmt.Errorf("config: vault requires either admin_token or role_id")
 		}
-		if !cfg.Openbao.AdminToken.IsEmpty() {
-			slog.Warn("openbao.admin_token is deprecated; use openbao.role_id with AppRole auth")
+		if !cfg.Vault.AdminToken.IsEmpty() {
+			slog.Warn("vault.admin_token is deprecated; use vault.role_id with AppRole auth")
 		}
 		if cfg.OIDC == nil {
-			return fmt.Errorf("config: [oidc] is required when [openbao] is configured")
+			return fmt.Errorf("config: [oidc] is required when [vault] is configured")
 		}
 		seen := make(map[string]bool)
-		for _, svc := range cfg.Openbao.Services {
+		for _, svc := range cfg.Vault.Services {
 			if svc.ID == "" || svc.Label == "" {
-				return fmt.Errorf("config: openbao.services entries must have id and label")
+				return fmt.Errorf("config: vault.services entries must have id and label")
 			}
 			if seen[svc.ID] {
-				return fmt.Errorf("config: duplicate openbao.services id %q", svc.ID)
+				return fmt.Errorf("config: duplicate vault.services id %q", svc.ID)
 			}
 			seen[svc.ID] = true
 		}
@@ -818,8 +874,8 @@ func validate(cfg *Config) error {
 	}
 
 	if cfg.Database.VaultRole != "" {
-		if cfg.Openbao == nil {
-			return fmt.Errorf("config: database.vault_role requires [openbao]")
+		if cfg.Vault == nil {
+			return fmt.Errorf("config: database.vault_role requires [vault]")
 		}
 		if cfg.Database.Driver != "postgres" {
 			return fmt.Errorf("config: database.vault_role requires database.driver = \"postgres\"")
@@ -830,8 +886,8 @@ func validate(cfg *Config) error {
 	}
 
 	if cfg.Database.BoardStorage {
-		if cfg.Openbao == nil {
-			return fmt.Errorf("config: database.board_storage requires [openbao]")
+		if cfg.Vault == nil {
+			return fmt.Errorf("config: database.board_storage requires [vault]")
 		}
 		if cfg.Database.Driver != "postgres" {
 			return fmt.Errorf("config: database.board_storage requires database.driver = \"postgres\"")

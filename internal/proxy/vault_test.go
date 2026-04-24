@@ -47,7 +47,7 @@ func vaultServer(t *testing.T, vaultClient *integration.Client) *server.Server {
 	t.Helper()
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
-		Openbao: &config.OpenbaoConfig{
+		Vault: &config.VaultConfig{
 			Address:     "http://mock",
 			AdminToken:  config.NewSecret("admin-token"),
 			TokenTTL:    config.Duration{Duration: 1 * time.Hour},
@@ -242,7 +242,7 @@ func TestInjectCredentials_SharedContainer_InjectsSessionToken(t *testing.T) {
 func TestInjectCredentials_ZeroTTLFallsBackToConfig(t *testing.T) {
 	client := mockJWTLogin(t, "s.zero-ttl-token", 0)
 	srv := vaultServer(t, client)
-	srv.Config.Openbao.TokenTTL = config.Duration{Duration: 30 * time.Minute}
+	srv.Config.Vault.TokenTTL = config.Duration{Duration: 30 * time.Minute}
 
 	r := requestWithUser("user-1", "my-access-token")
 	injectCredentials(r, srv, "app-1", "worker-1", 1)

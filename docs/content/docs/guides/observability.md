@@ -70,7 +70,7 @@ When `management_bind` is set:
 - Container bridge networks cannot reach `127.0.0.1`, so untrusted
   workloads cannot access operational data
 
-When AppRole auth is used (`openbao.role_id`), `/readyz` also reports a
+When AppRole auth is used (`vault.role_id`), `/readyz` also reports a
 `vault_token` check that reflects whether the token renewal goroutine is
 healthy. A stale or expired token degrades readiness, signaling the
 operator to re-bootstrap with a fresh `secret_id`.
@@ -239,7 +239,7 @@ Each line is a JSON object with the following fields:
 | `bundle.restore.fail` | Dependency restore failed |
 | `access.grant` | Per-app access granted to a user |
 | `access.revoke` | Per-app access revoked |
-| `credential.enroll` | User enrolled a credential in OpenBao |
+| `credential.enroll` | User enrolled a credential in the vault |
 | `user.login` | User logged in via OIDC |
 | `user.logout` | User logged out |
 | `user.update` | User role or active status changed |

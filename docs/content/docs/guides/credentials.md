@@ -1,74 +1,74 @@
 ---
 title: Credential Management
-description: How to set up OpenBao and manage per-user credentials for Shiny apps.
+description: How to set up the vault backend and manage per-user credentials for Shiny apps.
 weight: 4
 ---
 
-Blockyard integrates with [OpenBao](https://openbao.org/) (a Vault-compatible
-secrets manager) to deliver per-user credentials to Shiny apps at runtime.
-This allows each user to register API keys for external services (AI providers,
-databases, object storage, etc.) that are securely injected into their
-sessions.
+Blockyard integrates with a Vault-compatible secrets manager
+(tested against [OpenBao](https://openbao.org/); HashiCorp Vault also
+works) to deliver per-user credentials to Shiny apps at runtime. Each
+user registers API keys for external services (AI providers, databases,
+object storage, etc.) that are securely injected into their sessions.
 
 ## Prerequisites
 
 - OIDC authentication must be configured (see [Configuration](/docs/guides/configuration/))
-- An OpenBao (or HashiCorp Vault) instance, initialized and unsealed
+- A vault instance, initialized and unsealed
 
 ## How it works
 
-1. An operator configures OpenBao and defines which services users can
+1. An operator configures the vault and defines which services users can
    enroll credentials for
 2. Users store their API keys via the web UI or the REST API
-3. When a user visits a Shiny app, Blockyard injects a scoped OpenBao token
+3. When a user visits a Shiny app, Blockyard injects a scoped vault token
    into the request so the app can read that user's credentials
 
 No single compromised component can exfiltrate all user credentials. The
-server's OpenBao token is write-scoped — it cannot read user secrets. Only a
+server's vault token is write-scoped — it cannot read user secrets. Only a
 valid IdP access token (from an active user session) can produce a read-scoped
 token.
 
 ## Server configuration
 
-Add the `[openbao]` section to your config file. This requires `[oidc]` to
+Add the `[vault]` section to your config file. This requires `[oidc]` to
 also be configured.
 
 ```toml
-[openbao]
+[vault]
 address       = "http://openbao:8200"
 role_id       = "blockyard-server"     # AppRole role identifier
 token_ttl     = "1h"
 jwt_auth_path = "jwt"
 
-[[openbao.services]]
+[[vault.services]]
 id    = "openai"
 label = "OpenAI"
 
-[[openbao.services]]
+[[vault.services]]
 id    = "anthropic"
 label = "Anthropic"
 ```
 
-Each `[[openbao.services]]` entry defines a third-party service whose API
+Each `[[vault.services]]` entry defines a third-party service whose API
 keys users can enroll. The `id` is used in API paths and as the vault path
 segment, `label` is shown in the web UI. Credentials are stored at
 `secret/data/users/{sub}/apikeys/{id}`.
 
 ## Authentication
 
-Blockyard authenticates to OpenBao using **AppRole**. This replaces the
+Blockyard authenticates to the vault using **AppRole**. This replaces the
 previous static `admin_token` approach with a more secure, renewable
 credential.
 
 ### Initial bootstrap
 
-1. Configure the AppRole role in OpenBao (see the `setup-openbao.sh` script
-   in the hello-pocketbase example for reference)
+1. Configure the AppRole role in the vault (see the `setup-openbao.sh`
+   script in the hello-pocketbase example for reference)
 2. Set `role_id` in your config (this is a role identifier, not a secret)
 3. Deliver the `secret_id` via environment variable:
 
 ```bash
-BLOCKYARD_OPENBAO_SECRET_ID="your-secret-id" blockyard
+BLOCKYARD_VAULT_SECRET_ID="your-secret-id" blockyard
 ```
 
 On first startup, blockyard uses the `secret_id` to authenticate, obtains a
@@ -91,14 +91,14 @@ renewal, re-deliver a fresh `secret_id` via the environment variable.
 
 The `admin_token` field is deprecated but still accepted. To migrate:
 
-1. Set up AppRole in OpenBao (enable the auth method, create a policy and role)
+1. Set up AppRole in the vault (enable the auth method, create a policy and role)
 2. Replace `admin_token` with `role_id` in your config
-3. Set `BLOCKYARD_OPENBAO_SECRET_ID` for the first startup
-4. Remove the old `admin_token` / `BLOCKYARD_OPENBAO_ADMIN_TOKEN`
+3. Set `BLOCKYARD_VAULT_SECRET_ID` for the first startup
+4. Remove the old `admin_token` / `BLOCKYARD_VAULT_ADMIN_TOKEN`
 
 ## Bootstrapping
 
-On startup, Blockyard verifies OpenBao is configured correctly:
+On startup, Blockyard verifies the vault is configured correctly:
 
 - KV v2 secrets engine is mounted at `secret/`
 - JWT auth is configured with your IdP
@@ -137,11 +137,11 @@ R process reads it directly:
 
 ```r
 server <- function(input, output, session) {
-  # Get the scoped OpenBao token from the request header
+  # Get the scoped vault token from the request header
   vault_token <- session$request$HTTP_X_BLOCKYARD_VAULT_TOKEN
   vault_addr  <- Sys.getenv("VAULT_ADDR")
 
-  # Read your OpenAI API key from OpenBao
+  # Read your OpenAI API key from the vault
   resp <- httr2::request(vault_addr) |>
     httr2::req_url_path("/v1/secret/data/users", session$request$HTTP_X_SHINY_USER, "openai") |>
     httr2::req_headers("X-Vault-Token" = vault_token) |>
@@ -170,7 +170,7 @@ server <- function(input, output, session) {
 
   vault_token <- httr2::resp_body_json(resp)$token
 
-  # Then use vault_token to read credentials from OpenBao (same as above)
+  # Then use vault_token to read credentials from the vault (same as above)
 }
 ```
 
@@ -184,12 +184,12 @@ All worker containers receive:
 | `R_LIBS` | The restored package library path — typically `/blockyard-lib`, or `/blockyard-lib-store` when using the shared package store |
 | `BLOCKYARD_API_URL` | The server's internal API URL (used for runtime package installs and credential exchange) |
 
-When `[openbao]` is configured, workers also receive:
+When `[vault]` is configured, workers also receive:
 
 | Variable | Value |
 |---|---|
-| `VAULT_ADDR` | The OpenBao server address (from `[openbao] address`) |
-| `BLOCKYARD_VAULT_SERVICES` | JSON map of service IDs to Vault paths (only when `[[openbao.services]]` are defined) |
+| `VAULT_ADDR` | The vault server address (from `[vault] address`) |
+| `BLOCKYARD_VAULT_SERVICES` | JSON map of service IDs to vault paths (only when `[[vault.services]]` are defined) |
 
 ## Security model
 
@@ -201,4 +201,4 @@ Key properties:
 - The server cannot read stored secrets (admin token is write-scoped)
 - A compromised server can only intercept credentials for users with
   active sessions during the window of compromise
-- User credentials are encrypted at rest in OpenBao
+- User credentials are encrypted at rest in the vault

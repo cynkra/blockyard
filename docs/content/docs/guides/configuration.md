@@ -49,13 +49,13 @@ for end-to-end process-backend deployment walkthroughs.
 
 Add an `[oidc]` section to require users to log in before accessing
 apps. When OIDC is enabled, `server.session_secret` is required unless
-`[openbao]` is also configured (in which case the secret is
-auto-generated and stored in vault). See the
+`[vault]` is also configured (in which case the secret is
+auto-generated and stored in the vault). See the
 [Authorization guide](/docs/guides/authorization/).
 
 ### Credential management
 
-Add an `[openbao]` section to enroll per-user API keys that Shiny apps
+Add a `[vault]` section to enroll per-user API keys that Shiny apps
 read at runtime. Requires `[oidc]`. See the
 [Credential Management guide](/docs/guides/credentials/).
 
@@ -113,7 +113,7 @@ idle_worker_timeout  = "5m"
 # [redis]      — Redis-backed shared state; required for rolling updates
 # [update]     — rolling update orchestrator (schedule, drain, alt bind)
 # [oidc]       — OIDC authentication
-# [openbao]    — OpenBao credential management (requires [oidc])
+# [vault]      — Vault-compatible credential management (requires [oidc])
 # [audit]      — append-only JSONL audit log
 # [telemetry]  — Prometheus metrics and OpenTelemetry tracing
 ```

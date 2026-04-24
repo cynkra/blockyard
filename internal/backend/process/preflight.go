@@ -456,8 +456,8 @@ func checkWorkerEgress(cfg *config.ProcessConfig, fullCfg *config.Config) prefli
 			targets = append(targets, target{name: "redis", addr: hp})
 		}
 	}
-	if fullCfg.Openbao != nil && fullCfg.Openbao.Address != "" {
-		if hp := preflight.TCPAddrFromHTTPURL(fullCfg.Openbao.Address); hp != "" {
+	if fullCfg.Vault != nil && fullCfg.Vault.Address != "" {
+		if hp := preflight.TCPAddrFromHTTPURL(fullCfg.Vault.Address); hp != "" {
 			targets = append(targets, target{name: "openbao", addr: hp})
 		}
 	}

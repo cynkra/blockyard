@@ -74,7 +74,7 @@ cloud-detected hosts.
 
 **Why per-container bridges:** the requirements are that workers can reach
 the internet and local network services (package repositories, external APIs,
-OpenBao, IdP — which may themselves be containerized on the same host),
+vault, IdP — which may themselves be containerized on the same host),
 workers cannot reach each other, the server can reach each worker to proxy
 traffic, and workers cannot reach the server's management API. The obvious
 alternative — a single shared bridge with `--icc=false` (inter-container
@@ -152,16 +152,16 @@ Three independent trust domains hold the credential pipeline:
 
 | Domain | What it holds | Compromise alone yields |
 |---|---|---|
-| **IdP** | User identities, OIDC signing keys | Forge JWTs for any user → unlock any user's OpenBao namespace |
-| **OpenBao** | Encrypted credential storage, per-user policy enforcement | Read all stored secrets directly |
+| **IdP** | User identities, OIDC signing keys | Forge JWTs for any user → unlock any user's vault namespace |
+| **Vault** | Encrypted credential storage, per-user policy enforcement | Read all stored secrets directly |
 | **Server** | OIDC client secret, in-memory session tokens, AppRole-issued vault token (write-scoped, renewable) | Secrets for users with active sessions only (see below) |
 
 **Why the server alone is not sufficient to exfiltrate all credentials:**
 
-The server authenticates to OpenBao via AppRole auth — a renewable,
+The server authenticates to the vault via AppRole auth — a renewable,
 scoped token that grants **write** (credential enrollment) and
 **metadata** operations. It cannot read user secret values. The only
-way to read a user's secrets is with a scoped OpenBao token obtained
+way to read a user's secrets is with a scoped vault token obtained
 via JWT login — which requires a valid IdP access token for that user.
 
 The server obtains a user's access token only when the user actively
@@ -189,7 +189,7 @@ regardless of session state. A compromised server with access to the key
 and the database can exfiltrate the complete credential history in one
 operation. There is no way to create a "write-only" encryption key.
 
-The operational cost of running OpenBao (deploy, initialize, unseal,
+The operational cost of running the vault (deploy, initialize, unseal,
 monitor) is the price for this property. It is worth paying because
 blockyard is unlikely to undergo a professional security audit in the
 foreseeable future, and defense-in-depth through trust domain separation
@@ -336,7 +336,7 @@ no longer exist). Sessions survive across server restarts.
 
 ## Database Schema
 
-Seven tables — everything else lives in OpenBao, the IdP, Docker, or in-memory.
+Seven tables — everything else lives in the vault, the IdP, Docker, or in-memory.
 
 **Storage backend:** SQLite (`modernc.org/sqlite`, pure Go) for single-host
 Docker deployments — zero operational overhead and sufficient for the write
@@ -434,7 +434,7 @@ values are rejected.
 
 | Concern | Where |
 |---|---|
-| Per-user credentials (OAuth tokens, API keys) | OpenBao (v1) |
+| Per-user credentials (OAuth tokens, API keys) | vault (v1) |
 | User identity (authentication) | IdP via OIDC (v1) |
 | Session state (sub, access + refresh token) | Server-side session store (v1) |
 | User roles and active status | blockyard `users` table (v1) |

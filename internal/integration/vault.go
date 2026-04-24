@@ -16,16 +16,17 @@ import (
 // from transient failures.
 var ErrNotFound = errors.New("secret not found")
 
-// Client is a lightweight HTTP client for OpenBao's REST API.
-// It targets only the endpoints blockyard needs: JWT auth login,
-// KV v2 read/write, and sys/health.
+// Client is a lightweight HTTP client for the Vault-compatible REST
+// API (HashiCorp Vault and its OpenBao fork expose the same wire
+// protocol). It targets only the endpoints blockyard needs: JWT auth
+// login, KV v2 read/write, and sys/health.
 type Client struct {
 	addr           string
 	adminTokenFunc func() string
 	httpClient     *http.Client
 }
 
-// NewClient creates a new OpenBao client. The adminToken is retrieved
+// NewClient creates a new vault client. The adminToken is retrieved
 // via a callback to avoid holding the plaintext value in a long-lived
 // struct field.
 func NewClient(addr string, adminTokenFunc func() string) *Client {
@@ -36,24 +37,24 @@ func NewClient(addr string, adminTokenFunc func() string) *Client {
 	}
 }
 
-// Addr returns the OpenBao server address.
+// Addr returns the vault server address.
 func (c *Client) Addr() string { return c.addr }
 
 // AdminToken returns the current admin token. Satisfies
 // config.SecretResolver.
 func (c *Client) AdminToken() string { return c.adminTokenFunc() }
 
-// Health checks if OpenBao is reachable and unsealed.
+// Health checks if the vault is reachable and unsealed.
 // GET {addr}/v1/sys/health
 func (c *Client) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.addr+"/v1/sys/health", nil)
 	if err != nil {
-		return fmt.Errorf("openbao health: %w", err)
+		return fmt.Errorf("vault health: %w", err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("openbao health: %w", err)
+		return fmt.Errorf("vault health: %w", err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
@@ -67,10 +68,10 @@ func (c *Client) Health(ctx context.Context) error {
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusTooManyRequests {
 		return nil
 	}
-	return fmt.Errorf("openbao health: unexpected status %d", resp.StatusCode)
+	return fmt.Errorf("vault health: unexpected status %d", resp.StatusCode)
 }
 
-// jwtLoginResponse is the relevant subset of OpenBao's auth/jwt/login response.
+// jwtLoginResponse is the relevant subset of the Vault-compatible auth/jwt/login response.
 type jwtLoginResponse struct {
 	Auth struct {
 		ClientToken   string `json:"client_token"`
@@ -79,7 +80,7 @@ type jwtLoginResponse struct {
 	Errors []string `json:"errors"`
 }
 
-// JWTLogin exchanges an IdP access token for a scoped OpenBao token.
+// JWTLogin exchanges an IdP access token for a scoped vault token.
 // POST {addr}/v1/auth/{mountPath}/login
 func (c *Client) JWTLogin(ctx context.Context, mountPath, accessToken string) (token string, ttl time.Duration, err error) {
 	body := fmt.Sprintf(`{"role":"blockyard-user","jwt":%q}`, accessToken)
@@ -87,28 +88,28 @@ func (c *Client) JWTLogin(ctx context.Context, mountPath, accessToken string) (t
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
 	if err != nil {
-		return "", 0, fmt.Errorf("openbao jwt login: %w", err)
+		return "", 0, fmt.Errorf("vault jwt login: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("openbao jwt login: %w", err)
+		return "", 0, fmt.Errorf("vault jwt login: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return "", 0, fmt.Errorf("openbao jwt login: status %d", resp.StatusCode)
+		return "", 0, fmt.Errorf("vault jwt login: status %d", resp.StatusCode)
 	}
 
 	var result jwtLoginResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", 0, fmt.Errorf("openbao jwt login: decode response: %w", err)
+		return "", 0, fmt.Errorf("vault jwt login: decode response: %w", err)
 	}
 
 	if result.Auth.ClientToken == "" {
-		return "", 0, fmt.Errorf("openbao jwt login: empty client_token")
+		return "", 0, fmt.Errorf("vault jwt login: empty client_token")
 	}
 
 	return result.Auth.ClientToken, time.Duration(result.Auth.LeaseDuration) * time.Second, nil
@@ -119,26 +120,26 @@ func (c *Client) JWTLogin(ctx context.Context, mountPath, accessToken string) (t
 func (c *Client) KVWrite(ctx context.Context, path string, data map[string]any) error {
 	payload, err := json.Marshal(map[string]any{"data": data})
 	if err != nil {
-		return fmt.Errorf("openbao kv write: marshal: %w", err)
+		return fmt.Errorf("vault kv write: marshal: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/v1/secret/data/%s", c.addr, path)
 	req, err := http.NewRequestWithContext(ctx, "PUT", url, strings.NewReader(string(payload)))
 	if err != nil {
-		return fmt.Errorf("openbao kv write: %w", err)
+		return fmt.Errorf("vault kv write: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("openbao kv write: %w", err)
+		return fmt.Errorf("vault kv write: %w", err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("openbao kv write: status %d", resp.StatusCode)
+		return fmt.Errorf("vault kv write: status %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -154,13 +155,13 @@ func (c *Client) SecretExists(ctx context.Context, path string) (bool, error) {
 	url := fmt.Sprintf("%s/v1/%s", c.addr, metaPath)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return false, fmt.Errorf("openbao secret exists: %w", err)
+		return false, fmt.Errorf("vault secret exists: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("openbao secret exists: %w", err)
+		return false, fmt.Errorf("vault secret exists: %w", err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
@@ -169,7 +170,7 @@ func (c *Client) SecretExists(ctx context.Context, path string) (bool, error) {
 		return false, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("openbao secret exists: status %d", resp.StatusCode)
+		return false, fmt.Errorf("vault secret exists: status %d", resp.StatusCode)
 	}
 	return true, nil
 }
@@ -184,7 +185,7 @@ func (c *Client) SecretExists(ctx context.Context, path string) (bool, error) {
 //
 // Idempotent: vault returns 200/204 on update of an existing role.
 //
-// Uses the admin AppRole token configured via [openbao].
+// Uses the admin AppRole token configured via [vault].
 // POST {addr}/v1/{mount}/static-roles/{name}
 func (c *Client) DatabaseStaticRoleCreate(
 	ctx context.Context,
@@ -196,31 +197,31 @@ func (c *Client) DatabaseStaticRoleCreate(
 		"rotation_period": rotationPeriod,
 	})
 	if err != nil {
-		return fmt.Errorf("openbao db static-role create: marshal: %w", err)
+		return fmt.Errorf("vault db static-role create: marshal: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/v1/%s/static-roles/%s", c.addr, mount, name)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
 	if err != nil {
-		return fmt.Errorf("openbao db static-role create: %w", err)
+		return fmt.Errorf("vault db static-role create: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("openbao db static-role create: %w", err)
+		return fmt.Errorf("vault db static-role create: %w", err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("openbao db static-role create %s: status %d", name, resp.StatusCode)
+		return fmt.Errorf("vault db static-role create %s: status %d", name, resp.StatusCode)
 	}
 	return nil
 }
 
-// dbStaticCredsResponse is the relevant subset of OpenBao's database
+// dbStaticCredsResponse is the relevant subset of the Vault-compatible database
 // secrets-engine static-role credential response.
 type dbStaticCredsResponse struct {
 	Data struct {
@@ -251,30 +252,30 @@ func (c *Client) DatabaseStaticCredsRead(
 	url := fmt.Sprintf("%s/v1/%s/static-creds/%s", c.addr, mount, name)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "", "", 0, fmt.Errorf("openbao db static-creds: %w", err)
+		return "", "", 0, fmt.Errorf("vault db static-creds: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", "", 0, fmt.Errorf("openbao db static-creds: %w", err)
+		return "", "", 0, fmt.Errorf("vault db static-creds: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", "", 0, fmt.Errorf("openbao db static-creds %s: %w", name, ErrNotFound)
+		return "", "", 0, fmt.Errorf("vault db static-creds %s: %w", name, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return "", "", 0, fmt.Errorf("openbao db static-creds %s: status %d", name, resp.StatusCode)
+		return "", "", 0, fmt.Errorf("vault db static-creds %s: status %d", name, resp.StatusCode)
 	}
 
 	var result dbStaticCredsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", 0, fmt.Errorf("openbao db static-creds: decode: %w", err)
+		return "", "", 0, fmt.Errorf("vault db static-creds: decode: %w", err)
 	}
 	if result.Data.Username == "" || result.Data.Password == "" {
-		return "", "", 0, fmt.Errorf("openbao db static-creds %s: empty username or password", name)
+		return "", "", 0, fmt.Errorf("vault db static-creds %s: empty username or password", name)
 	}
 	return result.Data.Username, result.Data.Password, time.Duration(result.Data.TTL) * time.Second, nil
 }
@@ -292,19 +293,19 @@ func (c *Client) AuthMountAccessor(ctx context.Context, path string) (string, er
 	url := fmt.Sprintf("%s/v1/sys/auth", c.addr)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "", fmt.Errorf("openbao sys/auth: %w", err)
+		return "", fmt.Errorf("vault sys/auth: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("openbao sys/auth: %w", err)
+		return "", fmt.Errorf("vault sys/auth: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return "", fmt.Errorf("openbao sys/auth: status %d", resp.StatusCode)
+		return "", fmt.Errorf("vault sys/auth: status %d", resp.StatusCode)
 	}
 
 	// Vault's sys/auth response mixes two shapes: mount-path entries
@@ -315,7 +316,7 @@ func (c *Client) AuthMountAccessor(ctx context.Context, path string) (string, er
 	// envelope as RawMessage and only decode the one entry we need.
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return "", fmt.Errorf("openbao sys/auth: decode: %w", err)
+		return "", fmt.Errorf("vault sys/auth: decode: %w", err)
 	}
 
 	key := strings.TrimSuffix(path, "/") + "/"
@@ -330,17 +331,17 @@ func (c *Client) AuthMountAccessor(ctx context.Context, path string) (string, er
 			}
 		}
 		if !ok {
-			return "", fmt.Errorf("openbao sys/auth: no auth method at %q", path)
+			return "", fmt.Errorf("vault sys/auth: no auth method at %q", path)
 		}
 	}
 	var entry struct {
 		Accessor string `json:"accessor"`
 	}
 	if err := json.Unmarshal(entryRaw, &entry); err != nil {
-		return "", fmt.Errorf("openbao sys/auth: decode %s: %w", path, err)
+		return "", fmt.Errorf("vault sys/auth: decode %s: %w", path, err)
 	}
 	if entry.Accessor == "" {
-		return "", fmt.Errorf("openbao sys/auth: accessor missing at %q", path)
+		return "", fmt.Errorf("vault sys/auth: accessor missing at %q", path)
 	}
 	return entry.Accessor, nil
 }
@@ -365,33 +366,33 @@ func (c *Client) IdentityLookupEntityByAlias(
 		"alias_mount_accessor": aliasMountAccessor,
 	})
 	if err != nil {
-		return "", fmt.Errorf("openbao identity lookup: marshal: %w", err)
+		return "", fmt.Errorf("vault identity lookup: marshal: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/v1/identity/lookup/entity", c.addr)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
 	if err != nil {
-		return "", fmt.Errorf("openbao identity lookup: %w", err)
+		return "", fmt.Errorf("vault identity lookup: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("openbao identity lookup: %w", err)
+		return "", fmt.Errorf("vault identity lookup: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("openbao identity lookup: alias %q: %w", aliasName, ErrNotFound)
+		return "", fmt.Errorf("vault identity lookup: alias %q: %w", aliasName, ErrNotFound)
 	}
 	// Vault returns 204 No Content when the alias is unknown (no
 	// entity exists yet). Treat as not-found for caller clarity.
 	if resp.StatusCode == http.StatusNoContent {
-		return "", fmt.Errorf("openbao identity lookup: alias %q: %w", aliasName, ErrNotFound)
+		return "", fmt.Errorf("vault identity lookup: alias %q: %w", aliasName, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("openbao identity lookup: status %d", resp.StatusCode)
+		return "", fmt.Errorf("vault identity lookup: status %d", resp.StatusCode)
 	}
 
 	var result struct {
@@ -400,15 +401,15 @@ func (c *Client) IdentityLookupEntityByAlias(
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("openbao identity lookup: decode: %w", err)
+		return "", fmt.Errorf("vault identity lookup: decode: %w", err)
 	}
 	if result.Data.ID == "" {
-		return "", fmt.Errorf("openbao identity lookup: alias %q: empty entity id", aliasName)
+		return "", fmt.Errorf("vault identity lookup: alias %q: empty entity id", aliasName)
 	}
 	return result.Data.ID, nil
 }
 
-// kvReadResponse is the relevant subset of OpenBao's KV v2 read response.
+// kvReadResponse is the relevant subset of the Vault-compatible KV v2 read response.
 type kvReadResponse struct {
 	Data struct {
 		Data map[string]any `json:"data"`
@@ -421,26 +422,26 @@ func (c *Client) KVRead(ctx context.Context, path string, token string) (map[str
 	url := fmt.Sprintf("%s/v1/secret/data/%s", c.addr, path)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("openbao kv read: %w", err)
+		return nil, fmt.Errorf("vault kv read: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("openbao kv read: %w", err)
+		return nil, fmt.Errorf("vault kv read: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("openbao kv read: %s: %w", path, ErrNotFound)
+		return nil, fmt.Errorf("vault kv read: %s: %w", path, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openbao kv read: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("vault kv read: status %d", resp.StatusCode)
 	}
 
 	var result kvReadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("openbao kv read: decode: %w", err)
+		return nil, fmt.Errorf("vault kv read: decode: %w", err)
 	}
 	return result.Data.Data, nil
 }

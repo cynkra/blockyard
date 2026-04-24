@@ -55,7 +55,7 @@ func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *
 			ClientID:     "blockyard",
 			ClientSecret: config.NewSecret("test-secret"),
 		},
-		Openbao: &config.OpenbaoConfig{
+		Vault: &config.VaultConfig{
 			Address:     "http://mock-vault",
 			AdminToken:  config.NewSecret("admin-token"),
 			JWTAuthPath: "jwt",

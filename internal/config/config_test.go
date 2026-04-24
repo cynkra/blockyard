@@ -595,7 +595,7 @@ func TestValidationRejectsOidcEmptyClientSecret(t *testing.T) {
 }
 
 func TestValidationRejectsOidcWithoutSessionSecret(t *testing.T) {
-	// Without [openbao], session_secret is required.
+	// Without [vault], session_secret is required.
 	toml := strings.Replace(oidcTOML(t), `session_secret = "my-session-secret"`, ``, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
@@ -606,8 +606,8 @@ func TestValidationRejectsOidcWithoutSessionSecret(t *testing.T) {
 	}
 }
 
-func TestValidationDefersSessionSecretWithOpenbao(t *testing.T) {
-	// With [openbao] configured, session_secret is not required at load time
+func TestValidationDefersSessionSecretWithVault(t *testing.T) {
+	// With [vault] configured, session_secret is not required at load time
 	// (it may be auto-generated or resolved from vault).
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
@@ -630,7 +630,7 @@ issuer_url = "https://idp.example.com"
 client_id = "my-client"
 client_secret = "my-secret"
 
-[openbao]
+[vault]
 address = "https://bao.example.com"
 role_id = "blockyard-server"
 `, bundlePath, dbPath)
@@ -666,7 +666,7 @@ issuer_url = "https://idp.example.com"
 client_id = "my-client"
 client_secret = "my-secret"
 
-[openbao]
+[vault]
 address = "https://bao.example.com"
 admin_token = "hvs.admin123"
 role_id = "blockyard-server"
@@ -680,7 +680,7 @@ role_id = "blockyard-server"
 	}
 }
 
-func TestParseOpenbaoRoleID(t *testing.T) {
+func TestParseVaultRoleID(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
@@ -703,18 +703,18 @@ issuer_url = "https://idp.example.com"
 client_id = "my-client"
 client_secret = "my-secret"
 
-[openbao]
+[vault]
 address = "https://bao.example.com"
 role_id = "blockyard-server"
 `, bundlePath, dbPath)
 	cfg := loadFromString(t, toml)
-	if cfg.Openbao == nil {
-		t.Fatal("expected Openbao config")
+	if cfg.Vault == nil {
+		t.Fatal("expected Vault config")
 	}
-	if cfg.Openbao.RoleID != "blockyard-server" {
-		t.Errorf("role_id = %q, want blockyard-server", cfg.Openbao.RoleID)
+	if cfg.Vault.RoleID != "blockyard-server" {
+		t.Errorf("role_id = %q, want blockyard-server", cfg.Vault.RoleID)
 	}
-	if !cfg.Openbao.AdminToken.IsEmpty() {
+	if !cfg.Vault.AdminToken.IsEmpty() {
 		t.Error("expected admin_token to be empty")
 	}
 }
@@ -822,7 +822,7 @@ func TestEnvVarOverrideExternalURL(t *testing.T) {
 
 // --- OpenBao config tests ---
 
-func openbaoTOML(t *testing.T) string {
+func vaultTOML(t *testing.T) string {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
@@ -848,37 +848,37 @@ issuer_url = "https://idp.example.com"
 client_id = "my-client"
 client_secret = "my-secret"
 
-[openbao]
+[vault]
 address = "https://bao.example.com"
 admin_token = "hvs.admin123"
 `, bundlePath, dbPath)
 }
 
-func TestParseOpenbaoConfig(t *testing.T) {
-	cfg := loadFromString(t, openbaoTOML(t))
-	if cfg.Openbao == nil {
-		t.Fatal("expected Openbao config to be parsed")
+func TestParseVaultConfig(t *testing.T) {
+	cfg := loadFromString(t, vaultTOML(t))
+	if cfg.Vault == nil {
+		t.Fatal("expected Vault config to be parsed")
 	}
-	if cfg.Openbao.Address != "https://bao.example.com" {
-		t.Errorf("address = %q", cfg.Openbao.Address)
+	if cfg.Vault.Address != "https://bao.example.com" {
+		t.Errorf("address = %q", cfg.Vault.Address)
 	}
-	if cfg.Openbao.AdminToken.MustExpose() != "hvs.admin123" {
-		t.Errorf("admin_token = %q", cfg.Openbao.AdminToken.MustExpose())
+	if cfg.Vault.AdminToken.MustExpose() != "hvs.admin123" {
+		t.Errorf("admin_token = %q", cfg.Vault.AdminToken.MustExpose())
 	}
-	if cfg.Openbao.TokenTTL.Duration != 1*time.Hour {
-		t.Errorf("expected default token_ttl 1h, got %v", cfg.Openbao.TokenTTL.Duration)
+	if cfg.Vault.TokenTTL.Duration != 1*time.Hour {
+		t.Errorf("expected default token_ttl 1h, got %v", cfg.Vault.TokenTTL.Duration)
 	}
-	if cfg.Openbao.JWTAuthPath != "jwt" {
-		t.Errorf("expected default jwt_auth_path 'jwt', got %q", cfg.Openbao.JWTAuthPath)
+	if cfg.Vault.JWTAuthPath != "jwt" {
+		t.Errorf("expected default jwt_auth_path 'jwt', got %q", cfg.Vault.JWTAuthPath)
 	}
-	if cfg.Openbao.TokenFile != "/data/.vault-token" {
-		t.Errorf("expected default token_file '/data/.vault-token', got %q", cfg.Openbao.TokenFile)
+	if cfg.Vault.TokenFile != "/data/.vault-token" {
+		t.Errorf("expected default token_file '/data/.vault-token', got %q", cfg.Vault.TokenFile)
 	}
 }
 
-func TestOpenbaoTokenFileOverride(t *testing.T) {
+func TestVaultTokenFileOverride(t *testing.T) {
 	toml := strings.Replace(
-		openbaoTOML(t),
+		vaultTOML(t),
 		`admin_token = "hvs.admin123"`,
 		`admin_token = "hvs.admin123"`+"\n"+`token_file   = "/var/lib/blockyard/.vault-token"`,
 		1,
@@ -890,31 +890,31 @@ func TestOpenbaoTokenFileOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Openbao.TokenFile != "/var/lib/blockyard/.vault-token" {
-		t.Errorf("token_file = %q, want /var/lib/blockyard/.vault-token", cfg.Openbao.TokenFile)
+	if cfg.Vault.TokenFile != "/var/lib/blockyard/.vault-token" {
+		t.Errorf("token_file = %q, want /var/lib/blockyard/.vault-token", cfg.Vault.TokenFile)
 	}
 }
 
-func TestParseConfigWithoutOpenbao(t *testing.T) {
+func TestParseConfigWithoutVault(t *testing.T) {
 	cfg := loadFromString(t, minimalTOML)
-	if cfg.Openbao != nil {
-		t.Error("expected Openbao config to be nil when section is absent")
+	if cfg.Vault != nil {
+		t.Error("expected Vault config to be nil when section is absent")
 	}
 }
 
-func TestValidationRejectsOpenbaoEmptyAddress(t *testing.T) {
-	toml := strings.Replace(openbaoTOML(t), `address = "https://bao.example.com"`, `address = ""`, 1)
+func TestValidationRejectsVaultEmptyAddress(t *testing.T) {
+	toml := strings.Replace(vaultTOML(t), `address = "https://bao.example.com"`, `address = ""`, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(toml), 0o644)
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "openbao.address") {
-		t.Errorf("expected openbao.address error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "vault.address") {
+		t.Errorf("expected vault.address error, got: %v", err)
 	}
 }
 
-func TestValidationRejectsOpenbaoNoCredentials(t *testing.T) {
-	toml := strings.Replace(openbaoTOML(t), `admin_token = "hvs.admin123"`, `admin_token = ""`, 1)
+func TestValidationRejectsVaultNoCredentials(t *testing.T) {
+	toml := strings.Replace(vaultTOML(t), `admin_token = "hvs.admin123"`, `admin_token = ""`, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blockyard.toml")
 	os.WriteFile(path, []byte(toml), 0o644)
@@ -924,7 +924,7 @@ func TestValidationRejectsOpenbaoNoCredentials(t *testing.T) {
 	}
 }
 
-func TestValidationRejectsOpenbaoWithoutOidc(t *testing.T) {
+func TestValidationRejectsVaultWithoutOidc(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
 	dbPath := filepath.Join(dir, "db", "blockyard.db")
@@ -941,7 +941,7 @@ bundle_server_path = %q
 [database]
 path = %q
 
-[openbao]
+[vault]
 address = "https://bao.example.com"
 admin_token = "hvs.admin123"
 `, bundlePath, dbPath)
@@ -955,10 +955,10 @@ admin_token = "hvs.admin123"
 	}
 }
 
-func TestOpenbaoAutoConstructFromEnvVars(t *testing.T) {
-	t.Setenv("BLOCKYARD_OPENBAO_ADDRESS", "https://env-bao.example.com")
-	t.Setenv("BLOCKYARD_OPENBAO_ADMIN_TOKEN", "hvs.env-token")
-	// Also need OIDC for openbao validation to pass.
+func TestVaultAutoConstructFromEnvVars(t *testing.T) {
+	t.Setenv("BLOCKYARD_VAULT_ADDRESS", "https://env-bao.example.com")
+	t.Setenv("BLOCKYARD_VAULT_ADMIN_TOKEN", "hvs.env-token")
+	// Also need OIDC for vault validation to pass.
 	t.Setenv("BLOCKYARD_SERVER_EXTERNAL_URL", "https://example.com")
 	t.Setenv("BLOCKYARD_OIDC_ISSUER_URL", "https://idp.example.com")
 	t.Setenv("BLOCKYARD_OIDC_CLIENT_ID", "my-client")
@@ -966,22 +966,50 @@ func TestOpenbaoAutoConstructFromEnvVars(t *testing.T) {
 	t.Setenv("BLOCKYARD_SERVER_SESSION_SECRET", "my-session-secret")
 
 	cfg := loadFromString(t, minimalTOML)
-	if cfg.Openbao == nil {
-		t.Fatal("expected Openbao section to be auto-constructed from env vars")
+	if cfg.Vault == nil {
+		t.Fatal("expected Vault section to be auto-constructed from env vars")
 	}
-	if cfg.Openbao.Address != "https://env-bao.example.com" {
-		t.Errorf("address = %q", cfg.Openbao.Address)
+	if cfg.Vault.Address != "https://env-bao.example.com" {
+		t.Errorf("address = %q", cfg.Vault.Address)
 	}
-	if cfg.Openbao.AdminToken.MustExpose() != "hvs.env-token" {
-		t.Errorf("admin_token = %q", cfg.Openbao.AdminToken.MustExpose())
+	if cfg.Vault.AdminToken.MustExpose() != "hvs.env-token" {
+		t.Errorf("admin_token = %q", cfg.Vault.AdminToken.MustExpose())
 	}
 }
 
-func TestEnvVarOverrideOpenbaoTokenTTL(t *testing.T) {
-	t.Setenv("BLOCKYARD_OPENBAO_TOKEN_TTL", "30m")
-	cfg := loadFromString(t, openbaoTOML(t))
-	if cfg.Openbao.TokenTTL.Duration != 30*time.Minute {
-		t.Errorf("token_ttl = %v, want 30m", cfg.Openbao.TokenTTL.Duration)
+func TestEnvVarOverrideVaultTokenTTL(t *testing.T) {
+	t.Setenv("BLOCKYARD_VAULT_TOKEN_TTL", "30m")
+	cfg := loadFromString(t, vaultTOML(t))
+	if cfg.Vault.TokenTTL.Duration != 30*time.Minute {
+		t.Errorf("token_ttl = %v, want 30m", cfg.Vault.TokenTTL.Duration)
+	}
+}
+
+// --- Deprecation shim tests ---
+
+// TestDeprecatedOpenbaoSectionMigrates verifies that a legacy [openbao]
+// section still loads: it gets moved into cfg.Vault at load time.
+func TestDeprecatedOpenbaoSectionMigrates(t *testing.T) {
+	toml := strings.Replace(vaultTOML(t), "[vault]", "[openbao]", 1)
+	cfg := loadFromString(t, toml)
+	if cfg.Vault == nil {
+		t.Fatal("expected [openbao] to migrate into cfg.Vault")
+	}
+	if cfg.Vault.Address != "https://bao.example.com" {
+		t.Errorf("address = %q", cfg.Vault.Address)
+	}
+	if cfg.Openbao != nil {
+		t.Error("expected cfg.Openbao to be cleared after migration")
+	}
+}
+
+// TestDeprecatedOpenbaoEnvVarMigrates verifies that BLOCKYARD_OPENBAO_*
+// env vars are translated to BLOCKYARD_VAULT_* before the override walk.
+func TestDeprecatedOpenbaoEnvVarMigrates(t *testing.T) {
+	t.Setenv("BLOCKYARD_OPENBAO_TOKEN_TTL", "45m")
+	cfg := loadFromString(t, vaultTOML(t))
+	if cfg.Vault.TokenTTL.Duration != 45*time.Minute {
+		t.Errorf("token_ttl = %v, want 45m (from deprecated env var)", cfg.Vault.TokenTTL.Duration)
 	}
 }
 
@@ -1248,7 +1276,7 @@ func TestEnvVarOverrideTelemetryOTLPEndpoint(t *testing.T) {
 
 // databaseVaultTOML returns a config with the database section populated
 // per overrides. `overrides` is appended verbatim to [database]; other
-// sections (docker, storage, oidc, openbao) follow the happy-path shape
+// sections (docker, storage, oidc, vault) follow the happy-path shape
 // so validation fails only on the specific case under test.
 func databaseVaultTOML(t *testing.T, overrides string) string {
 	t.Helper()
@@ -1274,7 +1302,7 @@ issuer_url = "https://idp.example.com"
 client_id = "my-client"
 client_secret = "my-secret"
 
-[openbao]
+[vault]
 address = "https://bao.example.com"
 role_id = "blockyard-server"
 `, bundlePath, overrides)
@@ -1349,10 +1377,10 @@ func expectLoadError(t *testing.T, toml, substr string) {
 	}
 }
 
-// noOpenbaoTOML is databaseVaultTOML without the [openbao] section.
-// session_secret is set explicitly because the "oidc without openbao"
+// noVaultTOML is databaseVaultTOML without the [vault] section.
+// session_secret is set explicitly because the "oidc without vault"
 // validation fires before the database-specific checks we want to hit.
-func noOpenbaoTOML(t *testing.T, overrides string) string {
+func noVaultTOML(t *testing.T, overrides string) string {
 	t.Helper()
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundles")
@@ -1380,8 +1408,8 @@ client_secret = "my-secret"
 }
 
 // sqliteVaultTOML is a non-postgres config with the overrides injected
-// under [database]. [openbao] is present so the check under test fires
-// on driver, not on openbao.
+// under [database]. [vault] is present so the check under test fires
+// on driver, not on vault.
 func sqliteVaultTOML(t *testing.T, overrides string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -1406,16 +1434,16 @@ issuer_url = "https://idp.example.com"
 client_id = "my-client"
 client_secret = "my-secret"
 
-[openbao]
+[vault]
 address = "https://bao.example.com"
 role_id = "blockyard-server"
 `, bundlePath, dbPath, overrides)
 }
 
-func TestValidationRejectsVaultRoleWithoutOpenbao(t *testing.T) {
+func TestValidationRejectsVaultRoleWithoutVault(t *testing.T) {
 	expectLoadError(t,
-		noOpenbaoTOML(t, `vault_role = "blockyard_app"`),
-		"database.vault_role requires [openbao]")
+		noVaultTOML(t, `vault_role = "blockyard_app"`),
+		"database.vault_role requires [vault]")
 }
 
 func TestValidationRejectsVaultRoleWithoutPostgres(t *testing.T) {
@@ -1424,10 +1452,10 @@ func TestValidationRejectsVaultRoleWithoutPostgres(t *testing.T) {
 		`database.vault_role requires database.driver = "postgres"`)
 }
 
-func TestValidationRejectsBoardStorageWithoutOpenbao(t *testing.T) {
+func TestValidationRejectsBoardStorageWithoutVault(t *testing.T) {
 	expectLoadError(t,
-		noOpenbaoTOML(t, `board_storage = true`),
-		"database.board_storage requires [openbao]")
+		noVaultTOML(t, `board_storage = true`),
+		"database.board_storage requires [vault]")
 }
 
 func TestValidationRejectsBoardStorageWithoutPostgres(t *testing.T) {
@@ -1463,7 +1491,7 @@ func validDatabaseConfigForVault(t *testing.T) *Config {
 			ClientSecret: NewSecret("s"),
 			DefaultRole:  "viewer",
 		},
-		Openbao: &OpenbaoConfig{
+		Vault: &VaultConfig{
 			Address: "https://bao.example.com",
 			RoleID:  "blockyard-server",
 		},

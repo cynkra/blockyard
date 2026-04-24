@@ -24,7 +24,7 @@ The required isolation properties:
    with each other.
 2. **Worker-to-host isolation** — workers cannot access the server's management
    API, configuration, database, or Docker socket.
-3. **Network scoping** — workers can reach the internet, Vault (OpenBao), and
+3. **Network scoping** — workers can reach the internet, the vault, and
    the IdP. Nothing else on the local network. Cloud metadata endpoints
    (`169.254.169.254`) are blocked.
 4. **Resource limits** — workers cannot fork-bomb, OOM, or CPU-starve the host.
@@ -539,7 +539,7 @@ Each worker Pod gets a NetworkPolicy that:
    the node CIDR. This prevents workers from reaching the Kubernetes API
    server, other services, and other Pods.
 4. **Denies egress to cloud metadata** — `169.254.169.254/32`.
-5. **Allows egress to OpenBao and the IdP** — explicit CIDR/port exceptions
+5. **Allows egress to the vault and the IdP** — explicit CIDR/port exceptions
    punched before the deny rules.
 
 ```yaml
@@ -584,7 +584,7 @@ guaranteed. The Helm chart should document this and optionally run a
 startup check (query a known NetworkPolicy and verify the CNI reports
 support).
 
-**OpenBao and IdP egress.** If OpenBao and the IdP run inside the cluster
+**Vault and IdP egress.** If the vault and the IdP run inside the cluster
 (common in dev/staging), their Pod/Service CIDRs fall within the blocked
 RFC1918 ranges. The NetworkPolicy needs explicit exceptions for their
 endpoints. These would be configured via the Kubernetes config section
@@ -761,7 +761,7 @@ only when scaling the server horizontally.
 - Redis dependency (optional, for multi-replica)
 - Ingress resource with cert-manager annotations
 - ConfigMap for `blockyard.toml`
-- Secret for sensitive config (OIDC client secret, OpenBao credentials)
+- Secret for sensitive config (OIDC client secret, vault credentials)
 
 **Graceful shutdown.** The server's existing shutdown sequence (management
 listener → main listener → background goroutines → worker eviction) works
