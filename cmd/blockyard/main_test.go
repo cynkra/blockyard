@@ -95,9 +95,11 @@ func TestRandomNonceHex(t *testing.T) {
 
 	// Two draws should differ with overwhelming probability. Colliding
 	// would mean crypto/rand returned the same bytes twice — a signal
-	// something is very wrong, not a flake to tolerate.
-	if randomNonceHex(8) == randomNonceHex(8) {
-		t.Error("two 8-byte nonces collided")
+	// something is very wrong, not a flake to tolerate. Bound each call
+	// to its own local so staticcheck does not flag this as SA4000.
+	a, b := randomNonceHex(8), randomNonceHex(8)
+	if a == b {
+		t.Errorf("two 8-byte nonces collided: %q", a)
 	}
 }
 
