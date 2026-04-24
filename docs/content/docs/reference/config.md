@@ -120,6 +120,7 @@ port_range_end         = 10999
 worker_uid_range_start = 60000
 worker_uid_range_end   = 60999
 worker_gid             = 65534
+# skip_metadata_check    = false
 ```
 
 | Field | Type | Default | Required | Description |
@@ -132,6 +133,7 @@ worker_gid             = 65534
 | `worker_uid_range_start` | `integer` | `60000` | No | First host UID assigned to worker sandboxes (inclusive). Must be sized to at least the port range. |
 | `worker_uid_range_end` | `integer` | `60999` | No | Last host UID assigned to worker sandboxes (inclusive). |
 | `worker_gid` | `integer` | `65534` | No | Shared host GID for all workers. Used as the match key for iptables owner-match egress rules. |
+| `skip_metadata_check` | `boolean` | `false` | No | Suppress the `cloud_metadata` preflight check, which fails startup with Error when `169.254.169.254:80` is reachable from blockyard itself (and therefore from every worker). Set to `true` only when blockyard legitimately needs cloud metadata access (e.g., using the VM's IAM role for S3 storage); opting in accepts that a compromised worker can read instance credentials. |
 
 > [!WARNING]
 > Per-worker resource limits (`server.default_memory_limit`,

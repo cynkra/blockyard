@@ -497,6 +497,35 @@ writes the profile to disk. No authentication required. See
 [Process Backend (Containerized)](/docs/guides/process-backend-container/)
 for the full extraction workflow.
 
+### `by admin install-apparmor`
+
+Write the embedded AppArmor profile to disk. Used on Ubuntu 23.10+
+hosts where `kernel.apparmor_restrict_unprivileged_userns=1` blocks
+rootless `unshare(CLONE_NEWUSER)` — the profile grants `userns`
+narrowly to blockyard and its subprocesses so rootless bwrap can
+create its sandbox user namespace without disabling the restriction
+host-wide. Profile is embedded in the `by` binary.
+
+```bash
+sudo by admin install-apparmor
+sudo by admin install-apparmor --target /etc/apparmor.d/blockyard
+sudo apparmor_parser -r /etc/apparmor.d/blockyard   # load it
+```
+
+| Flag              | Description                                            |
+| ----------------- | ------------------------------------------------------ |
+| `--target <path>` | Output path (default: `/etc/apparmor.d/blockyard`)    |
+
+If `apparmor_parser` is available on the host, the command runs a
+syntax check (`apparmor_parser -QT`) on the written file and prints
+the parser's error as a warning when the profile is rejected — useful
+on AppArmor versions without the `userns` rule. The file is still
+written on a failed check; operators can inspect it or fall back to
+`sysctl kernel.apparmor_restrict_unprivileged_userns=0`. This command
+does not talk to a running blockyard server. See
+[Process Backend (Native)](/docs/guides/process-backend/#apparmor-profile-ubuntu-2310)
+for the full setup.
+
 ---
 
 ## User administration
