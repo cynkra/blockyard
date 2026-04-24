@@ -10,7 +10,7 @@ for the full rack API contract.
 ## Authentication
 
 The R session authenticates to PocketBase once at session start.
-Credentials come from OpenBao via the vault token that blockyard
+Credentials come from the vault via the vault token that blockyard
 injects on each proxied request.
 
 ```

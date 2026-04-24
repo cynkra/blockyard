@@ -24,7 +24,7 @@ log_retention        = "1h"
 # session_idle_ttl   = "0"
 idle_worker_timeout  = "5m"
 
-# Database, OIDC, OpenBao, and board_storage settings are provided
+# Database, OIDC, vault, and board_storage settings are provided
 # via environment variables in docker-compose.yml:
 #
 #   BLOCKYARD_DATABASE_DRIVER              = "postgres"
