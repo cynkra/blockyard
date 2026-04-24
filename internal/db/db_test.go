@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cynkra/blockyard/internal/config"
+	"github.com/cynkra/blockyard/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
@@ -43,14 +44,19 @@ func TestMain(m *testing.M) {
 		}
 		admin.Close()
 
+		// Serialize migration 001's CREATE ROLE (cluster-wide
+		// pg_authid) against parallel `go test` packages — see #317.
+		unlock := testutil.AcquirePGMigrationLockMain(pgBaseURL)
 		// Open via our normal path so migrations run against the template.
 		tplURL := replaceDBName(pgBaseURL, pgTemplateDB)
 		tpl, err := Open(config.DatabaseConfig{Driver: "postgres", URL: tplURL})
 		if err != nil {
+			unlock()
 			fmt.Fprintf(os.Stderr, "migrate template db: %v\n", err)
 			os.Exit(1)
 		}
 		tpl.Close()
+		unlock()
 
 		// Prevent the "source database is being accessed by other users"
 		// error: kill any lingering pool connections and disallow future

@@ -12,6 +12,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/testutil"
 	"github.com/google/uuid"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -48,6 +49,12 @@ func boardStoragePgDB(t *testing.T) *db.DB {
 		t.Fatalf("create database: %v", err)
 	}
 	admin.Close()
+
+	// Serialize migration 001's CREATE ROLE and the vault_db_admin
+	// bootstrap below against parallel test packages — pg_authid is
+	// cluster-wide (#317).
+	unlock := testutil.AcquirePGMigrationLock(t, pgBaseURL)
+	defer unlock()
 
 	testURL := replaceDBName(pgBaseURL, dbName)
 	d, err := db.Open(config.DatabaseConfig{Driver: "postgres", URL: testURL})
@@ -188,9 +195,13 @@ func syntheticRoleName(sub string) string {
 }
 
 // bootstrapAdmin ensures blockyard_admin exists. Separate helper so
-// per-test assertions can verify idempotence.
+// per-test assertions can verify idempotence. Serializes under the
+// cluster-wide migration lock because blockyard_admin lives in
+// pg_authid (#317).
 func bootstrapAdmin(t *testing.T, d *db.DB) {
 	t.Helper()
+	unlock := testutil.AcquirePGMigrationLock(t, pgBaseURL)
+	defer unlock()
 	if err := EnsureBlockyardAdmin(context.Background(), d); err != nil {
 		t.Fatalf("EnsureBlockyardAdmin: %v", err)
 	}

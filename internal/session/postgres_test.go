@@ -15,6 +15,7 @@ import (
 
 	"github.com/cynkra/blockyard/internal/config"
 	"github.com/cynkra/blockyard/internal/db"
+	"github.com/cynkra/blockyard/internal/testutil"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -54,12 +55,17 @@ func setupSessionsTemplate(base string) error {
 		return fmt.Errorf("create template: %w", err)
 	}
 
+	// Serialize migration 001's CREATE ROLE against parallel test
+	// packages — pg_authid is cluster-wide (#317).
+	unlock := testutil.AcquirePGMigrationLockMain(base)
 	tplURL := replacePGName(base, pgSessionsTemplate)
 	tpl, err := db.Open(config.DatabaseConfig{Driver: "postgres", URL: tplURL})
 	if err != nil {
+		unlock()
 		return fmt.Errorf("migrate template: %w", err)
 	}
 	tpl.Close()
+	unlock()
 
 	// Kick idle pool connections and mark template non-connectable so
 	// CREATE DATABASE … TEMPLATE succeeds (filesystem copy; does not
