@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,17 +24,23 @@ var ErrNotFound = errors.New("secret not found")
 type Client struct {
 	addr           string
 	adminTokenFunc func() string
+	relogin        func(context.Context) error
 	httpClient     *http.Client
 }
 
-// NewClient creates a new vault client. The adminToken is retrieved
-// via a callback to avoid holding the plaintext value in a long-lived
-// struct field. The underlying http.Client uses system CA trust and a
-// 10s timeout; call WithHTTPClient to override (e.g. for a private CA).
-func NewClient(addr string, adminTokenFunc func() string) *Client {
+// NewClient creates a new vault client. adminTokenFunc returns the
+// current admin token on each call (so token rotation is transparent
+// to the client); relogin is invoked when an admin-scoped call receives
+// a 403, after which the same request is retried once with a fresh
+// token. Pass nil for relogin when admin auth is static (deprecated
+// admin_token path). The underlying http.Client uses system CA trust
+// and a 10s timeout; call WithHTTPClient to override (e.g. for a
+// private CA).
+func NewClient(addr string, adminTokenFunc func() string, relogin func(context.Context) error) *Client {
 	return &Client{
 		addr:           strings.TrimRight(addr, "/"),
 		adminTokenFunc: adminTokenFunc,
+		relogin:        relogin,
 		httpClient:     DefaultHTTPClient(),
 	}
 }
@@ -51,6 +58,51 @@ func (c *Client) Addr() string { return c.addr }
 // AdminToken returns the current admin token. Satisfies
 // config.SecretResolver.
 func (c *Client) AdminToken() string { return c.adminTokenFunc() }
+
+// doAdmin executes an admin-scoped request and retries once through
+// relogin if the response is 403. The caller owns the returned
+// response body. body may be nil; when non-nil, Content-Type is set
+// to application/json.
+func (c *Client) doAdmin(ctx context.Context, method, url string, body []byte) (*http.Response, error) {
+	build := func() (*http.Request, error) {
+		var r io.Reader
+		if body != nil {
+			r = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, r)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Vault-Token", c.adminTokenFunc())
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		return req, nil
+	}
+
+	req, err := build()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusForbidden || c.relogin == nil {
+		return resp, nil
+	}
+
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err := c.relogin(ctx); err != nil {
+		return nil, fmt.Errorf("vault admin 403: relogin failed: %w", err)
+	}
+	req, err = build()
+	if err != nil {
+		return nil, err
+	}
+	return c.httpClient.Do(req)
+}
 
 // Health checks if the vault is reachable and unsealed.
 // GET {addr}/v1/sys/health
@@ -132,14 +184,7 @@ func (c *Client) KVWrite(ctx context.Context, path string, data map[string]any) 
 	}
 
 	url := fmt.Sprintf("%s/v1/secret/data/%s", c.addr, path)
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, strings.NewReader(string(payload)))
-	if err != nil {
-		return fmt.Errorf("vault kv write: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doAdmin(ctx, "PUT", url, payload)
 	if err != nil {
 		return fmt.Errorf("vault kv write: %w", err)
 	}
@@ -161,13 +206,7 @@ func (c *Client) SecretExists(ctx context.Context, path string) (bool, error) {
 	metaPath := strings.Replace(path, "secret/data/", "secret/metadata/", 1)
 
 	url := fmt.Sprintf("%s/v1/%s", c.addr, metaPath)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return false, fmt.Errorf("vault secret exists: %w", err)
-	}
-	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doAdmin(ctx, "GET", url, nil)
 	if err != nil {
 		return false, fmt.Errorf("vault secret exists: %w", err)
 	}
@@ -209,14 +248,7 @@ func (c *Client) DatabaseStaticRoleCreate(
 	}
 
 	url := fmt.Sprintf("%s/v1/%s/static-roles/%s", c.addr, mount, name)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
-	if err != nil {
-		return fmt.Errorf("vault db static-role create: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doAdmin(ctx, "POST", url, payload)
 	if err != nil {
 		return fmt.Errorf("vault db static-role create: %w", err)
 	}
@@ -258,13 +290,7 @@ func (c *Client) DatabaseStaticCredsRead(
 	ctx context.Context, mount, name string,
 ) (username, password string, ttl time.Duration, err error) {
 	url := fmt.Sprintf("%s/v1/%s/static-creds/%s", c.addr, mount, name)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", "", 0, fmt.Errorf("vault db static-creds: %w", err)
-	}
-	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doAdmin(ctx, "GET", url, nil)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("vault db static-creds: %w", err)
 	}
@@ -299,13 +325,7 @@ func (c *Client) DatabaseStaticCredsRead(
 // GET {addr}/v1/sys/auth
 func (c *Client) AuthMountAccessor(ctx context.Context, path string) (string, error) {
 	url := fmt.Sprintf("%s/v1/sys/auth", c.addr)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("vault sys/auth: %w", err)
-	}
-	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doAdmin(ctx, "GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("vault sys/auth: %w", err)
 	}
@@ -378,14 +398,7 @@ func (c *Client) IdentityLookupEntityByAlias(
 	}
 
 	url := fmt.Sprintf("%s/v1/identity/lookup/entity", c.addr)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payload)))
-	if err != nil {
-		return "", fmt.Errorf("vault identity lookup: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Vault-Token", c.adminTokenFunc())
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doAdmin(ctx, "POST", url, payload)
 	if err != nil {
 		return "", fmt.Errorf("vault identity lookup: %w", err)
 	}

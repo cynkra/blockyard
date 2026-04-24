@@ -33,7 +33,7 @@ func mockVaultForEnrollment(t *testing.T) *integration.Client {
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	return integration.NewClient(srv.URL, func() string { return "admin-token" })
+	return integration.NewClient(srv.URL, func() string { return "admin-token" }, nil)
 }
 
 func testServerWithVault(t *testing.T, idp *testutil.MockIdP) (*server.Server, *httptest.Server) {

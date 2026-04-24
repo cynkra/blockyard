@@ -196,21 +196,21 @@ func vaultPost(httpClient *http.Client, path string, data map[string]any) error 
 }
 
 func TestBootstrapReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, func() string { return rootToken }, nil)
 	if err := integration.Bootstrap(context.Background(), client, "jwt", false); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 }
 
 func TestHealthReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, func() string { return rootToken }, nil)
 	if err := client.Health(context.Background()); err != nil {
 		t.Fatalf("Health: %v", err)
 	}
 }
 
 func TestJWTLoginReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, func() string { return rootToken }, nil)
 
 	// Issue a JWT using the mock IdP.
 	jwt := mockIdP.IssueJWT("test-user-1", []string{"testers"})
@@ -228,7 +228,7 @@ func TestJWTLoginReal(t *testing.T) {
 }
 
 func TestEnrollAndReadCredential(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, func() string { return rootToken }, nil)
 
 	sub := "test-user-enroll"
 	service := "openai"
@@ -252,7 +252,7 @@ func TestEnrollAndReadCredential(t *testing.T) {
 }
 
 func TestTokenScopingReal(t *testing.T) {
-	client := integration.NewClient(openbaoURL, func() string { return rootToken })
+	client := integration.NewClient(openbaoURL, func() string { return rootToken }, nil)
 
 	// Write a secret for user-a.
 	err := integration.EnrollCredential(context.Background(), client, "user-a", "svc", map[string]any{
@@ -274,4 +274,126 @@ func TestTokenScopingReal(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when user-b reads user-a's secret")
 	}
+}
+
+// TestAppRoleAuthRotatesSecretID exercises the rotation-without-restart
+// flow end-to-end: an AppRole with two successive secret_ids, file-based
+// delivery, and a cross-rotation re-login that must pick up the new
+// value without the process having restarted.
+func TestAppRoleAuthRotatesSecretID(t *testing.T) {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+
+	// Enable AppRole auth if not already enabled (idempotent at the
+	// test-suite level: a 400 "path is already in use" is expected on
+	// subsequent calls and we tolerate it).
+	_ = vaultPost(httpClient, "/v1/sys/auth/approle", map[string]any{"type": "approle"})
+
+	// Create a role that we can rotate secret_ids against.
+	if err := vaultPost(httpClient, "/v1/auth/approle/role/rotate-test", map[string]any{
+		"token_policies":      []string{"default"},
+		"token_ttl":           "60s",
+		"secret_id_num_uses":  0,
+		"secret_id_ttl":       "5m",
+	}); err != nil {
+		t.Fatalf("create approle role: %v", err)
+	}
+
+	roleID := mustReadRoleID(t, httpClient, "rotate-test")
+
+	// Generate two distinct secret_ids. Both are valid against the
+	// role simultaneously (secret_id_num_uses=0 makes them reusable
+	// and AppRole keeps them both until their TTL elapses), so we can
+	// rotate mid-test without racing vault-side invalidation.
+	secretID1 := mustGenerateSecretID(t, httpClient, "rotate-test")
+	secretID2 := mustGenerateSecretID(t, httpClient, "rotate-test")
+	if secretID1 == secretID2 {
+		t.Fatal("expected two distinct secret_ids")
+	}
+
+	dir := t.TempDir()
+	path := dir + "/secret_id"
+	if err := os.WriteFile(path, []byte(secretID1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	auth := integration.NewAppRoleAuth(openbaoURL, roleID, path)
+	if err := auth.Login(context.Background()); err != nil {
+		t.Fatalf("initial login: %v", err)
+	}
+	token1 := auth.Token()
+	if token1 == "" {
+		t.Fatal("expected non-empty token after first login")
+	}
+
+	// Rotate: overwrite the file with secret_id2.
+	if err := os.WriteFile(path, []byte(secretID2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := auth.Login(context.Background()); err != nil {
+		t.Fatalf("post-rotation login: %v", err)
+	}
+	token2 := auth.Token()
+	if token2 == "" {
+		t.Fatal("expected non-empty token after re-login")
+	}
+	if token1 == token2 {
+		t.Error("expected re-login to issue a fresh token")
+	}
+
+	if !auth.Healthy() {
+		t.Error("Healthy() = false after successful re-login")
+	}
+}
+
+func mustReadRoleID(t *testing.T, httpClient *http.Client, role string) string {
+	t.Helper()
+	req, err := http.NewRequest("GET", openbaoURL+"/v1/auth/approle/role/"+role+"/role-id", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Vault-Token", rootToken)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var parsed struct {
+		Data struct {
+			RoleID string `json:"role_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Data.RoleID == "" {
+		t.Fatalf("empty role_id for %s", role)
+	}
+	return parsed.Data.RoleID
+}
+
+func mustGenerateSecretID(t *testing.T, httpClient *http.Client, role string) string {
+	t.Helper()
+	req, err := http.NewRequest("POST", openbaoURL+"/v1/auth/approle/role/"+role+"/secret-id", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Vault-Token", rootToken)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var parsed struct {
+		Data struct {
+			SecretID string `json:"secret_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Data.SecretID == "" {
+		t.Fatalf("empty secret_id for %s", role)
+	}
+	return parsed.Data.SecretID
 }

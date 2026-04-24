@@ -70,16 +70,16 @@ func TestNewHTTPClient_NotPEM(t *testing.T) {
 
 func TestClient_WithHTTPClient(t *testing.T) {
 	custom := &http.Client{Timeout: 1 * time.Second}
-	c := NewClient("http://vault", func() string { return "" }).WithHTTPClient(custom)
+	c := NewClient("http://vault", func() string { return "" }, nil).WithHTTPClient(custom)
 	if c.httpClient != custom {
 		t.Errorf("WithHTTPClient did not replace httpClient")
 	}
 }
 
-func TestTokenRenewer_WithHTTPClient(t *testing.T) {
+func TestAppRoleAuth_WithHTTPClient(t *testing.T) {
 	custom := &http.Client{Timeout: 1 * time.Second}
-	r := NewTokenRenewer("http://vault", "tok", "").WithHTTPClient(custom)
-	if r.httpClient != custom {
+	a := NewAppRoleAuth("http://vault", "role", "").WithHTTPClient(custom)
+	if a.httpClient != custom {
 		t.Errorf("WithHTTPClient did not replace httpClient")
 	}
 }

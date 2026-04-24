@@ -285,7 +285,7 @@ type VaultConfig struct {
 	RoleID               string          `toml:"role_id"`                  // AppRole role identifier
 	TokenTTL             Duration        `toml:"token_ttl"`                // default: 1h
 	JWTAuthPath          string          `toml:"jwt_auth_path"`            // default: "jwt"
-	TokenFile            string          `toml:"token_file"`               // persisted vault token path; default: "/data/.vault-token"
+	SecretIDFile         string          `toml:"secret_id_file"`           // opt-in: read secret_id from this path at every AppRole login, enabling rotation without restart
 	CACert               string          `toml:"ca_cert"`                  // path to PEM file; when set, replaces system CA trust for vault HTTP calls
 	SkipPolicyScopeCheck bool            `toml:"skip_policy_scope_check"`
 	Services             []ServiceConfig `toml:"services"`
@@ -537,12 +537,6 @@ func vaultDefaults(c *VaultConfig) {
 	}
 	if c.JWTAuthPath == "" {
 		c.JWTAuthPath = "jwt"
-	}
-	if c.TokenFile == "" {
-		// Lives at /data/.vault-token so it survives restarts regardless
-		// of database.driver. Previously derived from database.path,
-		// which broke Postgres deployments that don't mount /data/db/.
-		c.TokenFile = "/data/.vault-token"
 	}
 }
 

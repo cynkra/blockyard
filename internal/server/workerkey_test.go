@@ -122,7 +122,7 @@ func TestLoadOrCreateWorkerKeyVaultError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := integration.NewClient(srv.URL, func() string { return "test-token" })
+	client := integration.NewClient(srv.URL, func() string { return "test-token" }, nil)
 	cfg := &config.Config{}
 	cfg.Storage.BundleServerPath = t.TempDir()
 

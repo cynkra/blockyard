@@ -122,7 +122,7 @@ func (m *mockVault) setFail(fail bool) {
 }
 
 func newVaultClient(m *mockVault) *integration.Client {
-	return integration.NewClient(m.server.URL, func() string { return "mock-admin-token" })
+	return integration.NewClient(m.server.URL, func() string { return "mock-admin-token" }, nil)
 }
 
 // newProvisioner wires a Provisioner against the mock vault with the

@@ -57,35 +57,62 @@ segment, `label` is shown in the web UI. Credentials are stored at
 ## Authentication
 
 Blockyard authenticates to the vault using **AppRole**. This replaces the
-previous static `admin_token` approach with a more secure, renewable
-credential.
+previous static `admin_token` approach with a short-lived token Blockyard
+refreshes on its own cadence.
 
-### Initial bootstrap
+### How it works
 
-1. Configure the AppRole role in the vault (see the `setup-openbao.sh`
-   script in the hello-pocketbase example for reference)
-2. Set `role_id` in your config (this is a role identifier, not a secret)
-3. Deliver the `secret_id` via environment variable:
+1. At startup, Blockyard reads the `secret_id` and logs in against the
+   AppRole endpoint, obtaining a scoped token and its lease duration.
+2. A background goroutine re-logs in shortly before the current token
+   expires. On each re-login Blockyard re-reads the `secret_id` source,
+   so any rotation that happened on disk is picked up automatically.
+3. If any admin call returns 403 — because the token was externally
+   revoked, or vault restarted, or clocks drifted — Blockyard re-logs in
+   on the spot (coalesced with any in-flight login) and retries the
+   request once.
+
+There is no persisted token on disk and no long-running renewal loop.
+
+### Static `secret_id` (env var)
+
+The simplest setup reads `secret_id` once from the process environment:
 
 ```bash
 BLOCKYARD_VAULT_SECRET_ID="your-secret-id" blockyard
 ```
 
-On first startup, blockyard uses the `secret_id` to authenticate, obtains a
-scoped token, and persists it to disk. The `secret_id` is a one-time
-bootstrap input — after initial authentication, the server renews its own
-token indefinitely.
+The value is used at every login, so the server runs until that
+`secret_id` is revoked upstream. Good for deployments where rotation is
+tolerable at restart boundaries.
 
-### Steady state
+### Rotatable `secret_id` (file)
 
-After bootstrap, the server renews its vault token at half-TTL intervals.
-The persisted token is reused across restarts. No `secret_id` is needed
-for routine restarts.
+For deployments that need to rotate `secret_id` without restarting
+Blockyard, point `secret_id_file` at a path that a rotation tool (Vault
+Agent, a sidecar, a scheduled job) rewrites on its own cadence:
 
-### Re-bootstrap
+```toml
+[vault]
+address        = "http://vault:8200"
+role_id        = "blockyard-server"
+token_ttl      = "1h"
+secret_id_file = "/run/secrets/vault_secret_id"
+```
 
-If the server is down long enough for the persisted token to expire beyond
-renewal, re-deliver a fresh `secret_id` via the environment variable.
+Or via the env-var equivalent:
+
+```bash
+BLOCKYARD_VAULT_SECRET_ID_FILE=/run/secrets/vault_secret_id blockyard
+```
+
+Blockyard re-reads the file on each AppRole login (proactive, 403-driven,
+or startup). A rotation written to disk is picked up within one
+`token_ttl` of the rotation; shorten `token_ttl` to tighten that window.
+The file should be mode `0400`, owned by the Blockyard user, ideally on
+`tmpfs`.
+
+When both are set, `secret_id_file` takes precedence.
 
 ### Migrating from `admin_token`
 
@@ -93,7 +120,7 @@ The `admin_token` field is deprecated but still accepted. To migrate:
 
 1. Set up AppRole in the vault (enable the auth method, create a policy and role)
 2. Replace `admin_token` with `role_id` in your config
-3. Set `BLOCKYARD_VAULT_SECRET_ID` for the first startup
+3. Set `BLOCKYARD_VAULT_SECRET_ID` (or `secret_id_file`) for startup
 4. Remove the old `admin_token` / `BLOCKYARD_VAULT_ADMIN_TOKEN`
 
 ## Bootstrapping
