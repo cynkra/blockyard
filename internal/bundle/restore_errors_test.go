@@ -162,6 +162,62 @@ func TestSpawnRestore_PanicRecovery(t *testing.T) {
 	}
 }
 
+// TestSpawnRestore_PanicRecovery_DBClosed exercises the error-logging
+// branch in the panic-recovery defer when the failed-status update
+// itself fails (DB connection gone).
+func TestSpawnRestore_PanicRecovery_DBClosed(t *testing.T) {
+	params, tasks := setupRestoreTest(t, true)
+	database := params.DB
+	be := params.Backend.(*mockmock.MockBackend)
+	be.BuildFn = func(context.Context, backend.BuildSpec) (backend.BuildResult, error) {
+		_ = database.Close()
+		panic("simulated backend crash")
+	}
+
+	SpawnRestore(params)
+
+	_, _, doneCh, ok := tasks.Subscribe("task-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+	if status, _ := tasks.Status("task-1"); status != task.Failed {
+		t.Errorf("status = %d, want Failed", status)
+	}
+}
+
+// TestSpawnRestore_BuildError_DBClosed exercises the error-logging
+// branch in the non-panic error path when the failed-status update
+// itself fails.
+func TestSpawnRestore_BuildError_DBClosed(t *testing.T) {
+	params, tasks := setupRestoreTest(t, true)
+	database := params.DB
+	be := params.Backend.(*mockmock.MockBackend)
+	be.BuildFn = func(context.Context, backend.BuildSpec) (backend.BuildResult, error) {
+		_ = database.Close()
+		return backend.BuildResult{}, fmt.Errorf("backend unreachable")
+	}
+
+	SpawnRestore(params)
+
+	_, _, doneCh, ok := tasks.Subscribe("task-1")
+	if !ok {
+		t.Fatal("task not found")
+	}
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+	if status, _ := tasks.Status("task-1"); status != task.Failed {
+		t.Errorf("status = %d, want Failed", status)
+	}
+}
+
 // TestRunRestore_InvalidPakVersion covers the error branch when
 // pakcache.EnsureInstalled rejects the version string.
 func TestRunRestore_InvalidPakVersion(t *testing.T) {
