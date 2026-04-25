@@ -74,6 +74,10 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 					"bundle_id", params.BundleID,
 					"panic", r)
 				params.Sender.Write("FATAL: an unexpected error occurred during build.")
+				if err := params.DB.UpdateBundleStatus(params.BundleID, "failed"); err != nil {
+					slog.Error("restore: update status to failed after panic",
+						"bundle_id", params.BundleID, "error", err)
+				}
 				params.Sender.Complete(task.Failed)
 				if params.Metrics != nil {
 					params.Metrics.BundleRestoresFailed.Inc()
@@ -86,10 +90,6 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 						Detail: map[string]any{"bundle_id": params.BundleID},
 					})
 				}
-				if err := params.DB.UpdateBundleStatus(params.BundleID, "failed"); err != nil {
-					slog.Error("restore: update status to failed after panic",
-						"bundle_id", params.BundleID, "error", err)
-				}
 			}
 		}()
 		buildStart := time.Now()
@@ -100,6 +100,10 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 				"elapsed", time.Since(buildStart).Round(time.Millisecond),
 				"error", err)
 			params.Sender.Write(fmt.Sprintf("ERROR: %s", err))
+			if err := params.DB.UpdateBundleStatus(params.BundleID, "failed"); err != nil {
+				slog.Error("restore: update status to failed",
+					"bundle_id", params.BundleID, "error", err)
+			}
 			params.Sender.Complete(task.Failed)
 			if params.Metrics != nil {
 				params.Metrics.BundleRestoresFailed.Inc()
@@ -111,10 +115,6 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 					Target: params.AppID,
 					Detail: map[string]any{"bundle_id": params.BundleID},
 				})
-			}
-			if err := params.DB.UpdateBundleStatus(params.BundleID, "failed"); err != nil {
-				slog.Error("restore: update status to failed",
-					"bundle_id", params.BundleID, "error", err)
 			}
 			return
 		}
