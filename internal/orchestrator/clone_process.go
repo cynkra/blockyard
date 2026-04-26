@@ -129,6 +129,15 @@ func (f *processServerFactory) CurrentImageTag(_ context.Context) string {
 // binary and restarting.
 func (f *processServerFactory) SupportsRollback() bool { return false }
 
+// IsAlreadyCurrent always returns false. The process variant has no
+// registry semantics: ref is ignored everywhere upstream, the binary
+// on disk is whatever the operator put there, and the orchestrator's
+// "update" is effectively a fork+exec restart. Returning false keeps
+// the orchestrator on its full-update path so the restart still runs.
+func (f *processServerFactory) IsAlreadyCurrent(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
 // CreateInstance picks a free alt port, fork+execs a new blockyard
 // with BLOCKYARD_PASSIVE=1 and BLOCKYARD_SERVER_BIND set to the new
 // bind, and returns a handle with the new server's address cached.

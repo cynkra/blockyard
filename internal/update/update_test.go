@@ -306,6 +306,62 @@ func TestSetRepo(t *testing.T) {
 	}
 }
 
+// FetchInstallTarget for the main channel returns the rolling tag
+// "main" without consulting GitHub — the orchestrator pulls :main
+// and digest-compares to determine "already up to date." This is
+// the contract that issue #360 establishes; regression here would
+// re-introduce the broken per-commit tag.
+func TestFetchInstallTarget_Main(t *testing.T) {
+	// Install a fake remote that fails any call. The main channel
+	// must not hit GitHub at all.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("main channel should not call GitHub: %s", r.URL.Path)
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	old := APIBase
+	APIBase = srv.URL
+	defer func() { APIBase = old }()
+
+	target, err := FetchInstallTarget("main", "abc1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if target != "main" {
+		t.Errorf("target = %q, want %q", target, "main")
+	}
+}
+
+func TestFetchInstallTarget_StableUpdateAvailable(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.latestTag = "v1.5.0"
+	f.install(t)
+
+	target, err := FetchInstallTarget("stable", "1.4.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if target != "1.5.0" {
+		t.Errorf("target = %q, want %q", target, "1.5.0")
+	}
+}
+
+func TestFetchInstallTarget_StableAlreadyCurrent(t *testing.T) {
+	f := newFakeRemote()
+	defer f.Close()
+	f.latestTag = "v1.5.0"
+	f.install(t)
+
+	target, err := FetchInstallTarget("stable", "1.5.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if target != "" {
+		t.Errorf("target = %q, want empty (already current)", target)
+	}
+}
+
 func TestFetchRelease(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") != "application/vnd.github+json" {

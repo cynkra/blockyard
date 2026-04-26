@@ -202,6 +202,29 @@ func (f *dockerServerFactory) CurrentImageTag(ctx context.Context) string {
 // previous version's image from the registry.
 func (f *dockerServerFactory) SupportsRollback() bool { return true }
 
+// IsAlreadyCurrent reports whether the locally-cached ref resolves
+// to the same image ID as the running container. Caller must have
+// pulled ref via PreUpdate first so the local cache reflects the
+// current registry manifest. Used by the orchestrator's main-channel
+// path to skip backup/drain/clone when the rolling :main tag points
+// at the digest already in use.
+//
+// Returns (false, err) on inspect failures rather than silently
+// returning true — a missing ref or unreachable Docker daemon means
+// "we don't know," and the safer default is to let the orchestrator
+// run the full update path and fail on the next concrete step.
+func (f *dockerServerFactory) IsAlreadyCurrent(ctx context.Context, ref string) (bool, error) {
+	cur, err := f.docker.ContainerInspect(ctx, f.serverID, client.ContainerInspectOptions{})
+	if err != nil {
+		return false, fmt.Errorf("inspect self: %w", err)
+	}
+	img, err := f.docker.ImageInspect(ctx, ref)
+	if err != nil {
+		return false, fmt.Errorf("inspect image %s: %w", ref, err)
+	}
+	return cur.Container.Image == img.ID, nil
+}
+
 // cloneConfig inspects the current container and returns a
 // ContainerCreateOptions for a new container with the given image
 // and additional environment variables. This is the pre-phase-3-8
