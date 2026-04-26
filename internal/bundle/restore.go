@@ -78,10 +78,10 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 					slog.Error("restore: update status to failed after panic",
 						"bundle_id", params.BundleID, "error", err)
 				}
-				params.Sender.Complete(task.Failed)
 				if params.Metrics != nil {
 					params.Metrics.BundleRestoresFailed.Inc()
 				}
+				params.Sender.Complete(task.Failed)
 				if params.AuditLog != nil {
 					params.AuditLog.Emit(audit.Entry{
 						Action: audit.ActionBundleRestoreFail,
@@ -104,10 +104,10 @@ func SpawnRestore(params RestoreParams) <-chan struct{} {
 				slog.Error("restore: update status to failed",
 					"bundle_id", params.BundleID, "error", err)
 			}
-			params.Sender.Complete(task.Failed)
 			if params.Metrics != nil {
 				params.Metrics.BundleRestoresFailed.Inc()
 			}
+			params.Sender.Complete(task.Failed)
 			if params.AuditLog != nil {
 				params.AuditLog.Emit(audit.Entry{
 					Action: audit.ActionBundleRestoreFail,
