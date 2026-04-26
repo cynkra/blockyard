@@ -53,7 +53,8 @@
           "temporary": false
         }
       ],
-      "groups": ["testers"]
+      "groups": ["testers"],
+      "realmRoles": ["offline_access", "uma_authorization"]
     }
   ]
 }
