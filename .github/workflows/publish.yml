@@ -131,14 +131,47 @@ jobs:
     timeout-minutes: 5
     permissions:
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: everything
+            image_suffix: ""
+          - variant: docker
+            image_suffix: -docker
+          - variant: process
+            image_suffix: -process
     steps:
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create and push multi-arch manifest
+      - name: Create and push multi-arch manifest (${{ matrix.variant }})
         run: |
-          docker buildx imagetools create -t "${{ env.IMAGE }}:main" \
-            "${{ env.IMAGE }}:build-linux-amd64" \
-            "${{ env.IMAGE }}:build-linux-arm64"
+          docker buildx imagetools create -t "${{ env.IMAGE }}${{ matrix.image_suffix }}:main" \
+            "${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-amd64" \
+            "${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-arm64"
+
+  # Registry contract test: assert that the install target the
+  # orchestrator's main-channel resolver constructs actually exists
+  # on ghcr.io. This is the test issue #360 was missing — mock-based
+  # unit tests passed while production was asking Docker to pull a
+  # tag the workflow never published. Build-tag-gated so it only
+  # runs after a publish (pre-publish runs in ci.yml are SKIP'd
+  # automatically).
+  registry-contract:
+    needs: manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      packages: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Verify main-channel install target is pullable
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: go test -tags registry_contract -run TestMainChannelInstallTargetIsPullable -v ./internal/update/...

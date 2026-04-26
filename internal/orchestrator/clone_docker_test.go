@@ -7,9 +7,11 @@ import (
 	"io"
 	"iter"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
@@ -424,6 +426,112 @@ func TestCreateInstanceStartFails(t *testing.T) {
 	_, err := f.CreateInstance(context.Background(), "img:2.0", nil, sender)
 	if err == nil {
 		t.Error("expected error when start fails")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IsAlreadyCurrent
+// ---------------------------------------------------------------------------
+
+// Both inspect calls report the same image ID — the rolling tag
+// resolves to the digest already in use, so the orchestrator must
+// short-circuit (issue #360, Monday-rebuild detection).
+func TestIsAlreadyCurrentSameDigest(t *testing.T) {
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Image:      digest,
+					Config:     &container.Config{Image: "ghcr.io/cynkra/blockyard:main"},
+					HostConfig: &container.HostConfig{},
+				},
+			}, nil
+		},
+		imageInspectFn: func(context.Context, string, ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{InspectResponse: image.InspectResponse{ID: digest}}, nil
+		},
+	}
+	f := newDockerFactoryForTest(docker, "self-id", func() string { return "8080" })
+
+	current, err := f.IsAlreadyCurrent(context.Background(), "ghcr.io/cynkra/blockyard:main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !current {
+		t.Error("expected IsAlreadyCurrent=true when digests match")
+	}
+}
+
+// Different digests — Monday rebuild produced a new image, the
+// running container is still on the old one. Update must proceed.
+func TestIsAlreadyCurrentDifferentDigest(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Image:      "sha256:aaaaaaaaaaaa",
+					Config:     &container.Config{Image: "ghcr.io/cynkra/blockyard:main"},
+					HostConfig: &container.HostConfig{},
+				},
+			}, nil
+		},
+		imageInspectFn: func(context.Context, string, ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{InspectResponse: image.InspectResponse{ID: "sha256:bbbbbbbbbbbb"}}, nil
+		},
+	}
+	f := newDockerFactoryForTest(docker, "self-id", func() string { return "8080" })
+
+	current, err := f.IsAlreadyCurrent(context.Background(), "ghcr.io/cynkra/blockyard:main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if current {
+		t.Error("expected IsAlreadyCurrent=false when digests differ")
+	}
+}
+
+// ImageInspect failing means the just-pulled ref isn't locally
+// resolvable — propagate the error so the orchestrator can abort
+// loudly rather than silently skipping.
+func TestIsAlreadyCurrentMissingImage(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Image:      "sha256:aaaa",
+					Config:     &container.Config{Image: "ghcr.io/cynkra/blockyard:main"},
+					HostConfig: &container.HostConfig{},
+				},
+			}, nil
+		},
+		// imageInspectFn unset → mockDocker default returns errNotFound.
+	}
+	f := newDockerFactoryForTest(docker, "self-id", func() string { return "8080" })
+
+	_, err := f.IsAlreadyCurrent(context.Background(), "ghcr.io/cynkra/blockyard:main")
+	if err == nil {
+		t.Fatal("expected error when image not found")
+	}
+	if !strings.Contains(err.Error(), "inspect image") {
+		t.Errorf("error %q should mention 'inspect image'", err.Error())
+	}
+}
+
+func TestIsAlreadyCurrentSelfInspectFails(t *testing.T) {
+	docker := &mockDocker{
+		inspectFn: func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{}, io.ErrUnexpectedEOF
+		},
+	}
+	f := newDockerFactoryForTest(docker, "self-id", func() string { return "8080" })
+
+	_, err := f.IsAlreadyCurrent(context.Background(), "ghcr.io/cynkra/blockyard:main")
+	if err == nil {
+		t.Fatal("expected error when self-inspect fails")
+	}
+	if !strings.Contains(err.Error(), "inspect self") {
+		t.Errorf("error %q should mention 'inspect self'", err.Error())
 	}
 }
 

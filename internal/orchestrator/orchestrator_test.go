@@ -42,6 +42,8 @@ type fakeServerFactory struct {
 	supportsRollback bool
 	imageBase        string
 	imageTag         string
+	alreadyCurrent   bool
+	alreadyCurrentEr error
 }
 
 func (f *fakeServerFactory) PreUpdate(_ context.Context, _ string, _ task.Sender) error {
@@ -71,6 +73,10 @@ func (f *fakeServerFactory) CurrentImageTag(_ context.Context) string {
 
 func (f *fakeServerFactory) SupportsRollback() bool {
 	return f.supportsRollback
+}
+
+func (f *fakeServerFactory) IsAlreadyCurrent(_ context.Context, _ string) (bool, error) {
+	return f.alreadyCurrent, f.alreadyCurrentEr
 }
 
 // --- mock update checker ---
@@ -152,6 +158,51 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 	}
 	if tracker.drained.Load() != 0 {
 		t.Error("drain should not be called when up to date")
+	}
+}
+
+// Main-channel target is the rolling tag ":main", which is always
+// non-empty; the up-to-date check moves to the factory's digest
+// compare. When that says "yes, already current", Update must
+// short-circuit before the database backup or any drain (issue #360).
+func TestUpdateAlreadyCurrentByDigest(t *testing.T) {
+	checker := &mockChecker{target: "main"}
+	factory := &fakeServerFactory{alreadyCurrent: true}
+	o, tracker := newTestOrchestrator(t, factory, checker)
+	sender := newSender(t)
+
+	updated, err := o.Update(context.Background(), "main", sender)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated {
+		t.Error("expected updated=false when factory reports already-current")
+	}
+	if tracker.drained.Load() != 0 {
+		t.Error("drain must not be called when already current")
+	}
+}
+
+// IsAlreadyCurrent returning an error must abort the update — the
+// orchestrator can't know whether to proceed, and the safer default
+// is to fail loudly rather than silently drain on stale information.
+func TestUpdateIsAlreadyCurrentError(t *testing.T) {
+	checker := &mockChecker{target: "main"}
+	factory := &fakeServerFactory{
+		alreadyCurrentEr: io.ErrUnexpectedEOF,
+	}
+	o, tracker := newTestOrchestrator(t, factory, checker)
+	sender := newSender(t)
+
+	_, err := o.Update(context.Background(), "main", sender)
+	if err == nil {
+		t.Fatal("expected error when IsAlreadyCurrent fails")
+	}
+	if !strings.Contains(err.Error(), "compare current image") {
+		t.Errorf("error %q should mention 'compare current image'", err.Error())
+	}
+	if tracker.drained.Load() != 0 {
+		t.Error("drain must not be called when comparison fails")
 	}
 }
 

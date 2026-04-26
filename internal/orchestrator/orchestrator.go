@@ -138,6 +138,7 @@ func (stubFactory) PreUpdate(_ context.Context, _ string, _ task.Sender) error {
 func (stubFactory) CurrentImageBase(_ context.Context) string                  { return "blockyard" }
 func (stubFactory) CurrentImageTag(_ context.Context) string                   { return "test" }
 func (f stubFactory) SupportsRollback() bool                                   { return f.supportsRollback }
+func (stubFactory) IsAlreadyCurrent(_ context.Context, _ string) (bool, error) { return false, nil }
 
 // State returns the current orchestrator phase.
 func (o *Orchestrator) State() string {
@@ -186,7 +187,21 @@ func (o *Orchestrator) Update(
 	ctx context.Context,
 	channel string,
 	sender task.Sender,
-) (bool, error) {
+) (updated bool, retErr error) {
+	// Surface failures via the structured logger as well as the
+	// task sender. The sender goes to the UI progress card and is
+	// gone the moment the user closes the tab; structured logs land
+	// in journalctl/docker logs and are what an operator greps for
+	// when "Update" silently does nothing (issue #360).
+	defer func() {
+		if retErr != nil {
+			o.log.Error("orchestrator update failed",
+				"channel", channel,
+				"current", o.version,
+				"error", retErr)
+		}
+	}()
+
 	// 1. Resolve install target for the configured channel.
 	target, err := o.update.FetchInstallTarget(channel, o.version)
 	if err != nil {
@@ -204,7 +219,24 @@ func (o *Orchestrator) Update(
 		return false, fmt.Errorf("pre-update: %w", err)
 	}
 
-	// 3. Back up database.
+	// 3. Digest compare against the running container — the main
+	//    channel pins to a rolling tag (":main"), so the only way
+	//    to know we're up to date is to check whether the
+	//    just-pulled image's digest matches the one already in use.
+	//    Stable channel relies on the version-string short-circuit
+	//    in FetchInstallTarget, but running the check here too is
+	//    cheap insurance and adds zero network round-trips beyond
+	//    the local Docker socket.
+	current, err := o.factory.IsAlreadyCurrent(ctx, newRef)
+	if err != nil {
+		return false, fmt.Errorf("compare current image: %w", err)
+	}
+	if current {
+		sender.Write("Already up to date (" + newRef + ").")
+		return false, nil
+	}
+
+	// 4. Back up database.
 	sender.Write("Backing up database ...")
 	meta, err := o.db.BackupWithMeta(ctx, o.factory.CurrentImageTag(ctx))
 	if err != nil {
@@ -212,7 +244,7 @@ func (o *Orchestrator) Update(
 	}
 	sender.Write("Backup: " + meta.BackupPath)
 
-	// 4. Create new instance (passive mode).
+	// 5. Create new instance (passive mode).
 	o.activationToken = generateActivationToken()
 	sender.Write("Starting new instance ...")
 	startCtx, cancel := context.WithTimeout(ctx, o.cfg.Proxy.WorkerStartTimeout.Duration)
@@ -224,18 +256,18 @@ func (o *Orchestrator) Update(
 		return false, fmt.Errorf("create instance: %w", err)
 	}
 
-	// 5. Poll /readyz on new instance until 200.
+	// 6. Poll /readyz on new instance until 200.
 	sender.Write("Waiting for new instance to become ready ...")
 	if err := o.waitReady(startCtx, inst.Addr()); err != nil {
 		inst.Kill(ctx)
 		return false, fmt.Errorf("new instance never became ready: %w", err)
 	}
 
-	// 6. Drain self.
+	// 7. Drain self.
 	sender.Write("Draining current server ...")
 	o.drainFn()
 
-	// 7. Activate new server (start background goroutines).
+	// 8. Activate new server (start background goroutines).
 	sender.Write("Activating new server ...")
 	if err := o.activate(ctx, inst.Addr()); err != nil {
 		inst.Kill(ctx)
@@ -243,7 +275,7 @@ func (o *Orchestrator) Update(
 		return false, fmt.Errorf("activate new server: %w", err)
 	}
 
-	// 8. Stash the instance for Watchdog.
+	// 9. Stash the instance for Watchdog.
 	o.activeInstance = inst
 	sender.Write("Update complete. Entering watchdog mode ...")
 	return true, nil

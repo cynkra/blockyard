@@ -46,6 +46,18 @@ type ServerFactory interface {
 	// previous version. Docker can (pull old image); process cannot
 	// (previous binary typically overwritten by upgrade).
 	SupportsRollback() bool
+
+	// IsAlreadyCurrent reports whether ref resolves to the same
+	// image as the running server. Called after PreUpdate so the
+	// just-pulled image is in the local registry cache. Used by the
+	// main channel to short-circuit when the rolling :main tag
+	// resolves to the digest already in use.
+	//
+	// Docker: compares the pulled ref's image ID against the
+	// running container's image ID via ContainerInspect/ImageInspect.
+	// Process: returns false — the variant has no registry semantics
+	// and Update is effectively a fork+exec restart.
+	IsAlreadyCurrent(ctx context.Context, ref string) (bool, error)
 }
 
 // newServerInstance is the handle returned by CreateInstance. It

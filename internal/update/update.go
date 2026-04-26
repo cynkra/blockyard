@@ -272,29 +272,30 @@ func InferChannel(version string) string {
 	return "main"
 }
 
-// FetchInstallTarget returns the version string the orchestrator
-// should install on the given channel ("stable" or "main"). Returns
-// "" when current already matches the channel's head, signalling
-// "no update needed". The channel concept is preserved here (vs.
-// the version-classifier used by CheckLatest) because operators
-// pick which release stream to follow independently of how the
-// running build is versioned.
+// FetchInstallTarget returns the image tag the orchestrator should
+// install on the given channel ("stable" or "main").
+//
+// For "stable", returns the latest release's semver (e.g. "1.5.0"),
+// or "" when current already matches — version-string equality is a
+// sufficient up-to-date check on this channel.
+//
+// For "main", returns the rolling tag "main" unconditionally. The
+// main channel pins to the registry-side rolling tag rather than a
+// per-build release Name, so the orchestrator pulls :main and then
+// asks the factory whether the resolved digest matches the running
+// container (factory.IsAlreadyCurrent). This catches Monday-rebuild
+// updates that refresh image content without bumping the release
+// Name, and avoids the broken per-commit tag the publish workflow
+// never pushed (issue #360).
 func FetchInstallTarget(channel, currentVersion string) (string, error) {
-	var target string
-	switch channel {
-	case "main":
-		rel, err := FetchReleaseByTag("main")
-		if err != nil {
-			return "", err
-		}
-		target = rel.Name
-	default:
-		rel, err := FetchLatestStableRelease()
-		if err != nil {
-			return "", err
-		}
-		target = strings.TrimPrefix(rel.TagName, "v")
+	if channel == "main" {
+		return "main", nil
 	}
+	rel, err := FetchLatestStableRelease()
+	if err != nil {
+		return "", err
+	}
+	target := strings.TrimPrefix(rel.TagName, "v")
 	if target == currentVersion {
 		return "", nil
 	}
