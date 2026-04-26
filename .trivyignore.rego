@@ -64,17 +64,21 @@ ignore if input.PkgName in {
 	"libsframe1",
 }
 
-# review-after: 2026-07-17
-# GNU tar path-traversal via symlink + two-stage extraction. Not
-# exploitable in blockyard's current paths: bundle upload uses Go's
-# stdlib archive/tar (no /usr/bin/tar exec), and R's own tar usage
-# (e.g. install.packages extracting source tarballs) only runs
-# after the user has supplied executable R code, which is already
-# RCE-equivalent. Kept at CVE level on purpose — tar is a plausible
-# legitimate exec target in future code, so a new, potentially
-# different-class CVE in the same package should re-trigger triage
-# rather than silence automatically.
-ignore if input.VulnerabilityID == "CVE-2025-45582"
+# review-after: 2026-07-25
+# GNU tar archive-handling CVEs (45582 path-traversal via symlink
+# + two-stage extraction; 5704 hidden file injection via crafted
+# archives). Not exploitable in blockyard's current paths: bundle
+# upload uses Go's stdlib archive/tar (no /usr/bin/tar exec), and
+# R's own tar usage (e.g. install.packages extracting source
+# tarballs) only runs after the user has supplied executable R
+# code, which is already RCE-equivalent. Kept at CVE level on
+# purpose — tar is a plausible legitimate exec target in future
+# code, so a new, potentially different-class CVE in the same
+# package should re-trigger triage rather than silence automatically.
+ignore if input.VulnerabilityID in {
+	"CVE-2025-45582",
+	"CVE-2026-5704",
+}
 
 # review-after: 2026-07-17
 # libexpat algorithmic-complexity DoS: a ~2 MiB crafted XML causes
@@ -90,19 +94,22 @@ ignore if input.VulnerabilityID == "CVE-2025-45582"
 # triage rather than silence automatically.
 ignore if input.VulnerabilityID == "CVE-2025-66382"
 
-# review-after: 2026-07-17
+# review-after: 2026-07-25
 # libde265 heap buffer overflows in HEIC decode (38949 targets
-# display444as420; 38950 targets __interceptor_memcpy). libde265-0
-# is pulled in transitively via libheif by the R graphics stack;
-# no request-path consumer exposes it — the Go server doesn't
-# decode images and blockyard's APIs don't accept HEIC. Reachable
-# only from user R code that invokes HEIC decoding, which is
-# already RCE-equivalent. Kept at CVE level because a future
-# libde265 CVE may have a different shape (e.g. a parser bug on
-# a path we overlooked) and deserves fresh triage.
+# display444as420; 38950 targets __interceptor_memcpy; 33164 and
+# 33165 are additional 2026-series HEIC parser bugs in the same
+# decode path). libde265-0 is pulled in transitively via libheif
+# by the R graphics stack; no request-path consumer exposes it —
+# the Go server doesn't decode images and blockyard's APIs don't
+# accept HEIC. Reachable only from user R code that invokes HEIC
+# decoding, which is already RCE-equivalent. Kept at CVE level
+# because a future libde265 CVE may have a different shape (e.g.
+# a parser bug on a path we overlooked) and deserves fresh triage.
 ignore if input.VulnerabilityID in {
 	"CVE-2024-38949",
 	"CVE-2024-38950",
+	"CVE-2026-33164",
+	"CVE-2026-33165",
 }
 
 # review-after: 2026-07-17
@@ -118,3 +125,70 @@ ignore if input.VulnerabilityID in {
 # rasterizer, not a data parser — re-review if any feature
 # ever processes images server-side outside the R worker.
 ignore if input.PkgName == "libpixman-1-0"
+
+# review-after: 2026-07-25
+# glibc CVEs in code paths that blockyard does not link or
+# exercise: 4046 (iconv() DoS via specific charsets); 4437 (DNS
+# response parsing in the resolver); 4438 (gethostbyaddr returning
+# invalid hostname). All blockyard server binaries (blockyard,
+# by-builder, by) build with CGO_ENABLED=0, so Go uses its
+# pure-Go DNS resolver and stdlib unicode/transform machinery —
+# glibc's getaddrinfo / gethostbyaddr / iconv are never linked
+# into the request path. Publisher-supplied container image refs
+# are pulled via the Docker client over the daemon socket
+# (internal/backend/docker/docker.go ImagePull, internal/orchestrator
+# /clone_docker.go), so registry hostname resolution happens in
+# dockerd on the host, not in any process inside this image. The
+# only in-image glibc DNS / iconv consumer is R inside the worker,
+# which already runs untrusted user code (RCE-equivalent) and is
+# gated by viewer-egress restrictions — escaping the worker via
+# a MEDIUM glibc bug is strictly weaker than the in-worker
+# capability already accepted. Kept at CVE level because a future
+# glibc CVE may sit in a code path we add later (e.g. a CGO=1
+# helper invoked on a request path) and deserves fresh triage.
+ignore if input.VulnerabilityID in {
+	"CVE-2026-4046",
+	"CVE-2026-4437",
+	"CVE-2026-4438",
+}
+
+# review-after: 2026-07-25
+# dpkg-deb component vulnerability. dpkg-deb is invoked exactly
+# once across our images, at build time, in docker/worker.Dockerfile
+# to extract a pinned R .deb downloaded from cdn.posit.co. No
+# runtime path feeds .deb files to dpkg-deb: no Go code execs
+# `dpkg`/`dpkg-deb` (grep-confirmed across cmd/ and internal/),
+# and rig (the R installation manager that runs at container
+# start) handles tarballs from r-lib/rig releases, not .debs.
+# Kept at CVE level because a future dpkg CVE could land in a
+# subset we do invoke later (e.g. dpkg-query embedded in a hook)
+# and should re-trigger triage.
+ignore if input.VulnerabilityID == "CVE-2026-2219"
+
+# review-after: 2026-07-25
+# util-linux TOCTOU in the userspace mount(8) binary when setting
+# up loop devices. The bug is in /usr/bin/mount, not in the
+# mount(2) syscall. Blockyard never execs /usr/bin/mount: bwrap
+# performs its bind / tmpfs setup via direct mount(2) syscalls
+# (the --ro-bind / --bind / --tmpfs args in
+# internal/backend/process/bwrap.go are bwrap CLI flags consumed
+# by bwrap itself, not shell `mount` invocations), and the Docker
+# backend uses the daemon's mount machinery (also kernel-direct).
+# No losetup or `mount -o loop` invocation exists in the codebase.
+# Kept at CVE level — a future util-linux CVE in a binary we do
+# invoke (e.g. `mount` newly added to a preflight check) should
+# re-trigger triage.
+ignore if input.VulnerabilityID == "CVE-2026-27456"
+
+# review-after: 2026-07-25
+# libxpm4 X PixMap parser CVE. libxpm is pulled in transitively
+# via libx11-6 (docker/worker.Dockerfile) by R's cairo runtime
+# for X11 capability detection. Workers run R headless (no
+# DISPLAY, PNG/PDF backends), and no request path parses .xpm
+# files — the package is dead weight in the runtime image. Same
+# structural argument as libpixman-1-0: only consumer is user
+# R code, which is already RCE-equivalent. Kept at CVE level
+# because libxpm4 is plausible to drop entirely once libx11's
+# transitive depgraph is trimmed, at which point the rule should
+# disappear rather than silently apply.
+ignore if input.VulnerabilityID == "CVE-2026-4367"
