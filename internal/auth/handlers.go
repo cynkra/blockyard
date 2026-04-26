@@ -77,6 +77,16 @@ func secureFlag(cfg *config.Config) string {
 	return ""
 }
 
+// clearSessionCookie writes a Set-Cookie header that clears the
+// blockyard_session cookie on the client. Used by LogoutHandler and
+// by AppAuthMiddleware whenever it discards a stale or invalid session.
+func clearSessionCookie(w http.ResponseWriter, cfg *config.Config) {
+	w.Header().Add("Set-Cookie", fmt.Sprintf(
+		"blockyard_session=; Path=/; HttpOnly%s; Max-Age=0",
+		secureFlag(cfg),
+	))
+}
+
 // randomHex generates a cryptographically random hex string of n bytes.
 func randomHex(n int) (string, error) {
 	b := make([]byte, n)
@@ -384,11 +394,7 @@ func LogoutHandler(deps *Deps) http.HandlerFunc {
 			})
 		}
 
-		secure := secureFlag(deps.Config)
-		clearCookie := fmt.Sprintf(
-			"blockyard_session=; Path=/; HttpOnly%s; Max-Age=0", secure,
-		)
-		w.Header().Set("Set-Cookie", clearCookie)
+		clearSessionCookie(w, deps.Config)
 
 		if deps.OIDCClient != nil {
 			if endSession := deps.OIDCClient.EndSessionEndpoint(); endSession != "" {

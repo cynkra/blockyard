@@ -537,6 +537,23 @@ func requireAuth(w http.ResponseWriter, r *http.Request) *auth.AuthenticatedUser
 	return nil
 }
 
+// requireAdmin emits 401 when the caller is unauthenticated or 403 when
+// authenticated but lacking admin privilege. Returns false when the
+// handler should stop. Splitting the two status codes lets the
+// htmx:beforeSwap session-expired modal trigger only on real session
+// loss, not on legitimate "wrong role" rejections.
+func requireAdmin(w http.ResponseWriter, caller *auth.CallerIdentity) bool {
+	if caller == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if !caller.Role.CanManageRoles() {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 func vaultEnabled(srv *server.Server) bool {
 	return srv.Config.Vault != nil && len(srv.Config.Vault.Services) > 0
 }
@@ -839,8 +856,7 @@ func (ui *UI) adminPage(srv *server.Server, orch *orchestrator.Orchestrator) htt
 func (ui *UI) adminUsersFragment(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 
@@ -879,8 +895,7 @@ func parseAdminTab(v string) string {
 func (ui *UI) adminTabUsersFragment(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		data, err := buildAdminUsers(srv, caller, r.URL.Query())
@@ -899,8 +914,7 @@ func (ui *UI) adminTabUsersFragment(srv *server.Server) http.HandlerFunc {
 func (ui *UI) adminTabSystemFragment(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		var report *preflight.Report
@@ -920,8 +934,7 @@ func (ui *UI) adminTabSystemFragment(srv *server.Server) http.HandlerFunc {
 func (ui *UI) adminTabErrorsFragment(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
@@ -935,8 +948,7 @@ func (ui *UI) adminTabErrorsFragment(srv *server.Server) http.HandlerFunc {
 func (ui *UI) adminTabVersionFragment(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
@@ -952,8 +964,7 @@ func (ui *UI) adminTabVersionFragment(srv *server.Server, orch *orchestrator.Orc
 func (ui *UI) adminUpdateCheck(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		channel := resolveChannel(r, srv)
@@ -976,8 +987,7 @@ func (ui *UI) adminUpdateCheck(srv *server.Server, orch *orchestrator.Orchestrat
 func (ui *UI) adminUpdateStart(srv *server.Server, orch *orchestrator.Orchestrator, bgCtx context.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		channel := resolveChannel(r, srv)
@@ -1054,8 +1064,7 @@ func resolveChannel(r *http.Request, srv *server.Server) string {
 func (ui *UI) adminUpdateProgress(srv *server.Server, orch *orchestrator.Orchestrator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		data := buildAdminVersion(srv, orch, "", "")
@@ -1110,8 +1119,7 @@ func buildAdminVersion(srv *server.Server, orch *orchestrator.Orchestrator, chec
 func (ui *UI) adminErrorsFragment(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || !caller.Role.CanManageRoles() {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 		data := buildAdminErrors(srv)
@@ -1267,8 +1275,7 @@ func buildAdminUsers(srv *server.Server, caller *auth.CallerIdentity, q url.Valu
 func (ui *UI) systemRunFragment(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caller := auth.CallerFromContext(r.Context())
-		if caller == nil || caller.Role < auth.RoleAdmin {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if !requireAdmin(w, caller) {
 			return
 		}
 
