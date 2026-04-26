@@ -80,7 +80,7 @@ func Discover(ctx context.Context, issuerURL, discoveryURL, clientID, clientSecr
 		ClientSecret: clientSecret,
 		Endpoint:     endpoint,
 		RedirectURL:  redirectURL,
-		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
+		Scopes:       []string{oidc.ScopeOpenID, "profile", "email", oidc.ScopeOfflineAccess},
 	}
 
 	verifier := provider.Verifier(&oidc.Config{

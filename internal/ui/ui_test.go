@@ -2941,6 +2941,23 @@ func TestAdminUsersFragmentForbiddenForNonAdmin(t *testing.T) {
 	}
 }
 
+// An unauthenticated request to an admin fragment must produce 401, not
+// 403, so the htmx:beforeSwap session-expired modal triggers. 403 is
+// reserved for "authenticated but wrong role".
+func TestAdminFragmentUnauthorizedReturns401(t *testing.T) {
+	_, ts := newTestServer(t, oidcConfig())
+
+	resp, err := http.Get(ts.URL + "/ui/admin/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated admin fragment, got %d", resp.StatusCode)
+	}
+}
+
 func TestAdminUsersFragmentSetsPushURL(t *testing.T) {
 	_, ts := authServer(t, oidcConfig(), "admin-1", auth.RoleAdmin)
 

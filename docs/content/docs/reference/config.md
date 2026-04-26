@@ -363,6 +363,15 @@ default_role         = "viewer"
 > authentication. Users must log in before accessing apps (except for apps
 > with `public` visibility).
 
+> [!NOTE]
+> Blockyard requests `openid profile email offline_access` from the IdP so
+> that long-lived sessions can refresh access tokens without forcing the
+> user to log in again. The IdP must advertise `offline_access` in
+> `scopes_supported` and grant it to the client; otherwise the authorize
+> request fails with `invalid_scope`. For Authentik this means adding the
+> bundled `offline_access` scope to the provider's property mappings.
+> Dex grants refresh tokens by default and needs no extra configuration.
+
 ### Split-URL OIDC
 
 In Docker or Kubernetes deployments, the OIDC provider (e.g. Dex, Keycloak)

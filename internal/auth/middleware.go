@@ -58,6 +58,7 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 			cookie, err := DecodeCookie(cookieValue, deps.SigningKey)
 			if err != nil {
 				slog.Debug("auth: invalid session cookie", "error", err)
+				clearSessionCookie(w, deps.Config)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -69,6 +70,7 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 			}
 			if nowUnix()-cookie.IssuedAt > maxAge {
 				slog.Debug("auth: session cookie expired", "sub", cookie.Sub)
+				clearSessionCookie(w, deps.Config)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -76,6 +78,7 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 			session := deps.UserSessions.Get(cookie.Sub)
 			if session == nil {
 				slog.Debug("auth: no server-side session", "sub", cookie.Sub)
+				clearSessionCookie(w, deps.Config)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -86,6 +89,7 @@ func AppAuthMiddleware(deps *Deps) func(http.Handler) http.Handler {
 				slog.Error("token refresh failed, removing session",
 					"sub", cookie.Sub, "error", err)
 				deps.UserSessions.Delete(cookie.Sub)
+				clearSessionCookie(w, deps.Config)
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -395,6 +395,13 @@ func TestMiddlewareMissingServerSession(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200 for missing session (pass-through), got %d", w.Code)
 	}
+
+	// The middleware should clear the stale cookie so the browser stops
+	// presenting it on subsequent requests.
+	cleared := findCookie(w.Result(), "blockyard_session")
+	if cleared == nil || cleared.Value != "" {
+		t.Errorf("expected session cookie to be cleared, got %+v", cleared)
+	}
 }
 
 func TestMiddlewareContextCarriesUser(t *testing.T) {
