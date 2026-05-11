@@ -50,12 +50,14 @@ graph LR
 
 ### Prerequisites
 
-- Go 1.25+
+- Go (version per [`go.mod`](go.mod))
+- Node 22 + npm (Tailwind/DaisyUI CSS build under `internal/ui/`)
 - A Linux host (Windows and macOS supported for the Docker backend via Docker Desktop)
 - Either:
   - **Docker backend:** Docker or Podman with a Docker-compatible socket, or
   - **Process backend:** `bubblewrap` and `R` on the host. See [Process Backend (Native)](docs/content/docs/guides/process-backend.md).
 - SQLite 3 (bundled in-binary via `modernc.org/sqlite`)
+- Optional: Atlas Community CLI for `atlas migrate lint` (CI runs this); Postgres 17 to exercise the Postgres-backed tests (otherwise SQLite is used)
 
 ### Configuration
 
@@ -89,21 +91,26 @@ Pass `-s -- --server` to install the Linux `blockyard` server binary
 instead. See [Installation](docs/content/docs/getting-started/installation.md)
 for flags, environment variables, and manual download links.
 
-### Dev Container
+### Postgres-backed tests
 
-A devcontainer configuration is included for VS Code / GitHub Codespaces:
+The Postgres test suite is off by default — set
+`BLOCKYARD_TEST_POSTGRES_URL` to enable it. A small compose stack at
+[`dev/compose.yml`](dev/compose.yml) brings up a matching Postgres 17
+on `127.0.0.1:5432`:
 
 ```bash
-# Open in VS Code with the Dev Containers extension
-code .
-# Then: Reopen in Container
+docker compose -f dev/compose.yml up -d
+docker compose -f dev/compose.yml down -v   # when done
+
+# Set the URL in your shell before running the tests:
+export BLOCKYARD_TEST_POSTGRES_URL=postgres://blockyard:blockyard@127.0.0.1:5432/blockyard_test?sslmode=disable
 ```
 
 **Native mode** (`go run ./cmd/blockyard` directly) requires that Docker
 container IPs on bridge networks are routable from the host. This is the
 case on Linux and with some macOS Docker runtimes, but not all. If
 container IPs are not routable from your host, run the server inside a
-container (e.g. the devcontainer) instead.
+container instead.
 
 ## Project Layout
 

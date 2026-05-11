@@ -14,3 +14,9 @@ internal/ui/node_modules/
 !.env.example
 .vault-token
 *.db
+
+# Playwright skill scratch (screenshots, mjs scripts, traces)
+/.playwright/
+
+# Project-level Claude config (entirely user-personal; not shared)
+/.claude/

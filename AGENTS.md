@@ -11,13 +11,21 @@ problems, trade-offs, and things that might be wrong.
 
 ## Development environment
 
-This project uses a devcontainer (`.devcontainer/`). Do not install tools
-directly in the running container — they will be lost on rebuild. Instead,
-add any needed tools to `.devcontainer/Dockerfile` and rebuild.
+Prerequisites for building and running the test suite:
 
-The Go module cache is mounted as a Docker volume (see `devcontainer.json`).
-Go, gopls, and delve are pre-installed in the image. The Go version is
-defined in `go.mod` (single source of truth).
+- Go (version per `go.mod`)
+- Node 22 + npm (for the Tailwind/DaisyUI CSS build under `internal/ui/`)
+- Docker + `docker compose` (used by integration tests, the docker
+  backend, and the example deployments under `examples/`)
+- Atlas Community CLI (migration linting; `atlas migrate lint` is run by
+  CI and reproducible locally)
+- Linux host for the process backend (`bubblewrap` + `R`); Docker backend
+  works on macOS / Windows via Docker Desktop
+
+How you provision these is up to you — there's no project-shipped
+provisioning. Postgres tests are off by default; spin one up on demand
+with `docker compose -f dev/compose.yml up -d` (see
+[dev/compose.yml](dev/compose.yml)).
 
 ## Commit conventions
 

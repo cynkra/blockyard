@@ -174,8 +174,7 @@ jobs:
           GO_MINOR=$(awk '/^go /{print $2}' go.mod | grep -oP '^\d+\.\d+')
           for f in docker/server.Dockerfile \
                    docker/server-process.Dockerfile \
-                   docker/server-everything.Dockerfile \
-                   .devcontainer/Dockerfile; do
+                   docker/server-everything.Dockerfile; do
             if ! grep -qP "golang:${GO_MINOR}|GO_VERSION=${GO_MINOR}" "$f"; then
               echo "::error file=$f::Go version mismatch — expected $GO_MINOR (from go.mod)" && exit 1
             fi

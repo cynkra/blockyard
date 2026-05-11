@@ -1,0 +1,26 @@
+# On-demand Postgres for the BLOCKYARD_TEST_POSTGRES_URL-gated tests.
+# Up:    docker compose -f dev/compose.yml up -d   (or: make pg-up)
+# Down:  docker compose -f dev/compose.yml down -v (or: make pg-down)
+#
+# After bringing it up, export the URL the test suite expects:
+#   export BLOCKYARD_TEST_POSTGRES_URL=postgres://blockyard:blockyard@127.0.0.1:5432/blockyard_test?sslmode=disable
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: blockyard
+      POSTGRES_PASSWORD: blockyard
+      POSTGRES_DB: blockyard_test
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blockyard"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - blockyard-pg:/var/lib/postgresql/data
+
+volumes:
+  blockyard-pg:
