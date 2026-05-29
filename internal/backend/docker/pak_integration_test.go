@@ -34,6 +34,92 @@ func pakTestConfig(t *testing.T) *config.Config {
 	}
 }
 
+// TestBuildE2E_PureRSourceBuildNoToolchain verifies that a pure-R package
+// requiring a source build — the GitHub-`Remotes:` case from #367 — installs
+// on the toolchain-free worker image. pak flags any non-binary ref [bld] and
+// runs pkgbuild::check_build_tools() before installing, which aborts with
+// "Could not find tools necessary to compile a package" on an image without a
+// C compiler, even though pure-R packages compile nothing. bundle.PakCompilerShimR
+// injects options(pkgbuild.has_compiler = TRUE) into pak's worker subprocess
+// via a project .Rprofile. Without the shim this build fails with the compiler
+// error; with it, it succeeds. Guards against pak changing how its subprocess
+// loads profiles, and against the shim being dropped.
+func TestBuildE2E_PureRSourceBuildNoToolchain(t *testing.T) {
+	image := testutil.TOMLDockerImage(t)
+
+	ctx := context.Background()
+	b, err := New(ctx, pakTestConfig(t), t.TempDir(), "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// A minimal pure-R source package: no src/, and — like a raw GitHub repo —
+	// no NeedsCompilation field, so pak takes the source-build path. local::
+	// exercises the same [bld] + check_build_tools path as a GitHub Remote
+	// without depending on network or GitHub availability.
+	pkgDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(pkgDir, "R"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	desc := "Package: pureonly\nTitle: Pure R\nVersion: 0.0.1\n" +
+		"Authors@R: person(\"T\", \"U\", email = \"t@e.com\", role = c(\"aut\", \"cre\"))\n" +
+		"Description: Pure-R package with no compiled code.\nLicense: MIT\nEncoding: UTF-8\n"
+	if err := os.WriteFile(filepath.Join(pkgDir, "DESCRIPTION"), []byte(desc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "R", "hello.R"),
+		[]byte("hello <- function() \"hi\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cacheDir := t.TempDir()
+	libDir := t.TempDir()
+	pakCachePath := t.TempDir()
+	pakPath, err := pakcache.EnsureInstalled(ctx, b, image, "stable", pakCachePath)
+	if err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+
+	// Mirror the production build scripts: PakCompilerShimR runs first, then the
+	// standard pak setup, then a source install of the local pure-R package.
+	rScript := bundle.PakCompilerShimR + `
+Sys.setenv(R_USER_CACHE_DIR = "/cache", PKG_CACHE_DIR = "/cache")
+.libPaths(c("/pak", .libPaths()))
+library(pak)
+pak_lib <- system.file("library", package = "pak")
+if (nzchar(pak_lib) && dir.exists(pak_lib)) .libPaths(c(pak_lib, .libPaths()))
+pak::pkg_install("local::/pkg", lib = "/lib", upgrade = FALSE)
+if (!file.exists("/lib/pureonly/DESCRIPTION")) stop("pureonly not installed")
+cat("OK: pureonly installed without toolchain\n")
+`
+
+	spec := backend.BuildSpec{
+		AppID:    "purer-build-test",
+		BundleID: uuid.New().String()[:8],
+		Image:    image,
+		Cmd:      []string{"Rscript", "--vanilla", "-e", rScript},
+		Mounts: []backend.MountEntry{
+			{Source: pkgDir, Target: "/pkg", ReadOnly: true},
+			{Source: pakPath, Target: "/pak", ReadOnly: true},
+			{Source: cacheDir, Target: "/cache", ReadOnly: false},
+			{Source: libDir, Target: "/lib", ReadOnly: false},
+		},
+		Labels: map[string]string{},
+	}
+
+	result, err := b.Build(ctx, spec)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("pure-R source build failed (exit %d) — shim or pak subprocess profile regression?\n--- logs ---\n%s",
+			result.ExitCode, result.Logs)
+	}
+	if !strings.Contains(result.Logs, "OK: pureonly installed") {
+		t.Fatalf("expected success marker in logs; got:\n%s", result.Logs)
+	}
+}
+
 // TestBuildE2E_PakBuild exercises the Docker build pipeline with the new
 // Cmd/Mounts API. Since we cannot run a full pak install without pak in the
 // image, we use a simple R command to verify mounts and command override work.
