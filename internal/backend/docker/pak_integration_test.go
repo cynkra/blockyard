@@ -83,26 +83,33 @@ func TestBuildE2E_PureRSourceBuildNoToolchain(t *testing.T) {
 	// Mirror the production build scripts: PakCompilerShimR runs first, then the
 	// standard pak setup, then a source install of the local pure-R package.
 	rScript := bundle.PakCompilerShimR + `
-Sys.setenv(R_USER_CACHE_DIR = "/cache", PKG_CACHE_DIR = "/cache")
+Sys.setenv(R_USER_CACHE_DIR = "/cache", PKG_CACHE_DIR = "/cache", PKG_SYSREQS = "false")
 .libPaths(c("/pak", .libPaths()))
 library(pak)
 pak_lib <- system.file("library", package = "pak")
 if (nzchar(pak_lib) && dir.exists(pak_lib)) .libPaths(c(pak_lib, .libPaths()))
-pak::pkg_install("local::/pkg", lib = "/lib", upgrade = FALSE)
-if (!file.exists("/lib/pureonly/DESCRIPTION")) stop("pureonly not installed")
+pak::pkg_install("local::/app", lib = "/build-lib", upgrade = FALSE)
+if (!file.exists("/build-lib/pureonly/DESCRIPTION")) stop("pureonly not installed")
 cat("OK: pureonly installed without toolchain\n")
 `
 
+	// Mount targets matter here. The package goes at /app because Build() forces
+	// WorkingDir=/app on a read-only rootfs — with nothing mounted there the
+	// container can't start ("exec Rscript: no such file or directory"); /app is
+	// also where production bundles live, so local::/app mirrors the real build.
+	// The install library goes at /build-lib, NOT /lib: /lib holds the image's
+	// dynamic linker and libc, and shadowing it with an empty mount makes the
+	// dynamically-linked Rscript unloadable (same exec error).
 	spec := backend.BuildSpec{
 		AppID:    "purer-build-test",
 		BundleID: uuid.New().String()[:8],
 		Image:    image,
 		Cmd:      []string{"Rscript", "--vanilla", "-e", rScript},
 		Mounts: []backend.MountEntry{
-			{Source: pkgDir, Target: "/pkg", ReadOnly: true},
+			{Source: pkgDir, Target: "/app", ReadOnly: true},
 			{Source: pakPath, Target: "/pak", ReadOnly: true},
 			{Source: cacheDir, Target: "/cache", ReadOnly: false},
-			{Source: libDir, Target: "/lib", ReadOnly: false},
+			{Source: libDir, Target: "/build-lib", ReadOnly: false},
 		},
 		Labels: map[string]string{},
 	}
