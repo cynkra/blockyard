@@ -660,7 +660,7 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 		fv := v.Field(i)
 
 		// Pointer-to-struct: dereference if non-nil and recurse.
-		if field.Type.Kind() == reflect.Ptr && field.Type.Elem().Kind() == reflect.Struct {
+		if field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.Struct {
 			// Skip *Secret — handled below as a leaf.
 			if field.Type == secretPtrType {
 				val, ok := os.LookupEnv(envName)
@@ -680,7 +680,7 @@ func applyEnvToStruct(v reflect.Value, prefix string) {
 
 		// Pointer-to-primitive (e.g. *float64 for MaxCPULimit):
 		// parse the env var and set the pointer.
-		if field.Type.Kind() == reflect.Ptr {
+		if field.Type.Kind() == reflect.Pointer {
 			val, ok := os.LookupEnv(envName)
 			if !ok {
 				continue

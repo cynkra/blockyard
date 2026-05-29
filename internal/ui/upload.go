@@ -197,6 +197,7 @@ func (ui *UI) createApp(srv *server.Server) http.HandlerFunc {
 		// Enforce bundle size limit on the raw body.
 		r.Body = http.MaxBytesReader(w, r.Body, srv.Config.Storage.MaxBundleSize)
 
+		//nolint:gosec // G120: the request body is already bounded by the MaxBytesReader above, so form parsing cannot exhaust memory; the 32 MiB argument is only the in-memory threshold before spilling to disk.
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			renderUploadError(w, "Upload too large or invalid form data.")
 			return

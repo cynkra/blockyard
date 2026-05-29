@@ -89,7 +89,7 @@ func collectEnvVarNames(t reflect.Type, prefix string) []string {
 
 		ft := f.Type
 		// Dereference pointer types.
-		if ft.Kind() == reflect.Ptr {
+		if ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
 
