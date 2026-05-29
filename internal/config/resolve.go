@@ -25,7 +25,7 @@ func resolveStruct(ctx context.Context, v reflect.Value, path string, resolver S
 		fv := v.Field(i)
 
 		// Pointer-to-struct: dereference if non-nil and recurse.
-		if field.Type.Kind() == reflect.Ptr && field.Type.Elem().Kind() == reflect.Struct {
+		if field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.Struct {
 			if field.Type == secretPtrType {
 				if fv.IsNil() {
 					continue

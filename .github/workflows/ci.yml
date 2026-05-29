@@ -187,7 +187,13 @@ jobs:
       # one tool needs the system library.
       - name: Install libseccomp-dev
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libseccomp-dev
+      # Pin the linter version. Without it the action installs the
+      # floating `latest`, so an upstream release silently changes
+      # which rules run and flags previously-clean code on unrelated
+      # PRs (#375). Bump this deliberately.
       - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
       - name: Check for known vulnerabilities
         run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
       # -count=1 disables Go's test result cache. Without it, packages

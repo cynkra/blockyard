@@ -96,6 +96,7 @@ func Handler(srv *server.Server) http.Handler {
 				if rest := chi.URLParam(r, "*"); rest != "" {
 					newPath += rest
 				}
+				//nolint:gosec // G710: target is always a same-origin path under /app/; the canonical app name comes from the DB, so this can never become an absolute off-site URL.
 				http.Redirect(w, r, newPath, http.StatusMovedPermanently)
 				return
 			}
@@ -400,6 +401,7 @@ func RedirectTrailingSlash(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	//nolint:gosec // G710: appName is validated by isValidAppNameOrID above (lowercase, digits, hyphens only) and the target is a same-origin path under /app/, so no open redirect is possible.
 	http.Redirect(w, r, "/app/"+appName+"/", http.StatusMovedPermanently)
 }
 

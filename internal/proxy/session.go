@@ -24,6 +24,7 @@ func extractSessionID(r *http.Request) string {
 // The Secure flag is derived from externalURL (same as auth cookies).
 func sessionCookie(sessionID, appName, externalURL string, sessionTTL time.Duration) *http.Cookie {
 	secure := strings.HasPrefix(externalURL, "https://")
+	//nolint:gosec // G124: Secure is set conditionally on an HTTPS external URL so the cookie still works on http:// dev deployments; HttpOnly and SameSite=Lax are always on. Matches the auth cookie behavior.
 	return &http.Cookie{
 		Name:     cookieName,
 		Value:    sessionID,
