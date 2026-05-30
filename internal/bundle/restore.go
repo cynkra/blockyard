@@ -420,6 +420,34 @@ install_with_retry <- function(lockfile, lib, max_attempts = 3L) {
 }
 `
 
+// PakCompilerShimR lets pak's source-build step run on the toolchain-free
+// worker image (#191, #367). pak builds every non-binary ref — any GitHub /
+// git / local `Remotes:` dependency — from source, and pkgbuild aborts with
+// "Could not find tools necessary to compile a package" unless a C compiler
+// is present, even for pure-R packages that compile nothing. PPM only serves
+// binaries for CRAN/Bioc, so GitHub deps can never take the binary path.
+// `options(pkgbuild.has_compiler = TRUE)` skips pkgbuild's compiler probe:
+// pure-R builds then succeed with no toolchain, while a package that really
+// carries src/ still fails loudly at the actual compile ("make: not found"),
+// which is the correct signal to opt into a toolchain image via --image.
+//
+// The option must take effect in pak's *worker subprocess*, not this script's
+// process. pak spawns that subprocess through callr with
+// user_profile = "project", which sources a `.Rprofile` from the working
+// directory — so we write the option into a scratch dir and chdir there
+// before any pak call starts the subprocess. RENV_PROJECT is cleared because
+// pak disables the project profile when it is set. All paths the build script
+// uses afterwards are absolute, so changing the working directory is safe.
+const PakCompilerShimR = `
+local({
+  Sys.unsetenv("RENV_PROJECT")
+  d <- tempfile("pak-build-cwd-")
+  dir.create(d)
+  setwd(d)
+  writeLines("options(pkgbuild.has_compiler = TRUE)", ".Rprofile")
+})
+`
+
 // BuildCommand returns the R command that runs inside the build container.
 // The four-phase store-aware build script:
 //   - Phase 1: lockfile_create (pak resolves + solves)
@@ -429,7 +457,7 @@ install_with_retry <- function(lockfile, lib, max_attempts = 3L) {
 //
 // Exported for use by the refresh pipeline (server/refresh.go).
 func BuildCommand() []string {
-	rScript := LockfileInstallWithRetryR + `
+	rScript := LockfileInstallWithRetryR + PakCompilerShimR + `
 Sys.setenv(
   R_USER_CACHE_DIR = "/pak-cache",
   PKG_CACHE_DIR = "/pak-cache",
@@ -560,7 +588,7 @@ func BuildMounts(
 // legacyBuildCommand returns the R command for the phase 2-5 build flow
 // (no package store). Used when Store is nil (tests, pre-store deployments).
 func legacyBuildCommand() []string {
-	rScript := LockfileInstallWithRetryR + `
+	rScript := LockfileInstallWithRetryR + PakCompilerShimR + `
 Sys.setenv(
   R_USER_CACHE_DIR = "/pak-cache",
   PKG_CACHE_DIR = "/pak-cache",
