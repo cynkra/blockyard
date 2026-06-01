@@ -35,7 +35,7 @@
 #
 # No blockyard binary, no bwrap/seccomp profile, no entrypoint —
 # the Docker backend supplies the full Cmd at spawn time.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ARG R_VERSION=4.4.3
 ARG TARGETARCH
