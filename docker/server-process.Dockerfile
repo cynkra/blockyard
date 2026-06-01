@@ -68,7 +68,7 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
 # Final stage: ubuntu:24.04 + rig + R. See the header comment for
 # the rationale and issue #185 for the full discussion.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 # rig version pin. rig is the R installation manager from r-lib;
 # it downloads official R binaries and manages multiple installed
