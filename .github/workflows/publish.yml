@@ -87,6 +87,35 @@ jobs:
     with:
       version: main
 
+  # The linux/arm64 server-image legs run on GitHub's *partner*
+  # ubuntu-24.04-arm hosted runners (Arm Limited image), a smaller and
+  # less-baked pool than the first-party amd64 fleet. Intermittently a
+  # leg's runner is reclaimed at job startup: the job dies during
+  # docker/setup-buildx-action — before build-push ever runs — with
+  # "The runner has received a shutdown signal". The amd64 legs are
+  # untouched, but a single dead arm64 leg fails server-image and skips
+  # the manifest, so :main* is left unpublished for that commit (#380).
+  # A plain re-run on a fresh runner always succeeds, so do it
+  # automatically. fromJSON(run_attempt) < 3 caps it at 3 total attempts
+  # (2 retries) to bound the cost of a genuinely broken build — after
+  # that the real failure surfaces. gh run rerun --failed re-runs only
+  # the failed jobs (and their dependents); this job is a dependent of
+  # server-image, so it re-evaluates each attempt and stops itself once
+  # server-image goes green or the attempt cap is hit.
+  rerun-on-failure:
+    needs: server-image
+    if: ${{ failure() && fromJSON(github.run_attempt) < 3 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run failed jobs on a fresh runner
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run rerun "${{ github.run_id }}" --failed
+
   scan-image:
     needs: server-image
     strategy:
