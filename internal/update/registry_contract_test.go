@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,35 @@ func ghcrToken(ctx context.Context, repo string) (string, error) {
 	return out.Token, nil
 }
 
+// manifestExists HEADs the manifest for ghcr.io/<repo>:<tag> and
+// reports whether it resolves. Accepts the OCI manifest+index media
+// types so a multi-arch image (what the manifest job pushes) resolves
+// cleanly. Returns the resolved digest on success.
+func manifestExists(ctx context.Context, repo, tag, token string) (digest string, status string, err error) {
+	url := fmt.Sprintf("https://ghcr.io/v2/%s/manifests/%s", repo, tag)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ","))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", resp.Status, nil
+	}
+	return resp.Header.Get("Docker-Content-Digest"), resp.Status, nil
+}
+
 // TestMainChannelInstallTargetIsPullable resolves the main-channel
 // install target via the production code path and asserts the
 // resulting image reference exists on ghcr.io. Failure here is the
@@ -103,34 +133,62 @@ func TestMainChannelInstallTargetIsPullable(t *testing.T) {
 		t.Fatalf("get ghcr.io token: %v", err)
 	}
 
-	// HEAD the manifest. Accept the OCI manifest+index media types
-	// so a multi-arch image (which is what the manifest job pushes)
-	// resolves cleanly.
-	url := fmt.Sprintf("https://ghcr.io/v2/%s/manifests/%s", repo, target)
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	digest, status, err := manifestExists(ctx, repo, target, token)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("HEAD ghcr.io/%s:%s: %v", repo, target, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", strings.Join([]string{
-		"application/vnd.oci.image.index.v1+json",
-		"application/vnd.oci.image.manifest.v1+json",
-		"application/vnd.docker.distribution.manifest.list.v2+json",
-		"application/vnd.docker.distribution.manifest.v2+json",
-	}, ","))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("HEAD %s: %v", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
+	if digest == "" {
 		t.Fatalf("registry contract violation: ghcr.io/%s:%s does not exist (HEAD returned %s). "+
 			"This means the code's resolved install target is not on the registry — "+
 			"either the publish workflow didn't push it, or FetchInstallTarget returns "+
 			"a tag the workflow never publishes (issue #360).",
-			repo, target, resp.Status)
+			repo, target, status)
 	}
-	t.Logf("registry contract OK: ghcr.io/%s:%s exists (digest %s)", repo, target, resp.Header.Get("Docker-Content-Digest"))
+	t.Logf("registry contract OK: ghcr.io/%s:%s exists (digest %s)", repo, target, digest)
+}
+
+// TestCommitTagIsPullable asserts that the immutable per-commit tag
+// (`:<git-describe>`) for the commit under test exists on ghcr.io.
+//
+// This is the invariant #378 actually broke. The current orchestrator
+// pins the main channel to the rolling `:main` tag, so the test above
+// can pass while the per-commit tag is missing. But builds published
+// before the #360 `:main` fix resolve their install target to the GH
+// release Name — which equals `git describe --always --dirty` — and
+// such a build is permanently stranded if that tag was never pushed.
+// The manifest job must publish `:<VERSION>` alongside `:main`; this
+// test fails loudly if it stops doing so.
+func TestCommitTagIsPullable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Same command the publish workflow's binary/release/manifest jobs
+	// use, so the tag we check matches the one those jobs construct.
+	out, err := exec.CommandContext(ctx, "git", "describe", "--always", "--dirty").Output()
+	if err != nil {
+		t.Fatalf("git describe: %v", err)
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		t.Fatal("git describe returned empty version")
+	}
+
+	repo := repoFromAPIBase()
+	token, err := ghcrToken(ctx, repo)
+	if err != nil {
+		t.Fatalf("get ghcr.io token: %v", err)
+	}
+
+	digest, status, err := manifestExists(ctx, repo, version, token)
+	if err != nil {
+		t.Fatalf("HEAD ghcr.io/%s:%s: %v", repo, version, err)
+	}
+	if digest == "" {
+		t.Fatalf("registry contract violation: per-commit tag ghcr.io/%s:%s does not exist (HEAD returned %s). "+
+			"The manifest job must push `:<git-describe>` alongside `:main` — without it, any build "+
+			"that resolves its install target to the release Name (every build before the #360 :main fix) "+
+			"is stranded and can never update itself forward (issue #378).",
+			repo, version, status)
+	}
+	t.Logf("registry contract OK: per-commit tag ghcr.io/%s:%s exists (digest %s)", repo, version, digest)
 }
