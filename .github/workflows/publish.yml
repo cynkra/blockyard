@@ -142,6 +142,7 @@ jobs:
           - variant: process
             image_suffix: -process
     steps:
+      - uses: actions/checkout@v6
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -149,9 +150,23 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push multi-arch manifest (${{ matrix.variant }})
         run: |
-          docker buildx imagetools create -t "${{ env.IMAGE }}${{ matrix.image_suffix }}:main" \
-            "${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-amd64" \
-            "${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-arm64"
+          # Tag the manifest with both the rolling ":main" pointer and
+          # the immutable per-commit ":<git-describe>" tag. ":main" is
+          # what the current orchestrator pins to (digest-compared
+          # post-pull); ":<VERSION>" is the install target older builds
+          # resolve (the GH release Name, which equals git describe).
+          # Without it, a build published before the #360 :main fix is
+          # stranded: it asks Docker for a per-commit tag that was never
+          # pushed and can never update itself forward (#378). VERSION
+          # uses the same `git describe --always --dirty` as the
+          # cli-binaries/cli-release jobs so the tags line up exactly.
+          VERSION="$(git describe --always --dirty)"
+          IMG="${{ env.IMAGE }}${{ matrix.image_suffix }}"
+          docker buildx imagetools create \
+            -t "${IMG}:main" \
+            -t "${IMG}:${VERSION}" \
+            "${IMG}:build-linux-amd64" \
+            "${IMG}:build-linux-arm64"
 
   # Registry contract test: assert that the install target the
   # orchestrator's main-channel resolver constructs actually exists
@@ -171,7 +186,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Verify main-channel install target is pullable
+      - name: Verify install targets are pullable
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: go test -tags registry_contract -run TestMainChannelInstallTargetIsPullable -v ./internal/update/...
+        run: go test -tags registry_contract -run Pullable -v ./internal/update/...
