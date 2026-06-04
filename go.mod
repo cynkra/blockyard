@@ -13,7 +13,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/moby/moby/api v1.54.2
 	github.com/moby/moby/client v0.4.1
@@ -31,7 +31,7 @@ require (
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
-	golang.org/x/tools v0.44.0
+	golang.org/x/tools v0.45.0
 	modernc.org/sqlite v1.51.0
 )
 
