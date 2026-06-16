@@ -40,7 +40,7 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} \
     -o /blockyard ./cmd/blockyard
 RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates curl iptables
 
