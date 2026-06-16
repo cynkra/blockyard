@@ -61,7 +61,7 @@ RUN CGO_ENABLED=0 go build ${COVER:+-cover} -o /by-builder ./cmd/by-builder
 # and issue #185 for the rationale. iptables is the only addition
 # over the process-variant image — the Docker backend uses it for
 # worker egress in native mode.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ARG RIG_VERSION=0.7.1
 ARG TARGETARCH
