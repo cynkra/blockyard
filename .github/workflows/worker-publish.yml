@@ -41,7 +41,7 @@ jobs:
     permissions:
       packages: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/scan-image
         with:
           # Worker images are identical apart from R version; scanning
@@ -60,7 +60,7 @@ jobs:
     permissions:
       security-events: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/upload-sarif-merged
         with:
           category: trivy-worker
