@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -63,7 +63,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:
@@ -133,7 +133,7 @@ jobs:
     permissions:
       packages: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/scan-image
         with:
           image-ref: ${{ env.IMAGE }}${{ matrix.image_suffix }}:build-linux-amd64
@@ -149,7 +149,7 @@ jobs:
     permissions:
       security-events: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/upload-sarif-merged
         with:
           category: trivy-server
@@ -171,7 +171,7 @@ jobs:
           - variant: process
             image_suffix: -process
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -211,7 +211,7 @@ jobs:
     permissions:
       packages: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod

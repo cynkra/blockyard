@@ -63,7 +63,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check no exec of tools whose CVEs are silenced
         run: |
           tools='readelf|objdump|ld|as|nm|strip|addr2line|ar|ranlib|gprof|size'
@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
@@ -107,7 +107,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Atlas Community
         run: |
           curl -fsSL https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.1.0 \
@@ -151,7 +151,7 @@ jobs:
     env:
       BLOCKYARD_TEST_POSTGRES_URL: postgres://blockyard:blockyard@localhost:5432/blockyard_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # docs/themes/hugo-book submodule is required for the Hugo
           # build below, which produces the real internal/docs/dist
@@ -236,7 +236,7 @@ jobs:
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'cli')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -257,7 +257,7 @@ jobs:
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'docker')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -283,7 +283,7 @@ jobs:
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'pak')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -309,7 +309,7 @@ jobs:
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'idp')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -333,7 +333,7 @@ jobs:
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'openbao')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -367,7 +367,7 @@ jobs:
         ports:
           - 6379:6379
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -386,7 +386,7 @@ jobs:
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'ui')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -434,7 +434,7 @@ jobs:
       matrix:
         mode: [root, unprivileged]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -520,7 +520,7 @@ jobs:
     needs: [unit]
     if: github.event_name != 'merge_group' && github.event_name != 'push' && (inputs.job == '' || inputs.job == 'apparmor-smoke')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -562,7 +562,7 @@ jobs:
     if: github.event_name != 'merge_group' && github.event_name != 'push' && inputs.job == ''
     needs: [unit, cli, docker, idp, openbao, pak, process, redis, ui]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Patch coverage diff needs enough history to reach the PR base.
           fetch-depth: 0

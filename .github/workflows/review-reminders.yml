@@ -23,7 +23,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       ISSUE_TITLE: "security: expired review-after dates in .trivyignore.rego"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Scan and manage tracker issue
         run: |
           today=$(date -u +%Y-%m-%d)

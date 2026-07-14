@@ -33,7 +33,7 @@ jobs:
           '[{"example":"hello-shiny","test":"TestHelloShiny"},{"example":"hello-pocketbase","test":"TestHelloPocketbase"},{"example":"hello-postgres","test":"TestHelloPostgres"}]'
           ) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: github.event_name != 'pull_request'
       - uses: actions/setup-go@v6
         if: github.event_name != 'pull_request' && github.event_name != 'push'
@@ -125,9 +125,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: github.event_name != 'pull_request'
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         if: github.event_name != 'pull_request' && github.event_name != 'push'
         with:
           node-version: 22
@@ -246,7 +246,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
