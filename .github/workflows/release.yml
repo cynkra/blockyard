@@ -47,7 +47,7 @@ jobs:
           - variant: everything
             suffix: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/scan-image
         with:
           image-ref: ${{ env.SERVER_IMAGE }}${{ matrix.suffix }}:build-linux-amd64
@@ -66,7 +66,7 @@ jobs:
     permissions:
       security-events: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/upload-sarif-merged
         with:
           category: trivy-server
@@ -216,8 +216,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Install libseccomp-dev
@@ -281,7 +281,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -294,7 +294,7 @@ jobs:
         if: matrix.cmd == 'blockyard'
         run: cd docs && hugo --baseURL /docs/ --minify && rm -rf ../internal/docs/dist && cp -r public ../internal/docs/dist
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 

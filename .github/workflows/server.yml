@@ -54,7 +54,7 @@ jobs:
     permissions:
       packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # docs/themes/hugo-book is a submodule; docker/server.Dockerfile's
           # Hugo stage needs it to produce real docs output. Without this,
